@@ -273,7 +273,7 @@ export class Fabric {
     const identity = Object.values(this.tenant(t).identities).find(x => x.subject_id === subject);
     requireThat(identity && identity.device_id === device && identity.health_expires_at > now, 'INV-403-HEALTH', 'Configured device health evidence expired or mismatched', 403);
   }
-  getCapsule(p, id) { this.authorize(p, ['operator', 'approver', 'custodian', 'security', 'policy_admin']); return this.store.must(p.tenant_id, 'capsule', identifier(id)); }
+  getCapsule(p, id) { this.authorize(p, ['operator', 'approver', 'custodian', 'security', 'policy_admin', 'auditor']); return this.store.must(p.tenant_id, 'capsule', identifier(id)); }
   propose(p, input, idempotencyKey, requestIntent = null) {
     this.authorize(p, ['operator', 'workload', 'policy_admin']); validateProposal(input);
     requireThat(input.actor.subject_id === p.subject_id && input.actor.identity_class === this.identity(p).identity_class, 'INV-403-ACTOR', 'Actor must match authenticated identity', 403);
@@ -977,6 +977,7 @@ export class Fabric {
     // ({root, size} from a previously trusted checkpoint) is supplied, the
     // claimed tree is bound to it — an RFC-6962 inclusion proof is only
     // meaningful relative to a pinned (root, size).
+    requireThat(proof && typeof proof === 'object' && !Array.isArray(proof), 'INV-400-SCHEMA', 'Invalid proof', 400);
     if (pinned) requireThat(pinned.root === proof.root && pinned.size === proof.size, 'INV-409-FORK', 'Proof does not match the pinned checkpoint', 409);
     return verifyInclusion(proof.leaf_hash, proof.sequence - 1, proof.size, proof.path, proof.root);
   }
@@ -1226,6 +1227,9 @@ export class Fabric {
   }
   perceptionFallback(p, release) {
     this.authorize(p, ['operator', 'approver', 'custodian', 'security']);
+    requireThat(release && typeof release === 'object' && !Array.isArray(release), 'INV-400-SCHEMA', 'Invalid release', 400);
+    requireThat(release.fields && typeof release.fields === 'object' && !Array.isArray(release.fields), 'INV-400-SCHEMA', 'fields must be an object', 400);
+    text(release.purpose, 'purpose');
     return this.transaction(p, now => {
       this.assertHealthy(p.tenant_id, p.subject_id, this.identity(p).device_id, now);
       const result = workspaceFallback(release, this.policy(p.tenant_id), now);

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import http from 'node:http';
 import assert from 'node:assert/strict';
-import { createServer } from '../src/server.mjs';
+import { createServer, ROUTE_METHODS } from '../src/server.mjs';
 import { fixture, runtimeInput, runtimeRequest, hasCode } from './helpers.mjs';
 import { Worker } from 'node:worker_threads';
 import { actionAvailability, typedValue, csvSelection, nextAction } from '../web/app.js';
@@ -34,7 +34,8 @@ test('HTTP: missing/expired auth, cross origin, unknown host, traversal and cros
   assert.equal((await h.request('/config.json')).status, 404);
   assert.equal((await h.request(`/v1/action-capsules/${r.capsule.capsule_id}`, { token: h.setup.credentials.globex.operator })).status, 404);
   assert.equal((await h.request('/v1/resources/dataset-1')).status, 403);
-  assert.equal((await h.request('/v1/action-capsules', { token: h.setup.credentials.acme.auditor })).status, 403);
+  assert.equal((await h.request('/v1/action-capsules', { token: h.setup.credentials.acme.auditor })).status, 200);
+  assert.equal((await h.request('/v1/action-capsules', { method: 'POST', token: h.setup.credentials.acme.auditor, body: { input: {}, signature: {} } })).status, 403);
 });
 test('HTTP: duplicate keys, wrong content-type and huge bodies reject safely', async t => {
   const h = await httpFixture(t); assert.equal((await h.request('/v1/certificates', { method: 'POST', body: '{"capsule_id":"a","capsule_id":"b"}' })).status, 400);
@@ -130,7 +131,7 @@ test('UX-006 NET-010: /v1/approvals/batch and /v1/containment are real routes', 
 test('RUN-006: rejection metrics count by reason code on the live HTTP surface', async t => {
   const h = await httpFixture(t);
   await h.request('/v1/action-capsules', { token: null }); // 401
-  await h.request('/v1/action-capsules/nope', { token: h.setup.credentials.acme.auditor }); // 403 role
+  await h.request('/v1/revocations', { method: 'POST', token: h.setup.credentials.acme.auditor, body: {} }); // 403 role
   const m = await h.request('/v1/metrics', { token: h.setup.credentials.acme.security });
   assert.equal(m.status, 200);
   assert.ok(m.data.unauthorised >= 1);
@@ -160,4 +161,58 @@ test('AUD-009: security evidence continues while optional analytics is disabled'
   const audit = await h.request('/v1/audit/entries?limit=5', { token: h.setup.credentials.acme.auditor });
   assert.equal(audit.status, 200);
   assert.ok(audit.data.entries.length >= 1);
+});
+
+// w5-http-contract auditor regressions (report w5-http-contract.md).
+test('w5-H1: malformed proof objects reject 400, never crash to 500', async t => {
+  const h = await httpFixture(t), token = h.setup.credentials.acme.auditor;
+  for (const proof of [null, 'x', [], 5]) {
+    const r = await h.request('/v1/audit/verify-proof', { method: 'POST', token, body: { proof } });
+    assert.equal(r.status, 400, `proof=${JSON.stringify(proof)}`); assert.equal(r.data.error.code, 'INV-400-SCHEMA');
+  }
+});
+
+test('w5-H2: perception fallback rejects type-confused fields/purpose', async t => {
+  const h = await httpFixture(t);
+  for (const bad of [{ fields: 'x', purpose: 1 }, { fields: null, purpose: null }, { fields: [1], purpose: 'ok' }]) {
+    const r = await h.request('/v1/secure-perception/fallback', { method: 'POST', body: bad });
+    assert.equal(r.status, 400, JSON.stringify(bad));
+  }
+});
+
+test('w5-M3/L7: query params obey the canonical integer grammar and uniqueness', async t => {
+  const h = await httpFixture(t);
+  for (const bad of ['0x10', '1e2', '+5', '%205%20', '5.0', '007', '0b101'])
+    assert.equal((await h.request(`/v1/action-capsules?limit=${bad}`)).status, 400, bad);
+  assert.equal((await h.request('/v1/action-capsules?limit=25&limit=50')).status, 400);
+  assert.equal((await h.request('/v1/action-capsules?bogus=1')).status, 400);
+  assert.equal((await h.request('/v1/action-capsules?LIMIT=25')).status, 400);
+  assert.equal((await h.request('/v1/me?debug=1')).status, 400);
+  assert.equal((await h.request('/v1/audit/consistency')).status, 200);
+});
+
+test('w5-M6: non-canonical request targets are rejected, not normalized', async t => {
+  const h = await httpFixture(t);
+  for (const bad of ['/v1/../v1/me', '/v1\\me', '/%2e%2e/v1/me', '/v1/a/../me'])
+    assert.equal((await h.request(bad)).status, 400, bad);
+});
+
+test('w5-M4/L4/L5: connectors auth-gated; unknown resource and key 404', async t => {
+  const h = await httpFixture(t);
+  assert.equal((await h.request('/v1/connectors', { token: null })).status, 401);
+  assert.equal((await h.request('/v1/connectors')).status, 200);
+  assert.equal((await h.request('/v1/resources/does-not-exist')).status, 404);
+  assert.equal((await h.request('/v1/keys/no-such-key/attest', { token: h.setup.credentials.acme.security })).status, 404);
+});
+
+test('w5-M8: a wrong method on a documented path is a 405 on every route', async t => {
+  const h = await httpFixture(t), spec = JSON.parse(readFileSync('docs/openapi.json', 'utf8'));
+  for (const template of Object.keys(ROUTE_METHODS)) assert.ok(spec.paths[template], `route ${template} missing from openapi.json`);
+  for (const [template, ops] of Object.entries(spec.paths)) {
+    const wrong = ['GET', 'POST'].find(m => !Object.keys(ops).includes(m.toLowerCase()));
+    if (!wrong) continue;
+    const path = template.replaceAll(/\{[^}]+\}/g, 'x-1');
+    const r = await h.request(path, { method: wrong });
+    assert.equal(r.status, 405, `${wrong} ${path}`); assert.equal(r.data.error.code, 'INV-405-METHOD');
+  }
 });

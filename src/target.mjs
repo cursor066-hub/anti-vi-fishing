@@ -31,6 +31,9 @@ export class SimulatedTarget {
     catch (e) { this.db.exec('ROLLBACK'); throw e; }
   }
   key(tenant) { requireThat(this.keys[tenant], 'INV-404-NOT-FOUND', 'Resource not found', 404); return Buffer.from(this.keys[tenant], 'base64url'); }
+  exists(tenant, id) {
+    return this.db.prepare('SELECT 1 FROM resources WHERE tenant=? AND id=?').get(tenant, id) !== undefined;
+  }
   _readResource(tenant, id) {
     const row = this.db.prepare('SELECT version,value FROM resources WHERE tenant=? AND id=?').get(tenant, id);
     return row ? { version: row.version, value: decrypt(row.value, this.key(tenant), `${tenant}/resource/${id}`) } : { version: 0, value: null };

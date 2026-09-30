@@ -44,6 +44,8 @@ Policy DENY, DEFER and ESCROW are decision objects, not automatically HTTP 451/4
 
 The HTTP body limit is 1 MiB; JSON nesting is bounded, object keys are ASCII and safe-integer quantities only are accepted. Evidence is bounded at 32 items per action. List pagination is limit/offset — max 100 on `/v1/action-capsules`, max 200 on `/v1/certificates`. Policy simulation scans at most 500 recent actions. Retention stops conservatively if it cannot establish all references within its batch bound. Audit entries are cursor-paginated (`GET /v1/audit/entries?cursor=&limit=`, max 5000/page); the signed export bundle remains in-memory.
 
+Request targets must be origin-form canonical paths — absolute-form targets, backslashes, and literal or percent-encoded dot-segments are rejected rather than normalized. Query strings are closed: only the parameters declared per route may appear, at most once each, and integer parameters accept canonical decimal grammar only (no hex, exponents, signs, whitespace or leading zeros). A `Content-Type` of exactly `application/json` is required for bodies — parameters such as `;charset=` are not accepted. A documented path with the wrong method returns `INV-405-METHOD` (405), never a bare 404.
+
 There are no external URL fetch, plaintext-key extraction, raw SQL, universal administrator bypass, real bank connector, root-key enrollment, arbitrary capability widening, or production-enable API. Distributed revocation, cross-actor composition choreography, crypto migration beyond suite-gating and several long-term SRS features remain in the explicit gap register.
 
 ## Platform endpoints (v2)

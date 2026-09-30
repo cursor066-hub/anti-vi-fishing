@@ -2,7 +2,7 @@
 
 ## Executed evidence
 
-**272 automated test cases passed, 0 failed** (node --test over tests/). TAP output in reports/tests.tap.
+**278 automated test cases passed, 0 failed** (node --test over tests/). TAP output in reports/tests.tap.
 
 **22 simulation scenarios** run by scripts/simulate.mjs (reports/simulation-results.json).
 

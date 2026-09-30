@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 1262,
-      "bytes": 107957
+      "lines": 1266,
+      "bytes": 108406
     },
     "src/issuerd.mjs": {
       "lines": 286,
@@ -70,12 +70,12 @@
       "bytes": 9766
     },
     "src/secureview.mjs": {
-      "lines": 119,
-      "bytes": 8541
+      "lines": 120,
+      "bytes": 8755
     },
     "src/server.mjs": {
-      "lines": 185,
-      "bytes": 21418
+      "lines": 254,
+      "bytes": 26621
     },
     "src/shamir.mjs": {
       "lines": 83,
@@ -86,8 +86,8 @@
       "bytes": 16192
     },
     "src/target.mjs": {
-      "lines": 212,
-      "bytes": 15887
+      "lines": 215,
+      "bytes": 16023
     },
     "web/app.js": {
       "lines": 207,
@@ -114,8 +114,8 @@
       "bytes": 2875
     },
     "scripts/generate-contracts.mjs": {
-      "lines": 90,
-      "bytes": 16325
+      "lines": 102,
+      "bytes": 17735
     },
     "scripts/generate-vectors.mjs": {
       "lines": 69,
@@ -190,8 +190,8 @@
       "bytes": 5856
     },
     "tests/http-concurrency-ui.test.mjs": {
-      "lines": 164,
-      "bytes": 16160
+      "lines": 219,
+      "bytes": 19402
     },
     "tests/issuerd.test.mjs": {
       "lines": 108,
@@ -202,8 +202,8 @@
       "bytes": 28971
     },
     "tests/ledger3.test.mjs": {
-      "lines": 331,
-      "bytes": 21527
+      "lines": 332,
+      "bytes": 21660
     },
     "tests/lifecycle.test.mjs": {
       "lines": 125,
@@ -231,5 +231,5 @@
     }
   },
   "total_files": 57,
-  "total_lines": 8452
+  "total_lines": 8597
 }

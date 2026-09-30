@@ -51,14 +51,26 @@ function operation(path, method, description, role, request = null, status = 200
     { name: 'cursor', in: 'query', required: false, schema: { type: 'integer', minimum: 0 } },
     { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 5000 } },
     { name: 'view', in: 'query', required: false, schema: { type: 'string', enum: ['finance', 'privacy', 'technical'] } });
-  if (path === '/v1/coverage/history' && method === 'get') params.push({ name: 'at', in: 'query', required: false, schema: { type: 'integer', minimum: 1 } });
+  const qintSchema = (min, max) => ({ type: 'integer', minimum: min, ...(max ? { maximum: max } : {}), description: 'Canonical decimal integer grammar only (no hex/exponent/float/signed spellings); unknown or duplicate query parameters are rejected' });
+  if (path === '/v1/coverage/history' && method === 'get') params.push({ name: 'at', in: 'query', required: false, schema: qintSchema(0, 1e14) });
+  if (path === '/v1/audit/consistency' && method === 'get') params.push({ name: 'first', in: 'query', required: false, schema: qintSchema(1, 1e12) });
+  if (path === '/v1/action-capsules' && method === 'get') params.push(
+    { name: 'limit', in: 'query', required: false, schema: qintSchema(1, 100) },
+    { name: 'offset', in: 'query', required: false, schema: qintSchema(0, 1e6) });
+  if (path === '/v1/certificates' && method === 'get') params.push(
+    { name: 'limit', in: 'query', required: false, schema: qintSchema(1, 200) },
+    { name: 'offset', in: 'query', required: false, schema: qintSchema(0, 1e6) });
+  if (path === '/v1/grants' && method === 'get') params.push({ name: 'subject', in: 'query', required: false, schema: type.id });
   if (params.length) op.parameters = params;
   paths[path] ??= {}; paths[path][method] = op;
+  if (PUBLIC_PATHS.has(path)) op.security = [];
 }
+const PUBLIC_PATHS = new Set(['/healthz', '/readyz', '/', '/app.js', '/style.css']);
 for (const row of [
  ['/healthz','get','Liveness','unauthenticated'], ['/readyz','get','Readiness (db probe)','unauthenticated'],
- ['/v1/me','get','Current principal','authenticated'], ['/v1/schemas','get','Typed schema definitions and digests','authenticated'], ['/v1/policy','get','Read active constitution','operator, approver, custodian, policy_admin, security'],
- ['/v1/action-capsules','get','List capsules (limit 1–100 and offset)','operator, approver, custodian, security, policy_admin'], ['/v1/action-capsules','post','Propose exact action (input + capsule-intent envelope signed by the actor identity key)','operator, policy_admin, workload','ProposalRequest',201], ['/v1/action-capsules/{id}','get','Read exact capsule','operator, approver, custodian, security, policy_admin'],
+ ['/','get','Operator console HTML (static asset)','unauthenticated'], ['/app.js','get','Operator console script (static asset)','unauthenticated'], ['/style.css','get','Operator console stylesheet (static asset)','unauthenticated'],
+ ['/v1/me','get','Current principal','authenticated'], ['/v1/schemas','get','Typed schema definitions and digests','authenticated'], ['/v1/policy','get','Read active constitution','operator, approver, custodian, policy_admin, security, auditor'],
+ ['/v1/action-capsules','get','List capsules (limit 1–100 and offset)','operator, approver, custodian, security, policy_admin, auditor'], ['/v1/action-capsules','post','Propose exact action (input + capsule-intent envelope signed by the actor identity key)','operator, policy_admin, workload','ProposalRequest',201], ['/v1/action-capsules/{id}','get','Read exact capsule','operator, approver, custodian, security, policy_admin, auditor'],
  ['/v1/action-capsules/{id}/evidence','post','Attach a pre-signed evidence envelope','operator, security, policy_admin','Envelope',201], ['/v1/action-capsules/{id}/acquire-evidence','post','Pull signed evidence from a live issuer daemon (fabric derives binding claims)','operator, security, policy_admin','AcquireEvidence',201],
  ['/v1/action-capsules/{id}/evaluate','post','Evaluate deterministic policy','operator, policy_admin, approver, custodian','Empty'], ['/v1/action-capsules/{id}/cancel','post','Cancel undispatched authority','operator, security, policy_admin','Empty'], ['/v1/action-capsules/{id}/approval-challenge','get','Get exact digest-bound challenge','approver, custodian'],
  ['/v1/approvals','post','Submit offline-signed approval','approver, custodian','Envelope',201], ['/v1/approvals/batch','post','Batch-approve a declared 2-32 action set (one signature per capsule)','approver, custodian','BatchApproval',201], ['/v1/containment','get','Reconstruct the denied-consume / quarantine containment sequence','operator, security, auditor, policy_admin'],
@@ -67,11 +79,11 @@ for (const row of [
  ['/v1/resources/{id}','get','Read non-dataset synthetic target state','operator, policy_admin'], ['/v1/capabilities','post','Issue narrow local capability','operator, workload','CapabilityRequest',201], ['/gate/v1/runtime','post','Consume capability under shared budgets','bound subject','RuntimeRequest'],
  ['/v1/revocations','post','Permanently revoke local authority','security','Revocation',201], ['/v1/revocations','get','List revocations','operator, security, auditor, policy_admin'],
  ['/v1/coverage','get','Read signed conservative coverage manifest','operator, approver, custodian, security, auditor, policy_admin'], ['/v1/coverage','post','Declare monitored or unknown path','security','CoverageDeclaration',201], ['/v1/coverage/history','get','Coverage state reconstructed at instant ?at=','operator, approver, custodian, security, auditor, policy_admin'], ['/v1/coverage/{id}/technical-validation','post','Attach independently executed validation evidence to a path','security','Envelope'],
- ['/v1/connectors','get','Read simulator connector limitations','authenticated'], ['/v1/connectors/status','get','Issuer and target connector status incl. drift','operator, security, policy_admin, auditor'], ['/v1/connectors/{id}/drift-check','post','Live manifest drift check against issuer endpoint','security, policy_admin','Empty'],
+ ['/v1/connectors','get','Read simulator connector limitations','operator, security, policy_admin, auditor'], ['/v1/connectors/status','get','Issuer and target connector status incl. drift','operator, security, policy_admin, auditor'], ['/v1/connectors/{id}/drift-check','post','Live manifest drift check against issuer endpoint','security, policy_admin'],
  ['/v1/policies/simulate','post','Compare exact candidate without activation','policy_admin, security','Policy'], ['/v1/policy/history','get','Staged and historical policy versions','operator, security, auditor, policy_admin'],
  ['/v1/audit-exports','post','Export audited purpose-bound integrity metadata','auditor, security','AuditRequest'],
  ['/v1/audit/entries','get','Paginated audit view (cursor + limit 1–5000)','operator, security, auditor, policy_admin'], ['/v1/audit/proofs/{sequence}','get','RFC 6962 inclusion proof','operator, security, auditor'], ['/v1/audit/consistency','get','Consistency proof between tree sizes','operator, security, auditor'], ['/v1/audit/verify-proof','post','Verify a supplied inclusion proof against the live tree','operator, security, auditor','ProofVerify'],
- ['/v1/subjects','get','Identity inventory','operator, security, auditor, policy_admin'], ['/v1/grants','get','Active JIT grants','operator, security, auditor'],
+ ['/v1/subjects','get','Identity inventory','operator, security, auditor, policy_admin'], ['/v1/grants','get','Active JIT grants','operator, security, auditor, policy_admin'],
  ['/v1/retention/hold','post','Set or release evidence legal hold','security','RetentionHold'], ['/v1/retention/sweep','post','Apply conservative logical retention','security','Empty'], ['/v1/metrics','get','Read process-wide counters without target payloads','security'],
  ['/v1/ceremonies','get','List key ceremonies','security, custodian, policy_admin'], ['/v1/ceremonies','post','Plan a threshold ceremony','security, custodian','CeremonyCreate',201],
  ['/v1/ceremonies/{id}/acknowledge','post','Custodian acknowledges participation','custodian','CeremonyAcknowledge'], ['/v1/ceremonies/{id}/split','post','Split exportable material into committed shares','security, custodian','CeremonySplit'], ['/v1/ceremonies/{id}/reconstruct','post','Reconstruct under ceremony quorum (digest returned, not material)','security, custodian','CeremonyReconstruct'],
@@ -79,7 +91,7 @@ for (const row of [
  ['/v1/config-drift','get','Configuration drift status','security, policy_admin'], ['/v1/config-drift/reassert','post','Re-attest config after correction','security'], ['/v1/clock/recover','post','Audited clock repair after stall','security, policy_admin'],
  ['/v1/secure-perception/sessions','post','Open dev-attested sealed perception session','operator, approver, custodian, security','PerceptionSession',201], ['/v1/secure-perception/release','post','Release sealed fields under purpose binding','operator, approver, custodian, security','PerceptionRelease'], ['/v1/secure-perception/fallback','post','Labelled non-perception fallback submission','operator, approver, custodian, security','PerceptionFallback'],
  ['/v1/advisory','post','Deterministic advisory plane (never confers authority)','operator, approver, custodian, security, policy_admin','Advisory'],
- ['/session','post','Establish same-origin session','token holder','Session'], ['/session/logout','post','Destroy current cookie session','authenticated','Empty']
+ ['/session','post','Establish same-origin session','token holder','Session'], ['/session/logout','post','Destroy current cookie session','authenticated']
 ]) operation(...row);
 paths['/session'].post.security = [];
 const result = { openapi: '3.1.0', info: { title: 'Invariant Fabric engineering API', version: '1.0.0', description: 'Exact-action software enforcement and synthetic target execution. Not a production-certified deployment. JSON is restricted to IF-CJSON-1. Cookie mutations require Origin and X-CSRF-Token; bearer credentials are also supported. Strict runtime validation is authoritative.' }, servers: [{ url: 'http://127.0.0.1:8080' }], security: [{ bearerAuth: [] }], paths, components: { securitySchemes: { bearerAuth: { type: 'http', scheme: 'bearer' } }, schemas: components } };

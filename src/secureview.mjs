@@ -103,6 +103,7 @@ export function releaseAllowlist(policy) {
 }
 
 export function workspaceFallback(release, policy, now) {
+  requireThat(release && typeof release === 'object' && !Array.isArray(release) && release.fields && typeof release.fields === 'object' && !Array.isArray(release.fields), 'INV-400-SCHEMA', 'Invalid release', 400);
   // Controlled-workspace fallback: plaintext fields over the normal channel,
   // honestly labelled — only when policy explicitly permits it.
   const sp = policy.secure_perception ?? {};

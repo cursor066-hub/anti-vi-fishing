@@ -228,7 +228,8 @@ test('NFR-PRV-005: deletion preserves integrity metadata via tombstones', t => {
 test('NFR-MNT-001: every public route is versioned and the contract is documented', () => {
   const spec = JSON.parse(readFileSync('docs/openapi.json', 'utf8'));
   assert.equal(spec.openapi.split('.')[0], '3');
-  for (const path of Object.keys(spec.paths)) assert.match(path, /^\/(v1|gate\/v1|session|healthz|readyz)/);
+  const assets = new Set(['/', '/app.js', '/style.css']); // console statics are content, not API routes
+  for (const path of Object.keys(spec.paths)) assert.ok(assets.has(path) || /^\/(v1|gate\/v1|session|healthz|readyz)/.test(path), path);
 });
 
 test('NFR-MNT-003: a CycloneDX SBOM enumerates components and dependencies', () => {

@@ -45,7 +45,8 @@
               }
             }
           }
-        }
+        },
+        "security": []
       }
     },
     "/readyz": {
@@ -77,7 +78,107 @@
               }
             }
           }
-        }
+        },
+        "security": []
+      }
+    },
+    "/": {
+      "get": {
+        "operationId": "get_",
+        "summary": "Operator console HTML (static asset)",
+        "description": "Roles: unauthenticated. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/app.js": {
+      "get": {
+        "operationId": "get_app_js",
+        "summary": "Operator console script (static asset)",
+        "description": "Roles: unauthenticated. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/style.css": {
+      "get": {
+        "operationId": "get_style_css",
+        "summary": "Operator console stylesheet (static asset)",
+        "description": "Roles: unauthenticated. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": []
       }
     },
     "/v1/me": {
@@ -148,7 +249,7 @@
       "get": {
         "operationId": "get_v1_policy",
         "summary": "Read active constitution",
-        "description": "Roles: operator, approver, custodian, policy_admin, security. Engineering profile; all target mutations are simulated.",
+        "description": "Roles: operator, approver, custodian, policy_admin, security, auditor. Engineering profile; all target mutations are simulated.",
         "tags": [
           "Control"
         ],
@@ -180,7 +281,7 @@
       "get": {
         "operationId": "get_v1_action_capsules",
         "summary": "List capsules (limit 1–100 and offset)",
-        "description": "Roles: operator, approver, custodian, security, policy_admin. Engineering profile; all target mutations are simulated.",
+        "description": "Roles: operator, approver, custodian, security, policy_admin, auditor. Engineering profile; all target mutations are simulated.",
         "tags": [
           "Control"
         ],
@@ -205,7 +306,31 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "description": "Canonical decimal integer grammar only (no hex/exponent/float/signed spellings); unknown or duplicate query parameters are rejected"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000,
+              "description": "Canonical decimal integer grammar only (no hex/exponent/float/signed spellings); unknown or duplicate query parameters are rejected"
+            }
+          }
+        ]
       },
       "post": {
         "operationId": "post_v1_action_capsules",
@@ -263,7 +388,7 @@
       "get": {
         "operationId": "get_v1_action_capsules_id_",
         "summary": "Read exact capsule",
-        "description": "Roles: operator, approver, custodian, security, policy_admin. Engineering profile; all target mutations are simulated.",
+        "description": "Roles: operator, approver, custodian, security, policy_admin, auditor. Engineering profile; all target mutations are simulated.",
         "tags": [
           "Control"
         ],
@@ -708,7 +833,31 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "description": "Canonical decimal integer grammar only (no hex/exponent/float/signed spellings); unknown or duplicate query parameters are rejected"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000,
+              "description": "Canonical decimal integer grammar only (no hex/exponent/float/signed spellings); unknown or duplicate query parameters are rejected"
+            }
+          }
+        ]
       },
       "post": {
         "operationId": "post_v1_certificates",
@@ -1232,7 +1381,9 @@
             "required": false,
             "schema": {
               "type": "integer",
-              "minimum": 1
+              "minimum": 0,
+              "maximum": 100000000000000,
+              "description": "Canonical decimal integer grammar only (no hex/exponent/float/signed spellings); unknown or duplicate query parameters are rejected"
             }
           }
         ]
@@ -1296,7 +1447,7 @@
       "get": {
         "operationId": "get_v1_connectors",
         "summary": "Read simulator connector limitations",
-        "description": "Roles: authenticated. Engineering profile; all target mutations are simulated.",
+        "description": "Roles: operator, security, policy_admin, auditor. Engineering profile; all target mutations are simulated.",
         "tags": [
           "Control"
         ],
@@ -1382,16 +1533,6 @@
                 "schema": {
                   "$ref": "#/components/schemas/Error"
                 }
-              }
-            }
-          }
-        },
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/Empty"
               }
             }
           }
@@ -1664,7 +1805,20 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "first",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000000000,
+              "description": "Canonical decimal integer grammar only (no hex/exponent/float/signed spellings); unknown or duplicate query parameters are rejected"
+            }
+          }
+        ]
       }
     },
     "/v1/audit/verify-proof": {
@@ -1745,7 +1899,7 @@
       "get": {
         "operationId": "get_v1_grants",
         "summary": "Active JIT grants",
-        "description": "Roles: operator, security, auditor. Engineering profile; all target mutations are simulated.",
+        "description": "Roles: operator, security, auditor, policy_admin. Engineering profile; all target mutations are simulated.",
         "tags": [
           "Control"
         ],
@@ -1770,7 +1924,19 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "subject",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+              "maxLength": 128
+            }
+          }
+        ]
       }
     },
     "/v1/retention/hold": {
@@ -2574,16 +2740,6 @@
                 "schema": {
                   "$ref": "#/components/schemas/Error"
                 }
-              }
-            }
-          }
-        },
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/Empty"
               }
             }
           }
