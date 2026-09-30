@@ -19,7 +19,7 @@ export function loadIssuers(directory) {
   for (const file of readdirSync(directory)) {
     if (!file.endsWith('.issuer.json')) continue;
     const spec = JSON.parse(readFileSync(join(directory, file), 'utf8'));
-    fields(spec, ['issuer', 'key', 'channel', 'kinds', 'records', 'version']);
+    fields(spec, ['issuer', 'key', 'channel', 'kinds', 'records', 'version'], ['tenant']);
     identifier(spec.issuer); text(spec.version, 'issuer version', 32);
     requireThat(['authoritative', 'communication', 'device', 'counterparty'].includes(spec.channel), 'INV-400-SCHEMA', 'Unsupported issuer channel');
     // Registry key: '<tenant>:<issuer>' when the spec carries a tenant, so

@@ -1,0 +1,42 @@
+name: engineering-ci
+
+on:
+  push:
+    branches: [main, 'devin/**']
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.14'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.16.0'
+      - run: pip install 'cryptography>=3.4.8'
+      - name: Static source checks
+        run: node scripts/check.mjs
+      - name: Test suite
+        run: npm test
+      - name: Simulation harness
+        run: node scripts/simulate.mjs
+      - name: Cross-implementation conformance vectors
+        run: npm run conformance
+      - name: Independent export verifiers (node + bun)
+        run: |
+          node scripts/verify-export.mjs reports/sample-audit.json reports/sample-pinned-trust.json
+          bun scripts/verify-export-webcrypto.mjs reports/sample-audit.json reports/sample-pinned-trust.json
+          python3 scripts/canonical-vectors.py examples/canonical-vectors.json
+      - name: Benchmark (informational)
+        run: node scripts/benchmark.mjs
+      - name: Requirements traceability
+        run: python3 scripts/traceability.py
+      - name: Production gate (expected BLOCKED, informational)
+        continue-on-error: true
+        run: node scripts/release-check.mjs

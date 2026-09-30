@@ -1,0 +1,132 @@
+{
+ "format": "IF-CJSON-1 conformance vectors v1",
+ "vectors": [
+  {
+   "name": "empty-object",
+   "input": {},
+   "canonical": "{}"
+  },
+  {
+   "name": "empty-array",
+   "input": [],
+   "canonical": "[]"
+  },
+  {
+   "name": "null",
+   "input": null,
+   "canonical": "null"
+  },
+  {
+   "name": "booleans",
+   "input": [
+    true,
+    false
+   ],
+   "canonical": "[true,false]"
+  },
+  {
+   "name": "integers",
+   "input": [
+    0,
+    1,
+    -1,
+    9007199254740991,
+    -9007199254740991
+   ],
+   "canonical": "[0,1,-1,9007199254740991,-9007199254740991]"
+  },
+  {
+   "name": "sorted-keys",
+   "input": {
+    "b": 1,
+    "a": 2,
+    "a.1": 3,
+    "a:1": 4,
+    "_z": 5
+   },
+   "canonical": "{\"_z\":5,\"a\":2,\"a.1\":3,\"a:1\":4,\"b\":1}"
+  },
+  {
+   "name": "nested",
+   "input": {
+    "x": [
+     {
+      "y": {
+       "z": [
+        1,
+        "two",
+        null
+       ]
+      }
+     }
+    ],
+    "a": {}
+   },
+   "canonical": "{\"a\":{},\"x\":[{\"y\":{\"z\":[1,\"two\",null]}}]}"
+  },
+  {
+   "name": "nfc-unicode",
+   "input": {
+    "s": "café",
+    "cjk": ""
+   },
+   "canonical": "{\"cjk\":\"\",\"s\":\"café\"}"
+  },
+  {
+   "name": "escapes",
+   "input": {
+    "s": "q\"b\\c\t\n\u0001end"
+   },
+   "canonical": "{\"s\":\"q\\\"b\\\\c\\t\\n\\u0001end\"}"
+  },
+  {
+   "name": "negative-float",
+   "input": {
+    "n": -0.5
+   },
+   "canonical": null,
+   "error": "INV-400-SCHEMA"
+  },
+  {
+   "name": "float",
+   "input": {
+    "n": 1.5
+   },
+   "canonical": null,
+   "error": "INV-400-SCHEMA"
+  },
+  {
+   "name": "unsafe-int",
+   "input": {
+    "n": 9007199254740992
+   },
+   "canonical": null,
+   "error": "INV-400-SCHEMA"
+  },
+  {
+   "name": "non-nfc-string",
+   "input": {
+    "s": "café"
+   },
+   "canonical": null,
+   "error": "INV-400-SCHEMA"
+  },
+  {
+   "name": "proto-key",
+   "input": {
+    "x": 1,
+    "__proto__": 2
+   },
+   "canonical": null,
+   "error": "INV-400-SCHEMA"
+  },
+  {
+   "name": "non-ascii-key",
+   "input": {
+    "clé": 1
+   },
+   "canonical": null,
+   "error": "INV-400-SCHEMA"
+  }
+ ]
+}

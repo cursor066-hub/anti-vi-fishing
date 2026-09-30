@@ -3,9 +3,9 @@
   "functional_requirements": 166,
   "nonfunctional_requirements": 45,
   "status_counts": {
-    "NOT_IMPLEMENTED": 32,
-    "VERIFIED_IN_ENGINEERING_PROFILE": 55,
-    "PARTIAL": 96,
+    "PARTIAL": 109,
+    "VERIFIED_IN_ENGINEERING_PROFILE": 69,
+    "NOT_IMPLEMENTED": 5,
     "BLOCKED_EXTERNAL": 28
   },
   "production_ready": false,

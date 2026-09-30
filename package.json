@@ -12,6 +12,7 @@
     "benchmark": "node scripts/benchmark.mjs",
     "start": "node src/cli.mjs serve",
     "verify": "node scripts/verify-export.mjs",
+    "conformance": "node scripts/generate-vectors.mjs && node scripts/verify-vectors-webcrypto.mjs && python3 scripts/verify-vectors.py",
     "release:check": "node scripts/release-check.mjs"
   }
 }

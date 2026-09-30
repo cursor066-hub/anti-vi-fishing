@@ -3,7 +3,7 @@ import { requireThat } from './errors.mjs';
 
 // IF-MERKLE-1: RFC 6962-shaped binary Merkle tree over audit entry hashes.
 // Domain separation: 0x00 for leaves, 0x01 for interior nodes.
-const leaf = h => createHash('sha256').update(Buffer.concat([Buffer.from([0x00]), Buffer.from(h, 'hex')])).digest('hex');
+export const leaf = h => createHash('sha256').update(Buffer.concat([Buffer.from([0x00]), Buffer.from(h, 'hex')])).digest('hex');
 const node = (a, b) => createHash('sha256').update(Buffer.concat([Buffer.from([0x01]), Buffer.from(a, 'hex'), Buffer.from(b, 'hex')])).digest('hex');
 const isDigest = h => /^[a-f0-9]{64}$/.test(h);
 

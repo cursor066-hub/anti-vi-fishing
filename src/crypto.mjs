@@ -18,7 +18,10 @@ export function verifySigned(envelope, publicKeys, purpose) {
   requireThat(h && Object.keys(h).sort().join() === 'key_id,profile,purpose,suite' && h.profile === 'IF-CJSON-1' && h.suite === 'Ed25519' && h.purpose === purpose, 'INV-401-SIGNATURE', 'Unsupported signature context', 401);
   const key = publicKeys[h.key_id];
   requireThat(key && !key.revoked, 'INV-401-SIGNATURE', 'Signer unavailable', 401);
-  requireThat(typeof envelope.signature === 'string' && /^[A-Za-z0-9_-]{86}$/.test(envelope.signature), 'INV-401-SIGNATURE', 'Invalid signature encoding', 401);
+  // Require canonical base64url: mutating unused padding bits must not
+  // produce an accepted alternative encoding of the same signature.
+  requireThat(typeof envelope.signature === 'string' && /^[A-Za-z0-9_-]{86}$/.test(envelope.signature)
+    && Buffer.from(envelope.signature, 'base64url').toString('base64url') === envelope.signature, 'INV-401-SIGNATURE', 'Invalid signature encoding', 401);
   let ok = false;
   try { ok = verify(null, Buffer.from(canonical({ protected: h, payload: envelope.payload })), createPublicKey(key.public_key), Buffer.from(envelope.signature, 'base64url')); } catch { ok = false; }
   requireThat(ok, 'INV-401-SIGNATURE', 'Signature verification failed', 401);

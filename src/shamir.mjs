@@ -62,7 +62,7 @@ function interpolateZero(points) {
 export function reconstruct(shares) {
   requireThat(Array.isArray(shares) && shares.length >= 2, 'INV-400-SHAMIR', 'At least two shares are required');
   const xs = new Set(shares.map(s => s.x));
-  requireThat(xs.size === shares.length && shares.every(s => s.y instanceof Uint8Array && s.y.length === shares[0].y.length && s.x >= 1 && s.x <= 255), 'INV-400-SHAMIR', 'Malformed share set');
+  requireThat(xs.size === shares.length && shares.every(s => s.y instanceof Uint8Array && s.y.length === shares[0].y.length && s.x >= 1 && s.x <= 255), 'INV-400-SHAMIR', 'Malformed or duplicate share set');
   const out = new Uint8Array(shares[0].y.length);
   for (let b = 0; b < out.length; b++) out[b] = interpolateZero(shares.map(s => [s.x, s.y[b]]));
   return out;
