@@ -9,11 +9,12 @@ import { merkleRoot, inclusionProof, consistencyProof, verifyInclusion } from '.
 import { httpJson, driftCheck } from './connectors.mjs';
 import { createCeremony, acknowledge, commitShares, splitSecret, reconstructSecret, ceremonyReport } from './ceremony.mjs';
 import { decodeShare, encodeShare } from './shamir.mjs';
+import { SUITES } from './crypto.mjs';
 import { openSession, releaseFields, workspaceFallback } from './secureview.mjs';
 import { extract, explain, classifyIntent } from './advisory.mjs';
 import { fields, text, identifier, integer, uniqueStrings, validateProposal } from './schema.mjs';
 import { evaluatePolicy, validatePolicy, policyDiff } from './policy.mjs';
-import { declarePath, coverageManifest } from './coverage.mjs';
+import { declarePath, coverageManifest, applyDriftToPaths } from './coverage.mjs';
 import { requireThat, InvariantError } from './errors.mjs';
 import { join } from 'node:path';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
@@ -22,6 +23,7 @@ export class Fabric {
   constructor(config, directory, clock = Date.now, { vault = null } = {}) {
     requireThat(config.profile === 'engineering', 'INV-503-RELEASE', 'Production mode is blocked: external acceptance evidence is missing', 503);
     this.config = config; this.directory = directory; this.clock = clock;
+    this._configDrift = new Set();
     const encryption = {}, auditSigners = {};
     this.vault = vault ?? this._openVault();
     for (const [tenant, t] of Object.entries(config.tenants)) {
@@ -58,7 +60,7 @@ export class Fabric {
       const configDigest = digest({ tenant, identities: t.identities, issuers: t.issuers, genesis_policy: t.genesis_policy, gate_id: config.gate_id });
       const existing = this.store.get(tenant, 'config-snapshot', 'current');
       if (!existing) this.store.tx(() => { this.store.put(tenant, 'config-snapshot', 'current', { digest: configDigest, taken_at: this.clock() }, this.clock()); this.store.audit(tenant, 'CONFIG_SNAPSHOT', 'system', 'config', { config_digest: configDigest }, this.clock()); });
-      else if (existing.digest !== configDigest) this.store.tx(() => this.store.audit(tenant, 'CONFIG_DRIFT', 'system', 'config', { expected: existing.digest, observed: configDigest }, this.clock()));
+      else if (existing.digest !== configDigest) { this._configDrift.add(tenant); this.store.tx(() => this.store.audit(tenant, 'CONFIG_DRIFT', 'system', 'config', { expected: existing.digest, observed: configDigest, consequence: 'gate-privileges-withdrawn' }, this.clock())); }
     } } catch (error) { this.close(); throw error; }
   }
   _openVault() {
@@ -90,6 +92,19 @@ export class Fabric {
   }
   signExecution(t, payload, purpose) { return this.vault.envelope(this.keys(t).execution.key_id, purpose, payload); }
   signAudit(t, payload, purpose = 'audit') { return this.vault.envelope(this.keys(t).audit.key_id, purpose, payload); }
+  // RUN-010: security re-attests a drifted configuration snapshot, restoring
+  // privileges. This is the only operation allowed through during drift.
+  reassertConfig(p) {
+    this.authorize(p, ['security']);
+    return this.transaction(p, now => {
+      const t = p.tenant_id, tenant = this.tenant(t);
+      const digestNow = digest({ tenant: t, identities: tenant.identities, issuers: tenant.issuers, genesis_policy: tenant.genesis_policy, gate_id: this.config.gate_id });
+      this.store.put(t, 'config-snapshot', 'current', { digest: digestNow, taken_at: now }, now);
+      this._configDrift.delete(t);
+      this.store.audit(t, 'CONFIG_REASSERTED', p.subject_id, 'config', { config_digest: digestNow }, now);
+      return { reasserted: true, config_digest: digestNow };
+    }, { allowDuringDrift: true });
+  }
   identity(p) {
     const identity = Object.values(this.tenant(p.tenant_id).identities).find(x => x.subject_id === p.subject_id);
     requireThat(identity && !identity.revoked, 'INV-401-AUTH', 'Authentication required', 401); return identity;
@@ -129,8 +144,11 @@ export class Fabric {
     }
     return null;
   }
-  transaction(principal, fn) {
+  transaction(principal, fn, { allowDuringDrift = false } = {}) {
     this.authorize(principal, ['operator', 'approver', 'custodian', 'security', 'auditor', 'policy_admin', 'workload']);
+    // RUN-010: a drifting gate configuration withdraws privileges until a
+    // security actor re-attests the observed config snapshot.
+    requireThat(allowDuringDrift || !this._configDrift.has(principal.tenant_id), 'INV-403-QUARANTINE', 'Configuration drift withdrew gate privileges pending security re-attestation', 403);
     try { return this.store.tx(() => { const now = this.clock(); this.store.clock(now); this.activateDuePolicies(principal.tenant_id, now); return fn(now); }); }
     catch (error) {
       if (error instanceof InvariantError && error.code !== 'INV-503-TIME') {
@@ -248,7 +266,17 @@ export class Fabric {
     const observedPayload = verifySigned(observed, { [key_id]: issuer }, 'connector-manifest');
     const registered = { connector_id: `issuer:${issuer.name}`, version: issuer.version ?? '1.0.0', actions: issuer.kinds, channel: issuer.channel, key_id };
     const result = driftCheck(registered, { connector_id: observedPayload.connector_id, version: observedPayload.version, actions: observedPayload.actions, channel: observedPayload.domain, key_id: observed.protected.key_id }, this.clock());
-    return this.transaction(p, now => { if (result.drifted) this.store.audit(p.tenant_id, 'CONNECTOR_DRIFT', p.subject_id, key_id, { changes: result.changes, configuration_digest: result.configuration_digest }, now); return result; });
+    return this.transaction(p, now => {
+      if (!result.drifted) return result;
+      // COV-004/CON-006 consequence: paths depending on the drifted connector
+      // lose their observation evidence and fall to UNKNOWN until revalidated.
+      const paths = this.store.list(p.tenant_id, 'coverage', 10000);
+      const staled = applyDriftToPaths(paths, path => path.target === issuer.name || path.connector_id === `issuer:${issuer.name}`);
+      for (const path of paths) if (path.status === 'UNKNOWN' && path.evidence_at === null) this.store.put(p.tenant_id, 'coverage', path.path_id, path, now);
+      this.store.audit(p.tenant_id, 'CONNECTOR_DRIFT', p.subject_id, key_id, { changes: result.changes, configuration_digest: result.configuration_digest, coverage_paths_staled: staled }, now);
+      if (staled) this.store.audit(p.tenant_id, 'COVERAGE_STALED', p.subject_id, key_id, { paths: staled }, now);
+      return { ...result, coverage_paths_staled: staled };
+    });
   }
   approvalChallenge(p, id) {
     this.authorize(p, ['approver', 'custodian']); const r = this.store.must(p.tenant_id, 'capsule', id); this.ensureMutable(r);
@@ -615,6 +643,7 @@ export class Fabric {
       commitShares(ceremony, shares, null, now);
       this.store.put(p.tenant_id, 'ceremony', ceremony.ceremony_id, ceremony, now);
       this.store.audit(p.tenant_id, 'CEREMONY_SHARES_COMMITTED', p.subject_id, ceremony.ceremony_id, { count: ceremony.share_commitments.length }, now);
+      for (const n of ceremony.notices) this.store.audit(p.tenant_id, 'RECOVERY_NOTICE_ISSUED', p.subject_id, ceremony.ceremony_id, { custodian: n.custodian, channel: n.channel, issued_at: n.issued_at, delay_ms: ceremony.min_delay_ms }, now);
       return ceremonyReport(ceremony);
     });
   }
@@ -641,14 +670,16 @@ export class Fabric {
       commitShares(ceremony, shares, null, now);
       this.store.put(p.tenant_id, 'ceremony', ceremony.ceremony_id, ceremony, now);
       this.store.audit(p.tenant_id, 'CEREMONY_SHARES_COMMITTED', p.subject_id, ceremony.ceremony_id, { count: ceremony.share_commitments.length }, now);
+      for (const n of ceremony.notices) this.store.audit(p.tenant_id, 'RECOVERY_NOTICE_ISSUED', p.subject_id, ceremony.ceremony_id, { custodian: n.custodian, channel: n.channel, issued_at: n.issued_at, delay_ms: ceremony.min_delay_ms }, now);
       return { shares: ceremony.custodians.map((custodian, i) => ({ custodian, share: encodeShare(shares[i]) })), commitments: ceremony.share_commitments };
     });
   }
-  prepareRotation(p, key_class) {
+  prepareRotation(p, key_class, suite = 'Ed25519') {
     this.authorize(p, ['security', 'custodian']);
     requireThat(['execution', 'audit'].includes(key_class), 'INV-400-SCHEMA', 'key_class must be execution or audit');
+    requireThat(SUITES[suite], 'INV-400-SCHEMA', 'Unknown signature suite');
     return this.transaction(p, now => {
-      const pending = this.vault.generate('any', { pending: true });
+      const pending = this.vault.generate('any', { pending: true, suite });
       this.persistVault();
       this.store.audit(p.tenant_id, 'ROTATION_PREPARED', p.subject_id, pending.key_id, { key_class, ceremony_bound: true }, now);
       return { key_id: pending.key_id, public_key: pending.public_key, key_class, status: 'pending', note: 'Key generated inside the vault; it cannot sign until a verified key.rotate action activates it.' };
@@ -698,7 +729,7 @@ export class Fabric {
       else if (input.operation === 'explain') out = explain(input.decision ?? {});
       else if (input.operation === 'intent') out = classifyIntent(text(input.document, 'request text', 100000));
       else throw new InvariantError('INV-400-SCHEMA', 'Unsupported advisory operation');
-      this.store.audit(p.tenant_id, 'AI_ADVISORY', p.subject_id, out.model, { operation: input.operation, model: out.model, output_digest: digest(out), advisory: true }, now);
+      this.store.audit(p.tenant_id, 'AI_ADVISORY', p.subject_id, out.model, { operation: input.operation, model: out.model, model_version: out.model_version ?? out.model, provider: out.provider ?? 'local-deterministic', prompt_digest: digest({ operation: input.operation, document: input.document ?? null, decision: input.decision ?? null }), tool_context_digest: digest(input), output_digest: digest(out), advisory: true }, now);
       return out;
     });
   }

@@ -11,15 +11,15 @@ import { requireThat, InvariantError } from './errors.mjs';
 // purpose. Reconstructing the secret cryptographically requires >= threshold
 // distinct custodian shares — the approval record cannot bypass the math.
 
-export function createCeremony({ ceremony_id, tenant_id, purpose, threshold, custodians, valid_until }) {
-  fields({ ceremony_id, tenant_id, purpose, threshold, custodians, valid_until }, ['ceremony_id', 'tenant_id', 'purpose', 'threshold', 'custodians', 'valid_until']);
+export function createCeremony({ ceremony_id, tenant_id, purpose, threshold, custodians, valid_until, min_delay_ms = 0 }) {
+  fields({ ceremony_id, tenant_id, purpose, threshold, custodians, valid_until }, ['ceremony_id', 'tenant_id', 'purpose', 'threshold', 'custodians', 'valid_until'], ['min_delay_ms']);
   identifier(ceremony_id); identifier(tenant_id, 'tenant'); text(purpose, 'purpose', 64);
   integer(threshold, 'threshold', 2, custodians.length);
-  uniqueStrings(custodians, 'custodians', 16); integer(valid_until, 'valid until', 1);
+  uniqueStrings(custodians, 'custodians', 16); integer(valid_until, 'valid until', 1); integer(min_delay_ms, 'minimum delay', 0, 30 * 24 * 3600 * 1000);
   return {
-    ceremony_id, tenant_id, purpose, threshold, custodians: [...custodians].sort(), valid_until,
-    status: 'planned', acknowledgements: [], share_commitments: [], exceptions: [],
-    artifact_digest: digest({ ceremony_id, tenant_id, purpose, threshold, custodians, valid_until })
+    ceremony_id, tenant_id, purpose, threshold, custodians: [...custodians].sort(), valid_until, min_delay_ms,
+    status: 'planned', acknowledgements: [], share_commitments: [], exceptions: [], notices: [], committed_at: null,
+    artifact_digest: digest({ ceremony_id, tenant_id, purpose, threshold, custodians, valid_until, min_delay_ms })
   };
 }
 
@@ -41,6 +41,11 @@ export function commitShares(ceremony, shares, getCustodianKey, now) {
   requireThat(ceremony.status === 'planned' || ceremony.status === 'committed', 'INV-409-STATE', 'Ceremony already completed', 409);
   requireThat(shares.length === ceremony.custodians.length, 'INV-400-SCHEMA', 'Share count must equal custodian count');
   ceremony.share_commitments = shares.map((s, i) => ({ custodian: ceremony.custodians[i], share_index: s.x, commitment: digest({ x: s.x, y: Buffer.from(s.y).toString('base64url') }) }));
+  // KEY-009 out-of-band notice: each custodian gets an independently
+  // addressed notification record at share-commit time; the delay window
+  // below gives them time to object before any reconstruction is legal.
+  ceremony.notices = ceremony.custodians.map(c => ({ custodian: c, channel: 'recovery-notice', issued_at: now }));
+  ceremony.committed_at = now;
   ceremony.status = 'committed';
   return ceremony.share_commitments;
 }
@@ -54,6 +59,10 @@ export function splitSecret(secretBytes, ceremony) {
 // audit evidence that a valid quorum participated.
 export function reconstructSecret(ceremony, presentedShares, now) {
   requireThat(presentedShares.length >= ceremony.threshold, 'INV-403-ROLE', 'Fewer than threshold shares presented', 403);
+  // KEY-009 delay: reconstruction is illegal until the recovery delay has
+  // elapsed since shares were committed (notices already issued then).
+  requireThat(now >= (ceremony.committed_at ?? 0) + (ceremony.min_delay_ms ?? 0), 'INV-409-STATE', 'Recovery delay has not elapsed since share commitment', 409);
+  requireThat(ceremony.notices.length === ceremony.custodians.length, 'INV-409-STATE', 'Recovery notices have not been issued to all custodians', 409);
   const byIndex = new Map();
   for (const s of presentedShares) {
     const commitment = ceremony.share_commitments.find(c => c.share_index === s.x);

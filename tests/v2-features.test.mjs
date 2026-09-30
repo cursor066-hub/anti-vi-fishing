@@ -129,7 +129,7 @@ function policyChange(h, next, approvals = 3) {
   return { r, cert: h.f.certificate(h.p(), r.capsule.capsule_id) };
 }
 
-test('POL-013: staged policy activates only when trusted time reaches not_before', t => {
+test('POL-008: staged policy activates only when trusted time reaches not_before', t => {
   const h = fixture(t);
   const active = h.f.policy('acme');
   const next = clone(active); next.version = 2; next.policy_id = 'constitution:acme:v2'; next.not_before = h.now() + 240000;
@@ -145,7 +145,7 @@ test('POL-013: staged policy activates only when trusted time reaches not_before
   assert.equal(history.some(x => x.staged === true), true);
 });
 
-test('POL-014: emergency policy with sufficient custodians activates', t => {
+test('POL-013: emergency policy with sufficient custodians activates', t => {
   const h = fixture(t);
   const active = h.f.policy('acme');
   const next = clone(active); next.version = 2; next.policy_id = 'constitution:acme:em2'; next.emergency_of = 1; next.expires_at = h.now() + 3600000; next.not_before = 1;
@@ -161,7 +161,7 @@ test('POL-014: emergency policy with sufficient custodians activates', t => {
   assert.equal(h.f.evaluate(h.p(), r2.capsule.capsule_id).decision, 'DENY');
 });
 
-test('POL-014: emergency policy without the extra custodian is denied', t => {
+test('POL-013: emergency policy without the extra custodian is denied', t => {
   const h = fixture(t);
   const next = clone(h.f.policy('acme')); next.version = 2; next.policy_id = 'constitution:acme:em-deny'; next.emergency_of = 1; next.expires_at = h.now() + 3600000; next.not_before = 1;
   const r = h.proposed('policy.change', { policy: next }, { action: { type: 'policy.change', target_resource: 'policy', purpose: 'Emergency' } });
@@ -196,7 +196,7 @@ test('KEY-004 KEY-005: prepareRotation creates pending vault key; verified rotat
 
 // ---------- JIT grants ----------
 
-test('IDN-005: verified identity.jit.grant mints a time-bounded grant usable by runtime', t => {
+test('IDN-004: verified identity.jit.grant mints a time-bounded grant usable by runtime', t => {
   const h = fixture(t);
   const r = h.proposed('identity.jit.grant', { subject_id: 'operator', resources: ['dataset-1'], actions: ['data.read'], destinations: ['customer-vault'], columns: ['id'], row_ids: ['row-2'], ttl_ms: 300000, reason: 'Incident response' }, { action: { type: 'identity.jit.grant', target_resource: 'jit-grants', purpose: 'JIT access' } });
   h.evidence(r, { kind: 'identity_proof' }); h.evidence(r, { kind: 'identity_proof', issuer: 'registry' });
