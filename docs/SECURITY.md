@@ -33,6 +33,23 @@ Software keys are generated using the platform CSPRNG and Ed25519 implementation
 | Scale | Bounded engineering UI/query scans | Production-scale audit pagination, storage/rate/cache exhaustion and soak evidence |
 | Secure SDLC | Test suite and focused checks | Human maintainers, code review, current advisories, SAST/DAST/fuzz coverage and independent assessment |
 
+### Secure Perception residual risks
+
+Secure Perception raises the cost of extracting protected fields, it does not
+prevent all visual exfiltration. Residual risks that remain even with a fully
+attested hardware path:
+
+- **External camera** — a phone can photograph the rendered screen.
+- **Deliberate memorisation** — an authorised operator can memorise what they
+  are shown; the module reduces bulk extraction, not human recall.
+- **Compromised trusted hardware** — a compromised TEE/display-path component
+  can render and leak plaintext despite valid attestation.
+- **Side channels** — timing, pixel emissions and host-side channels are out of
+  scope for the software profile.
+
+Product copy and the console must never present the module as a trusted
+display or as prevention of all visual exfiltration.
+
 ### Store plaintext surfaces (design decision)
 
 The audit chain, `data_access` trail, `usage` keys, `nonces` and `idempotency` request hashes are stored **plaintext by design** inside `fabric.db`: audit envelopes must remain verifiable and servable to auditors who hold only public keys, and `verifyAudit`/export integrity checks are deliberately key-free. Confidentiality of the database file itself comes from the `0600` file permissions and the deployment's filesystem/backup controls — the tenant encryption keys (`config.json`) live in the same trust boundary, so encrypting audit metadata under them would not raise the bar against an attacker who can already read the directory. Integrity, however, is fully cryptographic: hash chaining, signed envelopes and per-row re-verification on read (`auditPage` recomputes digests and chain links before serving).

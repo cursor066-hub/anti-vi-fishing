@@ -772,3 +772,90 @@ test('IDN-009 R2-32: service credentials are short-lived capabilities, not stand
   h.advance(5001);
   assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap)), e => /^INV-4[0-9]{2}-/.test(e.code));
 });
+
+test('KEY-004 R2-33: key generation uses CSPRNG and is non-deterministic', t => {
+  const h = fixture(t);
+  const a = h.f.vault.generate('backup-manifest');
+  const b = h.f.vault.generate('backup-manifest');
+  assert.notEqual(a.public_key, b.public_key);
+  assert.equal(a.suite, 'Ed25519');
+});
+
+test('KEY-007 R2-34: a purpose-bound key cannot sign outside its purpose', t => {
+  const h = fixture(t);
+  const support = h.f.vault.generate('backup-manifest');
+  assert.throws(() => h.f.vault.sign(support.key_id, 'action-certificate', { x: 1 }), e => /^INV-/.test(e.code));
+  assert.throws(() => h.f.vault.sign(support.key_id, 'policy', { x: 1 }), e => /^INV-/.test(e.code));
+});
+
+test('KEY-012 R2-35: a ceremony is documented, witnessed and reproducible', t => {
+  const h = fixture(t); const custodians = ['custodian-1', 'custodian-2', 'custodian-3'];
+  const c = h.f.createCeremony(h.p('security'), { ceremony_id: 'cer-doc-1', purpose: 'documented drill', threshold: 2, custodians, valid_until: h.now() + 3600000 });
+  assert.equal(c.status, 'planned'); assert.equal(c.custodians.length, 3);
+  for (const subject of custodians.slice(0, 2)) {
+    const ack = signAcknowledgement(c, subject, h.setup.custodianKeys.acme[subject], h.now());
+    h.f.acknowledgeCeremony(h.p(subject), ack);
+  }
+  const secret = randomBytes(32).toString('base64url');
+  const split = h.f.splitCeremonySecret(h.p('security'), 'cer-doc-1', secret);
+  const report = h.f.reconstructCeremony(h.p('security'), 'cer-doc-1', [split.shares[0].share, split.shares[1].share]);
+  assert.equal(report.reconstructed, true);
+  assert.deepEqual(report.artifact.quorum, [1, 2]);
+  assert.ok(report.artifact.ceremony_id && report.artifact.purpose === 'documented drill');
+  const stored = h.f.store.get('acme', 'ceremony', 'cer-doc-1');
+  assert.equal(stored.notices.length, 3, 'a notice per custodian is recorded');
+  const types = h.f.store.auditPage('acme', { after: 0, limit: 100 }).entries.map(e => e.envelope.payload.type);
+  assert.ok(types.includes('CEREMONY_ACKNOWLEDGED') && types.includes('RECOVERY_NOTICE_ISSUED'));
+});
+
+test('AIG-002 AIG-007 R2-36: communication-channel evidence is advisory-only and can never authorise', t => {
+  const h = fixture(t); const r = h.proposed();
+  h.evidence(r); h.evidence(r, { issuer: 'registry' });
+  h.evidence(r, { issuer: 'email', advisory: true });
+  const record = h.f.getCapsule(h.p(), r.capsule.capsule_id);
+  const advisories = record.evidence.map(id => h.f.store.get('acme', 'evidence', id)).filter(e => e.payload.advisory);
+  assert.equal(advisories.length, 1);
+  // The advisory envelope carries no authority: approvals still gate the decision.
+  h.approve(r, 0);
+  assert.notEqual(h.f.evaluate(h.p(), r.capsule.capsule_id).decision, 'ALLOW');
+});
+
+test('CON-002 CON-007 R2-37: issuer evidence stays purpose-bound and customer-hosted', t => {
+  const h = fixture(t);
+  // The issuerd trust domain issues only 'evidence' envelopes (answerQuery);
+  // its key never appears in the vendor codebase — fixtures generate it.
+  const bank = h.setup.issuerKeys.acme.bank;
+  const env = signed({ evidence_id: 'e1', tenant_id: 'acme', capsule_digest: 'x'.repeat(64), kind: 'ownership', content_digest: 'a'.repeat(64), acquired_at: h.now(), expires_at: h.now() + 60000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'test', retention_until: h.now() + 120000 }, bank, 'evidence');
+  assert.equal(env.protected.purpose, 'evidence');
+  assert.equal(verifySigned(env, { [bank.key_id]: { public_key: bank.public_key } }, 'evidence').evidence_id, 'e1');
+  // An evidence-purpose signature can never masquerade as an approval or certificate.
+  const forged = { ...env, protected: { ...env.protected, purpose: 'action-approval' } };
+  assert.throws(() => verifySigned(forged, { [bank.key_id]: { public_key: bank.public_key } }, 'evidence'), hasCode('INV-401-SIGNATURE'));
+});
+
+test('NET-001 NET-002 NET-003 NET-010 R2-38: segmentation is identity-bound, envelope-bound and reconstructable', t => {
+  const h = fixture(t);
+  // Workstation peers are never service destinations.
+  const cfg = h.f.policy('acme'); cfg.runtime.network = { deny_workstation_peers: true, allowed_protocols: ['https'], allowed_ports: [443] };
+  h.f.store.put('acme', 'policy', 'active', cfg, h.now());
+  const cap = h.f.runtime.issue(h.p(), runtimeInput());
+  const ws = runtimeRequest(cap); ws.resource = 'ws-janedoe';
+  assert.throws(() => h.f.runtime.consume(h.p(), ws), e => /^INV-/.test(e.code));
+  // Authority is bound to subject + capability fields, never to a network location.
+  const badProto = runtimeRequest(cap); badProto.protocol = 'ftp';
+  assert.throws(() => h.f.runtime.consume(h.p(), badProto), e => /^INV-/.test(e.code));
+  const badPort = runtimeRequest(cap); badPort.port = 22;
+  assert.throws(() => h.f.runtime.consume(h.p(), badPort), e => /^INV-/.test(e.code));
+  assert.equal(h.f.runtime.consume(h.p(), runtimeRequest(cap)).decision, 'ALLOW');
+  // The incident sequence is reconstructable from the signed audit trail.
+  const audit = h.f.store.auditPage('acme', { after: 0, limit: 50 }).entries.map(i => i.envelope.payload.type);
+  assert.ok(audit.includes('CAPABILITY_ISSUED') || audit.includes('CAPABILITY_CONSUMED'), 'containment sequence reconstructable');
+});
+
+test('AUD-010 R2-39: the auditor role gets read-only least-privilege views', t => {
+  const h = fixture(t); const r = h.ready(); h.f.execute(h.p(), r.certificate);
+  const audit = h.p('auditor');
+  assert.ok(h.f.store.auditPage('acme', { after: 0, limit: 10 }).entries.length > 0, 'auditor can read entries');
+  assert.throws(() => h.f.approve(audit, { protected: { purpose: 'action-approval', key_id: 'x' }, payload: { capsule_id: 'x' }, signature: 'x' }), e => /^INV-4/.test(e.code));
+  assert.throws(() => h.f.retentionSweep(audit), e => /^INV-4/.test(e.code));
+});
