@@ -26,8 +26,8 @@
       "bytes": 8078
     },
     "src/coverage.mjs": {
-      "lines": 66,
-      "bytes": 4681
+      "lines": 70,
+      "bytes": 4909
     },
     "src/crypto.mjs": {
       "lines": 77,
@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 1593,
-      "bytes": 133960
+      "lines": 1687,
+      "bytes": 141697
     },
     "src/issuerd.mjs": {
       "lines": 303,
@@ -198,8 +198,8 @@
       "bytes": 8572
     },
     "tests/ledger2.test.mjs": {
-      "lines": 411,
-      "bytes": 29035
+      "lines": 415,
+      "bytes": 29359
     },
     "tests/ledger3.test.mjs": {
       "lines": 386,
@@ -254,8 +254,12 @@
       "bytes": 14600
     },
     "tests/w7-seam.test.mjs": {
-      "lines": 175,
-      "bytes": 13021
+      "lines": 176,
+      "bytes": 13166
+    },
+    "tests/w8-composite.test.mjs": {
+      "lines": 193,
+      "bytes": 14788
     },
     "tests/w8-fixverify.test.mjs": {
       "lines": 78,
@@ -270,6 +274,6 @@
       "bytes": 7577
     }
   },
-  "total_files": 67,
-  "total_lines": 10875
+  "total_files": 68,
+  "total_lines": 11171
 }

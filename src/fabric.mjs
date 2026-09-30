@@ -542,7 +542,18 @@ export class Fabric {
     const callStarted = Date.now();
     try { const res = await readWithRetry(`${issuer.endpoint}/v1/issuers/${issuer.name}/manifest?tenant=${p.tenant_id}`, { timeout_ms: 10000, retries: 2, headers: (issuer.read_token ?? issuer.issue_token) ? { Authorization: `Bearer ${issuer.read_token ?? issuer.issue_token}` } : undefined }); observed = res.data; this.recordIssuerCall(key_id, Date.now() - callStarted, false); } catch (e) {
       this.recordIssuerCall(key_id, Date.now() - callStarted, true);
-      return this.transaction(p, now => { this.store.put(p.tenant_id, 'issuer-drift', key_id, { drifted_at: now, changes: [{ field: 'endpoint', detail: 'unreachable' }] }, now); this.store.audit(p.tenant_id, 'CONNECTOR_DRIFT', p.subject_id, key_id, { drifted: 'unreachable', code: e.code ?? 'transport' }, now); return { drifted: true, changes: [{ field: 'endpoint', detail: 'unreachable' }], checked_at: now }; });
+      return this.transaction(p, now => {
+        this.store.put(p.tenant_id, 'issuer-drift', key_id, { drifted_at: now, changes: [{ field: 'endpoint', detail: 'unreachable' }] }, now);
+        // An unreachable issuer stales its dependent paths exactly like a
+        // drifted manifest — quarantined evidence cannot keep paths
+        // MONITORED (w8-composite F14).
+        const paths = this.store.list(p.tenant_id, 'coverage', 10000);
+        const transitioned = applyDriftToPaths(paths, path => path.target === issuer.name);
+        for (const path of transitioned) this.coverageTransition(p.tenant_id, path, 'UNKNOWN', `connector-unreachable:${key_id}`, now);
+        this.store.audit(p.tenant_id, 'CONNECTOR_DRIFT', p.subject_id, key_id, { drifted: 'unreachable', code: e.code ?? 'transport', coverage_paths_staled: transitioned.length }, now);
+        if (transitioned.length) this.store.audit(p.tenant_id, 'COVERAGE_STALED', p.subject_id, key_id, { paths: transitioned.map(x => x.path_id) }, now);
+        return { drifted: true, changes: [{ field: 'endpoint', detail: 'unreachable' }], checked_at: now, coverage_paths_staled: transitioned.length };
+      });
     }
     let observedPayload;
     try {
@@ -572,7 +583,7 @@ export class Fabric {
       // lose their observation evidence and fall to UNKNOWN until revalidated.
       // Each transition emits a coverage event and an owner task (COV-005/009).
       const paths = this.store.list(p.tenant_id, 'coverage', 10000);
-      const transitioned = applyDriftToPaths(paths, path => path.target === issuer.name || path.connector_id === `issuer:${issuer.name}`);
+      const transitioned = applyDriftToPaths(paths, path => path.target === issuer.name);
       for (const path of transitioned) this.coverageTransition(p.tenant_id, path, 'UNKNOWN', `connector-drift:${key_id}`, now);
       this.store.audit(p.tenant_id, 'CONNECTOR_DRIFT', p.subject_id, key_id, { changes: result.changes, configuration_digest: result.configuration_digest, coverage_paths_staled: transitioned.length }, now);
       if (transitioned.length) this.store.audit(p.tenant_id, 'COVERAGE_STALED', p.subject_id, key_id, { paths: transitioned.map(x => x.path_id) }, now);
@@ -620,7 +631,11 @@ export class Fabric {
         if (child.capsule.actor.subject_id !== record.capsule.actor.subject_id) problems.push({ code: 'CHILD_ACTOR', child: childId });
         if (child.status !== 'CERTIFIED') problems.push({ code: 'CHILD_STATE', child: childId, status: child.status });
         const cert = child.certificate_id ? this.store.get(t, 'certificate', child.certificate_id) : null;
-        if (!cert || cert.consumed) problems.push({ code: 'CHILD_CERT', child: childId });
+        // A composite over an already-dead child certificate mints a parent
+        // that can only bail — the dead child is an admission problem, not a
+        // dispatch-time surprise (w8-composite F9).
+        const cp = cert?.envelope?.payload;
+        if (!cert || cert.consumed || !cp || cp.issued_at > now || cp.expires_at <= now || this.revoked(t, 'certificate', cp.certificate_id)) problems.push({ code: 'CHILD_CERT', child: childId });
         else certs.push(cert);
       }
       if (problems.length) return { decision: 'ESCROW', reasons: problems.map(x => ({ code: x.code, message: `Composite child ${x.child}: ${x.code.toLowerCase().replace(/_/g, ' ')}${x.status ? ` (${x.status})` : ''}` })), explanation: 'Every child of a composite must be independently certified.', owner: record.capsule.actor.subject_id, expires_at: record.capsule.expires_at, evaluated_at: now, policy_version: policy.version, policy_digest: digest(policy), eligible_signers: [] };
@@ -679,6 +694,11 @@ export class Fabric {
       const stored = this.store.must(t, 'certificate', cert.certificate_id), record = this.store.must(t, 'capsule', cert.capsule_id);
       requireThat(digest(stored.envelope) === digest(envelope), 'INV-401-CERTIFICATE', 'Certificate does not match issued authority', 401);
       requireThat(!stored.consumed && record.status === 'CERTIFIED', 'INV-409-REPLAY', 'Certificate already consumed or action cancelled', 409);
+      // A composite child's certificate is spendable only through its parent
+      // — a solo spend verifies the child, then the parent's reservation
+      // bricks on the consumed cert (w8-composite F8). Once the parent is
+      // terminal the child is unbound again.
+      requireThat(!this.store.list(t, 'capsule', 10000).some(o => o.capsule.action.type === 'action.composite' && (o.capsule.requested_state.children ?? []).includes(record.capsule.capsule_id) && ['CERTIFIED', 'EXECUTING'].includes(o.status)), 'INV-409-STATE', 'Composite child certificates execute only through their parent', 409);
       requireThat(record.capsule_digest === cert.capsule_digest && this.graph(t, record).digest === cert.evidence_graph_digest && digest(this.policy(t)) === cert.policy_digest, 'INV-409-STATE', 'Action, evidence or policy changed', 409);
       requireThat(this.evaluation(t, record, now).decision === 'ALLOW', 'INV-412-EVIDENCE', 'Execution predicates no longer hold', 412);
       this.assertHealthy(t, record.capsule.actor.subject_id, record.capsule.actor.device_id, now);
@@ -804,28 +824,59 @@ export class Fabric {
       const t = p.tenant_id, r = this.store.must(t, 'capsule', cert.capsule_id), stored = this.store.must(t, 'certificate', cert.certificate_id);
       const existing = this.store.get(t, 'outcome', cert.certificate_id);
       requireThat(!existing || !['VERIFIED', 'FAILED', 'COMPENSATED'].includes(existing.payload.status), 'INV-409-STATE', 'A terminal execution outcome cannot be overwritten', 409);
+      // Compensation is claimed only where it actually ran — a refused or
+      // never-attempted unwind makes the outcome honestly FAILED, not
+      // COMPENSATED (w8-composite F1).
+      const compensatedIds = new Set((compensations ?? []).filter(c => c.compensated === true).map(c => c.capsule_id));
+      if (status === 'COMPENSATED' && compensations?.some(c => c.compensated === false)) {
+        status = 'FAILED'; reason = `COMPENSATION_INCOMPLETE:${reason}`;
+        wedged = [...new Set([...wedged, ...compensations.filter(c => c.compensated === false).map(c => c.capsule_id)])];
+      }
+      const childOutcomes = {};
       for (const done of executed) {
-        const childRecord = this.store.must(t, 'capsule', done.child.capsule.capsule_id), childStored = this.store.must(t, 'certificate', done.child.certificate_id);
-        childRecord.status = status === 'VERIFIED' ? 'VERIFIED' : status === 'UNCERTAIN' ? 'UNCERTAIN' : 'COMPENSATED';
-        childStored.consumed = true; childStored.status = childRecord.status;
-        this.store.put(t, 'capsule', childRecord.capsule.capsule_id, childRecord, now);
-        this.store.put(t, 'certificate', childStored.envelope.payload.certificate_id, childStored, now);
+        const childCapsuleId = done.child.capsule.capsule_id;
+        const childRecord = this.store.must(t, 'capsule', childCapsuleId), childStored = this.store.must(t, 'certificate', done.child.certificate_id);
+        const childCertId = childStored.envelope.payload.certificate_id;
+        const priorOutcome = this.store.get(t, 'outcome', childCertId);
+        const settledTerminal = priorOutcome && ['VERIFIED', 'FAILED', 'COMPENSATED'].includes(priorOutcome.payload.status);
+        let childStatus = status === 'VERIFIED' ? 'VERIFIED' : status === 'UNCERTAIN' ? 'UNCERTAIN' : status === 'COMPENSATED' && compensatedIds.has(childCapsuleId) ? 'COMPENSATED' : 'FAILED';
+        let extras = null;
         // VERIFIED children take their declared post-effects — a composite
         // may not attest an effect that never happened (runtime-audit F-2).
         // An effect that refuses (budget denial, lapsed rotation
         // precondition) demotes the parent outcome too — the ledger must not
-        // attest VERIFIED over a child that failed (w7-seam F6).
-        if (status === 'VERIFIED') {
-          const childExtras = this._applyVerifiedEffects(p, t, childRecord, childStored.envelope.payload, done.raw, now, post);
-          if (childExtras?.gate_denied || childExtras?.rotation_precondition_lapsed) {
-            status = 'FAILED'; reason = childExtras?.gate_denied?.code ?? 'ROTATION_PRECONDITION_LAPSED';
-            childRecord.status = 'FAILED'; childStored.status = 'FAILED';
-            this.store.put(t, 'capsule', childRecord.capsule.capsule_id, childRecord, now);
-            this.store.put(t, 'certificate', childStored.envelope.payload.certificate_id, childStored, now);
+        // attest VERIFIED over a child that failed (w7-seam F6). Effects
+        // never re-fire for an already-settled child (w8-composite F6).
+        if (status === 'VERIFIED' && childStatus === 'VERIFIED' && !settledTerminal) {
+          extras = this._applyVerifiedEffects(p, t, childRecord, childStored.envelope.payload, done.raw, now, post);
+          if (extras?.gate_denied || extras?.rotation_precondition_lapsed) {
+            status = 'FAILED'; reason = extras?.gate_denied?.code ?? 'ROTATION_PRECONDITION_LAPSED';
+            childStatus = 'FAILED';
           }
         }
+        // An export that egressed rows is charged and watermarked even when
+        // the parent did not finish VERIFIED — egress is irrevocable
+        // (w8-composite F2).
+        if (done.child.capsule.action.type === 'data.export' && childStatus !== 'VERIFIED' && !settledTerminal) extras = this._recordExportEgress(p, t, childRecord, childStored.envelope.payload, done.raw, now);
+        // A child whose outcome already settled keeps its recorded verdict —
+        // the parent's status never overrides a terminal child row.
+        if (settledTerminal) childStatus = priorOutcome.payload.status;
+        childRecord.status = childStatus; childStored.consumed = true; childStored.status = childStatus;
+        this.store.put(t, 'capsule', childCapsuleId, childRecord, now);
+        this.store.put(t, 'certificate', childCertId, childStored, now);
+        childOutcomes[childCapsuleId] = settledTerminal ? priorOutcome.payload.status : childStatus;
+        // Every executed child gets its own outcome row — reconcile(child)
+        // must answer the recorded verdict, never resurrect or re-fire
+        // effects (w8-composite F3/F4/F6). UNCERTAIN rows may supersede.
+        if (!settledTerminal) {
+          const childPayload = { certificate_id: childCertId, capsule_digest: childStored.envelope.payload.capsule_digest, target_transaction_id: childCertId, observed_state_digest: done.raw?.observed_state_digest ?? null, status: childStatus, reason: childStatus === status ? reason : `PARENT_${status}:${reason}`, execution_time: done.raw?.execution_time ?? execNow, reconciliation_evidence: done.raw ? digest(done.raw) : null, simulation: true, output: null, watermarks: extras?.watermarks ?? null, gate_denied: extras?.gate_denied?.detail ?? null, composite_child_of: cert.certificate_id, supersedes: priorOutcome ? digest(priorOutcome) : null };
+          this.store.put(t, 'outcome', childCertId, this.signAudit(t, childPayload, 'outcome'), now);
+        }
       }
-      const payload = { certificate_id: cert.certificate_id, capsule_digest: cert.capsule_digest, target_transaction_id: cert.certificate_id, observed_state_digest: digest({ children: executed.map(e => e.child.capsule.capsule_id), compensations }), status, reason, execution_time: execNow, reconciliation_evidence: digest(executed.map(e => e.raw)), simulation: true, output: null, composite: true, children: executed.map(e => e.child.capsule.capsule_id), wedged_children: wedged.length ? wedged : null, compensations, supersedes: existing ? digest(existing) : null };
+      // The terminal record names every child's fate — wedged and
+      // never-attempted children are accounted, not hidden (w8-composite F7).
+      for (const childId of capsule.requested_state.children ?? []) childOutcomes[childId] ??= wedged.includes(childId) ? 'WEDGED' : 'NOT_ATTEMPTED';
+      const payload = { certificate_id: cert.certificate_id, capsule_digest: cert.capsule_digest, target_transaction_id: cert.certificate_id, observed_state_digest: digest({ children: executed.map(e => e.child.capsule.capsule_id), compensations }), status, reason, execution_time: execNow, reconciliation_evidence: digest(executed.map(e => e.raw)), simulation: true, output: null, composite: true, children: executed.map(e => e.child.capsule.capsule_id), child_outcomes: childOutcomes, wedged_children: wedged.length ? wedged : null, compensations, supersedes: existing ? digest(existing) : null };
       const envelope = this.signAudit(t, payload, 'outcome');
       this.store.put(t, 'outcome', cert.certificate_id, envelope, now); stored.status = status; r.status = status;
       this.store.put(t, 'certificate', cert.certificate_id, stored, now); this.store.put(t, 'capsule', cert.capsule_id, r, now);
@@ -846,15 +897,19 @@ export class Fabric {
     }
     let expected = null;
     if (responseShape && Number.isSafeInteger(raw.execution_time)) {
+      // Expected state embeds the EXECUTION instant, not the validation
+      // instant — recomputing with validate-now falsifies every replayed
+      // journal entry whose time fields moved on (w8-composite F5).
+      const et = raw.execution_time;
       const c = r.capsule;
       expected = { ...c.current_state.material_fields, ...c.requested_state };
-      if (c.action.type === 'finance.bank.change') expected = { ...expected, first_payment_done: false, payment_eligible_at: now + 60000 };
+      if (c.action.type === 'finance.bank.change') expected = { ...expected, first_payment_done: false, payment_eligible_at: et + 60000 };
       if (c.action.type === 'finance.payment.first') expected = { ...c.current_state.material_fields, first_payment_done: true, payment: c.requested_state, payment_transaction: cert.certificate_id };
       if (c.action.type === 'data.export') expected = c.current_state.material_fields;
-      if (['identity.mfa.reset', 'identity.authenticator.enroll', 'identity.account.recover'].includes(c.action.type)) expected = { ...expected, last_identity_operation: { type: c.action.type, at: now, transaction: cert.certificate_id } };
-      if (c.action.type === 'key.rotate') expected = { ...expected, rotated_at: now, rotation_transaction: cert.certificate_id };
-      if (c.action.type === 'secret.use') expected = { ...c.current_state.material_fields, last_use: { secret_id: c.requested_state.secret_id, operation: c.requested_state.operation, workload_id: c.requested_state.workload_id, at: now, transaction: cert.certificate_id } };
-      if (c.action.type === 'backup.delete') expected = { ...c.current_state.material_fields, deleted_backups: [...(c.current_state.material_fields.deleted_backups ?? []), { backup_id: c.requested_state.backup_id, at: now, transaction: cert.certificate_id }] };
+      if (['identity.mfa.reset', 'identity.authenticator.enroll', 'identity.account.recover'].includes(c.action.type)) expected = { ...expected, last_identity_operation: { type: c.action.type, at: et, transaction: cert.certificate_id } };
+      if (c.action.type === 'key.rotate') expected = { ...expected, rotated_at: et, rotation_transaction: cert.certificate_id };
+      if (c.action.type === 'secret.use') expected = { ...c.current_state.material_fields, last_use: { secret_id: c.requested_state.secret_id, operation: c.requested_state.operation, workload_id: c.requested_state.workload_id, at: et, transaction: cert.certificate_id } };
+      if (c.action.type === 'backup.delete') expected = { ...c.current_state.material_fields, deleted_backups: [...(c.current_state.material_fields.deleted_backups ?? []), { backup_id: c.requested_state.backup_id, at: et, transaction: cert.certificate_id }] };
       if (c.action.type === 'identity.jit.grant') expected = { ...expected };
     }
     let outputValid = r.capsule.action.type !== 'data.export' && raw?.output === null;
@@ -957,26 +1012,25 @@ export class Fabric {
       this.store.audit(t, 'JIT_GRANT_ISSUED', p.subject_id, req.subject_id, { grant_id: grant.grant_id, grant_digest: digest(req), expires_at: grant.expires_at }, now);
       post.push(() => this.target.grant(t, grant.grant_id, grant));
     }
-    if (type === 'data.export') {
-      // DAT-009/011: a certified export is a first-class data access — it
-      // writes the same touch rows, budget charge and attribution watermarks
-      // as a capability read, so the reconstruction ledger sees every egress
-      // channel (runtime-audit F-7).
-      const requested = r.capsule.requested_state, subject = r.capsule.actor.subject_id;
-      const dataset = this.target.state(t, requested.dataset).material_fields;
-      // The export channel is gated by the same cumulative reconstruction
-      // budget as capability reads — an export may not sail past a coverage
-      // denial (w6-tenancy F5). Touch rows stay committed for the attempt.
-      const recon = reconstructionCheck(this.store.db, this.target.db, { tenant: t, subject, dataset: requested.dataset, rows: requested.row_ids, columns: requested.columns, now, policy: this.policy(t).runtime.reconstruction });
-      if (!recon.allowed) return { gate_denied: { code: 'INV-429-BUDGET', detail: { row_count: recon.row_count, column_count: recon.column_count, coverage_percent: recon.coverage_percent } } };
-      const weight = this.policy(t).runtime.sensitivity_weights[dataset.classification] ?? 1;
-      const cost = requested.row_ids.length * requested.columns.length * weight;
-      this.store.db.prepare('INSERT INTO usage VALUES(?,?,?,?,?,?,?)').run(t, subject, requested.dataset, now, cost, `cert:${cert.certificate_id}`, cert.certificate_id);
-      let tenantWatermarkKey;
-      try { tenantWatermarkKey = this.dataKey(t, 'watermark'); } catch { tenantWatermarkKey = null; }
-      return { watermarks: watermark(raw.output ?? [], { tenant: t, dataset: requested.dataset, subject, requestId: cert.certificate_id, tenantWatermarkKey: tenantWatermarkKey ?? this.dataKey(t, 'encryption') }).watermarks };
-    }
+    if (type === 'data.export') return this._recordExportEgress(p, t, r, cert, raw, now);
     return null;
+  }
+  // DAT-009/011: an executed export is a first-class data access — touch
+  // rows, budget charge and attribution watermarks. This runs whenever rows
+  // left the gate, including under a bail or demotion that can never
+  // un-egress them; a late budget denial is recorded, not silently skipped
+  // (w8-composite F2).
+  _recordExportEgress(p, t, r, cert, raw, now) {
+    const requested = r.capsule.requested_state, subject = r.capsule.actor.subject_id;
+    const dataset = this.target.state(t, requested.dataset).material_fields;
+    const recon = reconstructionCheck(this.store.db, this.target.db, { tenant: t, subject, dataset: requested.dataset, rows: requested.row_ids, columns: requested.columns, now, policy: this.policy(t).runtime.reconstruction });
+    const weight = this.policy(t).runtime.sensitivity_weights[dataset.classification] ?? 1;
+    const cost = requested.row_ids.length * requested.columns.length * weight;
+    this.store.db.prepare('INSERT INTO usage VALUES(?,?,?,?,?,?,?)').run(t, subject, requested.dataset, now, cost, `cert:${cert.certificate_id}`, cert.certificate_id);
+    if (!recon.allowed) return { gate_denied: { code: 'INV-429-BUDGET', detail: { row_count: recon.row_count, column_count: recon.column_count, coverage_percent: recon.coverage_percent } } };
+    let tenantWatermarkKey;
+    try { tenantWatermarkKey = this.dataKey(t, 'watermark'); } catch { tenantWatermarkKey = null; }
+    return { watermarks: watermark(raw.output ?? [], { tenant: t, dataset: requested.dataset, subject, requestId: cert.certificate_id, tenantWatermarkKey: tenantWatermarkKey ?? this.dataKey(t, 'encryption') }).watermarks };
   }
   finish(p, cert, raw, status, reason, { postRead = false } = {}) {
     const post = [];
@@ -1020,17 +1074,30 @@ export class Fabric {
       // A wedged composite reconciles per-child, never as a fake standalone:
       // children whose target journal wrote are recorded executed, the rest
       // are wedged — and they keep their own live certificates so a fresh
-      // composite can still spend them (w7-seam F9).
+      // composite can still spend them (w7-seam F9). Parent capsules never
+      // write a target journal row — the outcome aggregates the child
+      // outcome rows each child settle wrote (w8-composite F16).
       const executed = [], wedged = [];
+      let allSettledVerified = true, anyFailed = false, anyCompensated = false;
       for (const childId of record.capsule.requested_state.children ?? []) {
         const childCapsule = this.store.get(t, 'capsule', childId);
         const childCert = childCapsule?.certificate_id ? this.store.get(t, 'certificate', childCapsule.certificate_id) : null;
-        const childRaw = childCert ? this.target.outcome(t, childCert.envelope.payload.certificate_id) : null;
-        if (childCapsule && childCert && childRaw) executed.push({ child: { ...childCapsule, certificate_id: childCert.envelope.payload.certificate_id }, raw: childRaw, prior: childCapsule.capsule.current_state.material_fields });
+        const certId = childCert?.envelope?.payload?.certificate_id;
+        const childOutcome = certId ? this.store.get(t, 'outcome', certId) : null;
+        const childRaw = childCert ? this.target.outcome(t, certId) : null;
+        const settled = childOutcome && ['VERIFIED', 'FAILED', 'COMPENSATED'].includes(childOutcome.payload.status) ? childOutcome.payload.status : null;
+        if (settled === 'FAILED') anyFailed = true;
+        if (settled === 'COMPENSATED') anyCompensated = true;
+        if (settled !== 'VERIFIED') allSettledVerified = false;
+        if (childCapsule && childCert && (childRaw || settled)) executed.push({ child: { ...childCapsule, certificate_id: certId }, raw: childRaw, prior: childCapsule.capsule.current_state.material_fields });
         else wedged.push(childId);
       }
-      if (raw) return this.finishComposite(p, cert, record.capsule, executed, 'VERIFIED', 'RECONCILED_FROM_TARGET_JOURNAL', [], this.clock(), wedged);
-      return this.finishComposite(p, cert, record.capsule, executed, 'UNCERTAIN', 'COMPOSITE_INTERRUPTED_CHILDREN_ATTEMPTED', [], this.clock(), wedged);
+      // All children settled VERIFIED → the parent is VERIFIED; a failed or
+      // compensated child resolves the parent to the same verdict; anything
+      // incomplete stays honestly UNCERTAIN.
+      const settled = wedged.length === 0 && allSettledVerified ? 'VERIFIED' : anyFailed ? 'FAILED' : anyCompensated ? 'COMPENSATED' : 'UNCERTAIN';
+      const reasonMap = { VERIFIED: 'RECONCILED_FROM_CHILD_OUTCOMES', FAILED: 'RECONCILED_CHILD_FAILED', COMPENSATED: 'RECONCILED_CHILD_COMPENSATED', UNCERTAIN: 'COMPOSITE_INTERRUPTED_CHILDREN_ATTEMPTED' };
+      return this.finishComposite(p, cert, record.capsule, executed, settled, reasonMap[settled], [], this.clock(), wedged);
     }
     return this.finish(p, cert, raw, raw ? 'VERIFIED' : 'UNCERTAIN', raw ? 'RECONCILED_FROM_TARGET_JOURNAL' : 'NO_TARGET_CONFIRMATION_DO_NOT_RETRY');
   }
@@ -1116,12 +1183,24 @@ export class Fabric {
   coverageTransition(tenant, path, to, cause, now) {
     path.status = to; if (to === 'UNKNOWN') path.evidence_at = null;
     this.store.put(tenant, 'coverage', path.path_id, path, now);
-    this.store.insert(tenant, 'coverage-event', `${path.path_id}:${now}:${cause}`, { type: 'transitioned', path_id: path.path_id, to, evidence_at: path.evidence_at, at: now, cause }, now);
+    // Events and tasks are upserts: a same-millisecond re-transition must
+    // never throw INV-409 inside the caller's transaction and roll back the
+    // drift record itself (w8-composite F12).
+    this.store.put(tenant, 'coverage-event', `${path.path_id}:${now}:${cause}`, { type: 'transitioned', path_id: path.path_id, to, evidence_at: path.evidence_at, at: now, cause }, now);
     // Owner tasks exist only for degraded/unprotected states — a promotion
     // is a resolution, not a new obligation. UNCOVERED means the path is
     // declared unprotected: the owner must close it or enforce it.
-    if (to === 'UNKNOWN') this.store.insert(tenant, 'coverage-task', `${cause}:${path.path_id}`, { path_id: path.path_id, owner: path.owner, cause, opened_at: now, status: 'open', required_action: 'attach independently executed technical validation evidence' }, now);
-    if (to === 'UNCOVERED') this.store.insert(tenant, 'coverage-task', `${cause}:${path.path_id}`, { path_id: path.path_id, owner: path.owner, cause, opened_at: now, status: 'open', required_action: 'close this declared-unprotected path or bring it under enforced coverage' }, now);
+    if (to === 'UNKNOWN' || to === 'UNCOVERED') {
+      const taskId = `${cause}:${path.path_id}`, prev = this.store.get(tenant, 'coverage-task', taskId);
+      this.store.put(tenant, 'coverage-task', taskId, prev?.status === 'open' ? { ...prev, refreshed_at: now } : { path_id: path.path_id, owner: path.owner, cause, opened_at: now, status: 'open', required_action: to === 'UNKNOWN' ? 'attach independently executed technical validation evidence' : 'close this declared-unprotected path or bring it under enforced coverage' }, now);
+    } else {
+      // A promotion closes every open task for this path — drift tasks must
+      // not linger after revalidation (w8-composite F12).
+      for (const id of this.store.ids(tenant, 'coverage-task', 10000)) {
+        const task = this.store.get(tenant, 'coverage-task', id);
+        if (task && task.path_id === path.path_id && task.status === 'open') this.store.put(tenant, 'coverage-task', id, { ...task, status: 'closed', closed_at: now }, now);
+      }
+    }
   }
   coverage(p) {
     this.authorize(p, ['operator', 'approver', 'custodian', 'security', 'auditor', 'policy_admin']);
@@ -1141,14 +1220,27 @@ export class Fabric {
   coverageAt(p, at) {
     this.authorize(p, ['operator', 'approver', 'custodian', 'security', 'auditor', 'policy_admin']);
     const atTime = integer(Number(at), 'at', 1, 1e14);
-    return { at: atTime, paths: coverageAt(this.store.list(p.tenant_id, 'coverage-event', 100000), atTime) };
+    // Events replay in write order — store.list is newest-first and id
+    // ordering is lexical, so neither can be trusted for same-ms ties
+    // (w8-composite F10). rowid is the durable insertion sequence.
+    const events = this.store.db.prepare("SELECT id,value FROM records WHERE tenant=? AND kind='coverage-event' ORDER BY rowid").all(p.tenant_id).map(row => this.store.readValue(p.tenant_id, 'coverage-event', row.id, row.value));
+    return { at: atTime, paths: coverageAt(events, atTime) };
   }
   declareCoverage(p, input) {
     this.authorize(p, ['security']); return this.transaction(p, now => {
-      const path = declarePath(input, now); this.store.put(p.tenant_id, 'coverage', path.path_id, path, now);
-      this.store.insert(p.tenant_id, 'coverage-event', `${path.path_id}:${now}:declared`, { type: 'declared', path_id: path.path_id, path, at: now }, now);
-      if (path.status === 'UNKNOWN') this.store.insert(p.tenant_id, 'coverage-task', `declared-unknown:${path.path_id}`, { path_id: path.path_id, owner: path.owner, cause: 'declared-unknown', opened_at: now, status: 'open', required_action: 'attach independently executed technical validation evidence' }, now);
-      if (path.status === 'UNCOVERED') this.store.insert(p.tenant_id, 'coverage-task', `declared-uncovered:${path.path_id}`, { path_id: path.path_id, owner: path.owner, cause: 'declared-uncovered', opened_at: now, status: 'open', required_action: 'close this declared-unprotected path or bring it under enforced coverage' }, now);
+      const path = declarePath(input, now);
+      // Re-declaring an identical path carries its evidence forward — only a
+      // real configuration change resets the observation window; a bare
+      // re-declare can never mint MONITORED over nothing (w8-composite F11).
+      const prior = this.store.get(p.tenant_id, 'coverage', path.path_id);
+      if (prior && prior.configuration_digest === path.configuration_digest && prior.target === path.target && prior.action_type === path.action_type) {
+        path.evidence_at = prior.evidence_at; path.evidence_digest = prior.evidence_digest; path.technical_validation = prior.technical_validation;
+      }
+      if (path.status === 'MONITORED' && path.evidence_at === null) path.status = 'UNKNOWN';
+      this.store.put(p.tenant_id, 'coverage', path.path_id, path, now);
+      this.store.put(p.tenant_id, 'coverage-event', `${path.path_id}:${now}:declared`, { type: 'declared', path_id: path.path_id, path, at: now }, now);
+      if (path.status === 'UNKNOWN') this.store.put(p.tenant_id, 'coverage-task', `declared-unknown:${path.path_id}`, { path_id: path.path_id, owner: path.owner, cause: 'declared-unknown', opened_at: now, status: 'open', required_action: 'attach independently executed technical validation evidence' }, now);
+      if (path.status === 'UNCOVERED') this.store.put(p.tenant_id, 'coverage-task', `declared-uncovered:${path.path_id}`, { path_id: path.path_id, owner: path.owner, cause: 'declared-uncovered', opened_at: now, status: 'open', required_action: 'close this declared-unprotected path or bring it under enforced coverage' }, now);
       this.store.audit(p.tenant_id, 'COVERAGE_DECLARED', p.subject_id, path.path_id, { digest: digest(path), status: path.status }, now); return path;
     });
   }
@@ -1185,11 +1277,13 @@ export class Fabric {
       else this.store.insert(p.tenant_id, 'evidence', payload.evidence_id, { payload: clone(payload), envelope: clone(envelope), legal_hold: false }, now);
       path.technical_validation = { evidence_id: payload.evidence_id, issuer: envelope.protected.key_id, at: now, outcome: payload.claim };
       // Re-validation refreshes the evidence window — the documented way to
-      // keep a path MONITORED must actually extend coverage (w7-seam F10).
+      // keep a path covered must actually extend coverage (w7-seam F10).
+      // A passed independent bypass test is the ENFORCED criterion: it
+      // promotes UNKNOWN, UNCOVERED and MONITORED alike (w8-composite F13).
       path.evidence_at = now;
-      if (path.status === 'UNKNOWN') this.coverageTransition(p.tenant_id, path, 'MONITORED', 'technical-validation', now);
-      else this.store.put(p.tenant_id, 'coverage', path.path_id, path, now);
-      this.store.insert(p.tenant_id, 'coverage-event', `${path.path_id}:${now}:validation`, { type: 'technical_validation', path_id: path.path_id, validation: path.technical_validation, at: now }, now);
+      if (path.status === 'ENFORCED') this.store.put(p.tenant_id, 'coverage', path.path_id, path, now);
+      else this.coverageTransition(p.tenant_id, path, 'ENFORCED', 'technical-validation', now);
+      this.store.put(p.tenant_id, 'coverage-event', `${path.path_id}:${now}:validation`, { type: 'technical_validation', path_id: path.path_id, validation: path.technical_validation, at: now }, now);
       this.store.remove(p.tenant_id, 'coverage-task', `declared-unknown:${path.path_id}`);
       this.store.remove(p.tenant_id, 'coverage-task', `declared-uncovered:${path.path_id}`);
       this.store.audit(p.tenant_id, 'COVERAGE_TECHNICAL_VALIDATION', p.subject_id, path.path_id, { issuer: envelope.protected.key_id }, now);

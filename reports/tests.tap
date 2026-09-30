@@ -2147,70 +2147,124 @@ ok 358 - w7-seam F9: wedged composite reconciles composite-aware
   duration_ms: 0
   type: 'test'
   ...
+# Subtest: w8 F9: composite over an expired child certificate escrows at evaluation
+ok 359 - w8 F9: composite over an expired child certificate escrows at evaluation
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w8 F8: a certified composite child certificate refuses solo execution
+ok 360 - w8 F8: a certified composite child certificate refuses solo execution
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w8 F1/F3/F7/F16: uncompensated bail records FAILED parent + per-child outcomes
+ok 361 - w8 F1/F3/F7/F16: uncompensated bail records FAILED parent + per-child outcomes
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w8 F4/F6: a verified composite child settles to its recorded outcome without re-firing effects
+ok 362 - w8 F4/F6: a verified composite child settles to its recorded outcome without re-firing effects
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w8 F2: an egressed export inside a failed composite is charged and watermarked
+ok 363 - w8 F2: an egressed export inside a failed composite is charged and watermarked
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w8 F5: reconcile verifies a time-embedded journal entry after the clock moved
+ok 364 - w8 F5: reconcile verifies a time-embedded journal entry after the clock moved
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w8 F11/F13: re-declare preserves validation; UNCOVERED cannot self-promote; validation earns ENFORCED
+ok 365 - w8 F11/F13: re-declare preserves validation; UNCOVERED cannot self-promote; validation earns ENFORCED
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w8 F10/F12/F14: unreachable issuer stales paths; same-ms replays keep write order; re-drift never throws
+ok 366 - w8 F10/F12/F14: unreachable issuer stales paths; same-ms replays keep write order; re-drift never throws
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w8 F10 (unit): same-ms coverage events replay in insertion order
+ok 367 - w8 F10 (unit): same-ms coverage events replay in insertion order
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
 # Subtest: F1: pre-AAD-upgrade rows decrypt via the legacy fallback
-ok 359 - F1: pre-AAD-upgrade rows decrypt via the legacy fallback
+ok 368 - F1: pre-AAD-upgrade rows decrypt via the legacy fallback
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: F2: a contended WAL checkpoint keeps committed work green and the flag armed
-ok 360 - F2: a contended WAL checkpoint keeps committed work green and the flag armed
+ok 369 - F2: a contended WAL checkpoint keeps committed work green and the flag armed
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: F3: superseding target writes truncate the WAL at commit
-ok 361 - F3: superseding target writes truncate the WAL at commit
+ok 370 - F3: superseding target writes truncate the WAL at commit
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: COV-004: a live manifest drift drops the dependent path to UNKNOWN and opens an owner task
-ok 362 - COV-004: a live manifest drift drops the dependent path to UNKNOWN and opens an owner task
+ok 371 - COV-004: a live manifest drift drops the dependent path to UNKNOWN and opens an owner task
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: COV-005: stale evidence transitions to UNKNOWN at read time with event and owner task
-ok 363 - COV-005: stale evidence transitions to UNKNOWN at read time with event and owner task
+ok 372 - COV-005: stale evidence transitions to UNKNOWN at read time with event and owner task
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: COV-005: a fresh MONITORED path produces no expiry task or event
-ok 364 - COV-005: a fresh MONITORED path produces no expiry task or event
+ok 373 - COV-005: a fresh MONITORED path produces no expiry task or event
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: W8-TOOLING restore-check: execution keys never join the audit trust anchor (F1)
-ok 365 - W8-TOOLING restore-check: execution keys never join the audit trust anchor (F1)
+ok 374 - W8-TOOLING restore-check: execution keys never join the audit trust anchor (F1)
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: W8-TOOLING restore-check: db carrying audit table without committed heads fails (F5)
-ok 366 - W8-TOOLING restore-check: db carrying audit table without committed heads fails (F5)
+ok 375 - W8-TOOLING restore-check: db carrying audit table without committed heads fails (F5)
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: W8-TOOLING cli sign: keyfile consistency + option parse errors (F7)
-ok 367 - W8-TOOLING cli sign: keyfile consistency + option parse errors (F7)
+ok 376 - W8-TOOLING cli sign: keyfile consistency + option parse errors (F7)
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: W8-TOOLING cli init: duplicated tenants dedupe instead of half-writing (F9)
-ok 368 - W8-TOOLING cli init: duplicated tenants dedupe instead of half-writing (F9)
+ok 377 - W8-TOOLING cli init: duplicated tenants dedupe instead of half-writing (F9)
   ---
   duration_ms: 0
   type: 'test'
   ...
-1..368
-# tests 368
+1..377
+# tests 377
 # suites 0
-# pass 368
+# pass 377
 # fail 0
 # cancelled 0
 # skipped 0

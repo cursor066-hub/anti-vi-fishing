@@ -368,9 +368,13 @@ test('COV-001 COV-005 COV-009 COV-010: path classes, owner tasks, history replay
   const payload = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: digest(path), kind: 'technical_validation', content_digest: digest({ probe: 'ok' }), acquired_at: h.now(), expires_at: h.now() + 60000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'manual probe', retention_until: h.now() + 120000, claims };
   const envelope = signed(payload, h.setup.issuerKeys.acme['security-ops'], 'evidence');
   const out = h.f.technicalValidation(h.p('security'), 'path-a', envelope);
-  assert.equal(out.status, 'MONITORED');
+  // A passed independent bypass test is the ENFORCED criterion — stronger
+  // than a declared observation (w8-composite F13).
+  assert.equal(out.status, 'ENFORCED');
   const hist2 = h.f.coverageAt(h.p('auditor'), h.now());
-  assert.equal(hist2.paths['path-a'].status, 'MONITORED');
+  assert.equal(hist2.paths['path-a'].status, 'ENFORCED');
+  // ENFORCED coverage carries the advisory in the manifest.
+  assert.equal(h.f.coverage(h.p('auditor')).payload.paths.find(x => x.path_id === 'path-a').next_action.includes('Revalidate'), true);
   // COV-010 gate direction: a sibling path that has NO executed validation
   // cannot leave UNKNOWN — the label is only earned through evidence.
   h.f.declareCoverage(h.p('security'), { path_id: 'path-b', action_type: 'data.export', target: 'dataset-1', environment: 'prod', connector_version: '1.0', owner: 'op', status: 'UNKNOWN', path_class: 'api', max_age_ms: 60000, configuration_digest: digest({ y: 2 }) });

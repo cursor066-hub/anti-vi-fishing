@@ -34,7 +34,8 @@ test('w7-seam F1: technicalValidation enforces advisory/confidence/channel/kind 
   assert.throws(() => h.f.technicalValidation(h.p('security'), 'pv', validationEnvelope(h, path(), 'security-ops', { kind: 'ownership' }).envelope), hasCode('INV-403-SCOPE'));
   assert.throws(() => h.f.technicalValidation(h.p('security'), 'pv', validationEnvelope(h, path(), 'email').envelope), hasCode('INV-403-SCOPE'));
   const { envelope, payload } = validationEnvelope(h, path(), 'security-ops');
-  assert.equal(h.f.technicalValidation(h.p('security'), 'pv', envelope).status, 'MONITORED');
+  // A passed independent bypass test is the ENFORCED criterion (w8-composite F13).
+  assert.equal(h.f.technicalValidation(h.p('security'), 'pv', envelope).status, 'ENFORCED');
   const stored = h.f.store.get('acme', 'evidence', payload.evidence_id);
   assert.ok(stored && stored.envelope, 'cited validation evidence resolves on the ledger');
 });
@@ -52,13 +53,13 @@ test('w7-seam F2/F10: history replays in order and revalidation extends coverage
   const t2 = h.now();
   // F2: replay at t2 must answer MONITORED — oldest event applied last would
   // falsify it back to UNKNOWN. (COV-009 arbitrary-instant replay)
-  assert.equal(h.f.coverageAt(h.p('auditor'), t2).paths['pr'].status, 'MONITORED');
+  assert.equal(h.f.coverageAt(h.p('auditor'), t2).paths['pr'].status, 'ENFORCED', 'validated paths carry the ENFORCED status (w8-composite F13)');
   assert.equal(h.f.coverageAt(h.p('auditor'), t0 + 500).paths['pr'].status, 'UNKNOWN', 'status before validation stays UNKNOWN');
   // F10: age past the window, re-validate, evidence window refreshes.
   h.advance(70000);
   assert.equal(h.f.coverageAt(h.p('auditor'), h.now()).paths['pr'].status, 'UNKNOWN', 'stale evidence drops the path');
   h.f.technicalValidation(h.p('security'), 'pr', validationEnvelope(h, path(), 'security-ops').envelope);
-  assert.equal(h.f.coverageAt(h.p('auditor'), h.now() + 55000).paths['pr'].status, 'MONITORED', 'revalidation restarted the freshness window');
+  assert.equal(h.f.coverageAt(h.p('auditor'), h.now() + 55000).paths['pr'].status, 'ENFORCED', 'revalidation restarted the freshness window');
 });
 
 // w7-seam F3: issuer-drift quarantine reaches evaluation, not just attach —

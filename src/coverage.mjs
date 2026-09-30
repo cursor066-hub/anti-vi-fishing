@@ -28,7 +28,7 @@ export function declarePath(input, now) {
 // paths so the caller can emit owner tasks for each (COV-005).
 export function applyDriftToPaths(paths, matcher) {
   const transitioned = [];
-  for (const p of paths) if (p.status === 'MONITORED' && matcher(p)) { p.status = 'UNKNOWN'; p.evidence_at = null; transitioned.push(p); }
+  for (const p of paths) if ((p.status === 'MONITORED' || p.status === 'ENFORCED') && matcher(p)) { p.status = 'UNKNOWN'; p.evidence_at = null; transitioned.push(p); }
   return transitioned;
 }
 // Effective status at a point in time: staleness is computed, not stored,
@@ -43,8 +43,12 @@ export function effectiveStatus(path, now) {
 export function coverageAt(events, now) {
   const paths = {};
   // Replay must run oldest→newest: the store lists newest-first, and letting
-  // the oldest event be applied last falsifies every historical answer (w7-seam F2).
-  const ordered = [...events].sort((a, b) => (a.at - b.at) || (String(a.id) < String(b.id) ? -1 : 1));
+  // the oldest event be applied last falsifies every historical answer
+  // (w7-seam F2). The sort is stable on `at` — same-millisecond events keep
+  // their insertion order, so a drift transition can never replay before
+  // the declaration that preceded it (w8-composite F10). Callers must pass
+  // events in write order.
+  const ordered = [...events].sort((a, b) => a.at - b.at);
   for (const e of ordered.filter(e => e.at <= now)) {
     const s = paths[e.path_id] ?? {};
     if (e.type === 'declared') Object.assign(s, e.path);
