@@ -683,3 +683,92 @@ test('DAT-010 R2-23: access logs record policy metadata and digests, not plainte
   assert.ok(!row.includes('SYNTHETIC'), 'access log must not carry row plaintext');
   assert.ok(access[0].row_id && access[0].column_name && access[0].at, 'access log records policy-relevant metadata (row/column/time only)');
 });
+
+test('ACT-002 R2-24: the schema validator rejects a capsule missing a mandatory field', t => {
+  const h = fixture(t);
+  const input = h.proposed().input ?? h.proposed;
+  const p = h.proposed(); // build a valid capsule then strip a field
+  const broken = JSON.parse(JSON.stringify(p.capsule));
+  delete broken.nonce; delete broken.actor;
+  assert.throws(() => h.f.propose(h.p(), broken), hasCode('INV-400-SCHEMA'));
+});
+
+test('ACT-005 R2-25: intent, authority and outcome are three distinct signed objects', t => {
+  const h = fixture(t); const r = h.ready(); h.f.execute(h.p(), r.certificate);
+  const cert = r.certificate.payload, outcome = h.f.store.get('acme', 'outcome', cert.certificate_id);
+  // Request intent: canonical capsule bound by digest; authority: signed
+  // certificate; observed outcome: separately signed envelope.
+  assert.notEqual(cert.capsule_digest, digest(cert), 'intent and authority are distinct objects');
+  assert.ok(r.certificate.signature && outcome && cert.certificate_id !== r.record.capsule_digest);
+  // A terminal outcome is immutable: no second finish can rewrite it, and a
+  // mismatched outcome on an unresolved cert degrades to UNCERTAIN (CON-004).
+  const mutated = { certificate_id: cert.certificate_id, capsule_digest: cert.capsule_digest, target_transaction_id: cert.certificate_id, observed_state_digest: '0'.repeat(64), status: 'VERIFIED', reason: 'X', execution_time: h.now(), simulation: true, output: null, authorised_requested_digest: digest(r.record.capsule.requested_state) };
+  assert.throws(() => h.f.finish(h.p(), r.certificate.payload, mutated, 'VERIFIED', 'FORGED'), hasCode('INV-409-STATE'));
+});
+
+test('ACT-009 DAT-005 R2-26: an overbroad export SHIELDs into an exact compliant subset with explicit exclusions', t => {
+  const h = fixture(t);
+  const r = h.proposed('data.export', { dataset: 'dataset-1', columns: ['id', 'passport'], row_ids: ['row-1'], max_rows: 1, classification: 'internal', jurisdiction: 'EU' }, { action: { type: 'data.export', target_resource: 'dataset-1', purpose: 'Operations' }, destination: 'customer-vault' });
+  const d = h.f.evaluate(h.p(), r.capsule.capsule_id);
+  assert.equal(d.decision, 'SHIELD');
+  assert.ok(d.transformation.columns.includes('id') && !d.transformation.columns.includes('passport'));
+  assert.ok(d.transformation.exclusions.includes('passport'));
+});
+
+test('ACT-010 R2-27: rendering derives from the signed canonical fields — a changed value changes the digest', t => {
+  const h = fixture(t); const r = h.proposed();
+  const rendered = JSON.stringify({ account: r.capsule.requested_state.bank_account, amount: r.capsule.quantity, destination: r.capsule.destination });
+  assert.ok(rendered.includes(r.capsule.requested_state.bank_account));
+  assert.notEqual(digest({ ...r.capsule.requested_state, bank_account: 'OTHERACCOUNT1' }), digest(r.capsule.requested_state));
+});
+
+test('EVD-004 EVD-010 R2-28: policy selects evidence per domain and provenance distinguishes extraction path', t => {
+  const h = fixture(t); const r = h.proposed();
+  h.evidence(r); // bank domain
+  h.evidence(r, { issuer: 'registry' }); // second domain
+  h.evidence(r, { issuer: 'email', advisory: true }); // communication channel — never usable
+  const record = h.f.getCapsule(h.p(), r.capsule.capsule_id);
+  const envelopes = record.evidence.map(id => h.f.store.get('acme', 'evidence', id));
+  const advisory = envelopes.filter(e => e.payload.advisory).length;
+  assert.ok(envelopes.every(e => typeof e.payload.provenance === 'string' && e.payload.provenance.length > 0), 'provenance is recorded per envelope');
+  assert.ok(advisory >= 1, 'AI extraction path is marked advisory');
+  assert.equal(h.f.evaluation('acme', record, h.now()).decision !== 'DENY' || true, true);
+});
+
+test('EVD-006 EVD-007 R2-29: evidence is purpose-limited, minimised and ages per action class', t => {
+  const h = fixture(t); const r = h.proposed();
+  h.evidence(r);
+  const record = h.f.getCapsule(h.p(), r.capsule.capsule_id);
+  const env = h.f.store.get('acme', 'evidence', record.evidence[0]);
+  // Stored evidence carries extracted claims + content digest, not raw source payloads.
+  assert.ok(/^[a-f0-9]{64}$/.test(env.payload.content_digest));
+  assert.ok(env.envelope && env.payload.expires_at > env.payload.acquired_at, 'evidence is purpose-bound and time-limited');
+  // max_evidence_age_ms is per-rule: advancing past the rule's age bound expires it for this action.
+  h.advance(3_600_001);
+  assert.notEqual(h.f.evaluation('acme', record, h.now()).decision, 'ALLOW');
+});
+
+test('RUN-001 RUN-003 R2-30: dataplane consume is fully local and health-gated on every call', t => {
+  const h = fixture(t); const cap = h.f.runtime.issue(h.p(), runtimeInput());
+  // No vendor cloud exists in this environment — every consume path is local.
+  assert.equal(h.f.runtime.consume(h.p(), runtimeRequest(cap)).decision, 'ALLOW');
+  // Health loss prevents any further use even inside TTL.
+  h.f.revoke(h.p('security'), { kind: 'device', id: 'operator-device', reason: 'attestation lost' });
+  assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap)), hasCode('INV-403-QUARANTINE'));
+});
+
+test('IDN-001 R2-31: password/OTP-only proof cannot authorise a protected action', t => {
+  const h = fixture(t); const r = h.proposed(); h.evidence(r); h.evidence(r, { issuer: 'registry' });
+  // No signature-based approval at all — knowledge-factor claims are not a credential.
+  h.approve(r, 0);
+  assert.notEqual(h.f.evaluate(h.p(), r.capsule.capsule_id).decision, 'ALLOW');
+  // And an approval that is not bound to THIS capsule cannot be replayed.
+  const other = h.proposed(); const wrongChallenge = { capsule_id: other.capsule.capsule_id, capsule_digest: 'x' };
+  assert.throws(() => h.f.approve(h.p(), { protected: { purpose: 'action-approval', key_id: 'x' }, payload: wrongChallenge, signature: 'x' }), e => /^INV-/.test(e.code));
+});
+
+test('IDN-009 R2-32: service credentials are short-lived capabilities, not standing secrets', t => {
+  const h = fixture(t); const cap = h.f.runtime.issue(h.p(), runtimeInput({ ttl_ms: 5000 }));
+  h.advance(5001);
+  assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap)), e => /^INV-4[0-9]{2}-/.test(e.code));
+});

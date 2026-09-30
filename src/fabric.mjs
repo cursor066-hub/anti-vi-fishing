@@ -673,6 +673,10 @@ export class Fabric {
     const post = [];
     const envelope = this.transaction(p, now => {
       const t = p.tenant_id, r = this.store.must(t, 'capsule', cert.capsule_id), stored = this.store.must(t, 'certificate', cert.certificate_id);
+      // Terminal outcomes are immutable — a VERIFIED/FAILED result can never
+      // be overwritten by a second finish (only UNCERTAIN may resolve later).
+      const existing = this.store.get(t, 'outcome', cert.certificate_id);
+      requireThat(!existing || !['VERIFIED', 'FAILED', 'COMPENSATED'].includes(existing.payload.status), 'INV-409-STATE', 'A terminal execution outcome cannot be overwritten', 409);
       const { valid } = this._validateTargetResponse(r, cert, raw, now);
       if (status === 'VERIFIED' && !valid) { status = 'UNCERTAIN'; reason = 'TARGET_RESPONSE_INVALID'; }
       const extras = valid ? this._applyVerifiedEffects(p, t, r, cert, raw, now, post) : null;
