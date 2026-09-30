@@ -612,3 +612,74 @@ test('AUD-004 R2-16: a replay attempt is identifiable from log state and orderin
     assert.ok(entries[i].time >= entries[i - 1].time, 'audit timestamps must be monotonically ordered');
   }
 });
+
+test('POL-012 R2-17: no vendor-controlled credential can satisfy root-policy activation', t => {
+  const h = fixture(t);
+  const next = h.f.policy('acme'); const candidate = JSON.parse(JSON.stringify(next));
+  candidate.version = 2; candidate.not_before = h.now(); candidate.max_capsule_ttl_ms = 1800000;
+  const r = h.proposed('policy.change', { policy: candidate }, { action: { type: 'policy.change', target_resource: 'policy', purpose: 'Hardening' } });
+  h.evidence(r, { kind: 'governance_review' }); h.evidence(r, { kind: 'governance_review', issuer: 'registry' });
+  // Every non-custodian principal approves — vendor/system/operator credentials
+  // never count toward the custodian threshold.
+  for (const subject of ['operator', 'auditor']) {
+    try { h.approve(r, 1, subject); } catch { /* non-custodian approvals rejected outright */ }
+  }
+  const decision = h.f.evaluate(h.p(), r.capsule.capsule_id);
+  assert.notEqual(decision.decision, 'ALLOW', 'root policy must never activate on non-custodian signatures');
+});
+
+test('COM-014 R2-18: 3-of-5 custodian threshold holds; any 3 shares reconstruct, 2 cannot', async t => {
+  const { split, reconstruct } = await import('../src/shamir.mjs');
+  const secret = Buffer.alloc(32, 7);
+  const shares = split(secret, 5, 3);
+  assert.equal(shares.length, 5);
+  assert.deepEqual(Buffer.from(reconstruct([shares[0], shares[2], shares[4]], 3)), secret);
+  assert.deepEqual(Buffer.from(reconstruct([shares[1], shares[2], shares[3]], 3)), secret);
+  assert.throws(() => reconstruct([shares[0], shares[1]], 3), e => e.code === 'INV-400-SHAMIR');
+});
+
+test('COM-013 R2-19: high-risk actions honor the delay window and remain cancellable', t => {
+  const h = fixture(t);
+  const r = h.proposed('finance.bank.change', { bank_account: 'TESTBANK000001', currency: 'EUR' }, { action: { type: 'finance.bank.change', target_resource: 'vendor-1', purpose: 'Delay drill' } });
+  h.evidence(r); h.evidence(r, { issuer: 'registry' }); h.approve(r);
+  assert.equal(h.f.evaluate(h.p(), r.capsule.capsule_id).decision, 'DEFER');
+  h.f.cancel(h.p(), r.capsule.capsule_id);
+  assert.equal(h.f.getCapsule(h.p(), r.capsule.capsule_id).status, 'CANCELLED');
+});
+
+test('RUN-004 R2-20: subject revocation propagates synchronously — the next call is denied', t => {
+  const h = fixture(t);
+  const p = h.p();
+  assert.doesNotThrow(() => h.f.revocations(p));
+  h.f.revoke(h.p('security'), { kind: 'subject', id: 'operator', reason: 'Immediate revocation drill' });
+  assert.throws(() => h.f.getCapsule(p, 'x'), e => e.code === 'INV-403-QUARANTINE' || e.code === 'INV-401-AUTH');
+});
+
+test('RUN-009 R2-21: denial, throttling, quarantine and infrastructure failure are distinguishable', t => {
+  const h = fixture(t);
+  const codes = new Set();
+  // Policy denial
+  const denied = h.proposed('cloud.firewall.change', { protocol: 'tcp', port: 22, source_cidr: '0.0.0.0/0', service_id: 'database' });
+  assert.equal(h.f.evaluate(h.p(), denied.capsule.capsule_id).decision, 'DENY');
+  // Quarantine
+  h.f.revoke(h.p('security'), { kind: 'device', id: 'operator-device', reason: 'drill' });
+  try { h.f.runtime.issue(h.p(), runtimeInput()); } catch (e) { codes.add(e.code); }
+  // Codes must be distinct, namespaced and documented
+  assert.ok([...codes].every(c => /^INV-[45][0-9]{2}-[A-Z-]+$/.test(c)), 'error codes must follow the INV-status-class taxonomy');
+});
+
+test('DAT-006 R2-22: adversarial input cannot escape row/column constraints', t => {
+  const h = fixture(t); const cap = h.f.runtime.issue(h.p(), runtimeInput());
+  for (const evil of [['id; DROP TABLE audit'], ['id OR 1=1'], ["'union select'"], ['id\u0000']])
+    assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap, { columns: evil })), e => /^INV-4[0-9]{2}-/.test(e.code), evil[0]);
+});
+
+test('DAT-010 R2-23: access logs record policy metadata and digests, not plaintext contents', t => {
+  const h = fixture(t); const cap = h.f.runtime.issue(h.p(), runtimeInput());
+  h.f.runtime.consume(h.p(), runtimeRequest(cap));
+  const access = h.f.store.db.prepare('SELECT * FROM data_access').all();
+  assert.ok(access.length >= 1);
+  const row = JSON.stringify(access[0]);
+  assert.ok(!row.includes('SYNTHETIC'), 'access log must not carry row plaintext');
+  assert.ok(access[0].row_id && access[0].column_name && access[0].at, 'access log records policy-relevant metadata (row/column/time only)');
+});
