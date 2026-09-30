@@ -185,6 +185,25 @@ export function emergencyWeakening(base, next) {
   for (const w of nr.windows) { const bw = br.windows.find(x => x.duration_ms === w.duration_ms); if (bw && w.limit > bw.limit) return 'runtime.windows'; }
   if (nr.reconstruction.max_distinct_rows > br.reconstruction.max_distinct_rows || nr.reconstruction.max_distinct_columns > br.reconstruction.max_distinct_columns || nr.reconstruction.max_coverage_percent > br.reconstruction.max_coverage_percent) return 'runtime.reconstruction';
   for (const k of Object.keys(br.sensitivity_weights)) if ((nr.sensitivity_weights[k] ?? 0) < br.sensitivity_weights[k]) return 'runtime.sensitivity_weights';
+  // Egress and remediation allowlists plus evidence bindings are weakening
+  // dimensions too — an emergency policy may never drop a containment
+  // control silently (w9-network F2).
+  const bn = br.network ?? {}, nn = nr.network ?? {};
+  if (bn.deny_workstation_peers && !nn.deny_workstation_peers) return 'runtime.network.deny_workstation_peers';
+  if (!subset(nn.allowed_protocols ?? [], bn.allowed_protocols ?? [])) return 'runtime.network.allowed_protocols';
+  if (!subset(nn.allowed_ports ?? [], bn.allowed_ports ?? [])) return 'runtime.network.allowed_ports';
+  if (!subset(nr.remediation_services ?? [], br.remediation_services ?? [])) return 'runtime.remediation_services';
+  // A removed rolling window is a weakening, not just a raised limit —
+  // the same-duration loop above can never see it (w9-network F2).
+  for (const bw of br.windows) if (!nr.windows.some(w => w.duration_ms === bw.duration_ms)) return 'runtime.windows';
+  for (const [t, r] of Object.entries(next.rules)) {
+    const b = base.rules[t]; if (!b) continue;
+    // Every previously-bound evidence claim must stay bound to the same
+    // capsule path — dropping or retargeting a binding weakens it.
+    for (const [kind, binding] of Object.entries(b.evidence_bindings ?? {}))
+      for (const [field, path] of Object.entries(binding))
+        if (r.evidence_bindings?.[kind]?.[field] !== path) return `${t}.evidence_bindings`;
+  }
   const bs = base.secure_perception, ns = next.secure_perception;
   if (bs.enabled && !ns.enabled) return 'secure_perception.enabled';
   if (bs.fallback === 'denied' && ns.fallback !== 'denied') return 'secure_perception.fallback';

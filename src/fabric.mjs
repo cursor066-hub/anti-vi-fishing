@@ -66,7 +66,7 @@ export class Fabric {
       // genesis-signed digest is surfaced, never silently accepted.
       // Per-section digests let a later drift report name WHAT changed, not
       // just that the combined digest differs.
-      const sections = { identities: digest(t.identities), issuers: digest(t.issuers), genesis_policy: digest(t.genesis_policy), gate_id: digest(config.gate_id) };
+      const sections = this._configSections(t);
       const configDigest = digest({ tenant, sections });
       const existing = this.store.get(tenant, 'config-snapshot', 'current');
       if (!existing) this.store.tx(() => { this.store.put(tenant, 'config-snapshot', 'current', { digest: configDigest, taken_at: this.clock(), sections }, this.clock()); this.store.audit(tenant, 'CONFIG_SNAPSHOT', 'system', 'config', { config_digest: configDigest }, this.clock()); });
@@ -108,6 +108,10 @@ export class Fabric {
       for (const jg of this.store.list(tenant, 'jit-grant', 1000)) {
         if (!grants.some(g => g.grant_id === jg.grant.grant_id)) this.target.grant(tenant, jg.grant.grant_id, jg.grant);
       }
+      // Revoke direction too: a grant revoked in the ledger whose dataplane
+      // write never landed (crash between commit and apply) is still dead
+      // (w9-network F5).
+      for (const g of grants) if (!g.revoked && this.revoked(tenant, 'grant', g.grant_id)) this.target.revokeGrant(tenant, g.grant_id);
     }
     if (dirty) this.persistVault();
   }
@@ -197,7 +201,7 @@ export class Fabric {
   configDriftStatus(p) {
     this.authorize(p, ['security', 'policy_admin']);
     const t = p.tenant_id, tenant = this.tenant(t);
-    const sections = { identities: digest(tenant.identities), issuers: digest(tenant.issuers), genesis_policy: digest(tenant.genesis_policy), gate_id: digest(this.config.gate_id) };
+    const sections = this._configSections(tenant);
     const observed = digest({ tenant: t, sections }), existing = this.store.get(t, 'config-snapshot', 'current');
     const changed = existing?.sections ? Object.keys(sections).filter(k => existing.sections[k] !== sections[k]) : [];
     return { drifted: this._configDrift.has(t) || (existing && existing.digest !== observed), expected: existing?.digest ?? null, observed, changed_sections: changed };
@@ -208,13 +212,13 @@ export class Fabric {
     this.authorize(p, ['security']);
     return this.transaction(p, now => {
       const t = p.tenant_id, tenant = this.tenant(t);
-      const sections = { identities: digest(tenant.identities), issuers: digest(tenant.issuers), genesis_policy: digest(tenant.genesis_policy), gate_id: digest(this.config.gate_id) };
+      const sections = this._configSections(tenant);
       const digestNow = digest({ tenant: t, sections }), existing = this.store.get(t, 'config-snapshot', 'current');
       const changed = existing?.sections ? Object.keys(sections).filter(k => existing.sections[k] !== sections[k]) : [];
       this.store.put(t, 'config-snapshot', 'current', { digest: digestNow, taken_at: now, sections }, now);
       this._configDrift.delete(t);
       if (this.store.get(t, 'config-flag', 'drift')) this.store.remove(t, 'config-flag', 'drift');
-      this.store.audit(t, 'CONFIG_REASSERTED', p.subject_id, 'config', { config_digest: digestNow, changed_sections: changed }, now);
+      this.store.audit(t, 'CONFIG_REASSERTED', p.subject_id, 'config', { config_digest: digestNow, changed_sections: changed, previous_sections: existing?.sections ?? null }, now);
       return { reasserted: true, config_digest: digestNow, changed_sections: changed };
     }, { allowDuringDrift: true });
   }
@@ -222,13 +226,26 @@ export class Fabric {
   // forward host-clock jump would otherwise wedge every tenant permanently —
   // transaction() itself throws INV-503-TIME before it can run recovery. This
   // deliberately bypasses transaction() and requires a security actor; the
-  // recovery is audited. It can only move the clock forward to the host's
-  // current time, never back.
+  // recovery is audited. It moves the clock forward only — a backward step
+  // would resurrect expired certificates (w9-network F4) and is refused.
   recoverClock(p) {
     this.authorize(p, ['security', 'policy_admin']);
     return this.store.tx(() => {
       const now = this.clock();
       const prior = this.store.db.prepare('SELECT last FROM clock WHERE id=1').get()?.last ?? null;
+      // A backward step (snapshot restore) is survivable, but never silently:
+      // it must not re-open the validity window of any authority that the
+      // ledger watched lapse. Any certificate or live-status capsule whose
+      // expiry falls inside the rewound span would resurrect — refuse
+      // (w9-network F4). Forward steps need no such check.
+      if (prior !== null && now < prior) {
+        for (const tenant of Object.keys(this.config.tenants)) {
+          for (const c of this.store.list(tenant, 'certificate', 10000))
+            requireThat(c.consumed || c.envelope.payload.expires_at <= now || c.envelope.payload.expires_at > prior, 'INV-503-TIME', 'Clock recovery would resurrect an expired certificate', 503);
+          for (const r of this.store.list(tenant, 'capsule', 10000))
+            requireThat(r.capsule.expires_at <= now || r.capsule.expires_at > prior || ['VERIFIED', 'UNCERTAIN', 'FAILED', 'COMPENSATED', 'CANCELLED', 'EXECUTING'].includes(r.status), 'INV-503-TIME', 'Clock recovery would resurrect an expired action', 503);
+        }
+      }
       // Recovery records the discontinuity explicitly: prior_last is what
       // the ledger believed, recovered_at is the operator-asserted honest
       // host time. An external verifier sees the jump on the signed chain
@@ -303,6 +320,12 @@ export class Fabric {
       if (error instanceof InvariantError && error.code !== 'INV-503-TIME') {
         // A failing rejection-audit tx must not mask the original error (L1).
         try { this.store.tx(() => { const now = this.clock(); this.store.clock(now); this.store.audit(principal.tenant_id, 'SECURITY_OPERATION_REJECTED', principal.subject_id, 'local-gate', { code: error.code }, now); }); } catch { /* ledger unavailable — surface the real rejection */ }
+        // Quarantine denials land in the containment ledger too — NET-010
+        // reconstruction must see denied executes/proposes, not only denied
+        // consume calls (w9-network F7). Best-effort like the audit row.
+        if (error.code === 'INV-403-QUARANTINE' && error.details?.quarantine_denial) {
+          try { const n0 = this.clock(); this.store.tx(() => this.store.put(principal.tenant_id, 'containment', `deny:${randomUUID()}`, { contained_at: n0, subject_id: principal.subject_id, device_id: error.details.device ?? null, capability_id: null, resource: null, destination: null, action: null, code: error.code, request_id: `gate-deny`, dropped_requests: 1 }, n0)); } catch { /* containment logging never masks the original denial */ }
+        }
         throw error;
       }
       if (error instanceof InvariantError) throw error;
@@ -310,6 +333,20 @@ export class Fabric {
       // of leaking driver internals (e.g. node:sqlite ERR_INVALID_STATE).
       throw new InvariantError('INV-503-GATE', 'Internal gate failure', 503);
     }
+  }
+  // RUN-010: the snapshot watches every security-bearing config section —
+  // identities, issuers, policy, the bearer-token map, key bindings and
+  // custody flags, perception trust anchors, and the data-key material
+  // itself (private halves stay out of the digest; the vault/embedded
+  // custody flag still pins them) — a forged credential or swapped anchor
+  // must trip drift exactly like an edited identity set (w9-network F1).
+  _configSections(tenant) {
+    const keys = Object.fromEntries(Object.entries(tenant.keys ?? {}).map(([klass, v]) => [klass, klass === 'retired' ? (v ?? []).map(r => ({ key_class: r.key_class, key_id: r.key_id, public_key: r.public_key, retired_at: r.retired_at })) : { key_id: v.key_id, public_key: v.public_key, custody: v.custody ?? null }]));
+    return {
+      identities: digest(tenant.identities), issuers: digest(tenant.issuers), genesis_policy: digest(tenant.genesis_policy), gate_id: digest(this.config.gate_id),
+      auth: digest(tenant.auth ?? {}), keys: digest(keys), components: digest(tenant.components ?? {}),
+      data_keys: digest({ encryption_key_wrapped: tenant.encryption_key_wrapped ?? null, encryption_key: tenant.encryption_key ? digest(tenant.encryption_key) : null, watermark_key_wrapped: tenant.watermark_key_wrapped ?? null, watermark_key: tenant.watermark_key ? digest(tenant.watermark_key) : null })
+    };
   }
   revoked(tenant, kind, id) { return Boolean(this.store.get(tenant, 'revocation', `${kind}:${id}`)); }
   policy(t) {
@@ -319,7 +356,7 @@ export class Fabric {
   }
   identities(t) { return Object.fromEntries(Object.entries(this.tenant(t).identities).map(([id, v]) => [id, { ...v, revoked: v.revoked || this.revoked(t, 'key', id) || this.revoked(t, 'subject', v.subject_id) }])); }
   assertHealthy(t, subject, device, now) {
-    requireThat(!this.revoked(t, 'subject', subject) && !this.revoked(t, 'device', device), 'INV-403-QUARANTINE', 'Subject or device quarantined', 403);
+    requireThat(!this.revoked(t, 'subject', subject) && !this.revoked(t, 'device', device), 'INV-403-QUARANTINE', 'Subject or device quarantined', 403, { quarantine_denial: true, subject, device });
     const identity = Object.values(this.tenant(t).identities).find(x => x.subject_id === subject);
     requireThat(identity && identity.device_id === device && identity.health_expires_at > now, 'INV-403-HEALTH', 'Configured device health evidence expired or mismatched', 403);
   }
@@ -392,6 +429,10 @@ export class Fabric {
     // actor's registered identity key — a bearer token alone never mints a
     // request record someone could disown.
     requireThat(requestIntent, 'INV-401-SIGNATURE', 'A signed request-intent envelope over the proposal input is required', 401);
+    // Quarantine precedes the idempotency store: a replayed proposal must
+    // not return the cached record to a now-quarantined device
+    // (w9-network F10).
+    this.assertHealthy(p.tenant_id, p.subject_id, input.actor.device_id, this.clock());
     const identityEntry = Object.entries(this.tenant(p.tenant_id).identities).find(([, v]) => v.subject_id === p.subject_id);
     const intentPayload = verifySigned(requestIntent, { [identityEntry[0]]: { public_key: identityEntry[1].public_key } }, 'capsule-intent');
     requireThat(digest(intentPayload) === digest(input), 'INV-401-SIGNATURE', 'Request intent does not cover the proposed capsule exactly', 401);
@@ -584,6 +625,11 @@ export class Fabric {
       fields(observedPayload, ['connector_id', 'version', 'domain', 'actions', 'permissions', 'limitations', 'idempotency', 'coverage_implications', 'issued_at', 'expires_at']);
       requireThat(observedPayload.expires_at > this.clock(), 'INV-401-CONNECTOR', 'Connector manifest expired', 401);
       requireThat(Number.isSafeInteger(observedPayload.issued_at) && observedPayload.issued_at <= this.clock() + 300000, 'INV-401-CONNECTOR', 'Connector manifest issued-at is implausible', 401);
+      // Freshness floor: a manifest minted before the window replays stale
+      // issuer state as "no drift" (w9-network F8). The signed horizon is
+      // capped too — an issuer cannot extend its own replay window.
+      requireThat(observedPayload.issued_at >= this.clock() - 300000, 'INV-401-CONNECTOR', 'Connector manifest is stale', 401);
+      requireThat(observedPayload.expires_at <= this.clock() + 900000, 'INV-401-CONNECTOR', 'Connector manifest horizon too long', 401);
     } catch (e) {
       // A tampered or mis-signed manifest is drift, not just an error: the
       // issuer is quarantined exactly as if unreachable — forged manifests
@@ -721,9 +767,15 @@ export class Fabric {
       // bricks on the consumed cert (w8-composite F8). Once the parent is
       // terminal the child is unbound again.
       requireThat(!this.store.list(t, 'capsule', 10000).some(o => o.capsule.action.type === 'action.composite' && (o.capsule.requested_state.children ?? []).includes(record.capsule.capsule_id) && ['CERTIFIED', 'EXECUTING'].includes(o.status)), 'INV-409-STATE', 'Composite child certificates execute only through their parent', 409);
+      // A quarantined actor or dispatcher is refused before evidence work —
+      // the containment denial must land as INV-403, not as an evidence
+      // miss (w9-network F6/F7).
+      this.assertHealthy(t, record.capsule.actor.subject_id, record.capsule.actor.device_id, now);
+      // The dispatching endpoint must be healthy too — a quarantined-device
+      // principal cannot relay another actor's certificate (w9-network F6).
+      if (p.subject_id !== record.capsule.actor.subject_id) this.assertHealthy(t, p.subject_id, this.identity(p).device_id, now);
       requireThat(record.capsule_digest === cert.capsule_digest && this.graph(t, record).digest === cert.evidence_graph_digest && digest(this.policy(t)) === cert.policy_digest, 'INV-409-STATE', 'Action, evidence or policy changed', 409);
       requireThat(this.evaluation(t, record, now).decision === 'ALLOW', 'INV-412-EVIDENCE', 'Execution predicates no longer hold', 412);
-      this.assertHealthy(t, record.capsule.actor.subject_id, record.capsule.actor.device_id, now);
       const state = record.capsule.action.type === 'secret.use' ? this.target.secretState(t, record.capsule.requested_state.secret_id) : this.target.state(t, record.capsule.action.target_resource);
       requireThat(state.version === record.capsule.current_state.version && state.digest === record.capsule.current_state.digest, 'INV-409-STATE', 'Target state changed', 409);
       if (dryRun || this.policy(t).mode === 'shadow') {
@@ -1128,6 +1180,10 @@ export class Fabric {
     return this.transaction(p, now => {
       const r = this.store.must(p.tenant_id, 'capsule', id); requireThat(!['EXECUTING', 'VERIFIED', 'UNCERTAIN', 'FAILED', 'COMPENSATED'].includes(r.status), 'INV-409-STATE', 'Dispatched action cannot be cancelled; reconcile first', 409);
       this.assertHealthy(p.tenant_id, p.subject_id, this.identity(p).device_id, now);
+      // Same anti-grief rule attachEvidence already carries: only the
+      // proposing actor — or a privileged role — may cancel (w9-network F9).
+      const callerRoles = this.grantsFor(p.tenant_id, p.subject_id, now).roles ?? this.identity(p).roles;
+      requireThat(r.capsule.actor.subject_id === p.subject_id || callerRoles.some(x => ['security', 'policy_admin'].includes(x)), 'INV-403-SCOPE', 'Only the proposing actor or a privileged role may cancel', 403);
       r.status = 'CANCELLED'; this.store.put(p.tenant_id, 'capsule', id, r, now);
       this.store.audit(p.tenant_id, 'ACTION_CANCELLED', p.subject_id, id, { certificate_id: r.certificate_id }, now); return { status: r.status };
     });
@@ -1142,7 +1198,7 @@ export class Fabric {
       requireThat(this.policy(p.tenant_id).runtime.remediation_services.includes(input.remediation_service), 'INV-403-SCOPE', 'Remediation service is not in the policy allowlist', 403);
     }
     requireThat(['certificate', 'evidence', 'issuer', 'key', 'subject', 'device', 'capability', 'grant', 'token'].includes(input.kind), 'INV-400-SCHEMA', 'Unsupported revocation type');
-    return this.transaction(p, now => {
+    const env = this.transaction(p, now => {
       // Revocation must name a live authority — revoking a nonexistent id
       // would be silent record pollution.
       const t = p.tenant_id;
@@ -1172,7 +1228,6 @@ export class Fabric {
         // shadow a kind either.
       }[Object.hasOwn({ certificate:1, evidence:1, issuer:1, key:1, subject:1, device:1, capability:1, grant:1, token:1 }, input.kind) ? input.kind : ''];
       requireThat(exists?.(), 'INV-404-NOT-FOUND', `No live ${input.kind} authority with that id`, 404);
-      if (input.kind === 'grant') this.target.revokeGrant(t, input.id);
       const payload = { ...clone(input), tenant_id: t, revoked_at: now, actor: p.subject_id, propagation: 'local-synchronous', remote_propagation: 'NOT_IMPLEMENTED' };
       // Sign the revocation envelope BEFORE the record lands — the signing
       // key is still valid at signature time, and revoking the audit key
@@ -1184,6 +1239,12 @@ export class Fabric {
       this.store.audit(t, 'AUTHORITY_REVOKED', p.subject_id, `${input.kind}:${input.id}`, { reason_digest: digest(input.reason) }, now);
       return envelope;
     });
+    // The dataplane write lands AFTER the ledger commit: a revocation that
+    // fails its ledger write must never silently kill the grant anyway, and
+    // a ledger-confirmed revoke that can't reach the dataplane is healed by
+    // _reconcileLedger on the next open (w9-network F5).
+    if (input.kind === 'grant') this.target.revokeGrant(p.tenant_id, input.id);
+    return env;
   }
   revocations(p, kind = null) {
     this.authorize(p, ['operator', 'security', 'auditor', 'policy_admin']);

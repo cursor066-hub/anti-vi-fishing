@@ -61,13 +61,17 @@ export class RuntimeGate {
     try {
       return this.f.transaction(principal, now => {
       const t = principal.tenant_id, policy = this.f.policy(t);
-      const r0 = policy.runtime;
-      oneOf(input.protocol, r0.network?.allowed_protocols ?? ['https'], 'protocol');
-      oneOf(input.port, r0.network?.allowed_ports ?? [443], 'port');
       // Role binding at consume too — a leaked envelope cannot be spent by
       // an identity outside the workload plane (runtime-audit F-11).
       this.f.authorize(principal, ['operator', 'workload']);
       const cap = verifySigned(input.capability, this.f.executionPublic(t), 'capability');
+      // NET-003: the wire channel is bound by the capability's SIGNED
+      // runtime_policy snapshot, not whatever the live policy now allows —
+      // a later widening cannot retro-extend an outstanding capability to
+      // adjacent ports or weaker protocols (w9-network F3).
+      const netAllow = cap.runtime_policy?.network ?? policy.runtime.network ?? {};
+      oneOf(input.protocol, netAllow.allowed_protocols ?? ['https'], 'protocol');
+      oneOf(input.port, netAllow.allowed_ports ?? [443], 'port');
       requireThat(cap.tenant_id === t && cap.subject_id === principal.subject_id && cap.gate_id === this.f.config.gate_id, 'INV-403-SCOPE', 'Capability scope denied', 403);
       this.f.assertHealthy(t, principal.subject_id, input.device_id, now);
       requireThat(cap.expires_at > now && cap.issued_at <= now && !this.f.revoked(t, 'capability', cap.capability_id) && !this.f.revoked(t, 'key', input.capability.protected.key_id), 'INV-401-CAPABILITY', 'Capability is expired or revoked', 401);

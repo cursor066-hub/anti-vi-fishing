@@ -265,7 +265,10 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
           actions: Object.keys(issuer.kinds), permissions: ['issue signed evidence within declared kinds'],
           limitations: ['Records are authoritative only for this issuer domain', 'No claim about target-side enforcement'],
           idempotency: { mutating_retries: false, safe_read_retries: 2, timeout_ms: 10000 },
-          coverage_implications: ['evidence-source'], issued_at: clock(), expires_at: clock() + 86400000 * 30
+          // Manifests are short-lived so a captured replay cannot suppress
+          // drift detection for weeks (w9-network F8): the consumer bounds
+          // both the accepted issue age and the signed horizon.
+          coverage_implications: ['evidence-source'], issued_at: clock(), expires_at: clock() + 600000
         }, issuer.key, 'connector-manifest'));
       }
       if (req.method === 'POST' && (m = /^\/v1\/issuers\/([A-Za-z0-9_-]+)\/issue$/.exec(url.pathname))) {

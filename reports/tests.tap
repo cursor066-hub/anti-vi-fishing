@@ -2436,10 +2436,82 @@ ok 406 - w9-fixverify NB-2: the forbidden key set is the literal three-verifier 
   duration_ms: 0
   type: 'test'
   ...
-1..406
-# tests 406
+# Subtest: w9-network F1: the config snapshot watches auth, keys, components and data keys
+ok 407 - w9-network F1: the config snapshot watches auth, keys, components and data keys
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w9-network F2: an emergency policy cannot weaken network, remediation, bindings or windows
+ok 408 - w9-network F2: an emergency policy cannot weaken network, remediation, bindings or windows
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w9-network F3: a widened live policy cannot retro-extend a signed capability channel
+ok 409 - w9-network F3: a widened live policy cannot retro-extend a signed capability channel
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w9-network F4: clock recovery never resurrects lapsed authority
+ok 410 - w9-network F4: clock recovery never resurrects lapsed authority
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w9-network F5: a failed grant revocation leaves no phantom revoke
+ok 411 - w9-network F5: a failed grant revocation leaves no phantom revoke
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w9-network F6: a quarantined-device principal cannot dispatch another actor's certificate
+ok 412 - w9-network F6: a quarantined-device principal cannot dispatch another actor's certificate
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w9-network F7: quarantine denials on execute join the containment ledger
+ok 413 - w9-network F7: quarantine denials on execute join the containment ledger
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w9-network F8: a stale issuer manifest is drift, not freshness
+ok 414 - w9-network F8: a stale issuer manifest is drift, not freshness
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w9-network F9: an unrelated operator cannot cancel another actor's capsule
+ok 415 - w9-network F9: an unrelated operator cannot cancel another actor's capsule
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w9-network F10: an idempotent replay cannot slip past a fresh quarantine
+ok 416 - w9-network F10: an idempotent replay cannot slip past a fresh quarantine
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w9-network F11: a re-assertion audit records the previous section digests
+ok 417 - w9-network F11: a re-assertion audit records the previous section digests
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w9-network F12: the deploy unit carries clock/syscall/sandbox hardening
+ok 418 - w9-network F12: the deploy unit carries clock/syscall/sandbox hardening
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+1..418
+# tests 418
 # suites 0
-# pass 406
+# pass 418
 # fail 0
 # cancelled 0
 # skipped 0

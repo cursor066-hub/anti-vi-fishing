@@ -42,12 +42,12 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 1717,
-      "bytes": 144719
+      "lines": 1778,
+      "bytes": 150035
     },
     "src/issuerd.mjs": {
-      "lines": 353,
-      "bytes": 25362
+      "lines": 356,
+      "bytes": 25572
     },
     "src/keystore.mjs": {
       "lines": 154,
@@ -58,12 +58,12 @@
       "bytes": 6684
     },
     "src/policy.mjs": {
-      "lines": 330,
-      "bytes": 34839
+      "lines": 349,
+      "bytes": 36262
     },
     "src/runtime.mjs": {
-      "lines": 152,
-      "bytes": 14658
+      "lines": 156,
+      "bytes": 14988
     },
     "src/schema.mjs": {
       "lines": 90,
@@ -284,8 +284,12 @@
     "tests/w9-fixverify.test.mjs": {
       "lines": 74,
       "bytes": 5589
+    },
+    "tests/w9-network.test.mjs": {
+      "lines": 188,
+      "bytes": 12714
     }
   },
-  "total_files": 71,
-  "total_lines": 11876
+  "total_files": 72,
+  "total_lines": 12151
 }
