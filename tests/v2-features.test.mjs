@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID, createHmac } from 'node:crypto';
 import { fixture, hasCode } from './helpers.mjs';
 import { split, reconstruct, encodeShare, decodeShare } from '../src/shamir.mjs';
 import { merkleRoot, inclusionProof, verifyInclusion, consistencyProof, verifyConsistency } from '../src/merkle.mjs';
@@ -315,9 +315,18 @@ test('CON-001 CON-003: connector manifests verify and drift is detected', () => 
 test('DAT-009 DAT-011: reconstruction budget and watermarks on released rows', t => {
   const h = fixture(t);
   const cap = h.f.runtime.issue(h.p(), { device_id: 'operator-device', resource: 'dataset-1', destination: 'customer-vault', action: 'data.read', purpose: 'operations', columns: ['id', 'name'], row_ids: ['row-1'], classification: 'internal', jurisdiction: 'EU', max_cost: 100, ttl_ms: 60000 });
-  const out = h.f.runtime.consume(h.p(), { capability: cap, device_id: 'operator-device', resource: 'dataset-1', destination: 'customer-vault', action: 'data.read', purpose: 'operations', columns: ['id', 'name'], row_ids: ['row-1'], request_id: randomUUID(), protocol: 'https', port: 443 });
+  const request_id = randomUUID();
+  const out = h.f.runtime.consume(h.p(), { capability: cap, device_id: 'operator-device', resource: 'dataset-1', destination: 'customer-vault', action: 'data.read', purpose: 'operations', columns: ['id', 'name'], row_ids: ['row-1'], request_id, protocol: 'https', port: 443 });
   assert.equal(out.watermarks.length, 1);
   assert.equal(out.watermarks[0].row_id, 'row-1');
+  // DAT-011: the watermark actually binds THIS session — recompute the HMAC
+  // over (dataset, subject, request_id, row) with the tenant watermark key.
+  const key = Buffer.from(h.f.tenant('acme').watermark_key ?? h.f.tenant('acme').encryption_key, 'base64url');
+  const expected = createHmac('sha256', key).update(canonical({ dataset: 'dataset-1', subject: 'operator', request_id, row: out.rows[0] })).digest('hex').slice(0, 24);
+  assert.equal(out.watermarks[0].tag, expected);
+  // A different request id or subject does not reproduce the tag.
+  const wrong = createHmac('sha256', key).update(canonical({ dataset: 'dataset-1', subject: 'auditor', request_id, row: out.rows[0] })).digest('hex').slice(0, 24);
+  assert.notEqual(out.watermarks[0].tag, wrong);
   assert.equal(out.reconstruction.row_count >= 1, true);
 });
 

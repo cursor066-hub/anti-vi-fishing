@@ -37,6 +37,9 @@ export function fixture(t, tenants = ['acme', 'globex']) {
       : kind === 'dataset_authority' ? { dataset: rs.dataset ?? record.capsule.action.target_resource }
       : kind === 'identity_proof' || kind === 'recovery_authority' ? { subject_id: rs.subject_id ?? record.capsule.actor.subject_id }
       : kind === 'workload_attestation' ? { workload_id: rs.workload_id ?? 'workload-1' }
+      : kind === 'governance_review' ? { ref: 'REV-2026-001', action_ref: record.capsule.capsule_id }
+      : kind === 'payment_confirmation' ? { transaction_id: record.capsule.capsule_id }
+      : kind === 'device_health' ? { device_id: record.capsule.actor.device_id }
       : {};
     const payload = { evidence_id: randomUUID(), tenant_id: tenant, capsule_digest: record.capsule_digest, kind, content_digest: digest({ source: 'synthetic-only', claim }), acquired_at: time, expires_at: expiry, confidence, advisory, claim, dependencies, provenance: 'Synthetic test issuer; no external authority assertion', retention_until: expiry + 60000, claims };
     const key = setup.issuerKeys[tenant][issuer], envelope = signed(payload, key, 'evidence');

@@ -321,6 +321,7 @@ export class Fabric {
       requireThat(record.capsule.actor.subject_id === p.subject_id, 'INV-403-SCOPE', 'Only the proposing actor may attach evidence', 403);
       this.assertHealthy(t, record.capsule.actor.subject_id, record.capsule.actor.device_id, now);
       const payload = this.verifyEvidenceEnvelope(t, envelope);
+      requireThat(payload.acquired_at > now - 7 * 86400000, 'INV-400-SCHEMA', 'Evidence too old to attach', 400);
       requireThat(!this.revoked(t, 'issuer', envelope.protected.key_id) && !this.revoked(t, 'key', envelope.protected.key_id) && !this.revoked(t, 'evidence', payload.evidence_id), 'INV-401-EVIDENCE', 'Evidence source revoked', 401);
       // A connector whose observed manifest drifted from registration stops
       // being trusted for new evidence until a clean re-check clears the flag
@@ -344,6 +345,7 @@ export class Fabric {
       requireThat(record.evidence.length < 32, 'INV-429-CAPACITY', 'Evidence set limit reached', 429);
       const issuer = this.tenant(t).issuers[envelope.protected.key_id];
       requireThat(issuer.kinds.includes(payload.kind), 'INV-403-SCOPE', 'Issuer is not trusted for this evidence kind', 403);
+      requireThat(!payload.issuer_version || payload.issuer_version === issuer.version, 'INV-403-SCOPE', 'Issuer version drifted from registration', 403);
       this.store.insert(t, 'evidence', payload.evidence_id, { payload: clone(payload), envelope: clone(envelope), legal_hold: false }, now);
       record.evidence.push(payload.evidence_id); record.status = 'EVIDENCED'; record.approvals = []; record.decision = null;
       this.store.put(t, 'capsule', id, record, now); this.store.audit(t, 'EVIDENCE_ATTACHED', p.subject_id, id, { evidence_id: payload.evidence_id, evidence_digest: digest(envelope) }, now);
@@ -435,10 +437,11 @@ export class Fabric {
       requireThat(observedPayload.expires_at > this.clock(), 'INV-401-CONNECTOR', 'Connector manifest expired', 401);
       requireThat(Number.isSafeInteger(observedPayload.issued_at) && observedPayload.issued_at <= this.clock() + 300000, 'INV-401-CONNECTOR', 'Connector manifest issued-at is implausible', 401);
     } catch (e) {
-      // A tampered or mis-signed manifest must leave an audit trail —
-      // endpoint-controlled probing must not be unaudited (LOW-5).
+      // A tampered or mis-signed manifest is drift, not just an error: the
+      // issuer is quarantined exactly as if unreachable — forged manifests
+      // are a stronger signal than downtime (w5 F-5).
       if (e instanceof InvariantError) {
-        try { this.store.tx(() => this.store.audit(p.tenant_id, 'CONNECTOR_DRIFT', p.subject_id, key_id, { drifted: 'manifest_invalid', code: e.code }, this.clock())); } catch { /* ledger unavailable */ }
+        try { this.store.tx(() => { this.store.put(p.tenant_id, 'issuer-drift', key_id, { drifted_at: this.clock(), changes: [{ field: 'manifest', detail: 'invalid' }] }, this.clock()); this.store.audit(p.tenant_id, 'CONNECTOR_DRIFT', p.subject_id, key_id, { drifted: 'manifest_invalid', code: e.code }, this.clock()); }); } catch { /* ledger unavailable */ }
       }
       throw e;
     }
@@ -915,6 +918,15 @@ export class Fabric {
       // The evidence schema is reused; its capsule_digest field binds the
       // validation to this path (digest(path)) rather than to an action.
       const payload = this.verifyEvidenceEnvelope(p.tenant_id, envelope);
+      // Same trust bar as attachEvidence: revoked signer, drifted connector,
+      // out-of-kind envelope or a non-supporting outcome cannot promote a
+      // coverage path (w5 F-6).
+      requireThat(!this.revoked(p.tenant_id, 'issuer', envelope.protected.key_id) && !this.revoked(p.tenant_id, 'key', envelope.protected.key_id) && !this.revoked(p.tenant_id, 'evidence', payload.evidence_id), 'INV-401-EVIDENCE', 'Validation source revoked', 401);
+      requireThat(!this.store.get(p.tenant_id, 'issuer-drift', envelope.protected.key_id), 'INV-403-QUARANTINE', 'Issuer connector drifted — validation suspended pending revalidation', 403);
+      const issuer = this.tenant(p.tenant_id).issuers[envelope.protected.key_id];
+      requireThat(issuer.kinds.includes(payload.kind), 'INV-403-SCOPE', 'Issuer is not trusted for this evidence kind', 403);
+      requireThat(!payload.issuer_version || payload.issuer_version === issuer.version, 'INV-403-SCOPE', 'Issuer version drifted from registration', 403);
+      requireThat(payload.claim === 'supports', 'INV-400-SCHEMA', 'Technical validation requires a supporting outcome', 400);
       requireThat(payload.capsule_digest === digest(path), 'INV-400-SCHEMA', 'Validation evidence must bind this path');
       path.technical_validation = { evidence_id: payload.evidence_id, issuer: envelope.protected.key_id, at: now, outcome: payload.claim };
       if (path.status === 'UNKNOWN') { path.evidence_at = now; this.coverageTransition(p.tenant_id, path, 'MONITORED', 'technical-validation', now); }
@@ -1066,7 +1078,7 @@ export class Fabric {
       if (truncated) return { deleted: 0, held: items.length, corrupt: corrupt.length, reason: 'Reference scan limit reached; no deletion performed', complete_payload_erasure: false, truncated: true };
       for (const e of items) {
         if (e.payload.retention_until > now) continue;
-        const activeReference = records.some(r => r.evidence.includes(e.payload.evidence_id) && !['VERIFIED', 'FAILED', 'DENY', 'CANCELLED', 'COMPENSATED'].includes(r.status));
+        const activeReference = records.some(r => r.evidence.includes(e.payload.evidence_id) && !['VERIFIED', 'FAILED', 'DENY', 'CANCELLED', 'COMPENSATED'].includes(r.status)) || this.store.list(p.tenant_id, 'coverage', 10000, 0).some(c => c.technical_validation?.evidence_id === e.payload.evidence_id);
         if (e.legal_hold || activeReference) { held++; continue; }
         const original_digest = digest(e.envelope);
         this.store.insert(p.tenant_id, 'evidence-tombstone', e.payload.evidence_id, { evidence_id: e.payload.evidence_id, original_digest, deleted_at: now }, now);

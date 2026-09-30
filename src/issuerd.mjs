@@ -43,9 +43,9 @@ export function loadIssuers(directory) {
 // Constant-time bearer comparison — a plain `===` leaks match length via
 // early-exit timing (issuerd-audit LOW-2).
 function bearerMatches(auth, token) {
-  const expected = `Bearer ${token}`;
-  if (typeof auth !== 'string' || auth.length !== expected.length) return false;
-  return timingSafeEqual(Buffer.from(auth), Buffer.from(expected));
+  // Compare fixed-size digests so the token length is not a timing oracle.
+  if (typeof auth !== 'string') return false;
+  return timingSafeEqual(Buffer.from(digest(auth)), Buffer.from(digest(`Bearer ${token}`)));
 }
 
 function interpolate(template, claims) {
@@ -93,13 +93,16 @@ export function answerQuery(issuer, request, now) {
     extracted[f] = record[f] ?? null;
     if (String(record[f]) === String(request.claims?.[f])) matched.add(f);
   }
-  // A conflict answer must not leak record fields the caller did not already
-  // know — only fields whose claim matched are echoed back. A `supports`
-  // answer additionally echoes the caller's own query claims (they supplied
-  // them) plus the requested subject_id — the fabric binds those fields to
-  // the capsule's action so evidence describes THIS action, not an unrelated
-  // truth (issuerd-audit HIGH-2).
-  const revealed = claim === 'conflict' ? Object.fromEntries(Object.entries(extracted).filter(([f]) => matched.has(f))) : { ...(request.claims ?? {}), ...extracted, subject_id: request.subject_id };
+  // A conflict answer reveals nothing: echoing even the correctly-guessed
+  // fields is a per-field value-confirmation oracle (w5 F-7).
+  // A `supports` answer echoes the caller's own query claims plus the
+  // subject_id the record itself carries — NOT the independently supplied
+  // request.subject_id, which would let the caller stamp any subject onto a
+  // record that matched someone else (w5 F-1). The fabric binds
+  // claims.subject_id to the capsule's actor, so the lie must be impossible
+  // below the signature.
+  const resolvedSubject = record.subject_id ?? request.claims?.subject_id ?? request.subject_id;
+  const revealed = claim === 'conflict' ? {} : { ...(request.claims ?? {}), ...extracted, subject_id: resolvedSubject };
   return signed({ ...base, claim, content_digest: digest({ issuer: issuer.issuer, key, record }), claims: revealed, provenance: prov('*'), issuer_version: issuer.version }, issuer.key, 'evidence');
 }
 
@@ -112,8 +115,13 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
     try {
       const lines = readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean);
       const last = lines.length ? JSON.parse(lines[lines.length - 1]) : null;
-      if (last && Number.isSafeInteger(last.sequence) && /^[a-f0-9]{64}$/.test(last.digest ?? '')) { sequence.n = last.sequence; sequence.previous = last.digest; }
-    } catch { /* unreadable tail — start a fresh chain segment */ }
+      // A present-but-unparseable tail means the chain was tampered with or
+      // truncated mid-write — refuse to start rather than orphaning the whole
+      // prior segment under a fresh genesis.
+      if (lines.length && !(last && Number.isSafeInteger(last.sequence) && /^[a-f0-9]{64}$/.test(last.digest ?? '')))
+        throw new InvariantError('INV-503-CONFIG', 'Issuance log tail is corrupt; refuse to re-genesis silently', 503);
+      if (last) { sequence.n = last.sequence; sequence.previous = last.digest; }
+    } catch (e) { if (e instanceof InvariantError) throw e; /* unreadable tail — start a fresh chain segment */ }
   }
   function issuanceLog(entry) {
     if (!logPath) return;
@@ -144,28 +152,59 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
           requireThat(loopback, 'INV-503-CONNECTOR', 'Issuer endpoint requires a configured bearer token off loopback', 503);
         }
       };
+      // Authenticate before existence/scope resolution (w5 F-3): an
+      // unauthenticated caller must get a uniform 401 — never a 404/403 that
+      // enumerates issuer names or tenant bindings. `anyBearer` accepts any
+      // configured, unexpired issuer token of the required scope; per-issuer
+      // binding is still enforced by checkAuth afterwards.
+      const anyBearer = (scope) => {
+        const auth = req.headers.authorization ?? '';
+        return Object.values(issuers).some(i => {
+          const t = scope === 'issue' ? i.issue_token : (i.read_token ?? i.issue_token);
+          return t && (!i.token_expires_at || i.token_expires_at > clock()) && bearerMatches(auth, t);
+        });
+      };
+      const noTokens = !Object.values(issuers).some(i => i.issue_token || i.read_token);
+      const gate = (scope) => { requireThat(loopback || !noTokens, 'INV-503-CONNECTOR', 'Issuer endpoint requires a configured bearer token off loopback', 503); requireThat(anyBearer(scope) || (loopback && noTokens), 'INV-401-AUTH', `Issuer endpoint requires the ${scope} bearer token`, 401); };
+      // Per-IP token bucket (w5 F-4): reads and issues are separately
+      // budgeted; unauthenticated traffic shares a small bucket so probing
+      // cannot burn signing CPU or grow the issuance log unboundedly.
+      const buckets = createIssuerServer._buckets ??= new Map();
+      const ip = req.socket.remoteAddress ?? 'unknown';
+      const bucketFor = (scope) => {
+        const key = `${ip}:${scope}`, now = clock();
+        const limits = { read: [240, 60000], issue: [120, 60000], probe: [30, 60000] };
+        const [cap, window] = limits[scope] ?? limits.probe;
+        let b = buckets.get(key); if (!b || now >= b.reset) { b = { left: cap, reset: now + window }; buckets.set(key, b); }
+        if (buckets.size > 10000) for (const [k, v] of buckets) if (now >= v.reset) buckets.delete(k);
+        return b;
+      };
+      const take = (scope) => { const b = bucketFor(scope); requireThat(b.left > 0, 'INV-429-RATE', 'Rate limit exceeded', 429); b.left--; };
+      const resolveIssuer = (name, tenant) => (tenant && issuers[`${tenant}:${name}`]) || (issuers[name] && !issuers[name].ambiguous ? issuers[name] : (issuers[`${tenant}:${name}`] ?? null));
       if (req.method === 'GET' && url.pathname === '/v1/issuers') {
         const auth = req.headers.authorization ?? '';
         const holder = Object.values(issuers).find(i => {
           const t = i.read_token ?? i.issue_token;
           return t && bearerMatches(auth, t) && (!i.token_expires_at || i.token_expires_at > clock());
         });
-        if (!holder) requireThat(loopback, 'INV-401-AUTH', 'Issuer listing requires a valid read bearer token', 401);
+        if (!holder) { take('probe'); requireThat(loopback || !noTokens, 'INV-503-CONNECTOR', 'Issuer endpoint requires a configured bearer token off loopback', 503); requireThat(loopback && noTokens, 'INV-401-AUTH', 'Issuer listing requires a valid read bearer token', 401); } else take('read');
         // The directory is scoped to the holder's tenant: one issuer's token
-        // must not enumerate every tenant's issuers (issuerd-audit MED-4).
+        // must not enumerate every tenant's issuers (issuerd-audit MED-4),
+        // and a tenantless holder must not enumerate tenant-scoped issuers
+        // (w5 F-14).
         const out = {};
         for (const [k, i] of Object.entries(issuers)) {
           if (i.ambiguous || !i.issuer) continue;
-          if (holder && holder.tenant && i.tenant && i.tenant !== holder.tenant) continue;
+          if (holder && (i.tenant ?? null) !== (holder.tenant ?? null) && i.tenant) continue;
           out[k] = { issuer: i.issuer, tenant: i.tenant ?? null, channel: i.channel, version: i.version, kinds: Object.keys(i.kinds), key_id: i.key.key_id, public_key: i.key.public_key };
         }
         return send(200, out);
       }
       // Tenant-aware resolution: '<tenant>:<issuer>' wins; a bare name
       // resolves only when it is not ambiguous across tenants.
-      const resolveIssuer = (name, tenant) => (tenant && issuers[`${tenant}:${name}`]) || (issuers[name] && !issuers[name].ambiguous ? issuers[name] : (issuers[`${tenant}:${name}`] ?? null));
       let m;
       if (req.method === 'GET' && (m = /^\/v1\/issuers\/([A-Za-z0-9_-]+)\/manifest$/.exec(url.pathname))) {
+        if (!anyBearer('read')) { take('probe'); } gate('read'); take('read');
         const issuer = resolveIssuer(m[1], url.searchParams.get('tenant'));
         requireThat(issuer, 'INV-404-NOT-FOUND', 'Issuer not found', 404);
         const requestedTenant = url.searchParams.get('tenant');
@@ -186,6 +225,7 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
         fields(request, ['tenant_id', 'capsule_digest', 'kind', 'subject_id', 'claims'], ['dependencies']);
         identifier(request.tenant_id, 'tenant'); identifier(request.subject_id, 'subject'); text(request.kind, 'kind', 64);
         requireThat(/^[a-f0-9]{64}$/.test(request.capsule_digest), 'INV-400-SCHEMA', 'capsule_digest must be a digest');
+        if (!anyBearer('issue')) { take('probe'); issuanceLog({ issuer: 'unknown', request_digest: digest(request), refused: true, unauthenticated: true, code: 'INV-401-AUTH' }); } gate('issue'); take('issue');
         const issuer = resolveIssuer(m[1], request.tenant_id);
         requireThat(issuer, 'INV-404-NOT-FOUND', 'Issuer not found', 404);
         // Authentication failures are logged to the issuance chain too —
@@ -204,6 +244,7 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
         }
       }
       if (req.method === 'GET' && (m = /^\/v1\/issuers\/([A-Za-z0-9_-]+)\/health$/.exec(url.pathname))) {
+        if (!anyBearer('read')) { take('probe'); } gate('read'); take('read');
         const issuer = resolveIssuer(m[1], url.searchParams.get('tenant'));
         requireThat(issuer, 'INV-404-NOT-FOUND', 'Issuer not found', 404);
         checkAuth(issuer);

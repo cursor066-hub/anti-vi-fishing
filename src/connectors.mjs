@@ -1,4 +1,5 @@
 import http from 'node:http';
+import https from 'node:https';
 import { digest, canonical, parseStrict } from './canonical.mjs';
 import { fields, text, identifier, integer, uniqueStrings, oneOf } from './schema.mjs';
 import { signed, verifySigned } from './crypto.mjs';
@@ -42,11 +43,15 @@ export function verifyManifest(envelope, issuers, now) {
 // Bounded-retry HTTP client. Only idempotent GET-style reads are retried;
 // every request is deadline-bounded and body/schema-checked by the caller.
 export async function httpJson(url, { method = 'GET', body, timeout_ms = 10000, headers = {}, token } = {}) {
-  const attempts = 1;
   const payload = body === undefined ? undefined : canonical(body);
+  const target = new URL(url);
+  // Cleartext transport is only acceptable toward loopback (the synthetic
+  // issuer mesh); any remote endpoint must be TLS (w5 F-8).
+  const LOOPBACK = new Set(['localhost', '127.0.0.1', '::1', '[::1]', '0.0.0.0']);
+  requireThat(target.protocol === 'https:' || (target.protocol === 'http:' && LOOPBACK.has(target.hostname)), 'INV-400-CONNECTOR', `Refusing cleartext http to non-loopback host ${target.hostname}`, 400);
+  const transport = target.protocol === 'https:' ? https : http;
   return await new Promise((resolve, reject) => {
-    const target = new URL(url);
-    const req = http.request({
+    const req = transport.request({
       hostname: target.hostname, port: target.port, path: target.pathname + target.search, method,
       headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}), ...(token ? { Authorization: `Bearer ${token}` } : {}), ...headers },
       timeout: timeout_ms
@@ -76,12 +81,13 @@ export async function readWithRetry(url, options = {}) {
     try {
       const r = await httpJson(url, { ...options, method: 'GET' });
       if (r.status >= 200 && r.status < 300) return r;
-      if (r.status < 500) { const e = new InvariantError('INV-412-EVIDENCE', `Connector rejected read (${r.status})`, 412); e.status_code = r.status; throw e; }
+      if (r.status < 500) throw new InvariantError('INV-412-EVIDENCE', `Connector rejected read (${r.status})`, 412);
       last = new InvariantError('INV-502-CONNECTOR', `Connector read failed (${r.status})`, 502);
     } catch (e) {
       last = e;
-      if (e.status && e.status < 500 && !(e.code === 'INV-504-CONNECTOR' || e.code === 'INV-502-CONNECTOR')) throw e;
-      if (e.status && e.status < 500 && e.status !== 502 && e.status !== 504 && e.status !== 429) throw e;
+      // 4xx rejections are authoritative — never retry them. Transport-level
+      // failures (no HTTP status at all) and 5xx responses may retry.
+      if (e.status && e.status < 500) throw e;
     }
   }
   throw last;

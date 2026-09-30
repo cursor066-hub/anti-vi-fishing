@@ -1,6 +1,6 @@
 {
   "reference_environment": {
-    "node": "v24.16.0",
+    "node": "v24.19.0",
     "os": "linux",
     "architecture": "x64",
     "cpu": "INTEL(R) XEON(R) PLATINUM 8559C",
@@ -10,31 +10,34 @@
   },
   "core_deterministic_evaluation": {
     "samples": 2000,
-    "p50_ms": 0.11260400000003301,
-    "p95_ms": 0.18286899999999662,
-    "p99_ms": 0.2501450000000034,
-    "operations_per_second": 8274.68912892815
+    "p50_ms": 0.14299900000003163,
+    "p95_ms": 0.2266689999999585,
+    "p99_ms": 0.3059959999999933,
+    "operations_per_second": 6455.6586645108555
   },
   "integrated_evaluation_with_sqlite_audit": {
     "samples": 500,
-    "p50_ms": 1.8925069999999096,
-    "p95_ms": 2.477288999999928,
-    "p99_ms": 2.7912129999999706,
-    "operations_per_second": 505.384723625583
+    "p50_ms": 2.2688610000000153,
+    "p95_ms": 2.876600000000053,
+    "p99_ms": 3.126712999999995,
+    "operations_per_second": 424.65347310507985
   },
   "local_software_runtime_with_signed_audit": {
     "samples": 500,
-    "p50_ms": 1.3964820000001055,
-    "p95_ms": 2.022715999999946,
-    "p99_ms": 2.3266849999999977,
-    "operations_per_second": 674.16621569666
+    "p50_ms": 1.5946079999998801,
+    "p95_ms": 2.256887000000006,
+    "p99_ms": 2.6848200000001725,
+    "operations_per_second": 585.3837274511624
   },
   "target_network_latency": "not measured: no external target connector",
-  "targets": {
+  "asserted_targets": {
     "core_p95_at_most_250_ms": true,
     "core_p99_at_most_750_ms": true,
-    "integrated_100_evaluations_per_second": true,
-    "runtime_p99_at_most_1_ms": false
+    "integrated_100_evaluations_per_second": true
+  },
+  "observations": {
+    "runtime_p99_ms": 2.6848200000001725,
+    "runtime_p99_at_1_ms_target_met": false
   },
   "production_capacity_claim": false,
   "caveat": "Single-node microbenchmark, warm process, synthetic data and virtual policy clock advanced to respect budget/rate limits; not a production load, soak, packet or multi-zone benchmark."

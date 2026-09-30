@@ -185,7 +185,7 @@ test('RUN-010: config drift withdraws gate privileges until security re-attestat
   } finally { f2.close(); }
 });
 
-test('KEY-009: recovery delay blocks reconstruction and per-custodian notices are issued', t => {
+test('Recovery delay blocks reconstruction and per-custodian notices are issued', t => {
   const h = fixture(t);
   const custodians = ['custodian-1', 'custodian-2', 'custodian-3'];
   const c = h.f.createCeremony(h.p('security'), { ceremony_id: 'cer-delay', purpose: 'root recovery', threshold: 2, custodians, valid_until: h.now() + 3600000, min_delay_ms: 60000 });
@@ -467,7 +467,7 @@ test('R2-5: perception sessions are bound to their creator', t => {
   assert.equal(h.f.perceptionRelease(h.p(), session.session_id, { fields: { vendor: 'v1' }, purpose: 'verify' }).binding.fields[0], 'vendor');
 });
 
-test('POL-014 R2-6: governance floors cannot be lowered by a successor', t => {
+test('R2-6: governance floors cannot be lowered by a successor', t => {
   const h = fixture(t), policy = h.f.policy('acme'), now = h.now();
   const candidate = clone(policy);
   candidate.version += 1; candidate.expires_at = now + 86400000; candidate.not_before = 1;
@@ -482,7 +482,7 @@ test('POL-014 R2-6: governance floors cannot be lowered by a successor', t => {
   assert.equal(out2.reasons[0].code, 'GOVERNANCE_FLOOR');
 });
 
-test('POL-014 R2-7: an emergency policy that weakens any dimension is denied', t => {
+test('R2-7: an emergency policy that weakens any dimension is denied', t => {
   const h = fixture(t), policy = h.f.policy('acme'), now = h.now(), extra = policy.staged_policy.emergency_extra_custodians;
   const strict = clone(policy);
   strict.version += 1; strict.emergency_of = policy.version; strict.expires_at = now + 60000; strict.not_before = 1;
@@ -631,7 +631,7 @@ test('POL-012 R2-17: no vendor-controlled credential can satisfy root-policy act
   assert.notEqual(decision.decision, 'ALLOW', 'root policy must never activate on non-custodian signatures');
 });
 
-test('COM-014 R2-18: 3-of-5 custodian threshold holds; any 3 shares reconstruct, 2 cannot', async t => {
+test('COM-014 KEY-009 R2-18: 3-of-5 custodian threshold holds; any 3 shares reconstruct, 2 cannot', async t => {
   const { split, reconstruct } = await import('../src/shamir.mjs');
   const secret = Buffer.alloc(32, 7);
   const shares = split(secret, 5, 3);
@@ -835,6 +835,13 @@ test('AIG-002 AIG-007 R2-36: communication-channel evidence is advisory-only and
   // The advisory envelope carries no authority: approvals still gate the decision.
   h.approve(r, 0);
   assert.notEqual(h.f.evaluate(h.p(), r.capsule.capsule_id).decision, 'ALLOW');
+  // AIG-007 isolation half: the advisory extractor is a pure function of the
+  // supplied document — it cannot read tenant data. A document mentioning a
+  // foreign resource must not yield seeded-store values (TESTBANK000001,
+  // dataset-1 exist only in the store, not in this document).
+  const adv = h.f.advise(h.p(), { operation: 'extract', document: 'release artifact zz-foreign-9 for payment 500 EUR' });
+  const serialised = JSON.stringify(adv);
+  assert.ok(!serialised.includes('TESTBANK000001') && !serialised.includes('dataset-1'), 'advisory leaked tenant store content');
 });
 
 test('CON-002 CON-007 R2-37: issuer evidence stays purpose-bound and customer-hosted', t => {

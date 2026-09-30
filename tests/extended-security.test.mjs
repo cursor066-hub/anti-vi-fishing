@@ -54,10 +54,15 @@ test('ACT-007 UX-002: unsupported or ambiguous currency scales fail rather than 
   const h = fixture(t);
   for (const currency of ['XYZ', 'JPY', 'eur']) assert.throws(() => h.proposed('finance.beneficiary.create', { vendor_id: 'vendor-1', bank_account: 'TESTBANK000001', currency }), hasCode('INV-400-SCHEMA'));
 });
-test('POL-001 POL-002 POL-015: exact inputs and trusted test time produce identical decision and reasons', t => {
+test('POL-001 POL-015: exact inputs and trusted test time produce identical decision and reasons', t => {
   const h = fixture(t), r = h.proposed(); h.evidence(r); h.evidence(r, { issuer: 'registry' }); h.approve(r);
   const record = h.f.getCapsule(h.p(), r.capsule.capsule_id), expected = h.f.evaluation('acme', record, h.now());
   assert.equal(expected.decision, 'ALLOW'); for (let i = 0; i < 100; i++) assert.deepEqual(h.f.evaluation('acme', record, h.now()), expected);
+  // POL-015: a denied evaluation surfaces the failing predicate codes to the
+  // operator but never echoes the sensitive request content back.
+  const denied = h.f.evaluate(h.p(), h.proposed().capsule.capsule_id);
+  assert.ok(denied.reasons.length > 0 && denied.reasons.every(x => typeof x.code === 'string' && x.code.length > 0));
+  assert.ok(!JSON.stringify(denied).includes('TESTBANK000001'));
 });
 test('CON-004 COM-012: missing data-output fields return UNCERTAIN rather than an exception after dispatch', t => {
   const h = fixture(t), r = h.proposed('data.export', { dataset: 'dataset-1', columns: ['id'], row_ids: ['row-1'], max_rows: 1, classification: 'internal', jurisdiction: 'EU' }, { action: { type: 'data.export', target_resource: 'dataset-1', purpose: 'Operations' }, destination: 'customer-vault' });

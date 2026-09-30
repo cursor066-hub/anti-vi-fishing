@@ -1,5 +1,5 @@
 {
   "verifier": "scripts/verify-export-webcrypto.mjs (bun WebCrypto)",
-  "exit": 0,
-  "output": "{\"valid\":true,\"entries\":156,\"head\":\"4ae1da6ac5bc33e45c1f76260581fe4fa06b3ba0564a9141c1e1c7616ac262c8\",\"tenant_id\":\"acme\",\"verifier\":\"independent-webcrypto\"}"
+  "exit": null,
+  "output": "bun not installed on this machine — verifier not run"
 }

@@ -21,6 +21,7 @@ export const ISSUER_ROLES = {
   'device-attestation': { channel: 'device', kinds: ['device_health', 'workload_attestation'] },
   counterparty: { channel: 'counterparty', kinds: ['counterparty_credential', 'ownership'] },
   'build-pipeline': { channel: 'authoritative', kinds: ['build_provenance', 'test_result'] },
+  'security-ops': { channel: 'authoritative', kinds: ['technical_validation'] },
   email: { channel: 'communication', kinds: ['ownership', 'identity_proof'] }
 };
 
@@ -50,6 +51,9 @@ export const ISSUER_RULES = {
   'device-attestation': {
     device_health: { lookup: 'device:${claims.device_id}', expect: { health: 'pass' }, extract: ['firmware_version', 'attested_at'], ttl_ms: 300000, confidence: 96 },
     workload_attestation: { lookup: 'workload:${claims.workload_id}', expect: { attested: 'true' }, extract: ['image_digest', 'attested_at'], ttl_ms: 300000, confidence: 96 }
+  },
+  'security-ops': {
+    technical_validation: { lookup: 'probe:${claims.probe_id}', expect: { result: 'pass' }, extract: ['probed_at', 'method'], ttl_ms: 86400000, confidence: 95 }
   },
   counterparty: {
     counterparty_credential: { lookup: 'counterparty:${claims.counterparty_id}', expect: { credential: '${claims.credential_digest}', status: 'active' }, extract: ['issued_at'], ttl_ms: 3600000, confidence: 98 },
@@ -93,6 +97,9 @@ export function issuerRecords(tenant) {
     'device-attestation': {
       'device:operator-device': { health: 'pass', firmware_version: 'if-endpoint-2.1.0', attested_at: 1788640000000 },
       'workload:workload-1': { attested: 'true', image_digest: 'a'.repeat(64), attested_at: 1788640000000 }
+    },
+    'security-ops': {
+      'probe:PROBE-001': { result: 'pass', probed_at: 1788640000000, method: 'controlled-bypass-attempt' }
     },
     counterparty: {
       'counterparty:CP-SYNTH-1': { credential: 'b'.repeat(64), status: 'active', issued_at: 1788000000000 },

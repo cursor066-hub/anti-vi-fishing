@@ -6,8 +6,8 @@
       "bytes": 5969
     },
     "src/bootstrap.mjs": {
-      "lines": 215,
-      "bytes": 18203
+      "lines": 222,
+      "bytes": 18606
     },
     "src/canonical.mjs": {
       "lines": 85,
@@ -22,8 +22,8 @@
       "bytes": 4500
     },
     "src/connectors.mjs": {
-      "lines": 120,
-      "bytes": 7647
+      "lines": 126,
+      "bytes": 8078
     },
     "src/coverage.mjs": {
       "lines": 63,
@@ -42,12 +42,12 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 1232,
-      "bytes": 104318
+      "lines": 1244,
+      "bytes": 106070
     },
     "src/issuerd.mjs": {
-      "lines": 245,
-      "bytes": 16790
+      "lines": 286,
+      "bytes": 20078
     },
     "src/keystore.mjs": {
       "lines": 152,
@@ -58,8 +58,8 @@
       "bytes": 6684
     },
     "src/policy.mjs": {
-      "lines": 316,
-      "bytes": 33328
+      "lines": 326,
+      "bytes": 34349
     },
     "src/runtime.mjs": {
       "lines": 150,
@@ -147,7 +147,7 @@
     },
     "scripts/traceability.py": {
       "lines": 54,
-      "bytes": 12722
+      "bytes": 12711
     },
     "scripts/verify-export-webcrypto.mjs": {
       "lines": 61,
@@ -182,12 +182,12 @@
       "bytes": 1894
     },
     "tests/extended-security.test.mjs": {
-      "lines": 73,
-      "bytes": 7415
+      "lines": 78,
+      "bytes": 7806
     },
     "tests/helpers.mjs": {
-      "lines": 60,
-      "bytes": 5471
+      "lines": 63,
+      "bytes": 5742
     },
     "tests/http-concurrency-ui.test.mjs": {
       "lines": 164,
@@ -198,34 +198,34 @@
       "bytes": 8572
     },
     "tests/ledger2.test.mjs": {
-      "lines": 387,
-      "bytes": 26608
+      "lines": 411,
+      "bytes": 28971
     },
     "tests/ledger3.test.mjs": {
-      "lines": 314,
-      "bytes": 20099
+      "lines": 331,
+      "bytes": 21527
     },
     "tests/lifecycle.test.mjs": {
-      "lines": 102,
-      "bytes": 13336
+      "lines": 125,
+      "bytes": 14386
     },
     "tests/race-worker.mjs": {
       "lines": 10,
       "bytes": 534
     },
     "tests/regression.test.mjs": {
-      "lines": 983,
-      "bytes": 67575
+      "lines": 990,
+      "bytes": 68146
     },
     "tests/runtime-audit.test.mjs": {
-      "lines": 61,
-      "bytes": 9442
+      "lines": 83,
+      "bytes": 10498
     },
     "tests/v2-features.test.mjs": {
-      "lines": 336,
-      "bytes": 22419
+      "lines": 345,
+      "bytes": 23216
     }
   },
   "total_files": 56,
-  "total_lines": 8131
+  "total_lines": 8317
 }

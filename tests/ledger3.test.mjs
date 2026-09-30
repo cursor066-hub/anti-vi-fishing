@@ -98,7 +98,7 @@ test('NET-007: local capability enforcement keeps working without further contro
   assert.ok(allowed >= 1 && denied >= 1, `expected local rate limiting to engage, allowed=${allowed} denied=${denied}`);
 });
 
-test('NET-009: a peer-class resource is never a service destination', t => {
+test('NET-006 NET-009: a peer-class resource is never a service destination', t => {
   const h = fixture(t);
   for (const res of ['ws-alice', 'workstation-7', 'endpoint-janedoe']) {
     // Peer-class resources are refused at whichever layer sees them first —
@@ -167,6 +167,12 @@ test('NFR-SEC-006: crypto agility is configurable and both suites sign/verify', 
   assert.throws(() => h.f.verifyEvidenceEnvelope('acme', env), hasCode('INV-451-POLICY'));
 });
 
+test('NFR-PERF-004: the integrated load test met the >=100 evaluations/second target', () => {
+  const bench = JSON.parse(readFileSync('reports/benchmark.json', 'utf8'));
+  assert.equal(bench.asserted_targets.integrated_100_evaluations_per_second, true);
+  assert.ok(bench.integrated_evaluation_with_sqlite_audit.operations_per_second >= 100);
+});
+
 test('NFR-PERF-001 NFR-PERF-003: the benchmark publishes its environment and separates connector latency', () => {
   const bench = JSON.parse(readFileSync('reports/benchmark.json', 'utf8'));
   assert.ok(bench.reference_environment.cpu && bench.reference_environment.os && bench.reference_environment.architecture);
@@ -176,9 +182,16 @@ test('NFR-PERF-001 NFR-PERF-003: the benchmark publishes its environment and sep
 
 test('NFR-AVL-002: connector unavailability does not remove already-issued local controls inside the stale window', t => {
   const h = fixture(t);
-  // Issue a capability, then simulate the evidence-issuer plane being down:
-  // local runtime enforcement (issued capability consumes) still works.
   const cap = h.f.runtime.issue(h.p(), runtimeInput());
+  // The actual drill: sever the evidence-issuer plane outright — every
+  // registered issuer is flagged drifted (as checkIssuerDrift does when the
+  // endpoint is unreachable or the manifest is invalid), so no new evidence
+  // can be acquired or attached.
+  for (const key_id of Object.keys(h.f.tenant('acme').issuers))
+    h.f.store.put('acme', 'issuer-drift', key_id, { drifted_at: h.now(), changes: [{ field: 'endpoint', detail: 'unreachable' }] }, h.now());
+  const r = h.proposed();
+  assert.throws(() => h.evidence(r), hasCode('INV-403-QUARANTINE'));
+  // ...while the already-issued local control still enforces offline.
   assert.equal(h.f.runtime.consume(h.p(), runtimeRequest(cap)).decision, 'ALLOW');
 });
 
@@ -236,13 +249,17 @@ test('NFR-USA-004: a recorded decision replays deterministically from stored inp
 });
 
 test('NFR-TST-001: every requirement row carries a verification method', () => {
-  const rows = readFileSync('docs/requirements.csv', 'utf8').trim().split('\n');
-  const header = rows[0].split(',');
-  const methodIdx = header.indexOf('verification_method');
-  assert.ok(methodIdx > 0);
-  // Spot-parse: no row leaves the method column empty.
+  // Quote-aware CSV row parse — a naive split(',') miscounts cells when a
+  // quoted field contains a comma.
+  const parseRow = line => { const cells = []; let cur = '', q = false; for (let i = 0; i < line.length; i++) { const c = line[i]; if (q) { if (c === '"') { if (line[i + 1] === '"') { cur += '"'; i++; } else q = false; } else cur += c; } else if (c === '"') q = true; else if (c === ',') { cells.push(cur); cur = ''; } else cur += c; } cells.push(cur); return cells; };
+  const rows = readFileSync('docs/requirements.csv', 'utf8').trim().split('\n').map(parseRow);
+  const methodIdx = rows[0].indexOf('verification_method'), idIdx = rows[0].indexOf('id');
+  assert.ok(methodIdx > 0 && idIdx >= 0);
   assert.equal(rows.length - 1, 211);
-  for (const line of rows.slice(1)) assert.ok(line.length > methodIdx);
+  for (const cells of rows.slice(1)) {
+    assert.ok(cells.length > methodIdx, `short row: ${cells[0]}`);
+    assert.ok(cells[methodIdx].trim().length > 0, `empty verification_method in ${cells[idIdx]}`);
+  }
 });
 
 test('NFR-TST-003: seeded test data is synthetic and marked as such', t => {

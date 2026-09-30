@@ -224,29 +224,49 @@ test('PER-010: the controlled-workspace fallback is labelled lower-assurance and
 
 // ---- Wave-3 implementable-today items ----
 
-test('IDN-003: rule identity_classes admits only listed classes', t => {
+test('IDN-003: rule identity_classes distinguishes and combines all four classes', t => {
   const h = fixture(t);
-  const policy = h.f.policy('acme'); policy.rules['finance.beneficiary.create'].identity_classes = ['workload']; h.f.store.put('acme', 'policy', 'active', policy, h.now());
-  const r = h.proposed();
-  const d = h.f.evaluate(h.p(), r.capsule.capsule_id);
+  const policy = h.f.policy('acme');
+  // The workforce actor is denied when excluded from the class list.
+  policy.rules['finance.beneficiary.create'].identity_classes = ['workload']; h.f.store.put('acme', 'policy', 'active', policy, h.now());
+  const d = h.f.evaluate(h.p(), h.proposed().capsule.capsule_id);
   assert.equal(d.decision, 'DENY'); assert.ok(d.reasons.some(x => x.code === 'IDENTITY_CLASS'));
+  // Combining all four classes admits the workforce actor — each class is
+  // distinguishable and composable.
+  policy.rules['finance.beneficiary.create'].identity_classes = ['workforce', 'workload', 'device', 'counterparty']; h.f.store.put('acme', 'policy', 'active', policy, h.now());
+  const d2 = h.f.evaluate(h.p(), h.proposed().capsule.capsule_id);
+  assert.ok(!d2.reasons.some(x => x.code === 'IDENTITY_CLASS'));
+  // And a list of the other three still excludes the workforce actor.
+  policy.rules['finance.beneficiary.create'].identity_classes = ['workload', 'device', 'counterparty']; h.f.store.put('acme', 'policy', 'active', policy, h.now());
+  const d3 = h.f.evaluate(h.p(), h.proposed().capsule.capsule_id);
+  assert.ok(d3.reasons.some(x => x.code === 'IDENTITY_CLASS'));
 });
 
-test('IDN-010: rule min_proofing requires the actor identity to carry it', t => {
+test('IDN-010: root recovery demands higher proofing than routine access', t => {
   const h = fixture(t);
-  const policy = h.f.policy('acme'); policy.rules['finance.beneficiary.create'].min_proofing = 'high'; h.f.store.put('acme', 'policy', 'active', policy, h.now());
-  const r1 = h.proposed();
-  const d = h.f.evaluate(h.p(), r1.capsule.capsule_id);
-  assert.equal(d.decision, 'DENY'); assert.ok(d.reasons.some(x => x.code === 'PROOFING'));
-  // An identity that does carry high proofing passes the floor on a fresh capsule.
+  const policy = h.f.policy('acme');
+  // Routine action at low floor, root recovery at high floor.
+  policy.rules['finance.beneficiary.create'].min_proofing = 'low';
+  policy.rules['key.ceremony'].min_proofing = 'high';
+  h.f.store.put('acme', 'policy', 'active', policy, h.now());
   const [, identity] = Object.entries(h.setup.config.tenants.acme.identities).find(([, x]) => x.subject_id === 'operator');
+  identity.proofing_level = 'low';
+  // Low-proofed identity passes the routine floor but is refused root recovery.
+  const routine = h.f.evaluate(h.p(), h.proposed().capsule.capsule_id);
+  assert.ok(!routine.reasons.some(x => x.code === 'PROOFING'));
+  const root = h.proposed('key.ceremony', { ceremony_id: 'cer-root-1', purpose: 'Recover root', threshold: 3, custodians: ['custodian-1', 'custodian-2', 'custodian-3'] }, { action: { type: 'key.ceremony', target_resource: 'key-registry', purpose: 'Recover root' } });
+  h.advance(120001); // past the ceremony cooldown so the proofing check is reached
+  const d = h.f.evaluate(h.p(), root.capsule.capsule_id);
+  assert.notEqual(d.decision, 'ALLOW'); assert.ok(d.reasons.some(x => x.code === 'PROOFING'));
+  // A high-proofed identity clears the root floor.
   identity.proofing_level = 'high';
-  const r2 = h.proposed();
-  const d2 = h.f.evaluate(h.p(), r2.capsule.capsule_id);
+  const root2 = h.proposed('key.ceremony', { ceremony_id: 'cer-root-2', purpose: 'Recover root', threshold: 3, custodians: ['custodian-1', 'custodian-2', 'custodian-3'] }, { action: { type: 'key.ceremony', target_resource: 'key-registry', purpose: 'Recover root' } });
+  h.advance(120001);
+  const d2 = h.f.evaluate(h.p(), root2.capsule.capsule_id);
   assert.ok(!d2.reasons.some(x => x.code === 'PROOFING'));
 });
 
-test('NET-005 NET-006: remediation service must be policy-allowlisted and is audited', t => {
+test('NET-005: remediation service must be policy-allowlisted and is audited', t => {
   const h = fixture(t);
   assert.throws(() => h.f.revoke(h.p('security'), { kind: 'device', id: 'operator-device', reason: 'x', remediation_service: 'attack-ersatz' }), hasCode('INV-403-SCOPE'));
   h.f.revoke(h.p('security'), { kind: 'device', id: 'operator-device', reason: 'agent lost', remediation_service: 'device-wipe' });
@@ -346,12 +366,16 @@ test('COV-001 COV-005 COV-009 COV-010: path classes, owner tasks, history replay
   const path = h.f.store.must('acme', 'coverage', 'path-a');
   const claims = { capsule_digest: digest(path) };
   const payload = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: digest(path), kind: 'technical_validation', content_digest: digest({ probe: 'ok' }), acquired_at: h.now(), expires_at: h.now() + 60000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'manual probe', retention_until: h.now() + 120000, claims };
-  const issuer = Object.keys(h.setup.issuerKeys.acme)[0];
-  const envelope = signed(payload, h.setup.issuerKeys.acme[issuer], 'evidence');
+  const envelope = signed(payload, h.setup.issuerKeys.acme['security-ops'], 'evidence');
   const out = h.f.technicalValidation(h.p('security'), 'path-a', envelope);
   assert.equal(out.status, 'MONITORED');
   const hist2 = h.f.coverageAt(h.p('auditor'), h.now());
   assert.equal(hist2.paths['path-a'].status, 'MONITORED');
+  // COV-010 gate direction: a sibling path that has NO executed validation
+  // cannot leave UNKNOWN — the label is only earned through evidence.
+  h.f.declareCoverage(h.p('security'), { path_id: 'path-b', action_type: 'data.export', target: 'dataset-1', environment: 'prod', connector_version: '1.0', owner: 'op', status: 'UNKNOWN', path_class: 'api', max_age_ms: 60000, configuration_digest: digest({ y: 2 }) });
+  assert.equal(h.f.coverageAt(h.p('auditor'), h.now()).paths['path-b'].status, 'UNKNOWN');
+  assert.throws(() => h.f.technicalValidation(h.p('security'), 'path-b', envelope), hasCode('INV-400-SCHEMA'));
 });
 
 test('UX-010: digest-only scoping hides payload bodies from unprivileged roles', t => {

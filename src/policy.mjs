@@ -21,7 +21,17 @@ export function defaultPolicy(tenant) {
   rules['data.export'].evidence_bindings = { dataset_authority: { dataset: 'requested_state.dataset' } };
   for (const t of ['identity.mfa.reset', 'identity.authenticator.enroll', 'identity.account.recover', 'identity.jit.grant'])
     rules[t].evidence_bindings = { identity_proof: { subject_id: 'requested_state.subject_id' }, recovery_authority: { subject_id: 'requested_state.subject_id' } };
-  rules['secret.use'].evidence_bindings = { workload_attestation: { workload_id: 'requested_state.workload_id' } };
+  rules['secret.use'].evidence_bindings = { workload_attestation: { workload_id: 'requested_state.workload_id' }, device_health: { device_id: 'actor.device_id' } };
+  // Governance/payment/device evidence must describe THIS action, not merely
+  // be a true statement of the right kind: the review/confirmation/health
+  // claim carries the capsule reference (or actor device) it answers for
+  // (w5 F-2).
+  const governanceBinding = { governance_review: { action_ref: 'capsule_id' } };
+  for (const t of ['key.rotate', 'key.ceremony', 'backup.delete', 'policy.change', 'security.case.investigate', 'ai.model.deploy'])
+    rules[t].evidence_bindings = { ...(rules[t].evidence_bindings ?? {}), ...governanceBinding };
+  rules['finance.payment.first'].evidence_bindings = { ...rules['finance.payment.first'].evidence_bindings, payment_confirmation: { transaction_id: 'capsule_id' } };
+  for (const t of ['identity.mfa.reset', 'identity.authenticator.enroll', 'identity.account.recover', 'identity.jit.grant'])
+    rules[t].evidence_bindings = { ...rules[t].evidence_bindings, device_health: { device_id: 'actor.device_id' } };
   rules['code.release'].evidence_bindings = { build_provenance: { artifact_digest: 'requested_state.artifact_digest' }, test_result: { test_digest: 'requested_state.test_digest' } };
   rules['ai.model.deploy'].evidence_bindings = { test_result: { test_digest: 'requested_state.test_digest' } };
   rules['legal.contract.execute'].evidence_bindings = { counterparty_credential: { counterparty_id: 'requested_state.counterparty_id' }, legal_registry: { entity: 'requested_state.entity' } };
@@ -69,7 +79,7 @@ export function validatePolicy(p) {
       for (const [kind, map] of Object.entries(r.evidence_bindings)) {
         text(kind, 'evidence binding kind', 128);
         requireThat(typeof map === 'object' && map !== null && !Array.isArray(map) && Object.keys(map).length >= 1 && Object.keys(map).length <= 16, 'INV-400-SCHEMA', 'evidence binding map must list 1-16 claim fields');
-        for (const [cf, path] of Object.entries(map)) { text(cf, 'claim field', 128); requireThat(/^(actor\.(subject_id|device_id|identity_class)|action\.(type|target_resource|purpose|destination)|requested_state\.[A-Za-z0-9_-]{1,64}|subject_id|tenant_id)$/.test(path), 'INV-400-SCHEMA', `Invalid evidence binding path ${path}`); }
+        for (const [cf, path] of Object.entries(map)) { text(cf, 'claim field', 128); requireThat(/^(actor\.(subject_id|device_id|identity_class)|action\.(type|target_resource|purpose|destination)|requested_state\.[A-Za-z0-9_-]{1,64}|subject_id|tenant_id|capsule_id)$/.test(path), 'INV-400-SCHEMA', `Invalid evidence binding path ${path}`); }
       }
     }
     // IDN-003/IDN-010 optional admission conditions: restrict which identity
