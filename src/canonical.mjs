@@ -33,7 +33,11 @@ export function canonical(value, depth = 0) {
   }
   throw invalid('Unsupported canonical value');
 }
-const PROTO_KEYS = new Set(Object.getOwnPropertyNames(Object.prototype));
+// Every Object.prototype member name, plus 'prototype' and the legacy
+// watch/unwatch traps — the same superset the independent Python and
+// WebCrypto verifiers enforce, so all three implementations reject an
+// identical key set (w8-canonical F6).
+const PROTO_KEYS = new Set([...Object.getOwnPropertyNames(Object.prototype), 'prototype', 'watch', 'unwatch']);
 export function digest(value) { return createHash('sha256').update(canonical(value)).digest('hex'); }
 export function hashBytes(value) { return createHash('sha256').update(value).digest('hex'); }
 export function clone(value) { return JSON.parse(canonical(value)); }

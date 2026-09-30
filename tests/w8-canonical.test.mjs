@@ -93,7 +93,7 @@ test('CAN-F5: schema-layer type confusion surfaces as INV-400-SCHEMA, never 500/
 });
 
 test('CAN-F6: canonical() rejects every Object.prototype member name as a key', () => {
-  for (const k of Object.getOwnPropertyNames(Object.prototype))
+  for (const k of [...Object.getOwnPropertyNames(Object.prototype), 'prototype', 'watch', 'unwatch'])
     assert.throws(() => canonical({ [k]: 1 }), hasCode('INV-400-SCHEMA'), k);
   assert.throws(() => parseStrict('{"toString":1}'), hasCode('INV-400-SCHEMA'));
   assert.equal(canonical({ id: 'toString' }), '{"id":"toString"}'); // values are unaffected

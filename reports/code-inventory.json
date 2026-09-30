@@ -10,8 +10,8 @@
       "bytes": 19954
     },
     "src/canonical.mjs": {
-      "lines": 94,
-      "bytes": 5006
+      "lines": 98,
+      "bytes": 5298
     },
     "src/ceremony.mjs": {
       "lines": 124,
@@ -259,7 +259,7 @@
     },
     "tests/w8-canonical.test.mjs": {
       "lines": 165,
-      "bytes": 12598
+      "bytes": 12636
     },
     "tests/w8-composite.test.mjs": {
       "lines": 193,
@@ -279,5 +279,5 @@
     }
   },
   "total_files": 69,
-  "total_lines": 11529
+  "total_lines": 11533
 }
