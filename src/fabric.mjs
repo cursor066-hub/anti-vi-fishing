@@ -176,7 +176,8 @@ export class Fabric {
   authorize(p, roles) {
     requireThat(p && this.config.tenants[p.tenant_id], 'INV-401-AUTH', 'Authentication required', 401);
     const identity = this.identity(p);
-    requireThat(identity.roles.some(r => roles.includes(r)), 'INV-403-ROLE', 'Permission denied', 403);
+    const effective = this.grantsFor(p.tenant_id, p.subject_id, this.clock()).roles ?? identity.roles;
+    requireThat(effective.some(r => roles.includes(r)), 'INV-403-ROLE', 'Permission denied', 403);
     requireThat(!this.revoked(p.tenant_id, 'subject', p.subject_id), 'INV-403-QUARANTINE', 'Identity unavailable', 403);
     return identity;
   }
@@ -185,7 +186,10 @@ export class Fabric {
   grantsFor(tenant, subject_id, now) {
     const identity = Object.values(this.tenant(tenant).identities).find(x => x.subject_id === subject_id);
     const base = identity?.grants ?? { resources: [], actions: [], destinations: [], columns: [], row_ids: [] };
-    const merged = { resources: [...base.resources], actions: [...base.actions], destinations: [...base.destinations], columns: [...base.columns], row_ids: [...base.row_ids] };
+    // CON-008: grant-carried roles merge too — support access confers its
+    // operational role ONLY for the grant window; no standing access remains
+    // after expiry or revocation.
+    const merged = { roles: [...(identity?.roles ?? [])], resources: [...base.resources], actions: [...base.actions], destinations: [...base.destinations], columns: [...base.columns], row_ids: [...base.row_ids] };
     for (const g of this.target.grants(tenant, subject_id, now)) {
       for (const k of Object.keys(merged)) for (const v of g[k] ?? []) if (!merged[k].includes(v)) merged[k].push(v);
     }
@@ -311,7 +315,7 @@ export class Fabric {
     identifier(input.issuer, 'issuer'); text(input.kind, 'evidence kind');
     const t = p.tenant_id, record = this.store.must(t, 'capsule', capsule_id);
     requireThat(record.capsule.actor.subject_id === p.subject_id, 'INV-403-SCOPE', 'Only the proposing actor may acquire evidence', 403);
-    const entry = Object.entries(this.tenant(t).issuers).find(([, v]) => v.name === input.issuer || input.issuer === v.issuer_id || (v.endpoint ?? '').split('/').includes(input.issuer));
+    const entry = Object.entries(this.tenant(t).issuers).find(([, v]) => v.name === input.issuer || input.issuer === v.issuer_id);
     requireThat(entry, 'INV-404-NOT-FOUND', 'Issuer not found', 404);
     const [key_id, issuer] = entry;
     requireThat(issuer.endpoint, 'INV-412-EVIDENCE', 'Issuer has no live endpoint; attach a pre-signed envelope instead', 412);
@@ -645,7 +649,7 @@ export class Fabric {
     }
     if (type === 'identity.jit.grant') {
       const req = r.capsule.requested_state;
-      const grant = { grant_id: `jit-${cert.certificate_id}`, subject_id: req.subject_id, resources: req.resources, actions: req.actions, destinations: req.destinations, columns: req.columns, row_ids: req.row_ids, expires_at: now + req.ttl_ms, issued_at: now, issued_by: `action:${r.capsule.capsule_id}`, reason: req.reason, revoked: false };
+      const grant = { grant_id: `jit-${cert.certificate_id}`, subject_id: req.subject_id, resources: req.resources, actions: req.actions, destinations: req.destinations, columns: req.columns, row_ids: req.row_ids, roles: req.roles ?? [], expires_at: now + req.ttl_ms, issued_at: now, issued_by: `action:${r.capsule.capsule_id}`, reason: req.reason, revoked: false };
       this.store.put(t, 'jit-grant', grant.grant_id, { grant }, now);
       this.store.audit(t, 'JIT_GRANT_ISSUED', p.subject_id, req.subject_id, { grant_id: grant.grant_id, grant_digest: digest(req), expires_at: grant.expires_at }, now);
       post.push(() => this.target.grant(t, grant.grant_id, grant));

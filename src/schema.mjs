@@ -29,7 +29,7 @@ const types = {
   'secret.use': { secret_id: 'id', operation: 'text', workload_id: 'id' },
   'backup.delete': { backup_id: 'id', recovery_set: 'id' },
   'policy.change': { policy: 'object' },
-  'identity.jit.grant': { subject_id: 'id', resources: 'strings', actions: 'strings', destinations: 'strings', columns: 'strings', row_ids: 'strings', ttl_ms: 'positive', reason: 'text' },
+  'identity.jit.grant': { subject_id: 'id', resources: 'strings', actions: 'strings', destinations: 'strings', columns: 'strings', row_ids: 'strings', ttl_ms: 'positive', reason: 'text', roles: 'strings' },
   'key.rotate': { key_class: 'text', new_key_id: 'id', new_public_key: 'pem', ceremony_id: 'id', revoke_old: 'boolean' },
   'key.ceremony': { ceremony_id: 'id', purpose: 'text', threshold: 'positive', custodians: 'strings' },
   'action.composite': { children: 'strings' },

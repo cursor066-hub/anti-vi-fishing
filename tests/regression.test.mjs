@@ -215,7 +215,7 @@ test('IDN-005: MFA reset, authenticator enrolment and account recovery are separ
 
 test('IDN-004: expired JIT grant no longer widens runtime scope', t => {
   const h = fixture(t);
-  const r = h.proposed('identity.jit.grant', { subject_id: 'operator', resources: ['dataset-1'], actions: ['data.read'], destinations: ['customer-vault'], columns: ['id'], row_ids: ['row-99'], ttl_ms: 30000, reason: 'Incident' }, { action: { type: 'identity.jit.grant', target_resource: 'jit-grants', purpose: 'JIT' } });
+  const r = h.proposed('identity.jit.grant', { subject_id: 'operator', resources: ['dataset-1'], actions: ['data.read'], destinations: ['customer-vault'], columns: ['id'], row_ids: ['row-99'], ttl_ms: 30000, reason: 'Incident', roles: [] }, { action: { type: 'identity.jit.grant', target_resource: 'jit-grants', purpose: 'JIT' } });
   h.evidence(r, { kind: 'identity_proof', issuer: 'hris' }); h.evidence(r, { kind: 'identity_proof', issuer: 'registry' }); h.approve(r, 2);
   h.f.execute(h.p(), h.f.certificate(h.p(), r.capsule.capsule_id));
   const req = () => h.f.runtime.issue(h.p(), { device_id: 'operator-device', resource: 'dataset-1', destination: 'customer-vault', action: 'data.read', purpose: 'operations', columns: ['id'], row_ids: ['row-99'], classification: 'internal', jurisdiction: 'EU', max_cost: 10, ttl_ms: 60000 });
@@ -563,4 +563,27 @@ test('IDN-007 R2-13: a capability is bound to the attested device at consume', t
   assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap, { device_id: 'attacker-device' })), hasCode('INV-403-HEALTH'));
   h.f.revoke(h.p('security'), { kind: 'device', id: 'operator-device', reason: 'device health lost' });
   assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap)), hasCode('INV-403-QUARANTINE'));
+});
+
+test('CON-008 R2-14: vendor support access is time-bound, approved and revoked by expiry', t => {
+  const h = fixture(t);
+  // Vendor engineer has an identity but NO standing operational role.
+  const vendor = Object.values(h.setup.config.tenants.acme.identities).find(i => i.subject_id === 'custodian-2');
+  assert.ok(!vendor.roles.includes('operator'));
+  assert.throws(() => h.f.runtime.issue(h.p('custodian-2'), runtimeInput({ device_id: 'custodian-2-device' })), hasCode('INV-403-ROLE'));
+  // Customer authorises a 60s support grant through the full governed action lifecycle.
+  const r = h.proposed('identity.jit.grant', { subject_id: 'custodian-2', resources: ['dataset-1'], actions: ['data.read'], destinations: ['customer-vault'], columns: ['id'], row_ids: ['row-1'], ttl_ms: 60000, reason: 'Vendor support case 441', roles: ['operator'] }, { action: { type: 'identity.jit.grant', target_resource: 'jit-grants', purpose: 'Vendor support' } });
+  h.evidence(r, { kind: 'identity_proof' }); h.evidence(r, { kind: 'identity_proof', issuer: 'registry' }); h.approve(r, 2);
+  assert.equal(h.f.execute(h.p(), h.f.certificate(h.p(), r.capsule.capsule_id)).payload.status, 'VERIFIED');
+  // Inside the window: operator scope works, and the grant is audited.
+  const cap = h.f.runtime.issue(h.p('custodian-2'), runtimeInput({ device_id: 'custodian-2-device' })); assert.ok(cap.protected.key_id);
+  const entries = h.f.store.auditPage('acme', {}).entries.map(e => e.envelope.payload);
+  assert.ok(entries.some(e => e.type === 'JIT_GRANT_ISSUED' && e.reference === 'custodian-2'));
+  // A grant cannot mint custodian privilege — escalation is denied at admission.
+  const bad = h.proposed('identity.jit.grant', { subject_id: 'custodian-2', resources: ['dataset-1'], actions: ['data.read'], destinations: ['customer-vault'], columns: ['id'], row_ids: ['row-1'], ttl_ms: 60000, reason: 'Escalation attempt', roles: ['custodian'] }, { action: { type: 'identity.jit.grant', target_resource: 'jit-grants', purpose: 'Escalation' } });
+  h.evidence(bad, { kind: 'identity_proof' }); h.approve(bad);
+  assert.equal(h.f.evaluate(h.p(), bad.capsule.capsule_id).decision, 'DENY');
+  // After expiry: no standing access remains.
+  h.advance(61000);
+  assert.throws(() => h.f.runtime.issue(h.p('custodian-2'), runtimeInput({ device_id: 'custodian-2-device' })), hasCode('INV-403-ROLE'));
 });

@@ -201,7 +201,7 @@ test('KEY-004 KEY-005: prepareRotation creates pending vault key; verified rotat
 
 test('IDN-004: verified identity.jit.grant mints a time-bounded grant usable by runtime', t => {
   const h = fixture(t);
-  const r = h.proposed('identity.jit.grant', { subject_id: 'operator', resources: ['dataset-1'], actions: ['data.read'], destinations: ['customer-vault'], columns: ['id'], row_ids: ['row-2'], ttl_ms: 300000, reason: 'Incident response' }, { action: { type: 'identity.jit.grant', target_resource: 'jit-grants', purpose: 'JIT access' } });
+  const r = h.proposed('identity.jit.grant', { subject_id: 'operator', resources: ['dataset-1'], actions: ['data.read'], destinations: ['customer-vault'], columns: ['id'], row_ids: ['row-2'], ttl_ms: 300000, reason: 'Incident response', roles: [] }, { action: { type: 'identity.jit.grant', target_resource: 'jit-grants', purpose: 'JIT access' } });
   h.evidence(r, { kind: 'identity_proof' }); h.evidence(r, { kind: 'identity_proof', issuer: 'registry' });
   h.approve(r, 2);
   const cert = h.f.certificate(h.p(), r.capsule.capsule_id);

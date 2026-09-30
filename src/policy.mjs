@@ -192,6 +192,9 @@ export function evaluatePolicy({ capsule, policy, evidence = [], approvals = [],
     const r = policy.runtime, req = p.requested_state;
     const resources = req.resources ?? [], columns = req.columns ?? [], destinations = req.destinations ?? [], rowIds = req.row_ids ?? [];
     if (!resources.every(x => r.datasets.includes(x) || r.services.includes(x)) || !columns.every(x => r.allowed_columns.includes(x) && !r.forbidden_columns.includes(x)) || !destinations.every(x => r.destinations.includes(x))) return result('DENY', [reason('SCOPE_CATALOG', 'JIT grant exceeds the declared data/service catalog.')]);
+    // CON-008: grant-carried roles are support scope only — a JIT grant may
+    // never mint custodian/security/policy_admin privilege.
+    if (!(req.roles ?? []).every(x => ['operator', 'workload'].includes(x))) return result('DENY', [reason('ROLE_ESCALATION', 'JIT grant roles may only confer operator or workload scope.')]);
     if (!Array.isArray(rowIds)) return result('DENY', [reason('INVALID_GRANT', 'row_ids must be an explicit list.')]);
   }
   // POL-011: the cooldown anchors on the server-side receive timestamp, not
