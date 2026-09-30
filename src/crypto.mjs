@@ -1,4 +1,4 @@
-import { generateKeyPairSync, createPrivateKey, createPublicKey, sign, verify, randomBytes, createCipheriv, createDecipheriv, timingSafeEqual } from 'node:crypto';
+import { generateKeyPairSync, createPrivateKey, createPublicKey, sign, verify, randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
 import { canonical, digest } from './canonical.mjs';
 import { requireThat } from './errors.mjs';
 
@@ -73,8 +73,4 @@ export function decrypt(value, key, aad) {
   const [iv, tag, data] = value.split('.').map(x => Buffer.from(x, 'base64url'));
   const decipher = createDecipheriv('aes-256-gcm', key, iv); decipher.setAAD(Buffer.from(aad)); decipher.setAuthTag(tag);
   return JSON.parse(Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8'));
-}
-export function secretEqual(a, b) {
-  if (typeof a !== 'string' || typeof b !== 'string') return false;
-  const aa = Buffer.from(a), bb = Buffer.from(b); return aa.length === bb.length && timingSafeEqual(aa, bb);
 }

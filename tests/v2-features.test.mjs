@@ -178,7 +178,10 @@ test('KEY-004 KEY-005: prepareRotation creates pending vault key; verified rotat
   assert.equal(prep.status, 'pending');
   assert.throws(() => h.f.vault.sign(prep.key_id, 'any', 'x'), hasCode('INV-401-SIGNATURE'));
   const oldKey = h.setup.config.tenants.acme.keys.execution.key_id;
-  const r = h.proposed('key.rotate', { key_class: 'execution', new_key_id: prep.key_id, new_public_key: prep.public_key, ceremony_id: 'cer-1', revoke_old: true }, { action: { type: 'key.rotate', target_resource: 'key-registry', purpose: 'Rotation' } });
+  const custodians = ['custodian-1', 'custodian-2'];
+  const c = h.f.createCeremony(h.p('security'), { ceremony_id: 'cer-rot-1', purpose: 'execution key rotation', threshold: 2, custodians, valid_until: h.now() + 3600000 });
+  for (const subject of custodians) h.f.acknowledgeCeremony(h.p(subject), signAcknowledgement(c, subject, h.setup.custodianKeys.acme[subject], h.now()));
+  const r = h.proposed('key.rotate', { key_class: 'execution', new_key_id: prep.key_id, new_public_key: prep.public_key, ceremony_id: 'cer-rot-1', revoke_old: true }, { action: { type: 'key.rotate', target_resource: 'key-registry', purpose: 'Rotation' } });
   h.evidence(r, { kind: 'governance_review' }); h.evidence(r, { kind: 'governance_review', issuer: 'registry' });
   h.approve(r, 3);
   h.advance(60001); // key.rotate cooldown

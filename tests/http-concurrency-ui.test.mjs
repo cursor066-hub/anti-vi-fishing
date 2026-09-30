@@ -72,7 +72,7 @@ test('PER-007 PER-009: Secure Perception is dev-attested: forged attestations fa
   const bogus = await h.request('/v1/secure-perception/sessions', { method: 'POST', body: { attestation: { protected: { profile: 'IF-CJSON-1', suite: 'Ed25519', key_id: 'x', purpose: 'component-attestation' }, payload: { component: 'secure-view-acme', firmware_version: 'if-secureview-dev-1', nonce: 'a'.repeat(64) }, signature: 'x'.repeat(86) } } });
   assert.equal(bogus.status, 401);
   const component = h.setup.componentSecrets.acme['secure-view-acme'];
-  const attestation = component.attest('b'.repeat(64));
+  const attestation = component.attest('b'.repeat(64), h.now() + 300000);
   const session = await h.request('/v1/secure-perception/sessions', { method: 'POST', body: { attestation } });
   assert.equal(session.status, 201, JSON.stringify(session.data)); assert.equal(session.data.assurance, 'dev-attested-software'); assert.equal(session.data.production, false);
   const release = await h.request('/v1/secure-perception/release', { method: 'POST', body: { session_id: session.data.session_id, fields: { secret_field: 'sensitive-value-123' }, purpose: 'review' } });

@@ -111,10 +111,14 @@ test('ADV: staged policy cannot skip a version or resurrect a rolled-back rule',
   next.version = next.version + 2; // gap: must not activate
   next.not_before = h.now() - 1;
   h.f.store.put('acme', 'policy', 'staged', { policy: next, activate_at: next.not_before, staged_at: h.now() }, h.now());
-  // A version gap must refuse activation, not silently promote.
-  assert.throws(() => h.f.activateDuePolicies('acme', h.now()), (e) => e.code === 'INV-409-STATE');
+  // A version gap must never promote — and must never wedge: the stale row
+  // is retired with a POLICY_SUPERSEDED audit entry instead of throwing on
+  // every later transaction (policy-audit F1).
+  h.f.activateDuePolicies('acme', h.now());
   assert.equal(h.f.policy('acme').version, next.version - 2);
-  h.f.store.put('acme', 'policy', 'staged', null, h.now());
+  assert.equal(h.f.store.get('acme', 'policy', 'staged'), null);
+  const entries = h.f.store.auditPage('acme', {}).entries.map(e => e.envelope.payload);
+  assert.equal(entries.some(e => e.type === 'POLICY_SUPERSEDED' && e.metadata?.version === next.version), true);
 });
 
 test('ADV: envelope with evidence purpose cannot be submitted as approval', t => {

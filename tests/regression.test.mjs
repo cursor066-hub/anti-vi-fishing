@@ -36,7 +36,7 @@ test('driftCheck: missing optional fields never throw and are reported honestly'
 });
 
 test('workspaceFallback: returns honest plaintext binding with reason', () => {
-  const policy = { secure_perception: { fallback: 'controlled-workspace' } };
+  const policy = { secure_perception: { fallback: 'controlled-workspace', release_fields: '*' } };
   const out = workspaceFallback({ fields: { bank_account: 'TESTBANK1' }, purpose: 'review', reason: 'no device' }, policy, 1700000000000);
   assert.equal(out.mode, 'controlled-workspace'); assert.equal(out.production, false);
   assert.deepEqual(out.binding.fields, ['bank_account']); assert.equal(out.binding.reason, 'no device');
@@ -110,7 +110,7 @@ function randomValue(rand, depth = 0) {
   const o = {}; for (let i = 0; i < Math.floor(rand.next().value * 5); i++) o[`k${i}_${Math.floor(rand.next().value * 100)}`] = randomValue(rand, depth + 1); return o;
 }
 
-import { canonical, digest, parseStrict } from '../src/canonical.mjs';
+import { canonical, digest, parseStrict, hashBytes, clone } from '../src/canonical.mjs';
 
 test('canonical: 2000 seeded random values roundtrip deterministically', () => {
   const rand = rng(0x1F02);
@@ -154,7 +154,7 @@ test('coverage: direct target mutation does not upgrade manifest assurance', t =
 import { declarePath, applyDriftToPaths } from '../src/coverage.mjs';
 import { Fabric } from '../src/fabric.mjs';
 import { signAcknowledgement } from '../src/ceremony.mjs';
-import { clone } from '../src/canonical.mjs';
+
 
 test('COV-004 CON-006: declared paths carry observation time and drift moves them to UNKNOWN', () => {
   const p1 = declarePath({ path_id: 'p1', action_type: 'finance.payment.first', target: 'bank-1', environment: 'sim', connector_version: '1.0.0', owner: 'sec', status: 'MONITORED', max_age_ms: 1000, configuration_digest: digest({ a: 1 }) }, 100);
@@ -309,19 +309,27 @@ test('L2: explain renders real reason codes, never [object Object]', t => {
   const h = fixture(t);
   const r = h.proposed('finance.beneficiary.create', { vendor_id: 'v', bank_account: 'TESTBANK000001', currency: 'EUR' });
   const decision = h.f.evaluate(h.p(), r.capsule.capsule_id);
-  const out = h.f.advise(h.p(), { operation: 'explain', decision });
+  // explain narrates stored decisions only (runtime-audit F-13) — pass the
+  // capsule id, and confirm a caller-supplied verdict object is refused.
+  const out = h.f.advise(h.p(), { operation: 'explain', capsule_id: r.capsule.capsule_id });
   assert.equal(out.verdict, decision.decision);
   for (const x of out.reasons) { assert.equal(typeof x.code, 'string'); assert.equal(/\[object Object\]/.test(x.text), false); }
   assert.equal(/\[object Object\]/.test(out.text), false);
+  assert.throws(() => h.f.advise(h.p(), { operation: 'explain', capsule_id: 'cap-nope' }), (e) => e.code === 'INV-404-NOT-FOUND');
+  assert.throws(() => h.f.advise(h.p(), { operation: 'explain' }), (e) => e.code === 'INV-400-SCHEMA');
 });
 
 test('L3: secure-perception release binds capsule_id and evidence_ref into the sealed envelope', t => {
   const h = fixture(t);
   const component = h.setup.componentSecrets.acme['secure-view-acme'];
-  const session = h.f.perceptionSession(h.p(), component.attest('b'.repeat(64)));
-  const released = h.f.perceptionRelease(h.p(), session.session_id, { fields: { vendor: 'v1' }, purpose: 'verify', capsule_id: 'cap-1', evidence_ref: 'ev-9' });
-  assert.equal(released.binding.capsule_id, 'cap-1');
-  assert.equal(released.binding.evidence_ref, 'ev-9');
+  const session = h.f.perceptionSession(h.p(), component.attest('b'.repeat(64), h.now() + 300000));
+  const r = h.proposed();
+  const evidence = h.evidence(r);
+  const released = h.f.perceptionRelease(h.p(), session.session_id, { fields: { vendor: 'v1' }, purpose: 'verify', capsule_id: r.capsule.capsule_id, evidence_ref: evidence.payload.evidence_id });
+  assert.equal(released.binding.capsule_id, r.capsule.capsule_id);
+  assert.equal(released.binding.evidence_ref, evidence.payload.evidence_id);
+  // Forged provenance is refused (runtime-audit F-6).
+  assert.throws(() => h.f.perceptionRelease(h.p(), session.session_id, { fields: { vendor: 'v1' }, purpose: 'verify', capsule_id: 'cap-ghost' }), (e) => e.code === 'INV-404-NOT-FOUND');
 });
 
 test('L4: evidence signed under a retired suite is rejected policy-wide', t => {
@@ -346,4 +354,213 @@ test('M2: a rolled-back consume leaves no phantom data_access touches', t => {
   const ok = h.f.runtime.consume(h.p(), { ...req(), request_id: 'req-m2-2' });
   assert.equal(ok.decision, 'ALLOW');
   assert.ok(touches() > 0);
+});
+
+// ── Audit round 4: hostile HTTP/authz auditor findings ───────────────────────
+
+test('audit: only the proposing actor may attach evidence (griefing blocked)', t => {
+  const h = fixture(t), r = h.proposed();
+  const key = h.setup.issuerKeys.acme.bank, payload = { evidence_id: 'x', tenant_id: 'acme', capsule_digest: r.capsule_digest, kind: 'ownership', content_digest: 'a'.repeat(64), acquired_at: h.now(), expires_at: h.now() + 600000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'x', retention_until: h.now() + 700000 };
+  const envelope = signed(payload, key, 'evidence');
+  assert.throws(() => h.f.attachEvidence(h.p('security'), r.capsule.capsule_id, envelope), hasCode('INV-403-SCOPE'));
+});
+
+test('audit: revoke names must exist (no silent record pollution)', t => {
+  const h = fixture(t);
+  assert.throws(() => h.f.revoke(h.p('security'), { kind: 'subject', id: 'ghost-user', reason: 'x' }), hasCode('INV-404-NOT-FOUND'));
+  assert.throws(() => h.f.revoke(h.p('security'), { kind: 'issuer', id: 'ghost-issuer', reason: 'x' }), hasCode('INV-404-NOT-FOUND'));
+});
+
+test('audit: token revocation marks the token hash in the revocation store', t => {
+  const h = fixture(t);
+  const token = h.setup.credentials.acme.operator, tokenHash = hashBytes(token);
+  h.f.revoke(h.p('security'), { kind: 'token', id: tokenHash, reason: 'leak drill' });
+  assert.equal(h.f.revoked('acme', 'token', tokenHash), true);
+});
+
+test('audit: key.rotate requires an acknowledged ceremony', t => {
+  const h = fixture(t);
+  const prep = h.f.prepareRotation(h.p('security'), 'execution');
+  const r = h.proposed('key.rotate', { key_class: 'execution', new_key_id: prep.key_id, new_public_key: prep.public_key, ceremony_id: 'cer-nonexistent', revoke_old: true }, { action: { type: 'key.rotate', target_resource: 'key-registry', purpose: 'Rotation' } });
+  h.evidence(r, { kind: 'governance_review' }); h.evidence(r, { kind: 'governance_review', issuer: 'registry' });
+  h.approve(r, 3); h.advance(60001);
+  const cert = h.f.certificate(h.p(), r.capsule.capsule_id);
+  assert.throws(() => h.f.execute(h.p(), cert), hasCode('INV-409-STATE'));
+});
+
+test('audit: releaseFields honour a policy allowlist (INV-451 on unlisted fields)', t => {
+  const policy = { secure_perception: { fallback: 'controlled-workspace', release_fields: ['bank_account'] } };
+  assert.throws(() => workspaceFallback({ fields: { bank_account: 'TESTBANK1', ssn: '001' }, purpose: 'review', reason: 'x' }, policy, 1), hasCode('INV-451-POLICY'));
+});
+
+test('audit: configDriftStatus reports per-section digests and no drift on fresh snapshot', t => {
+  const h = fixture(t);
+  const s = h.f.configDriftStatus(h.p('security'));
+  assert.equal(s.drifted, false); assert.deepEqual(s.changed_sections, []); assert.ok(s.observed);
+});
+
+// ===== Audit round 2: runtime F-4/F-8/F-9/F-10/F-12, policy F2-F5/F8/F9 =====
+import { evaluatePolicy } from '../src/policy.mjs';
+
+import { runtimeInput, runtimeRequest, BASE_TIME } from './helpers.mjs';
+
+const policyCapsule = (policy, candidate, opts = {}) => ({
+  capsule_id: 'cap-x', tenant_id: 'acme', policy_version: policy.version,
+  expires_at: BASE_TIME + 3600000, created_at: opts.created_at ?? BASE_TIME - 600000,
+  received_at: opts.received_at ?? BASE_TIME - 600000, quantity: 1,
+  destination: 'customer-vault', actor: { subject_id: 'initiator', device_id: 'dev-1' },
+  action: { type: opts.type ?? 'policy.change', target_resource: 'policy' },
+  exclusions: [], requested_state: opts.requested ?? { policy: candidate },
+  current_state: { version: 1, digest: 'x', material_fields: {} },
+});
+
+test('R2-1: a grant narrowed since issuance cannot ride a signed capability', t => {
+  const h = fixture(t);
+  const cap = h.f.runtime.issue(h.p(), runtimeInput({ columns: ['id', 'name'] }));
+  assert.equal(h.f.runtime.consume(h.p(), runtimeRequest(cap, { columns: ['id', 'name'] })).decision, 'ALLOW');
+  const ident = Object.values(h.f.tenant('acme').identities).find(i => i.subject_id === 'operator');
+  ident.grants = { ...ident.grants, columns: ['id'] };
+  assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap, { columns: ['id', 'name'] })), hasCode('INV-403-SCOPE'));
+});
+
+test('R2-2: transform policy binds capabilities; row key is never transformable', t => {
+  const h = fixture(t);
+  assert.throws(() => h.f.runtime.issue(h.p(), runtimeInput({ transforms: { id: { op: 'drop' } } })), hasCode('INV-403-SCOPE'));
+  assert.throws(() => h.f.runtime.issue(h.p(), runtimeInput({ resource: 'dataset-9' })), hasCode('INV-403-SCOPE'));
+  assert.throws(() => h.f.runtime.issue(h.p(), runtimeInput({ columns: ['id', 'salary'] })), hasCode('INV-403-SCOPE'));
+  const active = h.f.policy('acme'), next = clone(active);
+  next.runtime.allowed_transforms = ['mask', 'drop', 'constant'];
+  h.f.store.put('acme', 'policy', 'active', next, h.now());
+  assert.throws(() => h.f.runtime.issue(h.p(), runtimeInput({ transforms: { name: { op: 'tokenise' } } })), hasCode('INV-403-SCOPE'));
+});
+
+test('R2-3: deterministic target refusals record FAILED, not UNCERTAIN', t => {
+  const h = fixture(t), { certificate } = h.ready();
+  const out = h.f.execute(h.p(), certificate, { fault: 'state-conflict' });
+  assert.equal(out.payload.status, 'FAILED');
+  assert.equal(out.payload.reason, 'INV-409-STATE');
+  assert.throws(() => h.f.execute(h.p(), certificate), hasCode('INV-409-REPLAY'));
+});
+
+test('RUN-005 R2-4: constrained fail mode allows stale reads at half budget only', t => {
+  const h = fixture(t);
+  const cap = h.f.runtime.issue(h.p(), runtimeInput({ max_cost: 10, columns: ['id', 'name'], row_ids: ['row-1', 'row-2'] }));
+  const serviceCap = h.f.runtime.issue(h.p(), runtimeInput({ action: 'service.connect', resource: 'erp-service', destination: 'erp-service', columns: [], row_ids: [] }));
+  const next = clone(h.f.policy('acme'));
+  next.fail_modes = { ...next.fail_modes, 'data.read': 'constrained', 'service.connect': 'constrained' };
+  next.version += 1;
+  h.f.store.put('acme', 'policy', 'active', next, h.now());
+  const first = h.f.runtime.consume(h.p(), runtimeRequest(cap));
+  assert.equal(first.decision, 'ALLOW');
+  assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap)), hasCode('INV-429-BUDGET'));
+  assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(serviceCap)), hasCode('INV-503-GATE'));
+});
+
+test('R2-5: perception sessions are bound to their creator', t => {
+  const h = fixture(t);
+  const component = h.setup.componentSecrets.acme['secure-view-acme'];
+  const session = h.f.perceptionSession(h.p(), component.attest('c'.repeat(64), h.now() + 300000));
+  assert.throws(() => h.f.perceptionRelease(h.p('custodian-1'), session.session_id, { fields: { vendor: 'v1' }, purpose: 'verify' }), hasCode('INV-403-SCOPE'));
+  assert.equal(h.f.perceptionRelease(h.p(), session.session_id, { fields: { vendor: 'v1' }, purpose: 'verify' }).binding.fields[0], 'vendor');
+});
+
+test('POL-014 R2-6: governance floors cannot be lowered by a successor', t => {
+  const h = fixture(t), policy = h.f.policy('acme'), now = h.now();
+  const candidate = clone(policy);
+  candidate.version += 1; candidate.expires_at = now + 86400000; candidate.not_before = 1;
+  candidate.staged_policy = { ...candidate.staged_policy, min_delay_ms: policy.staged_policy.min_delay_ms - 1 };
+  const out = evaluatePolicy({ capsule: policyCapsule(policy, candidate), policy, identities: h.f.identities('acme'), now });
+  assert.equal(out.decision, 'DENY');
+  assert.equal(out.reasons[0].code, 'GOVERNANCE_FLOOR');
+  const candidate2 = clone(policy);
+  candidate2.version += 1; candidate2.expires_at = now + 86400000; candidate2.not_before = 1;
+  candidate2.staged_policy = { ...candidate2.staged_policy, emergency_max_ttl_ms: policy.staged_policy.emergency_max_ttl_ms + 1 };
+  const out2 = evaluatePolicy({ capsule: policyCapsule(policy, candidate2), policy, identities: h.f.identities('acme'), now });
+  assert.equal(out2.reasons[0].code, 'GOVERNANCE_FLOOR');
+});
+
+test('POL-014 R2-7: an emergency policy that weakens any dimension is denied', t => {
+  const h = fixture(t), policy = h.f.policy('acme'), now = h.now(), extra = policy.staged_policy.emergency_extra_custodians;
+  const strict = clone(policy);
+  strict.version += 1; strict.emergency_of = policy.version; strict.expires_at = now + 60000; strict.not_before = 1;
+  for (const r of Object.values(strict.rules)) r.approval_threshold = Math.min(5, r.approval_threshold + extra);
+  const passes = evaluatePolicy({ capsule: policyCapsule(policy, strict), policy, identities: h.f.identities('acme'), now });
+  assert.equal(passes.reasons.some(r => r.code.startsWith('EMERGENCY_')), false);
+  const weak = clone(strict);
+  weak.rules['finance.beneficiary.create'].evidence_kinds = [];
+  const out = evaluatePolicy({ capsule: policyCapsule(policy, weak), policy, identities: h.f.identities('acme'), now });
+  assert.equal(out.decision, 'DENY');
+  assert.equal(out.reasons[0].code, 'EMERGENCY_WEAKER');
+});
+
+test('POL-011 R2-8: cooldown anchors on server received_at, not caller created_at', t => {
+  const h = fixture(t), policy = h.f.policy('acme'), now = h.now();
+  const cap = type => ({ capsule_id: 'cap-c', tenant_id: 'acme', policy_version: policy.version, expires_at: now + 3600000, created_at: now - 120000, received_at: now - 30000, quantity: 1, destination: 'customer-vault', actor: { subject_id: 'op-x', device_id: 'd' }, action: { type, target_resource: 'res-1' }, exclusions: [], requested_state: { bank_account: 'X' }, current_state: { version: 1, digest: 'x', material_fields: {} } });
+  const deferred = evaluatePolicy({ capsule: cap('finance.bank.change'), policy, identities: h.f.identities('acme'), now });
+  assert.equal(deferred.decision, 'DEFER');
+  assert.equal(deferred.not_before, now - 30000 + policy.rules['finance.bank.change'].cooldown_ms);
+  const old = cap('finance.bank.change'); old.received_at = now - 120000;
+  const notDeferred = evaluatePolicy({ capsule: old, policy, identities: h.f.identities('acme'), now });
+  assert.equal(notDeferred.decision === 'DEFER' && notDeferred.reasons.some(r => r.code === 'COOLDOWN'), false);
+});
+
+test('R2-9: an expired constitution still permits its own succession', t => {
+  const h = fixture(t), policy = clone(h.f.policy('acme')), now = h.now();
+  policy.expires_at = now - 1;
+  const candidate = clone(policy);
+  candidate.version += 1; candidate.expires_at = now + 86400000; candidate.not_before = 1;
+  const out = evaluatePolicy({ capsule: policyCapsule(policy, candidate, { received_at: now - 200000 }), policy, identities: h.f.identities('acme'), now });
+  assert.equal(out.reasons.some(r => r.code === 'EXPIRED'), false);
+  const other = policyCapsule(policy, {}, { type: 'finance.beneficiary.create', requested: { vendor_id: 'v', bank_account: 'x', currency: 'EUR' }, received_at: now - 200000 });
+  const denied = evaluatePolicy({ capsule: other, policy, identities: h.f.identities('acme'), now });
+  assert.equal(denied.decision, 'DENY');
+  assert.equal(denied.reasons[0].code, 'EXPIRED');
+});
+
+test('POL-011 R2-10: approval quorum requires distinct subjects, not just domains', t => {
+  const h = fixture(t), policy = h.f.policy('acme'), now = h.now();
+  const cap = { capsule_id: 'cap-q', tenant_id: 'acme', policy_version: policy.version, expires_at: now + 3600000, created_at: now - 120000, received_at: now - 120000, quantity: 1, destination: 'customer-vault', actor: { subject_id: 'initiator', device_id: 'd' }, action: { type: 'finance.beneficiary.create', target_resource: 'r-1' }, exclusions: [], requested_state: { vendor_id: 'v', bank_account: 'x', currency: 'EUR' }, current_state: { version: 1, digest: 'x', material_fields: {} } };
+  const identities = {
+    k1: { subject_id: 'alice', failure_domain: 'd1', roles: ['approver'], revoked: false, hardware_backed: false },
+    k2: { subject_id: 'alice', failure_domain: 'd2', roles: ['approver'], revoked: false, hardware_backed: false },
+    k3: { subject_id: 'bob', failure_domain: 'd2', roles: ['approver'], revoked: false, hardware_backed: false },
+  };
+  const approvals = (signers) => signers.map(s => ({ signer_id: s, expires_at: now + 60000 }));
+  const same = evaluatePolicy({ capsule: cap, policy, approvals: approvals(['k1', 'k2']), identities, now });
+  assert.equal(same.decision, 'ESCROW');
+  assert.deepEqual(same.eligible_signers, ['k1']);
+  const distinct = evaluatePolicy({ capsule: cap, policy, approvals: approvals(['k1', 'k3']), identities, now });
+  assert.deepEqual(distinct.eligible_signers, ['k1', 'k3']);
+});
+
+test('R2-11: staged admission refuses pre-expired or min-delay-violating successors', t => {
+  const h = fixture(t), policy = h.f.policy('acme'), now = h.now();
+  const dead = clone(policy);
+  dead.version += 1; dead.expires_at = now - 1; dead.not_before = 1;
+  const outDead = evaluatePolicy({ capsule: policyCapsule(policy, dead), policy, identities: h.f.identities('acme'), now });
+  assert.equal(outDead.decision, 'DENY');
+  assert.equal(outDead.reasons[0].code, 'SUCCESSOR_EXPIRED');
+  const rushed = clone(policy);
+  rushed.version += 1; rushed.expires_at = now + 86400000; rushed.not_before = now + 1000;
+  const outRush = evaluatePolicy({ capsule: policyCapsule(policy, rushed), policy, identities: h.f.identities('acme'), now });
+  assert.equal(outRush.decision, 'DENY');
+  assert.equal(outRush.reasons[0].code, 'STAGED_DELAY');
+});
+
+test('R2-12: a lapsed approval cannot drag the certificate expiry floor below now', t => {
+  const h = fixture(t);
+  const r = h.proposed(); h.evidence(r); h.evidence(r, { issuer: 'registry' }); h.approve(r, 3);
+  const record = h.f.store.must('acme', 'capsule', r.capsule.capsule_id);
+  record.approvals[0].payload.expires_at = h.now() - 1; // lapsed — must not set the floor
+  h.f.store.put('acme', 'capsule', r.capsule.capsule_id, record, h.now());
+  const cert = h.f.certificate(h.p(), r.capsule.capsule_id);
+  assert.ok(cert.payload.expires_at > h.now());
+});
+
+test('IDN-007 R2-13: a capability is bound to the attested device at consume', t => {
+  const h = fixture(t);
+  const cap = h.f.runtime.issue(h.p(), runtimeInput());
+  assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap, { device_id: 'attacker-device' })), hasCode('INV-403-HEALTH'));
+  h.f.revoke(h.p('security'), { kind: 'device', id: 'operator-device', reason: 'device health lost' });
+  assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap)), hasCode('INV-403-QUARANTINE'));
 });

@@ -59,10 +59,13 @@ function interpolateZero(points) {
   return acc;
 }
 
-export function reconstruct(shares) {
+export function reconstruct(shares, k = null) {
   requireThat(Array.isArray(shares) && shares.length >= 2, 'INV-400-SHAMIR', 'At least two shares are required');
+  if (k !== null) requireThat(shares.length >= k, 'INV-400-SHAMIR', 'Fewer than k shares presented');
   const xs = new Set(shares.map(s => s.x));
-  requireThat(xs.size === shares.length && shares.every(s => s.y instanceof Uint8Array && s.y.length === shares[0].y.length && s.x >= 1 && s.x <= 255), 'INV-400-SHAMIR', 'Malformed or duplicate share set');
+  // x coordinates must be exact integers — a fractional x produces a
+  // plausible-looking but wrong secret rather than an error.
+  requireThat(xs.size === shares.length && shares.every(s => s.y instanceof Uint8Array && s.y.length === shares[0].y.length && Number.isSafeInteger(s.x) && s.x >= 1 && s.x <= 255), 'INV-400-SHAMIR', 'Malformed or duplicate share set');
   const out = new Uint8Array(shares[0].y.length);
   for (let b = 0; b < out.length; b++) out[b] = interpolateZero(shares.map(s => [s.x, s.y[b]]));
   return out;

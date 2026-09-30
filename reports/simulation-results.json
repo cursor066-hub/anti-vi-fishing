@@ -91,6 +91,18 @@
       "expected": "INV-409-AUDIT",
       "actual": "INV-409-AUDIT",
       "pass": true
+    },
+    {
+      "name": "Engine-native online backup completes",
+      "expected": 0,
+      "actual": 0,
+      "pass": true
+    },
+    {
+      "name": "Offline restore verification of drill backup",
+      "expected": 0,
+      "actual": 0,
+      "pass": true
     }
   ],
   "allowed_low_and_slow_queries": 50,

@@ -1,10 +1,13 @@
-import { createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify, randomBytes } from 'node:crypto';
+import { createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify, randomBytes, createHmac } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { canonical, digest } from './canonical.mjs';
 import { encrypt, decrypt, SUITES, verifySuite, signSuite } from './crypto.mjs';
 import { fields, text, identifier, integer } from './schema.mjs';
 import { requireThat, InvariantError } from './errors.mjs';
+
+const derivePublic = pem => createPublicKey(createPrivateKey(pem)).export({ type: 'spki', format: 'pem' });
+const stateMac = (masterKey, state) => createHmac('sha256', masterKey).update(canonical(state)).digest('base64url');
 
 // IF-SOFTHSM-1: software keystore profile. Keys are generated inside the
 // vault, never leave it in plaintext (private material at rest is wrapped
@@ -35,7 +38,7 @@ export class KeyVault {
   publicKey(key_id) { return this.keys.get(key_id)?.public_key ?? null; }
   generate(purpose, { suite = 'Ed25519', exportable = false, key_id = null, pending = false } = {}) {
     requireThat(SUITES[suite], 'INV-400-SCHEMA', 'Unapproved algorithm suite');
-    text(purpose, 'key purpose', 64);
+    for (const p of Array.isArray(purpose) ? purpose : [purpose]) text(p, 'key purpose', 64);
     const raw = this._generateRaw(suite);
     const id = key_id ?? raw.key_id;
     requireThat(!this.keys.has(id), 'INV-409-CONFLICT', 'Key id already exists', 409);
@@ -56,6 +59,11 @@ export class KeyVault {
   importKey(key, purpose, { exportable = false, suite = 'Ed25519' } = {}) {
     fields(key, ['key_id', 'public_key', 'private_key']);
     requireThat(typeof key.private_key === 'string' && key.private_key.includes('PRIVATE KEY') && key.private_key.length <= 8192, 'INV-400-SCHEMA', 'Invalid private key');
+    requireThat(SUITES[suite], 'INV-400-SCHEMA', 'Unapproved algorithm suite');
+    // The advertised public key must be the public half of the private key —
+    // otherwise the vault would attest a foreign identity while signing with
+    // whatever private material was handed in (crypto-audit M-2).
+    requireThat(derivePublic(key.private_key) === key.public_key, 'INV-401-SIGNATURE', 'Imported keypair is inconsistent', 401);
     requireThat(!this.keys.has(key.key_id), 'INV-409-CONFLICT', 'Key id already exists', 409);
     this.keys.set(key.key_id, { key_id: key.key_id, public_key: key.public_key, purpose, suite, exportable, revoked: false, generated_inside: false, wrapped: encrypt(key.private_key, this.masterKey, `vault/${key.key_id}`), created_firmware: 'imported' });
     return { key_id: key.key_id, public_key: key.public_key, suite, purpose, exportable };
@@ -63,13 +71,15 @@ export class KeyVault {
   _private(key_id) { return decrypt(this.entry(key_id).wrapped, this.masterKey, `vault/${key_id}`); }
   sign(key_id, purpose, message) {
     const e = this.entry(key_id);
-    requireThat(e.purpose === purpose || e.purpose === 'any', 'INV-403-SCOPE', `Key is bound to purpose ${e.purpose}`, 403);
-    return signSuite(e.suite ?? 'Ed25519', Buffer.isBuffer(message) ? message : Buffer.from(message), this._private(key_id));
+    requireThat(e.purpose === 'any' || e.purpose === purpose || (Array.isArray(e.purpose) && e.purpose.includes(purpose)), 'INV-403-SCOPE', `Key is bound to purpose ${e.purpose}`, 403);
+    requireThat(SUITES[e.suite], 'INV-400-SCHEMA', 'Unapproved algorithm suite');
+    return signSuite(e.suite, Buffer.isBuffer(message) ? message : Buffer.from(message), this._private(key_id));
   }
   verify(key_id, message, signatureB64) {
     const e = this.entry(key_id);
     try {
-      return verifySuite(e.suite ?? 'Ed25519', Buffer.isBuffer(message) ? message : Buffer.from(message), e.public_key, Buffer.from(signatureB64, 'base64url'));
+      if (!SUITES[e.suite]) return false;
+      return verifySuite(e.suite, Buffer.isBuffer(message) ? message : Buffer.from(message), e.public_key, Buffer.from(signatureB64, 'base64url'));
     } catch { return false; }
   }
   // Envelope signing with the IF-CJSON-1 profile; identical wire shape to
@@ -93,21 +103,35 @@ export class KeyVault {
   }
   attestorPublicKeys() { return { [this.attestor.key_id]: { public_key: this.attestor.public_key } }; }
   save(path) {
-    const state = { format: STORE_FORMAT, firmware: this.firmware, attestor_wrapped: encrypt(this.attestor.private_key, this.masterKey, 'vault/attestor'), keys: this.list().map(e => ({ ...e, wrapped: this.keys.get(e.key_id).wrapped })) };
+    const state = { format: STORE_FORMAT, firmware: this.firmware, attestor: { key_id: this.attestor.key_id, public_key: this.attestor.public_key }, attestor_wrapped: encrypt(this.attestor.private_key, this.masterKey, 'vault/attestor'), keys: this.list().map(e => ({ ...e, wrapped: this.keys.get(e.key_id).wrapped })) };
+    // The state file is MAC'd under the master key: a write-only attacker
+    // (backup tampering, restore injection) cannot flip purpose/exportable/
+    // public_key metadata without breaking authentication (crypto-audit H-2).
+    state.mac = stateMac(this.masterKey, state);
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     writeFileSync(path, canonical(state) + '\n', { mode: 0o600 });
     chmodSync(path, 0o600);
   }
   static load(path, masterKey) {
-    const state = JSON.parse(readFileSync(path, 'utf8'));
+    const { mac, ...state } = JSON.parse(readFileSync(path, 'utf8'));
     requireThat(state.format === STORE_FORMAT, 'INV-503-CONFIG', 'Unrecognised keystore format', 503);
     const vault = new KeyVault(masterKey, { firmware: state.firmware });
-    vault.attestor.private_key = decrypt(state.attestor_wrapped, vault.masterKey, 'vault/attestor');
-    for (const e of state.keys) vault.keys.set(e.key_id, { ...e, wrapped: e.wrapped });
+    requireThat(stateMac(vault.masterKey, state) === mac, 'INV-503-CONFIG', 'Keystore integrity check failed (state MAC mismatch)', 503);
+    const attestorPrivate = decrypt(state.attestor_wrapped, vault.masterKey, 'vault/attestor');
+    // Restore the full attestor identity — persisting only the private key
+    // corrupted key_id/public_key on every restart (crypto-audit H-1).
+    requireThat(state.attestor && derivePublic(attestorPrivate) === state.attestor.public_key, 'INV-503-CONFIG', 'Attestor identity inconsistent', 503);
+    vault.attestor = { key_id: state.attestor.key_id, public_key: state.attestor.public_key, private_key: attestorPrivate };
+    for (const e of state.keys) {
+      // Verify every entry's advertised public key matches its private half.
+      requireThat(derivePublic(decrypt(e.wrapped, vault.masterKey, `vault/${e.key_id}`)) === e.public_key, 'INV-503-CONFIG', `Key ${e.key_id} has inconsistent public material`, 503);
+      vault.keys.set(e.key_id, { ...e, wrapped: e.wrapped });
+    }
     return vault;
   }
   static open(directory) {
     const storePath = `${directory}/keystore.json`, masterPath = `${directory}/master.key`;
+    if (existsSync(storePath) && !existsSync(masterPath)) throw new InvariantError('INV-503-CONFIG', 'Keystore exists but master key is missing — refusing to silently regenerate', 503);
     if (existsSync(storePath) && existsSync(masterPath)) return KeyVault.load(storePath, JSON.parse(readFileSync(masterPath, 'utf8')).master_key);
     const masterKey = randomBytes(32).toString('base64url');
     return new KeyVault(masterKey);

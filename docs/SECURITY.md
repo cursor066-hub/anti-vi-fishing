@@ -33,6 +33,16 @@ Software keys are generated using the platform CSPRNG and Ed25519 implementation
 | Scale | Bounded engineering UI/query scans | Production-scale audit pagination, storage/rate/cache exhaustion and soak evidence |
 | Secure SDLC | Test suite and focused checks | Human maintainers, code review, current advisories, SAST/DAST/fuzz coverage and independent assessment |
 
+### Store plaintext surfaces (design decision)
+
+The audit chain, `data_access` trail, `usage` keys, `nonces` and `idempotency` request hashes are stored **plaintext by design** inside `fabric.db`: audit envelopes must remain verifiable and servable to auditors who hold only public keys, and `verifyAudit`/export integrity checks are deliberately key-free. Confidentiality of the database file itself comes from the `0600` file permissions and the deployment's filesystem/backup controls — the tenant encryption keys (`config.json`) live in the same trust boundary, so encrypting audit metadata under them would not raise the bar against an attacker who can already read the directory. Integrity, however, is fully cryptographic: hash chaining, signed envelopes and per-row re-verification on read (`auditPage` recomputes digests and chain links before serving).
+
+Residual honest limits:
+
+- SQLite `secure_delete` cannot guarantee erasure of pages already flushed into filesystem snapshots or earlier backups — the retention report marks pre-erasure backup media as out of scope.
+- A **file-level** `DELETE`/`UPDATE` bypassing the API leaves orphan wrapped DEKs (the key outliving its ciphertext) — a generic property, mitigated only by convention: all deletion goes through `remove`/`shred`, which destroy the DEK first.
+- A WAL checkpoint is best-effort under writer contention; a busy checkpoint keeps the shred flag armed and retries on the next commit.
+
 ## Reporting and release ownership
 
 No operational security-reporting inbox, legal entity, incident team, signer identity or external assessor was provisioned. This is a public-release blocker, not a fictitious security contact. Deployment owners must establish a monitored private reporting channel, acknowledgement/escalation policy and update process before any public beta. Do not send real vulnerabilities or customer data to an unverified address from a draft document.

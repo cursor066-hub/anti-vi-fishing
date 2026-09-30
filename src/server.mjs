@@ -7,6 +7,7 @@ import { parseStrict, canonical, hashBytes, digest } from './canonical.mjs';
 import { fields, text, identifier, integer } from './schema.mjs';
 import { SCHEMAS } from './schema.mjs';
 import { requireThat, InvariantError } from './errors.mjs';
+import { merkleRoot } from './merkle.mjs';
 
 export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin = `http://127.0.0.1:${port}` } = {}) {
   requireThat(['127.0.0.1', '::1'].includes(host), 'INV-503-RELEASE', 'Engineering HTTP service must bind to loopback', 503);
@@ -24,7 +25,7 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
     const hash = hashBytes(token);
     for (const [tenant, t] of Object.entries(fabric.config.tenants)) {
       const entry = t.auth[hash];
-      if (entry && entry.expires_at > fabric.clock()) {
+      if (entry && entry.expires_at > fabric.clock() && !fabric.revoked(tenant, 'token', hash)) {
         const principal = { tenant_id: tenant, subject_id: entry.subject_id };
         fabric.authorize(principal, ['operator', 'approver', 'custodian', 'security', 'auditor', 'policy_admin', 'workload']);
         return { principal, expires: entry.expires_at };
@@ -54,7 +55,9 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
     res.setHeader('X-Frame-Options', 'DENY'); res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
     res.setHeader('Content-Security-Policy', "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
     res.setHeader('Cache-Control', 'no-store');
-    const send = (status, data, type = 'application/json; charset=utf-8') => { res.writeHead(status, { 'Content-Type': type }); res.end(type.startsWith('application/json') ? canonical(data) : data); };
+    // Serialize before any byte is flushed: a canonical() failure must surface
+    // as a clean error response, never a destroyed socket after a 200 header.
+    const send = (status, data, type = 'application/json; charset=utf-8') => { const bodyOut = type.startsWith('application/json') ? canonical(data) : data; res.writeHead(status, { 'Content-Type': type }); res.end(bodyOut); };
     try {
       requireThat(['GET', 'POST'].includes(req.method), 'INV-405-METHOD', 'Method not allowed', 405);
       requireThat(req.headers.host === new URL(origin).host, 'INV-400-HOST', 'Unrecognised host', 400);
@@ -101,7 +104,13 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       if (path === '/v1/certificates' && req.method === 'POST') { const input = await body(req); fields(input, ['capsule_id']); identifier(input.capsule_id); return send(201, fabric.certificate(p, input.capsule_id)); }
       if ((m = /^\/v1\/certificates\/([A-Za-z0-9-]+)$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['operator', 'policy_admin', 'security']); return send(200, fabric.store.must(p.tenant_id, 'certificate', m[1]).envelope); }
       if (path === '/gate/v1/execute' && req.method === 'POST') { const input = await body(req); fields(input, ['certificate', 'dry_run']); requireThat(typeof input.dry_run === 'boolean', 'INV-400-SCHEMA', 'dry_run must be boolean'); return send(200, fabric.execute(p, input.certificate, { dryRun: input.dry_run })); }
-      if ((m = /^\/gate\/v1\/outcomes\/([A-Za-z0-9-]+)$/.exec(path)) && req.method === 'GET') return send(200, fabric.reconcile(p, m[1]));
+      if ((m = /^\/gate\/v1\/outcomes\/([A-Za-z0-9-]+)$/.exec(path)) && req.method === 'GET') {
+        // Read-only view: reconciliation itself is a POST — a GET never writes.
+        fabric.authorize(p, ['operator', 'security', 'policy_admin']); const out = fabric.store.get(p.tenant_id, 'outcome', m[1]);
+        requireThat(out, 'INV-404-NOT-FOUND', 'No recorded outcome for this certificate', 404);
+        return send(200, out);
+      }
+      if ((m = /^\/gate\/v1\/outcomes\/([A-Za-z0-9-]+)$/.exec(path)) && req.method === 'POST') return send(200, fabric.reconcile(p, m[1]));
       if ((m = /^\/v1\/resources\/([A-Za-z0-9_.:-]+)$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['operator', 'policy_admin']); const state = fabric.target.state(p.tenant_id, m[1]); if (Array.isArray(state.material_fields.rows)) throw new InvariantError('INV-403-SCOPE', 'Use a data capability for dataset access', 403); return send(200, state); }
       if (path === '/v1/capabilities' && req.method === 'POST') { fabric.authorize(p, ['operator', 'workload']); return send(201, fabric.runtime.issue(p, await body(req))); }
       if (path === '/gate/v1/runtime' && req.method === 'POST') return send(200, fabric.runtime.consume(p, await body(req)));
@@ -117,7 +126,7 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       if (path === '/v1/revocations' && req.method === 'GET') return send(200, fabric.revocations(p));
       if (path === '/v1/grants' && req.method === 'GET') return send(200, fabric.listGrants(p, url.searchParams.get('subject')));
       if (path === '/v1/subjects' && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'auditor', 'policy_admin']); return send(200, { items: Object.values(fabric.identities(p.tenant_id)).map(i => ({ subject_id: i.subject_id, roles: i.roles, device_id: i.device_id, identity_class: i.identity_class, health_expires_at: i.health_expires_at })) }); }
-      if (path === '/v1/certificates' && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'auditor', 'policy_admin']); const limit = integer(Number(url.searchParams.get('limit') ?? 50), 'limit', 1, 200), offset = integer(Number(url.searchParams.get('offset') ?? 0), 'offset', 0, 1000000); return send(200, { items: fabric.store.list(p.tenant_id, 'certificate', limit, offset).map(c => ({ certificate_id: c.certificate_id, status: c.status, stored_at: c.stored_at })), limit, offset }); }
+      if (path === '/v1/certificates' && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'auditor', 'policy_admin']); const limit = integer(Number(url.searchParams.get('limit') ?? 50), 'limit', 1, 200), offset = integer(Number(url.searchParams.get('offset') ?? 0), 'offset', 0, 1000000); return send(200, { items: fabric.store.list(p.tenant_id, 'certificate', limit, offset).map(c => ({ certificate_id: c.certificate_id, status: c.status, issued_at: c.issued_at ?? null, consumed: c.consumed === true })), limit, offset }); }
       if (path === '/v1/policy/history' && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'auditor', 'policy_admin']); return send(200, { items: fabric.store.list(p.tenant_id, 'policy-history', 100, 0), staged: fabric.store.get(p.tenant_id, 'policy', 'staged') ?? null }); }
       if ((m = /^\/v1\/action-capsules\/([A-Za-z0-9-]+)\/acquire-evidence$/.exec(path)) && req.method === 'POST') { const input = await body(req); fields(input, ['issuer', 'kind', 'claims']); return send(201, await fabric.acquireEvidence(p, m[1], input)); }
       if (path === '/v1/connectors/status' && req.method === 'GET') return send(200, fabric.connectorStatus(p));
@@ -125,7 +134,7 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       if ((m = /^\/v1\/audit\/proofs\/(\d+)$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'auditor']); return send(200, fabric.auditProof(p, Number(m[1]))); }
       if (path === '/v1/audit/consistency' && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'auditor']); const first = integer(Number(url.searchParams.get('first') ?? 0), 'first', 1, 1e12); return send(200, fabric.auditConsistency(p, first)); }
       if (path === '/v1/audit/entries' && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'auditor']); const cursor = integer(Number(url.searchParams.get('cursor') ?? 0), 'cursor', 0, 1e12), limit = integer(Number(url.searchParams.get('limit') ?? 1000), 'limit', 1, 5000); return send(200, fabric.store.auditPage(p.tenant_id, { after: cursor, limit })); }
-      if (path === '/v1/audit/verify-proof' && req.method === 'POST') { const i = await body(req); fields(i, ['proof']); return send(200, { valid: fabric.verifyAuditProof(p.tenant_id, i.proof) }); }
+      if (path === '/v1/audit/verify-proof' && req.method === 'POST') { fabric.authorize(p, ['operator', 'security', 'auditor']); const i = await body(req); fields(i, ['proof']); const hashes = fabric.store.auditHashes(p.tenant_id); return send(200, { valid: fabric.verifyAuditProof(p.tenant_id, i.proof, { root: merkleRoot(hashes), size: hashes.length }) }); }
       if (path === '/v1/ceremonies' && req.method === 'GET') { fabric.authorize(p, ['security', 'custodian', 'policy_admin']); return send(200, { items: fabric.store.list(p.tenant_id, 'ceremony', 100, 0).map(c => ({ ceremony_id: c.ceremony_id, status: c.status, purpose: c.purpose })) }); }
       if (path === '/v1/ceremonies' && req.method === 'POST') return send(201, fabric.createCeremony(p, await body(req)));
       if ((m = /^\/v1\/ceremonies\/([A-Za-z0-9_.:-]+)\/(acknowledge|split|reconstruct)$/.exec(path)) && req.method === 'POST') {
@@ -137,6 +146,7 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       if (path === '/v1/keys' && req.method === 'GET') { fabric.authorize(p, ['security', 'policy_admin']); return send(200, { keys: fabric.vault.list().map(({ wrapped, ...k }) => k), firmware: fabric.vault.firmware }); }
       if (path === '/v1/keys/rotate-prepare' && req.method === 'POST') { const input = await body(req); fields(input, ['key_class'], ['suite']); return send(201, fabric.prepareRotation(p, input.key_class, input.suite)); }
       if (path === '/v1/config-drift/reassert' && req.method === 'POST') return send(200, fabric.reassertConfig(p));
+      if (path === '/v1/config-drift' && req.method === 'GET') return send(200, fabric.configDriftStatus(p));
       if ((m = /^\/v1\/keys\/([A-Za-z0-9_.:-]+)\/attest$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['security', 'auditor']); return send(200, fabric.vault.attest(m[1])); }
       if (path === '/v1/secure-perception/sessions' && req.method === 'POST') { const input = await body(req); fields(input, ['attestation']); return send(201, fabric.perceptionSession(p, input.attestation)); }
       if (path === '/v1/secure-perception/release' && req.method === 'POST') { const input = await body(req); fields(input, ['session_id', 'fields', 'purpose'], ['capsule_id', 'evidence_ref']); const { session_id, ...release } = input; return send(200, fabric.perceptionRelease(p, session_id, release)); }

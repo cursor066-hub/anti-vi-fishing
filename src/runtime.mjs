@@ -8,6 +8,9 @@ import { requireThat } from './errors.mjs';
 export class RuntimeGate {
   constructor(fabric) { this.f = fabric; }
   issue(principal, input) {
+    // Role binding at issue (runtime-audit F-11): capabilities exist only
+    // for the workload plane — custodian/auditor identities cannot mint them.
+    this.f.authorize(principal, ['operator', 'workload']);
     fields(input, ['device_id', 'resource', 'destination', 'action', 'purpose', 'columns', 'row_ids', 'classification', 'jurisdiction', 'max_cost', 'ttl_ms'], ['transforms']);
     identifier(input.device_id); identifier(input.resource); text(input.destination, 'destination'); oneOf(input.action, ['data.read', 'service.connect'], 'runtime action');
     for (const k of ['purpose', 'classification', 'jurisdiction']) text(input[k], k);
@@ -20,8 +23,19 @@ export class RuntimeGate {
       const grants = this.f.grantsFor(t, principal.subject_id, now);
       requireThat(identity.device_id === input.device_id && grants.resources.includes(input.resource) && grants.actions.includes(input.action), 'INV-403-SCOPE', 'Capability scope denied', 403);
       requireThat(r.destinations.includes(input.destination) && grants.destinations.includes(input.destination) && r.purposes.includes(input.purpose) && r.classifications.includes(input.classification) && r.jurisdictions.includes(input.jurisdiction), 'INV-403-SCOPE', 'Capability context denied', 403);
-      requireThat(input.columns.every(c => grants.columns.includes(c) && !r.forbidden_columns.includes(c)) && input.row_ids.every(id => grants.row_ids.includes(id)), 'INV-403-SCOPE', 'Dataset selection denied', 403);
-      if (input.action === 'data.read') requireThat(input.columns.length && input.row_ids.length, 'INV-400-SCHEMA', 'Data capabilities require explicit rows and columns');
+      requireThat(input.columns.every(c => grants.columns.includes(c) && !r.forbidden_columns.includes(c) && r.allowed_columns.includes(c)) && input.row_ids.every(id => grants.row_ids.includes(id)), 'INV-403-SCOPE', 'Dataset selection denied', 403);
+      if (input.action === 'data.read') {
+        requireThat(input.columns.length && input.row_ids.length, 'INV-400-SCHEMA', 'Data capabilities require explicit rows and columns');
+        // Catalog ceilings (policy-audit F7): only policy-declared datasets.
+        requireThat(r.datasets.includes(input.resource), 'INV-403-SCOPE', 'Dataset is not policy-declared', 403);
+      }
+      // Transformation policy (runtime-audit F-8): declared ops only, and
+      // the row key itself can never be transformed — that would silently
+      // defeat the reconstruction ledger.
+      for (const [col, tr] of Object.entries(input.transforms ?? {})) {
+        requireThat(r.allowed_transforms.includes(tr.op), 'INV-403-SCOPE', `Transform ${tr.op} is not policy-declared`, 403);
+        requireThat(col !== 'id', 'INV-403-SCOPE', 'The row key column cannot be transformed', 403);
+      }
       if (input.action === 'service.connect') {
         requireThat(r.services.includes(input.resource) && input.destination === input.resource && !input.columns.length && !input.row_ids.length, 'INV-403-SCOPE', 'Network service scope denied', 403);
         // NET-001/002: workstation-class peers are never reachable through a
@@ -45,16 +59,32 @@ export class RuntimeGate {
       const r0 = policy.runtime;
       oneOf(input.protocol, r0.network?.allowed_protocols ?? ['https'], 'protocol');
       oneOf(input.port, r0.network?.allowed_ports ?? [443], 'port');
+      // Role binding at consume too — a leaked envelope cannot be spent by
+      // an identity outside the workload plane (runtime-audit F-11).
+      this.f.authorize(principal, ['operator', 'workload']);
       const cap = verifySigned(input.capability, this.f.executionPublic(t), 'capability');
       requireThat(cap.tenant_id === t && cap.subject_id === principal.subject_id && cap.gate_id === this.f.config.gate_id, 'INV-403-SCOPE', 'Capability scope denied', 403);
       this.f.assertHealthy(t, principal.subject_id, input.device_id, now);
       requireThat(cap.expires_at > now && cap.issued_at <= now && !this.f.revoked(t, 'capability', cap.capability_id) && !this.f.revoked(t, 'key', input.capability.protected.key_id), 'INV-401-CAPABILITY', 'Capability is expired or revoked', 401);
+      // JIT/static grant validity is re-evaluated AT CONSUMPTION — a grant
+      // revoked since issuance cannot ride a signed envelope past policy
+      // (runtime-audit F-4).
+      const live = this.f.grantsFor(t, cap.subject_id, now);
+      requireThat(live.resources.includes(cap.resource) && live.actions.includes(cap.action) && live.destinations.includes(cap.destination) && cap.columns.every(c => live.columns.includes(c)) && cap.row_ids.every(id => live.row_ids.includes(id)), 'INV-403-SCOPE', 'Underlying grant is revoked, expired, or narrowed', 403);
       // RUN-005 / fail-mode matrix: a capability minted under a superseded
       // policy is honoured only for classes configured cached-allow, and only
       // inside max_stale_ms; everything else fails closed.
+      let constrained = false;
       if (cap.policy_digest !== digest(policy)) {
         const mode = policy.fail_modes?.[cap.action] ?? policy.fail_modes?.default ?? 'closed';
-        requireThat(mode === 'cached-allow' && now - cap.issued_at <= policy.max_stale_ms, 'INV-503-GATE', `Policy changed; fail mode for ${cap.action} is ${mode}`, 503);
+        if (mode === 'constrained') {
+          // 'Constrained' (RUN-005): stale access is read-only at half the
+          // capability budget — never writes, never full cost.
+          requireThat(cap.action === 'data.read' && now - cap.issued_at <= policy.max_stale_ms, 'INV-503-GATE', `Policy changed; fail mode for ${cap.action} is constrained`, 503);
+          constrained = true;
+        } else {
+          requireThat(mode === 'cached-allow' && now - cap.issued_at <= policy.max_stale_ms, 'INV-503-GATE', `Policy changed; fail mode for ${cap.action} is ${mode}`, 503);
+        }
       }
       requireThat(this.f.store.get(t, 'capability', cap.capability_id), 'INV-401-CAPABILITY', 'Unknown capability', 401);
       for (const key of ['device_id', 'resource', 'destination', 'action', 'purpose']) requireThat(input[key] === cap[key], 'INV-403-SCOPE', 'Capability binding mismatch', 403);
@@ -64,7 +94,7 @@ export class RuntimeGate {
       requireThat(!exists, 'INV-409-REPLAY', 'Runtime request already consumed', 409);
       const r = cap.runtime_policy, cost = cap.action === 'data.read' ? input.row_ids.length * input.columns.length * r.sensitivity_weights[cap.classification] : 1;
       const used = this.f.store.db.prepare('SELECT coalesce(sum(cost),0) AS n FROM usage WHERE tenant=? AND capability=?').get(t, cap.capability_id).n;
-      requireThat(used + cost <= cap.max_cost, 'INV-429-BUDGET', 'Capability volume exhausted', 429);
+      requireThat(used + cost <= (constrained ? Math.floor(cap.max_cost / 2) : cap.max_cost), 'INV-429-BUDGET', 'Capability volume exhausted', 429);
       // No caller-provided byte counts: charge observed requested information units.
       for (const window of r.windows) {
         const total = this.f.store.db.prepare('SELECT coalesce(sum(cost),0) AS n FROM usage WHERE tenant=? AND subject=? AND resource=? AND at>?').get(t, cap.subject_id, cap.resource, now - window.duration_ms).n;

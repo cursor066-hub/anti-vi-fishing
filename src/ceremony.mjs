@@ -37,10 +37,16 @@ export function signAcknowledgement(ceremony, custodian, custodianKey, now) {
 
 // Custodians commit to their shares before distribution: commitment is
 // digest(x||y) so reconstruction can later prove which shares were used.
-export function commitShares(ceremony, shares, getCustodianKey, now) {
+// Share indices must be exactly {1..n} and distinct, and each commitment is
+// bound to its custodian by index (custodian at sorted position x−1), never
+// by caller-supplied array position (crypto-audit M-6).
+export function commitShares(ceremony, shares, now) {
   requireThat(ceremony.status === 'planned' || ceremony.status === 'committed', 'INV-409-STATE', 'Ceremony already completed', 409);
-  requireThat(shares.length === ceremony.custodians.length, 'INV-400-SCHEMA', 'Share count must equal custodian count');
-  ceremony.share_commitments = shares.map((s, i) => ({ custodian: ceremony.custodians[i], share_index: s.x, commitment: digest({ x: s.x, y: Buffer.from(s.y).toString('base64url') }) }));
+  const n = ceremony.custodians.length;
+  requireThat(shares.length === n, 'INV-400-SCHEMA', 'Share count must equal custodian count');
+  const indices = shares.map(s => s.x).sort((a, b) => a - b);
+  requireThat(indices.every((x, i) => Number.isSafeInteger(x) && x === i + 1), 'INV-400-SCHEMA', 'Share indices must be exactly 1..n and distinct');
+  ceremony.share_commitments = shares.map(s => ({ custodian: ceremony.custodians[s.x - 1], share_index: s.x, commitment: digest({ x: s.x, y: Buffer.from(s.y).toString('base64url') }) }));
   // KEY-009 out-of-band notice: each custodian gets an independently
   // addressed notification record at share-commit time; the delay window
   // below gives them time to object before any reconstruction is legal.

@@ -71,7 +71,10 @@ export function parseStrict(text) {
       for (const [word, val] of [['true', true], ['false', false], ['null', null]]) {
         if (text.slice(i, i + word.length) === word) { i += word.length; return val; }
       }
-      const m = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/.exec(text.slice(i));
+      // Integer lexemes only — exponent/fraction spellings that would silently
+      // normalize to another number (1e3→1000, 1.0000000000000001→1) are
+      // rejected; the wire must already carry the canonical spelling.
+      const m = /^-?(?:0|[1-9][0-9]*)/.exec(text.slice(i));
       if (m) { i += m[0].length; return Number(m[0]); }
     }
     throw invalid('Invalid JSON');

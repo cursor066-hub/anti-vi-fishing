@@ -4,7 +4,7 @@ import { mkdirSync, chmodSync } from 'node:fs';
 import { digest, clone } from './canonical.mjs';
 import { encrypt, decrypt } from './crypto.mjs';
 import { buildPlan, verifyPlan, executePlan } from './datagate.mjs';
-import { requireThat } from './errors.mjs';
+import { requireThat, InvariantError } from './errors.mjs';
 
 // Controlled target simulator. It NEVER talks to a real bank, ERP, OS, or
 // cloud. Resources and dataset rows live in real tables with per-tenant AES-256-GCM
@@ -13,7 +13,7 @@ import { requireThat } from './errors.mjs';
 export class SimulatedTarget {
   constructor(path, tenantKeys) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 }); this.db = new DatabaseSync(path); chmodSync(path, 0o600); this.keys = tenantKeys;
-    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
+    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; PRAGMA secure_delete=ON;
       CREATE TABLE IF NOT EXISTS resources(tenant TEXT, id TEXT, version INTEGER, value TEXT, PRIMARY KEY(tenant,id));
       CREATE TABLE IF NOT EXISTS transactions(tenant TEXT,id TEXT,value TEXT,PRIMARY KEY(tenant,id));
       CREATE TABLE IF NOT EXISTS dataset_rows(tenant TEXT, dataset TEXT, row_id TEXT, data TEXT, PRIMARY KEY(tenant,dataset,row_id));
@@ -100,6 +100,10 @@ export class SimulatedTarget {
     const tenant = capsule.tenant_id, id = capsule.action.target_resource;
     const prior = this.outcome(tenant, transactionId); if (prior) return prior;
     if (fault === 'before-dispatch') throw new Error('Simulated transport timeout before dispatch');
+    // 'state-conflict' simulates a DETERMINISTIC refusal raised inside the
+    // target transaction (e.g. a predicate the reservation check could not
+    // see) — the outcome must record FAILED, never UNCERTAIN.
+    if (fault === 'state-conflict') throw new InvariantError('INV-409-STATE', 'Simulated deterministic target refusal', 409);
     this.db.exec('BEGIN IMMEDIATE');
     let outcome;
     try {
@@ -139,7 +143,17 @@ export class SimulatedTarget {
       outcome = { target_transaction_id: transactionId, capsule_digest: digest(capsule), authorised_requested_digest: digest(requested), observed_state_digest: digest(next), observed_state: next, output, status: 'VERIFIED', execution_time: now, simulation: true };
       this.db.prepare('INSERT INTO transactions VALUES(?,?,?)').run(tenant, transactionId, encrypt(outcome, this.key(tenant), `${tenant}/transaction/${transactionId}`));
       this.db.exec('COMMIT');
-    } catch (e) { this.db.exec('ROLLBACK'); throw e; }
+    } catch (e) {
+      this.db.exec('ROLLBACK');
+      // Two processes racing the same transactionId hit the PK constraint
+      // inside the write — the loser must get the stored outcome, not an
+      // error (store-audit LOW: idempotent replay under contention).
+      if (/PRIMARYKEY|UNIQUE/.test(String(e.code ?? e.message))) {
+        const prior = this.outcome(tenant, transactionId);
+        if (prior) return prior;
+      }
+      throw e;
+    }
     if (fault === 'after-commit') throw new Error('Simulated response lost after durable commit');
     if (fault === 'malformed-response') return { status: 'VERIFIED' };
     if (fault === 'altered-response') return { ...outcome, authorised_requested_digest: '0'.repeat(64) };

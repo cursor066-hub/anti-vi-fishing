@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import { fixture, runtimeInput, runtimeRequest } from '../tests/helpers.mjs';
-import { writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { writeFileSync, mkdirSync, rmSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { bootstrap } from '../src/bootstrap.mjs';
 import { digest, clone } from '../src/canonical.mjs';
 import { verifyAudit } from '../src/store.mjs';
 import { spawnSync } from 'node:child_process';
@@ -37,18 +39,25 @@ try {
   const tampered = clone(bundle); tampered.entries.splice(3, 1);
   scenario('Audit deletion detection', 'INV-409-AUDIT', () => verifyAudit(tampered, bundle.public_keys));
   mkdirSync('reports', { recursive: true });
-  writeFileSync('reports/simulation-results.json', JSON.stringify({ simulated: true, real_systems_tested: false, scenarios, allowed_low_and_slow_queries: allowed, all_pass: scenarios.every(s => s.pass) }, null, 2) + '\n');
   writeFileSync('reports/sample-audit.json', JSON.stringify(bundle, null, 2) + '\n');
   writeFileSync('reports/sample-pinned-trust.json', JSON.stringify(bundle.public_keys, null, 2) + '\n');
   writeFileSync('reports/sample-checkpoint.json', JSON.stringify(bundle.checkpoint.payload, null, 2) + '\n');
   const values = [null, true, false, 0, 9007199254740991, -9007199254740991, { b: 2, a: 1 }, { greeting: 'Žižek 🛡 café', nested: [1, { zero: 0 }] }, { '123hash': { x: '\n\t' } }, { alpha: ['é', '🎛'], omega: {} }];
   writeFileSync('examples/canonical-vectors.json', JSON.stringify(values.map((value, i) => ({ name: `vector-${i + 1}`, value, sha256: digest(value) })), null, 2) + '\n');
-  // Backup/restore drill: real CLI backup of the live deployment directory,
-  // then offline manifest verification with the restore-check tool.
-  const drill = spawnSync(process.execPath, ['scripts/backup.mjs', '--dir', h.directory, '--out', join(h.directory, 'drill-backup')], { encoding: 'utf8' });
-  scenario('Engine-native online backup completes', 0, () => drill.status);
-  const check = spawnSync(process.execPath, ['scripts/restore-check.mjs', '--dir', join(h.directory, 'drill-backup')], { encoding: 'utf8' });
-  scenario('Offline restore verification of drill backup', 0, () => check.status);
+  // Backup/restore drill: a REAL deployment directory (bootstrap writes
+  // master.key + keystore.json + config.json + dbs) is backed up with the
+  // CLI, then verified offline with the restore-check tool.
+  const drillDir = mkdtempSync(join(tmpdir(), 'if-drill-'));
+  try {
+    bootstrap(join(drillDir, 'deploy'), ['acme'], Date.now());
+    const drill = spawnSync(process.execPath, ['scripts/backup.mjs', '--dir', join(drillDir, 'deploy'), '--out', join(drillDir, 'backup')], { encoding: 'utf8' });
+    scenario('Engine-native online backup completes', 0, () => drill.status);
+    const check = spawnSync(process.execPath, ['scripts/restore-check.mjs', '--dir', join(drillDir, 'backup')], { encoding: 'utf8' });
+    scenario('Offline restore verification of drill backup', 0, () => check.status);
+  } finally { rmSync(drillDir, { recursive: true, force: true }); }
+  // Results are written AFTER every scenario — the report must cover the
+  // drill scenarios too, not a prefix of the run.
+  writeFileSync('reports/simulation-results.json', JSON.stringify({ simulated: true, real_systems_tested: false, scenarios, allowed_low_and_slow_queries: allowed, all_pass: scenarios.every(s => s.pass) }, null, 2) + '\n');
   console.log(JSON.stringify({ simulations: scenarios.length, passed: scenarios.filter(s => s.pass).length, audit_entries: bundle.entries.length, real_systems_tested: false }));
   if (scenarios.some(s => !s.pass)) process.exitCode = 1;
 } finally { h.close(); rmSync(h.directory, { recursive: true }); }

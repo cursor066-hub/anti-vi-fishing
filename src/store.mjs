@@ -18,6 +18,11 @@ export class Store {
     // secure_delete=ON zeroes freed pages, so a deleted DEK row leaves no
     // recoverable copy in the database file itself.
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA secure_delete=ON;');
+    // Crash window (crypto-audit M-4): if the process died between a shred's
+    // committed DELETE and the post-commit TRUNCATE, wrapped-DEK copies stay
+    // reachable in the WAL. Truncating at open bounds that residue to uptime.
+    // (Physical slack on disk sectors is out of scope — see SECURITY.md.)
+    this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
     const version = this.db.prepare('PRAGMA user_version').get().user_version;
     requireThat(version <= 1, 'INV-503-STORAGE', 'Database schema is newer than this application', 503);
     this.db.exec(`
@@ -27,6 +32,11 @@ export class Store {
         hash TEXT NOT NULL, envelope TEXT NOT NULL, PRIMARY KEY(tenant,seq));
       CREATE TRIGGER IF NOT EXISTS no_audit_update BEFORE UPDATE ON audit BEGIN SELECT RAISE(ABORT, 'append-only audit'); END;
       CREATE TRIGGER IF NOT EXISTS no_audit_delete BEFORE DELETE ON audit BEGIN SELECT RAISE(ABORT, 'append-only audit'); END;
+      -- Chain-squat guard (store-audit MED-1): an insert must extend the head
+      -- exactly; earlier positions and gaps are rejected by the engine.
+      CREATE TRIGGER IF NOT EXISTS audit_seq_guard BEFORE INSERT ON audit
+        WHEN NEW.seq <> (SELECT COALESCE(MAX(seq),0)+1 FROM audit WHERE tenant=NEW.tenant)
+        BEGIN SELECT RAISE(ABORT, 'audit sequence must extend the head'); END;
       CREATE TABLE IF NOT EXISTS nonces (tenant TEXT NOT NULL, nonce TEXT NOT NULL, capsule TEXT NOT NULL, PRIMARY KEY(tenant,nonce));
       CREATE TABLE IF NOT EXISTS idempotency (tenant TEXT NOT NULL, scope TEXT NOT NULL, key TEXT NOT NULL,
         hash TEXT NOT NULL, result TEXT NOT NULL, PRIMARY KEY(tenant,scope,key));
@@ -84,10 +94,16 @@ export class Store {
     return this.db.prepare('SELECT id,value FROM records WHERE tenant=? AND kind=? ORDER BY created DESC,id LIMIT ? OFFSET ?').all(tenant, kind, limit, offset)
       .map(row => decrypt(row.value, this.dek(tenant, kind, row.id) ?? this.key(tenant), `${tenant}/${kind}/${row.id}`));
   }
+  // Id-only enumeration: sweeps must not let one undecryptable row wedge the
+  // whole pass (store-audit MED-3) — callers isolate failures per id.
+  ids(tenant, kind, limit = 500, offset = 0) {
+    return this.db.prepare('SELECT id FROM records WHERE tenant=? AND kind=? ORDER BY created DESC,id LIMIT ? OFFSET ?').all(tenant, kind, limit, offset).map(r => r.id);
+  }
   remove(tenant, kind, id) {
     this._shredded = true;
     this.db.prepare('DELETE FROM deks WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id);
     this.db.prepare('DELETE FROM records WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id);
+    if (!this.db.isTransaction) this.checkpoint(); // non-tx paths must not leave the DEK in the WAL (store-audit LOW)
   }
   shred(tenant, kind, id) {
     // Crypto-shredding: destroy the record DEK (secure_delete zeroes its
@@ -97,12 +113,17 @@ export class Store {
     const changes = this.db.prepare('DELETE FROM deks WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id).changes
       + this.db.prepare('DELETE FROM records WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id).changes;
     this._shredded = this._shredded || changes > 0;
+    if (!this.db.isTransaction) this.checkpoint();
     return changes > 0;
   }
-  // Call outside any transaction: truncates the WAL after shredding so no
-  // reachable copy of a destroyed wrapped DEK remains in the log.
+  // Called post-commit (tx) and at open: truncates the WAL after shredding so
+  // no reachable copy of a destroyed wrapped DEK remains in the log. The
+  // checkpoint result is honoured — a busy/partial truncate keeps the shred
+  // flag armed so the next commit retries (store-audit HIGH-1).
   checkpoint() {
-    if (this._shredded) { this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); this._shredded = false; }
+    if (!this._shredded) return;
+    const r = this.db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+    if (!r.busy && r.checkpointed >= r.log) this._shredded = false;
   }
   clock(now) {
     requireThat(Number.isSafeInteger(now) && now > 0, 'INV-503-TIME', 'Clock unavailable', 503);
@@ -122,13 +143,35 @@ export class Store {
   }
   auditPage(tenant, { after = 0, limit = 1000 } = {}) {
     const rows = this.db.prepare('SELECT seq,hash,envelope FROM audit WHERE tenant=? AND seq>? ORDER BY seq LIMIT ?').all(tenant, after, limit);
-    return { entries: rows.map(r => ({ sequence: r.seq, hash: r.hash, envelope: JSON.parse(r.envelope) })), next_cursor: rows.length === limit ? rows.at(-1).seq : null };
+    // Serving the log is a security surface: re-verify each row's stored
+    // hash against its signed payload and check chain continuity back to the
+    // row preceding the page — an injected or rewritten row cannot pass
+    // (store-audit MED-5).
+    const anchor = after ? this.db.prepare('SELECT hash FROM audit WHERE tenant=? AND seq=?').get(tenant, after) : null;
+    requireThat(after === 0 || anchor, 'INV-409-AUDIT-TAMPER', 'Audit cursor does not resolve to a stored row', 409);
+    let previous = anchor?.hash ?? '0'.repeat(64);
+    const entries = rows.map(r => {
+      const envelope = JSON.parse(r.envelope);
+      requireThat(digest(envelope.payload) === r.hash && envelope.payload.sequence === r.seq && envelope.payload.previous === previous, 'INV-409-AUDIT-TAMPER', 'Audit row failed integrity verification', 409);
+      previous = r.hash;
+      return { sequence: r.seq, hash: r.hash, envelope };
+    });
+    return { entries, next_cursor: rows.length === limit ? rows.at(-1).seq : null };
   }
-  auditExport(tenant) {
+  auditExport(tenant, now = null) {
     const rows = this.db.prepare('SELECT hash,envelope FROM audit WHERE tenant=? ORDER BY seq').all(tenant).map(r => ({ hash: r.hash, envelope: JSON.parse(r.envelope) }));
     const signer = this.auditSigners[tenant], public_keys = signer.keys ? signer.keys() : { [signer.key_id]: { public_key: signer.public_key } };
     const checkpoint = signer.sign({ tenant_id: tenant, size: rows.length, head: rows.at(-1)?.hash ?? '0'.repeat(64), tree_head: merkleRoot(rows.map(r => r.hash)) }, 'checkpoint');
-    return { format: 'IF-AUDIT-1', public_keys, checkpoint, entries: rows };
+    // Witness checkpoints (store-audit HIGH-2): the previous export's signed
+    // checkpoint travels in the bundle, so amputating or rewriting a suffix of
+    // the log after an export breaks verification instead of self-certifying.
+    // A file-level attacker can still delete the stored witness too — a truly
+    // pinned anchor requires an external copy of a checkpoint, which
+    // verifyAudit(priorCheckpoint) accepts; this closes the common case.
+    const priorRow = this.db.prepare("SELECT id,value FROM records WHERE tenant=? AND kind='audit-checkpoint' ORDER BY created DESC LIMIT 1").get(tenant);
+    const prior_checkpoint = priorRow ? decrypt(priorRow.value, this.dek(tenant, 'audit-checkpoint', priorRow.id) ?? this.key(tenant), `${tenant}/audit-checkpoint/${priorRow.id}`) : null;
+    if (now !== null) this.put(tenant, 'audit-checkpoint', `cp-${checkpoint.payload.size}`, checkpoint, now);
+    return { format: 'IF-AUDIT-1', public_keys, prior_checkpoint, checkpoint, entries: rows };
   }
   idempotent(tenant, scope, key, requestHash, fn) {
     requireThat(typeof key === 'string' && /^[A-Za-z0-9_-]{8,128}$/.test(key), 'INV-400-SCHEMA', 'An 8–128 character Idempotency-Key is required');
@@ -145,13 +188,19 @@ export class Store {
 export function verifyAudit(bundle, pinnedKeys, priorCheckpoint = null) {
   requireThat(bundle.format === 'IF-AUDIT-1' && Array.isArray(bundle.entries), 'INV-400-AUDIT', 'Unsupported audit format');
   const checkpoint = verifySigned(bundle.checkpoint, pinnedKeys, 'checkpoint');
+  // A stored witness from a previous export acts as the pin when the caller
+  // supplies none — verify it under the same keys before trusting it.
+  const prior = priorCheckpoint ?? (bundle.prior_checkpoint ? verifySigned(bundle.prior_checkpoint, pinnedKeys, 'checkpoint') : null);
   let previous = '0'.repeat(64), sequence = 0, time = 0;
   for (const item of bundle.entries) {
     const entry = verifySigned(item.envelope, pinnedKeys, 'audit');
     requireThat(entry.tenant_id === checkpoint.tenant_id && entry.sequence === ++sequence && entry.previous === previous && entry.time >= time && digest(entry) === item.hash, 'INV-409-AUDIT', 'Audit continuity failure', 409);
     previous = item.hash; time = entry.time;
-    if (priorCheckpoint && sequence === priorCheckpoint.size) requireThat(previous === priorCheckpoint.head, 'INV-409-FORK', 'Witness checkpoint disagrees', 409);
+    if (prior && sequence === prior.size) requireThat(previous === prior.head, 'INV-409-FORK', 'Witness checkpoint disagrees', 409);
   }
-  requireThat(checkpoint.size === sequence && checkpoint.head === previous && (!priorCheckpoint || (checkpoint.tenant_id === priorCheckpoint.tenant_id && sequence >= priorCheckpoint.size)), 'INV-409-AUDIT', 'Missing or inconsistent checkpoint', 409);
+  requireThat(checkpoint.size === sequence && checkpoint.head === previous && (!prior || (checkpoint.tenant_id === prior.tenant_id && sequence >= prior.size)), 'INV-409-AUDIT', 'Missing or inconsistent checkpoint', 409);
+  // The signed tree_head anchors the entry set under the Merkle root —
+  // recompute it rather than trusting the attested value (crypto-audit I-1).
+  requireThat(checkpoint.tree_head === merkleRoot(bundle.entries.map(i => i.hash)), 'INV-409-AUDIT', 'Checkpoint tree head does not match the audit entries', 409);
   return { valid: true, entries: sequence, head: previous, tenant_id: checkpoint.tenant_id };
 }

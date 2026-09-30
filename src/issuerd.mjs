@@ -93,7 +93,23 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
     const send = (status, data) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(canonical(data)); };
     try {
       const url = new URL(req.url, `http://${host}:${port}`);
+      const loopback = ['127.0.0.1', '::1', 'localhost'].includes(host);
+      // A configured issue_token authenticates every issuer surface; without
+      // one the daemon only answers on loopback (engineering profile).
+      const checkAuth = issuer => {
+        const token = issuer?.issue_token ?? null;
+        if (token) {
+          const auth = req.headers.authorization ?? '';
+          requireThat(auth === `Bearer ${token}`, 'INV-401-AUTH', 'Issuer endpoint requires the issuer bearer token', 401);
+        } else {
+          requireThat(loopback, 'INV-503-CONNECTOR', 'Issuer endpoint requires a configured issue_token off loopback', 503);
+        }
+      };
+      const anyToken = () => Object.values(issuers).find(i => i.issue_token)?.issue_token ?? null;
       if (req.method === 'GET' && url.pathname === '/v1/issuers') {
+        const token = anyToken();
+        if (token) { const auth = req.headers.authorization ?? ''; requireThat(auth === `Bearer ${token}`, 'INV-401-AUTH', 'Issuer listing requires a bearer token', 401); }
+        else requireThat(loopback, 'INV-503-CONNECTOR', 'Issuer listing requires configured issue_tokens off loopback', 503);
         const out = {};
         for (const [k, i] of Object.entries(issuers)) if (!i.ambiguous && i.issuer) out[k] = { issuer: i.issuer, tenant: i.tenant ?? null, channel: i.channel, version: i.version, kinds: Object.keys(i.kinds), key_id: i.key.key_id, public_key: i.key.public_key };
         return send(200, out);
@@ -105,6 +121,7 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
       if (req.method === 'GET' && (m = /^\/v1\/issuers\/([A-Za-z0-9_-]+)\/manifest$/.exec(url.pathname))) {
         const issuer = resolveIssuer(m[1], url.searchParams.get('tenant'));
         requireThat(issuer, 'INV-404-NOT-FOUND', 'Issuer not found', 404);
+        checkAuth(issuer);
         return send(200, signed({
           connector_id: `issuer:${issuer.issuer}`, version: issuer.version, domain: issuer.channel,
           actions: Object.keys(issuer.kinds), permissions: ['issue signed evidence within declared kinds'],
@@ -122,15 +139,7 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
         requireThat(/^[a-f0-9]{64}$/.test(request.capsule_digest), 'INV-400-SCHEMA', 'capsule_digest must be a digest');
         const issuer = resolveIssuer(m[1], request.tenant_id);
         requireThat(issuer, 'INV-404-NOT-FOUND', 'Issuer not found', 404);
-        // Issuance is authenticated: an `issue_token` in the spec is required
-        // off-loopback; on loopback an unset token only serves the dev profile.
-        const token = issuer.issue_token ?? null, loopback = ['127.0.0.1', '::1', 'localhost'].includes(host);
-        if (token) {
-          const auth = req.headers.authorization ?? '';
-          requireThat(auth === `Bearer ${token}`, 'INV-401-AUTH', 'Issuance requires the issuer bearer token', 401);
-        } else {
-          requireThat(loopback, 'INV-503-CONNECTOR', 'Issuance endpoint requires a configured issue_token off loopback', 503);
-        }
+        checkAuth(issuer);
         try {
           const envelope = answerQuery(issuer, request, clock());
           issuanceLog({ issuer: issuer.issuer, request_digest: digest(request), evidence_id: envelope.payload.evidence_id, claim: envelope.payload.claim });
@@ -143,6 +152,7 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
       if (req.method === 'GET' && (m = /^\/v1\/issuers\/([A-Za-z0-9_-]+)\/health$/.exec(url.pathname))) {
         const issuer = resolveIssuer(m[1], url.searchParams.get('tenant'));
         requireThat(issuer, 'INV-404-NOT-FOUND', 'Issuer not found', 404);
+        checkAuth(issuer);
         return send(200, { status: 'ok', issuer: issuer.issuer, version: issuer.version, records: Object.keys(issuer.records).length, uptime_ms: process.uptime() * 1000 | 0 });
       }
       throw new InvariantError('INV-404-NOT-FOUND', 'Resource not found', 404);

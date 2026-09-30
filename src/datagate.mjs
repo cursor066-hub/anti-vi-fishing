@@ -62,7 +62,9 @@ export function applyTransforms(rows, transforms, ctx) {
 // without altering source data.
 export function watermark(rows, ctx) {
   const key = Buffer.from(ctx.tenantWatermarkKey, 'base64url');
-  const marks = rows.map(row => ({ row_id: row.id ?? null, tag: createHmac('sha256', key).update(canonical({ dataset: ctx.dataset, subject: ctx.subject, request_id: ctx.requestId, row })).digest('hex').slice(0, 24) }));
+  // Row identity falls back to a full-row digest so exports lacking an 'id'
+  // column are still attributable per record (runtime-audit F-3).
+  const marks = rows.map(row => ({ row_id: row.id ?? `digest:${digest(row).slice(0, 24)}`, tag: createHmac('sha256', key).update(canonical({ dataset: ctx.dataset, subject: ctx.subject, request_id: ctx.requestId, row })).digest('hex').slice(0, 24) }));
   return { rows, watermarks: marks };
 }
 

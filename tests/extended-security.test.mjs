@@ -4,8 +4,13 @@ import { fixture, hasCode, runtimeInput, runtimeRequest } from './helpers.mjs';
 import { clone, digest } from '../src/canonical.mjs';
 import { signed } from '../src/crypto.mjs';
 import { spawnSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
+
+// Locate the independent WebCrypto verifier runtime: PATH, the conventional
+// ~/.bun install, or an explicit BUN_BIN override.
+const bun = process.env.BUN_BIN ?? (existsSync(join(homedir(), '.bun/bin/bun')) ? join(homedir(), '.bun/bin/bun') : 'bun');
 
 test('COM-002: all independently signed certificate binding mutations still fail registered-authority equality', t => {
   const h = fixture(t), { certificate } = h.ready();
@@ -37,7 +42,7 @@ test('AIG-006: source prose cannot override typed policy fields', t => {
 test('KEY-010 NFR-MNT-002: independent verifiers reject signed-log tampering and duplicate JSON keys', t => {
   const h = fixture(t); h.proposed(); const bundle = h.f.exportAudit(h.p('auditor'), 'Verifier adversarial test'), file = join(h.directory, 'audit.json'), trust = join(h.directory, 'trust.json');
   writeFileSync(file, JSON.stringify(bundle)); writeFileSync(trust, JSON.stringify(bundle.public_keys));
-  for (const [command, script] of [[process.execPath, 'scripts/verify-export.mjs'], ['bun', 'scripts/verify-export-webcrypto.mjs']]) {
+  for (const [command, script] of [[process.execPath, 'scripts/verify-export.mjs'], [bun, 'scripts/verify-export-webcrypto.mjs']]) {
     const valid = spawnSync(command, [script, file, trust], { encoding: 'utf8' }); assert.equal(valid.status, 0, valid.stderr);
     const changed = clone(bundle); changed.entries[0].envelope.payload.metadata.policy_digest = 'f'.repeat(64); writeFileSync(file, JSON.stringify(changed));
     assert.equal(spawnSync(command, [script, file, trust]).status, 1);

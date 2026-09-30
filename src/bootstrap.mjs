@@ -131,8 +131,9 @@ export function createConfiguration(tenantNames = ['acme'], now = Date.now(), { 
     const component = createDevComponent(`secure-view-${tenant}`);
     componentSecrets[tenant][component.name] = component;
     const components = { [component.name]: { signing_key_id: component.signing.key_id, signing: { key_id: component.signing.key_id, public_key: component.signing.public_key }, ecdh_public: component.ecdh_public, firmware_version: component.firmware_version, assurance: 'dev-attested-software', production: false } };
-    const execution = vault ? vault.generate('any', {}) : generateKey();
-    const audit = vault ? vault.generate('any', {}) : generateKey();
+    // Purpose-bound at creation — no 'any' wildcard signing authority.
+    const execution = vault ? vault.generate(['action-certificate', 'capability'], {}) : generateKey();
+    const audit = vault ? vault.generate(['audit', 'outcome', 'revocation', 'coverage', 'checkpoint', 'backup-manifest'], {}) : generateKey();
     config.tenants[tenant] = { encryption_key: randomBytes(32).toString('base64url'), watermark_key: randomBytes(32).toString('base64url'), keys: { execution: { key_id: execution.key_id, public_key: execution.public_key, custody: vault ? 'vault' : 'embedded', ...(vault ? {} : { private_key: execution.private_key }) }, audit: { key_id: audit.key_id, public_key: audit.public_key, custody: vault ? 'vault' : 'embedded', ...(vault ? {} : { private_key: audit.private_key }) } }, identities, issuers, components, auth, genesis_policy: policy, genesis_signatures: Object.values(custodianKeys[tenant]).slice(0, 3).map(k => signed(policy, k, 'root-policy')) };
   }
   return { config, credentials, custodianKeys, issuerKeys, componentSecrets, vault };

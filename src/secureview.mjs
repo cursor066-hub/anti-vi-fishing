@@ -20,8 +20,8 @@ export function createComponent(name, firmwareVersion) {
   return {
     name, firmware_version: firmwareVersion, signing,
     ecdh_public: ecdh.publicKey.export({ type: 'spki', format: 'pem' }), _ecdh_private: ecdh.privateKey,
-    attest(nonce) {
-      return signed({ component: name, firmware_version: firmwareVersion, nonce, generated_inside: false, assurance: ASSURANCE.dev, production: false, capabilities: ['field-release', 'evidence-viewer'] }, signing, 'component-attestation');
+    attest(nonce, expires_at) {
+      return signed({ component: name, firmware_version: firmwareVersion, nonce, expires_at, generated_inside: false, assurance: ASSURANCE.dev, production: false, capabilities: ['field-release', 'evidence-viewer'] }, signing, 'component-attestation');
     }
   };
 }
@@ -32,7 +32,13 @@ export function openSession(component, attestation, policy, now) {
   const sp = policy.secure_perception ?? {};
   requireThat(sp.enabled !== false, 'INV-451-POLICY', 'Secure Perception is disabled by policy', 451);
   requireThat((sp.allowed_firmware ?? []).includes(attestation.payload.firmware_version), 'INV-401-ATTESTATION', 'Component firmware not trusted by policy', 401);
-  requireThat(sp.nonce ? attestation.payload.nonce === sp.nonce : /^[a-f0-9]{64}$/.test(attestation.payload.nonce ?? ''), 'INV-400-SCHEMA', 'Bad attestation nonce');
+  // Attestations must be fresh and nonce-bound: expiry is mandatory, the
+  // nonce must be a 64-hex value, and when policy pins a nonce it must match
+  // exactly. Fabric additionally rejects nonce reuse across sessions
+  // (replay), so a captured attestation cannot mint a second session.
+  requireThat(/^[a-f0-9]{64}$/.test(attestation.payload.nonce ?? ''), 'INV-400-SCHEMA', 'Bad attestation nonce');
+  requireThat(Number.isSafeInteger(attestation.payload.expires_at) && attestation.payload.expires_at > now, 'INV-401-ATTESTATION', 'Attestation expired or missing expiry', 401);
+  requireThat(!sp.nonce || attestation.payload.nonce === sp.nonce, 'INV-400-SCHEMA', 'Attestation nonce does not match policy');
   const server = generateKeyPairSync('ec', { namedCurve: 'P-256' });
   const session = {
     session_id: 'sv-' + digest({ component: attestation.payload.component, now, salt: randomBytes(8).toString('hex') }).slice(0, 24),
@@ -55,9 +61,8 @@ export function releaseFields(session, release, policy, now) {
   // release: {capsule_id?, evidence_ref?, fields: {name:value}, purpose}
   fields(release, ['fields', 'purpose'], ['capsule_id', 'evidence_ref']);
   requireThat(session.expires_at > now, 'INV-409-STATE', 'Perception session expired', 409);
-  const sp = policy.secure_perception ?? {};
-  const allowed = sp.release_fields ?? Object.keys(release.fields);
-  for (const f of Object.keys(release.fields)) requireThat(allowed.includes(f), 'INV-451-POLICY', `Field ${f} not releasable under perception policy`, 451);
+  const allowed = releaseAllowlist(policy);
+  if (allowed) for (const f of Object.keys(release.fields)) requireThat(allowed.includes(f), 'INV-451-POLICY', `Field ${f} not releasable under perception policy`, 451);
   const binding = { session_id: session.session_id, purpose: release.purpose, fields: Object.keys(release.fields).sort(), capsule_id: release.capsule_id ?? null, evidence_ref: release.evidence_ref ?? null, expires_at: session.expires_at, issued_at: now };
   const plaintext = canonical({ ...binding, data: release.fields });
   const key = deriveKey(session); const nonce = randomBytes(12);
@@ -79,13 +84,35 @@ export function openRelease(component, release) {
   const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(release.nonce, 'base64url'));
   decipher.setAuthTag(Buffer.from(release.tag, 'base64url'));
   const plaintext = Buffer.concat([decipher.update(Buffer.from(release.ciphertext, 'base64url')), decipher.final()]).toString('utf8');
-  return parseStrict(plaintext);
+  const inner = parseStrict(plaintext);
+  // The outer binding is unauthenticated metadata — the authenticated copy
+  // inside the ciphertext must agree with it, or the release was tampered.
+  const { data, ...innerBinding } = inner;
+  requireThat(canonical(innerBinding) === canonical(release.binding), 'INV-401-TAMPER', 'Release binding does not match the authenticated plaintext', 401);
+  return inner;
+}
+
+// Field allowlist: an array restricts names; the explicit wildcard '*' marks a
+// deliberate unrestricted engineering profile. An unset field FAILS CLOSED — a
+// policy author cannot accidentally release whatever a caller names.
+export function releaseAllowlist(policy) {
+  const rf = (policy.secure_perception ?? {}).release_fields;
+  if (rf === '*') return null; // explicit unrestricted
+  requireThat(Array.isArray(rf), 'INV-451-POLICY', 'secure_perception.release_fields must be an explicit allowlist (or "*" in the engineering profile)', 451);
+  return rf;
 }
 
 export function workspaceFallback(release, policy, now) {
   // Controlled-workspace fallback: plaintext fields over the normal channel,
   // honestly labelled — only when policy explicitly permits it.
   const sp = policy.secure_perception ?? {};
+  // The fallback is gated by the whole perception clause, not just the
+  // fallback key: perception disabled or hardware-required means NO
+  // plaintext path exists at all (runtime-audit F-5).
+  requireThat(sp.enabled !== false, 'INV-451-POLICY', 'Secure Perception is disabled by policy', 451);
+  requireThat(sp.required_assurance !== 'hardware-enclave', 'INV-451-POLICY', 'Hardware-enclave assurance permits no software fallback', 451);
   requireThat(sp.fallback === 'controlled-workspace', 'INV-451-POLICY', 'Policy denies unencrypted release fallback', 451);
+  const allowed = releaseAllowlist(policy);
+  if (allowed) for (const f of Object.keys(release.fields)) requireThat(allowed.includes(f), 'INV-451-POLICY', `Field ${f} not releasable under perception policy`, 451);
   return { mode: 'controlled-workspace', assurance: ASSURANCE.workspace, production: false, binding: { purpose: release.purpose, fields: Object.keys(release.fields).sort(), reason: release.reason ?? null, issued_at: now }, data: release.fields };
 }
