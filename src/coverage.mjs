@@ -42,11 +42,14 @@ export function effectiveStatus(path, now) {
 // reflect what was known then, not what is known now.
 export function coverageAt(events, now) {
   const paths = {};
-  for (const e of events.filter(e => e.at <= now)) {
+  // Replay must run oldest→newest: the store lists newest-first, and letting
+  // the oldest event be applied last falsifies every historical answer (w7-seam F2).
+  const ordered = [...events].sort((a, b) => (a.at - b.at) || (String(a.id) < String(b.id) ? -1 : 1));
+  for (const e of ordered.filter(e => e.at <= now)) {
     const s = paths[e.path_id] ?? {};
     if (e.type === 'declared') Object.assign(s, e.path);
     if (e.type === 'transitioned') { s.status = e.to; s.evidence_at = e.evidence_at; }
-    if (e.type === 'technical_validation') s.technical_validation = e.validation;
+    if (e.type === 'technical_validation') { s.technical_validation = e.validation; s.evidence_at = e.at; }
     paths[e.path_id] = s;
   }
   // The replayed state is evaluated at the query instant: an evidence window

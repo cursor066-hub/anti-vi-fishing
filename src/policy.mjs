@@ -277,7 +277,9 @@ export function evaluatePolicy({ capsule, policy, evidence = [], approvals = [],
     if (e.revoked) { issues.push(reason('EVIDENCE_REVOKED', 'An attached source was revoked.')); continue; }
     if (e.payload.expires_at <= now || now - e.payload.acquired_at > rule.max_evidence_age_ms) { issues.push(reason('EVIDENCE_EXPIRED', 'Refresh stale evidence.')); continue; }
     if (e.payload.claim === 'conflict') { issues.push(reason('EVIDENCE_CONFLICT', 'Resolve conflicting authoritative evidence.')); continue; }
-    if (e.payload.confidence < 90 || e.payload.advisory || e.issuer.channel === 'communication') { unverifiable.add(e.payload.evidence_id); continue; }
+    // A drifted issuer's pre-attached envelopes lose authority too — drift
+    // quarantine is not only an attach-time edge (w7-seam F3).
+    if (e.drifted || e.payload.confidence < 90 || e.payload.advisory || e.issuer.channel === 'communication') { unverifiable.add(e.payload.evidence_id); continue; }
     if (e.payload.dependencies.some(id => !byId.has(id) || byId.get(id).revoked || byId.get(id).payload.expires_at <= now)) { issues.push(reason('EVIDENCE_DEPENDENCY', 'A dependency is unavailable or invalid.')); continue; }
     usable.push(e);
   }

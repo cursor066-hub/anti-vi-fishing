@@ -14,8 +14,8 @@
       "bytes": 4386
     },
     "src/ceremony.mjs": {
-      "lines": 121,
-      "bytes": 8817
+      "lines": 124,
+      "bytes": 9054
     },
     "src/cli.mjs": {
       "lines": 51,
@@ -26,8 +26,8 @@
       "bytes": 8078
     },
     "src/coverage.mjs": {
-      "lines": 63,
-      "bytes": 4385
+      "lines": 66,
+      "bytes": 4681
     },
     "src/crypto.mjs": {
       "lines": 77,
@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 1456,
-      "bytes": 122936
+      "lines": 1529,
+      "bytes": 129115
     },
     "src/issuerd.mjs": {
       "lines": 295,
@@ -58,8 +58,8 @@
       "bytes": 6684
     },
     "src/policy.mjs": {
-      "lines": 328,
-      "bytes": 34636
+      "lines": 330,
+      "bytes": 34791
     },
     "src/runtime.mjs": {
       "lines": 152,
@@ -248,8 +248,12 @@
     "tests/w7-fix.test.mjs": {
       "lines": 221,
       "bytes": 14600
+    },
+    "tests/w7-seam.test.mjs": {
+      "lines": 175,
+      "bytes": 12964
     }
   },
-  "total_files": 62,
-  "total_lines": 9995
+  "total_files": 63,
+  "total_lines": 10251
 }

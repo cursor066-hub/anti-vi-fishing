@@ -38,7 +38,10 @@ export function createCeremony({ ceremony_id, tenant_id, purpose, threshold, cus
 export function acknowledge(ceremony, custodian, ackEnvelope, now) {
   requireThat(ceremony.custodians.includes(custodian), 'INV-403-ROLE', 'Not a ceremony custodian', 403);
   requireThat(ceremony.status !== 'completed', 'INV-409-STATE', 'Ceremony already completed', 409);
-  requireThat(!ceremony.acknowledgements.some(a => a.payload.custodian === custodian), 'INV-409-STATE', 'Custodian already acknowledged', 409);
+  // A custodian who attested a superseded artifact digest must be able to
+  // re-acknowledge the rebound artifact — only same-digest consent is a
+  // duplicate (w7-seam F4).
+  requireThat(!ceremony.acknowledgements.some(a => a.payload.custodian === custodian && a.payload.artifact_digest === ceremony.artifact_digest), 'INV-409-STATE', 'Custodian already acknowledged', 409);
   ceremony.acknowledgements.push(ackEnvelope);
   return ackEnvelope;
 }

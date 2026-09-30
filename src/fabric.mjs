@@ -136,6 +136,9 @@ export class Fabric {
     const bySubject = new Map(Object.values(this.identities(t)).map(i => [i.subject_id, i]));
     const domains = new Set(), live = new Set();
     for (const a of ceremony.acknowledgements) {
+      // Only consent to the CURRENT artifact counts: an acknowledgement
+      // bound to a superseded digest attested different terms (w7-seam F4).
+      if (a.payload.artifact_digest !== ceremony.artifact_digest) continue;
       const identity = bySubject.get(a.payload.custodian);
       if (!identity || identity.revoked) continue;
       live.add(a.payload.custodian);
@@ -405,7 +408,7 @@ export class Fabric {
       // fields (tokens, expiry, endpoint) rotate by design and must never
       // invalidate a minted certificate or pending approval (w5 F-3).
       const semantic = iss ? { public_key: iss.public_key, name: iss.name, issuer_id: iss.issuer_id, failure_domain: iss.failure_domain, channel: iss.channel, kinds: iss.kinds, version: iss.version } : iss;
-      return { ...e, revoked: this.revoked(t, 'evidence', id) || this.revoked(t, 'issuer', e.envelope.protected.key_id) || this.revoked(t, 'key', e.envelope.protected.key_id), issuer: semantic };
+      return { ...e, revoked: this.revoked(t, 'evidence', id) || this.revoked(t, 'issuer', e.envelope.protected.key_id) || this.revoked(t, 'key', e.envelope.protected.key_id), drifted: !!this.store.get(t, 'issuer-drift', e.envelope.protected.key_id), issuer: semantic };
     });
     const graph_digest = digest(items.map(e => ({ envelope_digest: digest(e.envelope), issuer_digest: digest(e.issuer), revoked: e.revoked })).sort((a, b) => a.envelope_digest < b.envelope_digest ? -1 : 1));
     return { items, digest: graph_digest };
@@ -597,6 +600,10 @@ export class Fabric {
       for (const childId of children) {
         const child = this.store.get(t, 'capsule', childId);
         if (!child) { problems.push({ code: 'CHILD_MISSING', child: childId }); continue; }
+        // A composite may only wrap leaf actions — a nested composite would
+        // dispatch as a generic mutation and leave live, re-spendable
+        // grandchild certificates behind (w7-seam F6).
+        if (child.capsule.action.type === 'action.composite') { problems.push({ code: 'CHILD_TYPE', child: childId }); continue; }
         if (child.capsule.actor.subject_id !== record.capsule.actor.subject_id) problems.push({ code: 'CHILD_ACTOR', child: childId });
         if (child.status !== 'CERTIFIED') problems.push({ code: 'CHILD_STATE', child: childId, status: child.status });
         const cert = child.certificate_id ? this.store.get(t, 'certificate', child.certificate_id) : null;
@@ -667,6 +674,28 @@ export class Fabric {
       if (dryRun || this.policy(t).mode === 'shadow') {
         this.store.audit(t, 'EXECUTION_DRY_RUN', p.subject_id, cert.certificate_id, { no_mutation: true }, now);
         return { dry_run: true, no_mutation: true, certificate_id: cert.certificate_id };
+      }
+      // Rotation pre-flight runs at RESERVATION — before the certificate is
+      // consumed and before the target journal writes. A certified rotation
+      // that fails here keeps its cert live and the capsule CERTIFIED instead
+      // of wedging EXECUTING after a committed journal (w7-seam F5).
+      if (record.capsule.action.type === 'key.rotate') {
+        const req = record.capsule.requested_state, entry = this.vault.keys.get(req.new_key_id);
+        requireThat(entry && entry.pending && !entry.revoked && !this.revoked(t, 'key', req.new_key_id), 'INV-409-STATE', 'Rotation target is not a pending vault key', 409);
+        requireThat(this.ownsVaultKey(t, req.new_key_id), 'INV-403-SCOPE', 'Vault key is not owned by this tenant', 403);
+        requireThat(req.new_public_key === entry.public_key, 'INV-400-SCHEMA', 'new_public_key does not match the pending vault key');
+        const offered = Array.isArray(entry.purpose) ? entry.purpose : [entry.purpose];
+        requireThat(entry.purpose === 'any' || (this._keyPurposes[req.key_class] ?? []).every(x => offered.includes(x)), 'INV-403-SCOPE', 'Rotation key purpose does not cover the target class', 403);
+        if (req.ceremony_id) {
+          const ceremony = this.store.get(t, 'ceremony', req.ceremony_id);
+          requireThat(ceremony && ceremony.status !== 'completed' && ceremony.valid_until > now && ceremony.purpose === 'key.rotate' && !ceremony.rotation_consumed, 'INV-409-STATE', 'key.rotate requires a live, unconsumed key.rotate ceremony', 409);
+          requireThat(ceremony.rotation?.key_class === req.key_class && ceremony.rotation?.new_key_id === req.new_key_id, 'INV-403-SCOPE', 'Ceremony is not bound to this rotation', 403);
+          requireThat(this.custodianQuorum(t, ceremony).live >= ceremony.threshold, 'INV-409-STATE', 'Ceremony lacks a live custodian quorum across failure domains', 409);
+          // The ceremony is spent atomically with the reservation — a second
+          // certified rotation cannot race past it into the journal.
+          ceremony.rotation_consumed = record.capsule.capsule_id;
+          this.store.put(t, 'ceremony', ceremony.ceremony_id, ceremony, now);
+        }
       }
       stored.consumed = true; stored.status = 'EXECUTING'; stored.transaction_id = cert.certificate_id;
       record.status = 'EXECUTING'; this.store.put(t, 'certificate', cert.certificate_id, stored, now); this.store.put(t, 'capsule', cert.capsule_id, record, now);
@@ -764,13 +793,24 @@ export class Fabric {
       requireThat(!existing || !['VERIFIED', 'FAILED', 'COMPENSATED'].includes(existing.payload.status), 'INV-409-STATE', 'A terminal execution outcome cannot be overwritten', 409);
       for (const done of executed) {
         const childRecord = this.store.must(t, 'capsule', done.child.capsule.capsule_id), childStored = this.store.must(t, 'certificate', done.child.certificate_id);
-        childRecord.status = status === 'VERIFIED' ? 'VERIFIED' : 'COMPENSATED';
+        childRecord.status = status === 'VERIFIED' ? 'VERIFIED' : status === 'UNCERTAIN' ? 'UNCERTAIN' : 'COMPENSATED';
         childStored.consumed = true; childStored.status = childRecord.status;
         this.store.put(t, 'capsule', childRecord.capsule.capsule_id, childRecord, now);
         this.store.put(t, 'certificate', childStored.envelope.payload.certificate_id, childStored, now);
         // VERIFIED children take their declared post-effects — a composite
         // may not attest an effect that never happened (runtime-audit F-2).
-        if (status === 'VERIFIED') this._applyVerifiedEffects(p, t, childRecord, childStored.envelope.payload, done.raw, now, post);
+        // An effect that refuses (budget denial, lapsed rotation
+        // precondition) demotes the parent outcome too — the ledger must not
+        // attest VERIFIED over a child that failed (w7-seam F6).
+        if (status === 'VERIFIED') {
+          const childExtras = this._applyVerifiedEffects(p, t, childRecord, childStored.envelope.payload, done.raw, now, post);
+          if (childExtras?.gate_denied || childExtras?.rotation_precondition_lapsed) {
+            status = 'FAILED'; reason = childExtras?.gate_denied?.code ?? 'ROTATION_PRECONDITION_LAPSED';
+            childRecord.status = 'FAILED'; childStored.status = 'FAILED';
+            this.store.put(t, 'capsule', childRecord.capsule.capsule_id, childRecord, now);
+            this.store.put(t, 'certificate', childStored.envelope.payload.certificate_id, childStored, now);
+          }
+        }
       }
       const payload = { certificate_id: cert.certificate_id, capsule_digest: cert.capsule_digest, target_transaction_id: cert.certificate_id, observed_state_digest: digest({ children: executed.map(e => e.child.capsule.capsule_id), compensations }), status, reason, execution_time: execNow, reconciliation_evidence: digest(executed.map(e => e.raw)), simulation: true, output: null, composite: true, children: executed.map(e => e.child.capsule.capsule_id), wedged_children: wedged.length ? wedged : null, compensations, supersedes: existing ? digest(existing) : null };
       const envelope = this.signAudit(t, payload, 'outcome');
@@ -859,27 +899,24 @@ export class Fabric {
       // inside the transaction so the vault can never diverge from a
       // committed VERIFIED outcome (w6 F2/F4).
       const entry = this.vault.keys.get(req.new_key_id);
-      // Ledger revocation counts too — a pending key revoked between mint
-      // and activation must never be activated (w6-fix F4).
-      requireThat(entry && entry.pending && !entry.revoked && !this.revoked(t, 'key', req.new_key_id), 'INV-409-STATE', 'Rotation target is not a pending vault key', 409);
-      // The vault is process-global: a certified rotation may only activate a
-      // pending key minted for THIS tenant (w6-tenancy F3).
-      requireThat(this.ownsVaultKey(t, req.new_key_id), 'INV-403-SCOPE', 'Vault key is not owned by this tenant', 403);
-      requireThat(req.new_public_key === entry.public_key, 'INV-400-SCHEMA', 'new_public_key does not match the pending vault key');
+      // Activation preconditions are re-verified here — a lapse between
+      // reservation and outcome (e.g. a revocation landing mid-flight) must
+      // become an honest FAILED outcome, not a thrown wedge after the target
+      // journal already committed (w7-seam F5).
       const needed = this._keyPurposes[req.key_class] ?? [];
-      const offered = Array.isArray(entry.purpose) ? entry.purpose : [entry.purpose];
-      requireThat(entry.purpose === 'any' || needed.every(x => offered.includes(x)), 'INV-403-SCOPE', 'Rotation key purpose does not cover the target class', 403);
+      const offered = entry && (Array.isArray(entry.purpose) ? entry.purpose : [entry.purpose]);
+      let preconditions = entry && entry.pending && !entry.revoked && !this.revoked(t, 'key', req.new_key_id)
+        && this.ownsVaultKey(t, req.new_key_id)
+        && req.new_public_key === entry.public_key
+        && (entry.purpose === 'any' || needed.every(x => offered.includes(x)));
       if (req.ceremony_id) {
         const ceremony = this.store.get(t, 'ceremony', req.ceremony_id);
-        // A cited ceremony must be a live key.rotate ceremony bound to THIS
-        // class and key, consented by a live cross-domain custodian quorum,
-        // and consumable exactly once (w6 F3/F7/F9).
-        requireThat(ceremony && ceremony.status !== 'completed' && ceremony.valid_until > now && ceremony.purpose === 'key.rotate' && !ceremony.rotation_consumed, 'INV-409-STATE', 'key.rotate requires a live, unconsumed key.rotate ceremony', 409);
-        requireThat(ceremony.rotation?.key_class === req.key_class && ceremony.rotation?.new_key_id === req.new_key_id, 'INV-403-SCOPE', 'Ceremony is not bound to this rotation', 403);
-        requireThat(this.custodianQuorum(t, ceremony).live >= ceremony.threshold, 'INV-409-STATE', 'Ceremony lacks a live custodian quorum across failure domains', 409);
-        ceremony.rotation_consumed = r.capsule.capsule_id;
-        this.store.put(t, 'ceremony', ceremony.ceremony_id, ceremony, now);
+        // The ceremony was consumed atomically at reservation — this may
+        // only be consumed by THIS capsule and stay bound to this rotation.
+        preconditions = preconditions && ceremony && ceremony.purpose === 'key.rotate' && ceremony.rotation_consumed === r.capsule.capsule_id
+          && ceremony.rotation?.key_class === req.key_class && ceremony.rotation?.new_key_id === req.new_key_id;
       }
+      if (!preconditions) return { rotation_precondition_lapsed: true };
       const klass = req.key_class, previous = this.keys(t)[klass];
       // Activation, repointing and retiring run inside the transaction; only
       // the vault file write stays post-commit. The rotation's own outcome is
@@ -889,9 +926,12 @@ export class Fabric {
       this.vault.activate(req.new_key_id);
       this.tenant(t).keys[klass] = { key_id: req.new_key_id, public_key: req.new_public_key };
       this.tenant(t).keys.retired = [...(this.tenant(t).keys.retired ?? []), { key_class: klass, key_id: previous.key_id, public_key: previous.public_key, retired_at: now }];
-      this.store.put(t, 'key-rotation', req.new_key_id, { new_key_id: req.new_key_id, new_public_key: req.new_public_key, key_class: klass, previous_key_id: previous.key_id, previous_public_key: previous.public_key, revoke_old: true, rotated_at: now, capsule_id: r.capsule.capsule_id }, now);
-      this.store.audit(t, 'KEY_ROTATED', p.subject_id, req.new_key_id, { key_class: klass, previous_key_id: previous.key_id, ceremony_id: req.ceremony_id }, now);
-      post.push(() => { this.vault.revoke(previous.key_id); this.persistVault(); });
+      // revoke_old is the operator's declared choice — the ledger attests
+      // what was actually done, never a hardcoded true (w7-seam F7).
+      const revokeOld = req.revoke_old !== false;
+      this.store.put(t, 'key-rotation', req.new_key_id, { new_key_id: req.new_key_id, new_public_key: req.new_public_key, key_class: klass, previous_key_id: previous.key_id, previous_public_key: previous.public_key, revoke_old: revokeOld, rotated_at: now, capsule_id: r.capsule.capsule_id }, now);
+      this.store.audit(t, 'KEY_ROTATED', p.subject_id, req.new_key_id, { key_class: klass, previous_key_id: previous.key_id, ceremony_id: req.ceremony_id, revoke_old: revokeOld }, now);
+      post.push(() => { if (revokeOld) this.vault.revoke(previous.key_id); this.persistVault(); });
       // Only an audit-class rotation changes the outcome signer; other
       // classes leave the audit key untouched.
       if (klass === 'audit') return { outcome_key_id: previous.key_id };
@@ -935,6 +975,7 @@ export class Fabric {
       if (status === 'VERIFIED' && !valid) { status = 'UNCERTAIN'; reason = 'TARGET_RESPONSE_INVALID'; }
       const extras = valid ? this._applyVerifiedEffects(p, t, r, cert, raw, now, post) : null;
       if (extras?.gate_denied) { status = 'FAILED'; reason = extras.gate_denied.code; }
+      if (extras?.rotation_precondition_lapsed) { status = 'FAILED'; reason = 'ROTATION_PRECONDITION_LAPSED'; }
       // H1: revocation cannot abort a committed reservation — it stops NEW
       // reservations. A revocation that landed between reservation and this
       // finish is recorded and flagged rather than hidden, so the ledger
@@ -957,6 +998,23 @@ export class Fabric {
     if (current && ['VERIFIED', 'FAILED'].includes(current.payload.status)) return current;
     requireThat(stored.consumed, 'INV-409-STATE', 'Execution has not started', 409);
     const cert = stored.envelope.payload, raw = this.target.outcome(t, id);
+    const record = this.store.must(t, 'capsule', cert.capsule_id);
+    if (record.capsule.action.type === 'action.composite') {
+      // A wedged composite reconciles per-child, never as a fake standalone:
+      // children whose target journal wrote are recorded executed, the rest
+      // are wedged — and they keep their own live certificates so a fresh
+      // composite can still spend them (w7-seam F9).
+      const executed = [], wedged = [];
+      for (const childId of record.capsule.requested_state.children ?? []) {
+        const childCapsule = this.store.get(t, 'capsule', childId);
+        const childCert = childCapsule?.certificate_id ? this.store.get(t, 'certificate', childCapsule.certificate_id) : null;
+        const childRaw = childCert ? this.target.outcome(t, childCert.envelope.payload.certificate_id) : null;
+        if (childCapsule && childCert && childRaw) executed.push({ child: { ...childCapsule, certificate_id: childCert.envelope.payload.certificate_id }, raw: childRaw, prior: childCapsule.capsule.current_state.material_fields });
+        else wedged.push(childId);
+      }
+      if (raw) return this.finishComposite(p, cert, record.capsule, executed, 'VERIFIED', 'RECONCILED_FROM_TARGET_JOURNAL', [], this.clock(), wedged);
+      return this.finishComposite(p, cert, record.capsule, executed, 'UNCERTAIN', 'COMPOSITE_INTERRUPTED_CHILDREN_ATTEMPTED', [], this.clock(), wedged);
+    }
     return this.finish(p, cert, raw, raw ? 'VERIFIED' : 'UNCERTAIN', raw ? 'RECONCILED_FROM_TARGET_JOURNAL' : 'NO_TARGET_CONFIRMATION_DO_NOT_RETRY');
   }
   cancel(p, id) {
@@ -1082,10 +1140,25 @@ export class Fabric {
       const issuer = this.tenant(p.tenant_id).issuers[envelope.protected.key_id];
       requireThat(issuer.kinds.includes(payload.kind), 'INV-403-SCOPE', 'Issuer is not trusted for this evidence kind', 403);
       requireThat(!payload.issuer_version || payload.issuer_version === issuer.version, 'INV-403-SCOPE', 'Issuer version drifted from registration', 403);
+      // The same trust floor evaluatePolicy applies to action evidence:
+      // advisory opinions, sub-threshold confidence and communication-channel
+      // issuers can never promote a coverage path — and the kind is pinned so
+      // a generic attestation cannot masquerade as a bypass test (w7-seam F1).
+      requireThat(payload.kind === 'technical_validation', 'INV-403-SCOPE', 'Validation evidence must be technical_validation kind', 403);
+      requireThat(!payload.advisory && (payload.confidence ?? 0) >= 90, 'INV-400-SCHEMA', 'Advisory or low-confidence evidence cannot validate a path', 400);
+      requireThat(issuer.channel !== 'communication', 'INV-403-SCOPE', 'Communication-channel issuers cannot technically validate a path', 403);
       requireThat(payload.claim === 'supports', 'INV-400-SCHEMA', 'Technical validation requires a supporting outcome', 400);
       requireThat(payload.capsule_digest === digest(path), 'INV-400-SCHEMA', 'Validation evidence must bind this path');
+      // The cited evidence_id must resolve on the ledger — a validation can
+      // never reference an envelope that exists nowhere (w7-seam F1).
+      const priorEvidence = this.store.get(p.tenant_id, 'evidence', payload.evidence_id);
+      if (priorEvidence) requireThat(digest(priorEvidence.envelope) === digest(envelope), 'INV-409-CONFLICT', 'Evidence id already bound to different material', 409);
+      else this.store.insert(p.tenant_id, 'evidence', payload.evidence_id, { payload: clone(payload), envelope: clone(envelope), legal_hold: false }, now);
       path.technical_validation = { evidence_id: payload.evidence_id, issuer: envelope.protected.key_id, at: now, outcome: payload.claim };
-      if (path.status === 'UNKNOWN') { path.evidence_at = now; this.coverageTransition(p.tenant_id, path, 'MONITORED', 'technical-validation', now); }
+      // Re-validation refreshes the evidence window — the documented way to
+      // keep a path MONITORED must actually extend coverage (w7-seam F10).
+      path.evidence_at = now;
+      if (path.status === 'UNKNOWN') this.coverageTransition(p.tenant_id, path, 'MONITORED', 'technical-validation', now);
       else this.store.put(p.tenant_id, 'coverage', path.path_id, path, now);
       this.store.insert(p.tenant_id, 'coverage-event', `${path.path_id}:${now}:validation`, { type: 'technical_validation', path_id: path.path_id, validation: path.technical_validation, at: now }, now);
       this.store.remove(p.tenant_id, 'coverage-task', `declared-unknown:${path.path_id}`);
@@ -1311,7 +1384,7 @@ export class Fabric {
       // artifact, and the acknowledgements themselves must span distinct
       // failure domains with all custodians still live (w6 F5/F7/F9).
       requireThat(this.custodianQuorum(t, ceremony).live >= ceremony.threshold, 'INV-409-STATE', 'Ceremony lacks a live custodian quorum across failure domains', 409);
-      const acked = new Set(ceremony.acknowledgements.map(a => a.payload.custodian));
+      const acked = new Set(ceremony.acknowledgements.filter(a => a.payload.artifact_digest === ceremony.artifact_digest).map(a => a.payload.custodian));
       const shares = encodedShares.map(s => decodeShare(s));
       for (const s of shares) requireThat(acked.has(ceremony.custodians[s.x - 1]), 'INV-403-ROLE', 'Share presented for a custodian who did not acknowledge', 403);
       const { secret, artifact } = reconstructSecret(ceremony, shares, now);

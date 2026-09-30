@@ -2057,10 +2057,52 @@ ok 343 - w7-backup F5: a torn cross-database snapshot fails the referential chec
   duration_ms: 0
   type: 'test'
   ...
-1..343
-# tests 343
+# Subtest: w7-seam F1: technicalValidation enforces advisory/confidence/channel/kind bars and persists evidence
+ok 344 - w7-seam F1: technicalValidation enforces advisory/confidence/channel/kind bars and persists evidence
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w7-seam F2/F10: history replays in order and revalidation extends coverage
+ok 345 - w7-seam F2/F10: history replays in order and revalidation extends coverage
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w7-seam F3: drifted issuer evidence stops counting at evaluation
+ok 346 - w7-seam F3: drifted issuer evidence stops counting at evaluation
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w7-seam F4: stale-digest acks excluded from quorum; custodian re-acks
+ok 347 - w7-seam F4: stale-digest acks excluded from quorum; custodian re-acks
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w7-seam F5/F7: ceremony spent at reservation; revoke_old honored
+ok 348 - w7-seam F5/F7: ceremony spent at reservation; revoke_old honored
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w7-seam F6: nested composite child escrows CHILD_TYPE
+ok 349 - w7-seam F6: nested composite child escrows CHILD_TYPE
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w7-seam F9: wedged composite reconciles composite-aware
+ok 350 - w7-seam F9: wedged composite reconciles composite-aware
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+1..350
+# tests 350
 # suites 0
-# pass 343
+# pass 350
 # fail 0
 # cancelled 0
 # skipped 0
