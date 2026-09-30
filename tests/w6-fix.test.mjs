@@ -64,9 +64,15 @@ test('w6-fix F6: denied exports do not burn the reconstruction budget', t => {
     return h.f.execute(h.p(), h.f.certificate(h.p(), r.capsule.capsule_id));
   };
   assert.equal(exportRow('row-1').payload.status, 'VERIFIED');
-  const denied = exportRow('row-2');
-  assert.equal(denied.payload.status, 'FAILED');
-  assert.equal(denied.payload.gate_denied.row_count, 2, 'denial still reports the prospective coverage');
+  // Denial fires at reservation: the certificate is never consumed, no
+  // journal entry or outcome exists and no touch rows land (w10-datagate F3).
+  const r2 = h.proposed('data.export', { dataset: 'dataset-1', columns: ['id'], row_ids: ['row-2'], max_rows: 1, classification: 'internal', jurisdiction: 'EU' }, { action: { type: 'data.export', target_resource: 'dataset-1', purpose: 'Operations' }, destination: 'customer-vault', policy_version: 2 });
+  h.evidence(r2, { kind: 'dataset_authority' }); h.approve(r2, 1);
+  const cert2 = h.f.certificate(h.p(), r2.capsule.capsule_id);
+  assert.throws(() => h.f.execute(h.p(), cert2), hasCode('INV-429-BUDGET'));
+  assert.equal(h.f.store.must('acme', 'certificate', cert2.payload.certificate_id).consumed ?? false, false, 'denied reservation leaves the certificate unspent');
+  assert.equal(h.f.store.get('acme', 'outcome', cert2.payload.certificate_id) ?? null, null, 'no outcome without egress');
+  assert.equal(h.f.target.outcome('acme', cert2.payload.certificate_id) ?? null, null, 'no journal entry without egress');
   const touches = h.f.store.db.prepare("SELECT count(*) AS n FROM data_access WHERE tenant='acme' AND dataset='dataset-1'").get().n;
   assert.equal(touches, 1, 'only the disclosed row is accounted — the denied probe wrote nothing');
 });
@@ -79,9 +85,10 @@ test('w6-fix F4: revoked keys cannot sign; revoked pending keys cannot activate'
   const auditKey = h.f.keys('acme').audit.key_id, execKey = h.f.keys('acme').execution.key_id;
   h.f.revoke(h.p('security'), { kind: 'key', id: execKey, reason: 'compromised' });
   assert.throws(() => h.f.signExecution('acme', { probe: 1 }, 'capability'), hasCode('INV-401-SIGNATURE'));
-  // Revoking the audit key itself is a wedging event by design — the
-  // revocation envelope is signed while the key is still valid, then every
-  // later signature attempt fails until a key.rotate lands.
+  // Revoking the audit key outright now refuses unless a pending successor
+  // covers the audit purposes — rotate first (w10-cert F5).
+  assert.throws(() => h.f.revoke(h.p('security'), { kind: 'key', id: auditKey, reason: 'compromised' }), hasCode('INV-409-STATE'));
+  h.f.prepareRotation(h.p('security'), 'audit');
   h.f.revoke(h.p('security'), { kind: 'key', id: auditKey, reason: 'compromised' });
   assert.throws(() => h.f.signAudit('acme', { probe: 1 }, 'outcome'), hasCode('INV-401-SIGNATURE'));
 });

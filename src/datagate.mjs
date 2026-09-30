@@ -44,7 +44,9 @@ export function executePlan(db, plan, tenant, decode = null) {
 // SHIELD transformations applied to a result set (DAT-005). Each transform is
 // deterministic so an assessor can recompute the transformed output.
 export const TRANSFORMS = {
-  mask: (value, field) => value === null || value === undefined ? null : '\u2022\u2022\u2022\u2022' + String(value).slice(-2),
+  // The last-two reveal would fully disclose any value of two characters
+  // or fewer — short cells suppress to a fixed-length mark (w10-datagate F4).
+  mask: (value, field) => value === null || value === undefined ? null : (String(value).length <= 2 ? '\u2022\u2022\u2022\u2022' : '\u2022\u2022\u2022\u2022' + String(value).slice(-2)),
   tokenise: (value, field, ctx) => 'tok:' + createHmac('sha256', ctx.tenantKey).update(`${ctx.tenant}/${ctx.dataset}/${field}/${canonical(value)}`).digest('hex').slice(0, 24),
   drop: () => null,
   constant: (value, field, ctx, arg) => arg ?? null,
@@ -75,14 +77,17 @@ export function watermark(rows, ctx) {
   const key = Buffer.from(ctx.tenantWatermarkKey, 'base64url');
   // Row identity falls back to a full-row digest so exports lacking an 'id'
   // column are still attributable per record (runtime-audit F-3).
-  const marks = rows.map(row => ({ row_id: row.id ?? `digest:${digest(row).slice(0, 24)}`, tag: createHmac('sha256', key).update(canonical({ dataset: ctx.dataset, subject: ctx.subject, request_id: ctx.requestId, row })).digest('hex').slice(0, 24) }));
+  // The tag binds tenant, dataset, subject, capability and request —
+  // caller-chosen request ids must not make two different disclosures
+  // produce colliding marks (w10-datagate F7).
+  const marks = rows.map(row => ({ row_id: row.id ?? `digest:${digest(row).slice(0, 24)}`, tag: createHmac('sha256', key).update(canonical({ tenant: ctx.tenant, dataset: ctx.dataset, subject: ctx.subject, capability_id: ctx.capabilityId ?? null, request_id: ctx.requestId, row })).digest('hex').slice(0, 24) }));
   return { rows, watermarks: marks };
 }
 
 // DAT-009: cumulative reconstruction control. Counts distinct rows and
 // columns a subject has touched per dataset inside the window; crossing the
 // configured coverage threshold produces a budget denial plus an audit signal.
-export function reconstructionCheck(touchDb, catalogDb, { tenant, subject, dataset, rows, columns, now, policy }) {
+export function reconstructionCheck(touchDb, catalogDb, { tenant, subject, dataset, rows, columns, now, policy, record = true }) {
   // Touch records live on the fabric store's transaction so a rolled-back
   // consume cannot leave phantom access rows (cross-DB atomicity, M2).
   // Counts are computed PROSPECTIVELY before writing: a denied attempt
@@ -97,11 +102,22 @@ export function reconstructionCheck(touchDb, catalogDb, { tenant, subject, datas
   const rowCount = rowSet.size, colCount = colSet.size;
   const totalRows = catalogDb.prepare('SELECT count(*) AS n FROM dataset_rows WHERE tenant=? AND dataset=?').get(tenant, dataset).n;
   const coveragePercent = totalRows ? Math.floor((rowCount * 100) / totalRows) : 0;
+  // Coverage is also bounded dataset-wide: a second identity minted by
+  // jit.grant (or any peer subject) must not let the combined disclosure
+  // of a dataset exceed the same window ceiling (w10-datagate F2).
+  const datasetTouched = new Set(touchDb.prepare('SELECT DISTINCT row_id FROM data_access WHERE tenant=? AND dataset=? AND at>?').all(tenant, dataset, now - window).map(x => x.row_id));
+  for (const r of rows) datasetTouched.add(r);
+  const datasetCoverage = totalRows ? Math.floor((datasetTouched.size * 100) / totalRows) : 0;
   const limits = policy ?? { max_distinct_rows: 100000, max_distinct_columns: 100000, max_coverage_percent: 100 };
-  if (rowCount > limits.max_distinct_rows || colCount > limits.max_distinct_columns || coveragePercent > limits.max_coverage_percent) {
-    return { allowed: false, code: 'INV-429-BUDGET', row_count: rowCount, column_count: colCount, coverage_percent: coveragePercent };
+  const maxDatasetCoverage = limits.max_dataset_coverage_percent ?? limits.max_coverage_percent;
+  if (rowCount > limits.max_distinct_rows || colCount > limits.max_distinct_columns || coveragePercent > limits.max_coverage_percent || datasetCoverage > maxDatasetCoverage) {
+    return { allowed: false, code: 'INV-429-BUDGET', row_count: rowCount, column_count: colCount, coverage_percent: coveragePercent, dataset_coverage_percent: datasetCoverage };
   }
-  const ins = touchDb.prepare('INSERT INTO data_access VALUES(?,?,?,?,?,?)');
-  for (const row of rows) for (const c of columns) ins.run(tenant, subject, dataset, row, c, now);
-  return { allowed: true, row_count: rowCount, column_count: colCount, coverage_percent: coveragePercent };
+  // record=false gives a read-only pre-flight: the export admission check
+  // must not write touch rows before egress actually commits (w10-datagate F3).
+  if (record) {
+    const ins = touchDb.prepare('INSERT INTO data_access VALUES(?,?,?,?,?,?)');
+    for (const row of rows) for (const c of columns) ins.run(tenant, subject, dataset, row, c, now);
+  }
+  return { allowed: true, row_count: rowCount, column_count: colCount, coverage_percent: coveragePercent, dataset_coverage_percent: datasetCoverage };
 }

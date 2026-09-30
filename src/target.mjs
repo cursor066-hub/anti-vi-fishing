@@ -202,7 +202,12 @@ export class SimulatedTarget {
       if (fault === 'before-commit') throw new Error('Simulated target transaction failure');
       if (type === 'secret.use') this._writeSecret(tenant, requested.secret_id, state.version + 1, next);
       else if (type !== 'data.export') { this._deleted = true; this.db.prepare('INSERT INTO resources VALUES(?,?,?,?) ON CONFLICT(tenant,id) DO UPDATE SET version=excluded.version,value=excluded.value').run(tenant, id, state.version + 1, encrypt(next, this.key(tenant), AAD('target', 'resource', tenant, id))); }
-      outcome = { target_transaction_id: transactionId, capsule_digest: digest(capsule), authorised_requested_digest: digest(requested), observed_state_digest: digest(next), observed_state: next, output, status: 'VERIFIED', execution_time: now, simulation: true };
+      // An export's observed_state would persist the WHOLE dataset —
+      // including columns the requester may not see — into the durable
+      // journal for no validation benefit: the digest alone proves the
+      // snapshot. Export entries keep the digest and the authorised output
+      // only (w10-datagate F5).
+      outcome = { target_transaction_id: transactionId, capsule_digest: digest(capsule), authorised_requested_digest: digest(requested), observed_state_digest: digest(next), observed_state: type === 'data.export' ? null : next, output, status: 'VERIFIED', execution_time: now, simulation: true };
       this.db.prepare('INSERT INTO transactions VALUES(?,?,?)').run(tenant, transactionId, encrypt(outcome, this.key(tenant), AAD('target', 'transaction', tenant, transactionId)));
       this.db.exec('COMMIT');
       // Same commit-boundary truncation as tx() — durable on success, armed
@@ -238,6 +243,11 @@ export class SimulatedTarget {
     // cannot lose-update the version counter (concurrency-audit L3).
     return this.tx(() => {
       const state = this.state(tenant, id);
+      // The restore may only overwrite the child's own write: if a later
+      // authorised action already moved the resource past the compensated
+      // version, reverting would silently erase it (w10-cert F6).
+      const expected = capsule.current_state.version + 1;
+      if (state.version !== expected) return { compensated: false, reason: 'STALE_COMPENSATION', note: `Registry moved past the compensated write (version ${state.version}, expected ${expected}); a separately authorised remedy action is required.` };
       this._deleted = true; // restoration supersedes ciphertext (w8-fixverify F3)
       this.db.prepare('UPDATE resources SET version=?, value=? WHERE tenant=? AND id=?').run(state.version + 1, encrypt({ ...priorState, compensated_at: now, compensation_of: digest(capsule) }, this.key(tenant), AAD('target', 'resource', tenant, id)), tenant, id);
       return { compensated: true, restored_version: state.version + 1 };

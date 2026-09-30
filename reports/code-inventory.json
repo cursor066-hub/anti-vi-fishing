@@ -34,16 +34,16 @@
       "bytes": 5165
     },
     "src/datagate.mjs": {
-      "lines": 108,
-      "bytes": 7407
+      "lines": 124,
+      "bytes": 8833
     },
     "src/errors.mjs": {
       "lines": 10,
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 1786,
-      "bytes": 150821
+      "lines": 1853,
+      "bytes": 157139
     },
     "src/issuerd.mjs": {
       "lines": 400,
@@ -58,12 +58,12 @@
       "bytes": 6684
     },
     "src/policy.mjs": {
-      "lines": 349,
-      "bytes": 36262
+      "lines": 354,
+      "bytes": 36873
     },
     "src/runtime.mjs": {
-      "lines": 156,
-      "bytes": 14988
+      "lines": 161,
+      "bytes": 15312
     },
     "src/schema.mjs": {
       "lines": 90,
@@ -86,8 +86,8 @@
       "bytes": 19020
     },
     "src/target.mjs": {
-      "lines": 250,
-      "bytes": 18686
+      "lines": 260,
+      "bytes": 19570
     },
     "web/app.js": {
       "lines": 216,
@@ -222,8 +222,8 @@
       "bytes": 534
     },
     "tests/regression.test.mjs": {
-      "lines": 1024,
-      "bytes": 71006
+      "lines": 1029,
+      "bytes": 71428
     },
     "tests/release-attestation.test.mjs": {
       "lines": 65,
@@ -234,8 +234,12 @@
       "bytes": 10498
     },
     "tests/v2-features.test.mjs": {
-      "lines": 350,
-      "bytes": 23668
+      "lines": 351,
+      "bytes": 23732
+    },
+    "tests/w10-cert-datagate.test.mjs": {
+      "lines": 206,
+      "bytes": 13499
     },
     "tests/w10-fixverify.test.mjs": {
       "lines": 238,
@@ -254,12 +258,12 @@
       "bytes": 5988
     },
     "tests/w6-fix.test.mjs": {
-      "lines": 170,
-      "bytes": 12837
+      "lines": 177,
+      "bytes": 13827
     },
     "tests/w6-tenancy.test.mjs": {
-      "lines": 122,
-      "bytes": 8534
+      "lines": 125,
+      "bytes": 9213
     },
     "tests/w7-dek.test.mjs": {
       "lines": 117,
@@ -310,6 +314,6 @@
       "bytes": 6229
     }
   },
-  "total_files": 77,
-  "total_lines": 12774
+  "total_files": 78,
+  "total_lines": 13099
 }

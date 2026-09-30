@@ -581,7 +581,9 @@ test('CON-008 R2-14: vendor support access is time-bound, approved and revoked b
   assert.throws(() => h.f.runtime.issue(h.p('custodian-2'), runtimeInput({ device_id: 'custodian-2-device' })), hasCode('INV-403-ROLE'));
   // Customer authorises a 60s support grant through the full governed action lifecycle.
   const r = h.proposed('identity.jit.grant', { subject_id: 'custodian-2', resources: ['dataset-1'], actions: ['data.read'], destinations: ['customer-vault'], columns: ['id'], row_ids: ['row-1'], ttl_ms: 60000, reason: 'Vendor support case 441', roles: ['operator'] }, { action: { type: 'identity.jit.grant', target_resource: 'jit-grants', purpose: 'Vendor support' } });
-  h.evidence(r, { kind: 'identity_proof' }); h.evidence(r, { kind: 'identity_proof', issuer: 'registry' }); h.approve(r, 2);
+  // The beneficiary cannot sit in its own approver quorum — custodian-2's
+  // signature never counts for a grant naming custodian-2 (w10-datagate F6).
+  h.evidence(r, { kind: 'identity_proof' }); h.evidence(r, { kind: 'identity_proof', issuer: 'registry' }); h.approve(r, ['custodian-1', 'custodian-3']);
   assert.equal(h.f.execute(h.p(), h.f.certificate(h.p(), r.capsule.capsule_id)).payload.status, 'VERIFIED');
   // Inside the window: operator scope works, and the grant is audited.
   const cap = h.f.runtime.issue(h.p('custodian-2'), runtimeInput({ device_id: 'custodian-2-device' })); assert.ok(cap.protected.key_id);
@@ -1017,7 +1019,10 @@ test('CONC-G R2-46: a wedged composite child is named in the parent outcome', t 
   let calls = 0;
   h.f.target.execute = (capsule, id, now, fault) => { calls += 1; if (calls === 2) throw new Error('child dispatch lost mid-flight'); return orig(capsule, id, now, fault); };
   const out = h.f.execute(h.p(), parentCert);
-  assert.equal(out.payload.status, 'COMPENSATED');
+  // A wedged child falsifies the compensated verdict even though the
+  // executed child was positively unwound (w10-cert F1).
+  assert.equal(out.payload.status, 'FAILED');
+  assert.ok(out.payload.reason.startsWith('COMPENSATION_INCOMPLETE'), 'the reason records the incomplete unwind');
   assert.ok(Array.isArray(out.payload.wedged_children) && out.payload.wedged_children.includes(c2.record.capsule.capsule_id), 'wedged child is named, not understated');
   assert.deepEqual(out.payload.children, [c1.record.capsule.capsule_id], 'children list stays in execution order');
 });

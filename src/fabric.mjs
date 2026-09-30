@@ -757,6 +757,10 @@ export class Fabric {
       const envelope = this.signExecution(t, payload, 'action-certificate');
       this.store.insert(t, 'certificate', payload.certificate_id, { envelope, consumed: false, status: 'CERTIFIED', issued_at: now }, now);
       r.certificate_id = payload.certificate_id; r.status = 'CERTIFIED'; r.decision = decision; this.store.put(t, 'capsule', id, r, now);
+      // A certified composite binds each child to itself by an indexed
+      // marker — the execute() guard resolves the parent by key, never by
+      // scanning (w10-cert F4).
+      if (r.capsule.action.type === 'action.composite') for (const childId of r.capsule.requested_state.children ?? []) { const child = this.store.must(t, 'capsule', childId); child.composite_parents = [...new Set([...(child.composite_parents ?? []), id])]; this.store.put(t, 'capsule', childId, child, now); }
       this.store.audit(t, 'CERTIFICATE_ISSUED', p.subject_id, id, { certificate_id: payload.certificate_id, certificate_digest: digest(envelope) }, now); return envelope;
     });
   }
@@ -773,8 +777,10 @@ export class Fabric {
       // A composite child's certificate is spendable only through its parent
       // — a solo spend verifies the child, then the parent's reservation
       // bricks on the consumed cert (w8-composite F8). Once the parent is
-      // terminal the child is unbound again.
-      requireThat(!this.store.list(t, 'capsule', 10000).some(o => o.capsule.action.type === 'action.composite' && (o.capsule.requested_state.children ?? []).includes(record.capsule.capsule_id) && ['CERTIFIED', 'EXECUTING'].includes(o.status)), 'INV-409-STATE', 'Composite child certificates execute only through their parent', 409);
+      // terminal the child is unbound again. The binding is an indexed
+      // marker written at parent certification — a capped capsule scan
+      // would silently expire as a guard (w10-cert F4).
+      requireThat(!(record.composite_parents ?? []).some(pid => ['CERTIFIED', 'EXECUTING'].includes(this.store.get(t, 'capsule', pid)?.status)), 'INV-409-STATE', 'Composite child certificates execute only through their parent', 409);
       // A quarantined actor or dispatcher is refused before evidence work —
       // the containment denial must land as INV-403, not as an evidence
       // miss (w9-network F6/F7).
@@ -786,6 +792,23 @@ export class Fabric {
       requireThat(this.evaluation(t, record, now).decision === 'ALLOW', 'INV-412-EVIDENCE', 'Execution predicates no longer hold', 412);
       const state = record.capsule.action.type === 'secret.use' ? this.target.secretState(t, record.capsule.requested_state.secret_id) : this.target.state(t, record.capsule.action.target_resource);
       requireThat(state.version === record.capsule.current_state.version && state.digest === record.capsule.current_state.digest, 'INV-409-STATE', 'Target state changed', 409);
+      // Export rows release only to the identity the disclosure ledger
+      // authorized — a relay receiving plaintext egress while usage,
+      // watermarks and data_access all bill the approved actor would break
+      // attribution entirely (w10-datagate F1). A composite containing an
+      // export child releases those rows to its spender — same rule.
+      const releasesExport = record.capsule.action.type === 'data.export'
+        || (record.capsule.action.type === 'action.composite' && (record.capsule.requested_state.children ?? []).some(cid => this.store.get(t, 'capsule', cid)?.capsule.action.type === 'data.export'));
+      requireThat(!releasesExport || p.subject_id === record.capsule.actor.subject_id, 'INV-403-SCOPE', 'Data export rows release only to the approved actor', 403);
+      // A reconstruction denial refuses the export at reservation — before
+      // the certificate is consumed and before the journal writes — so a
+      // denied export egresses nothing and bills nothing (w10-datagate F3).
+      // The check is read-only; the touch rows land at finish with egress.
+      if (record.capsule.action.type === 'data.export') {
+        const req = record.capsule.requested_state;
+        const recon = reconstructionCheck(this.store.db, this.target.db, { tenant: t, subject: record.capsule.actor.subject_id, dataset: req.dataset, rows: req.row_ids, columns: req.columns, now, policy: this.policy(t).runtime.reconstruction, record: false });
+        requireThat(recon.allowed, 'INV-429-BUDGET', 'Reconstruction limit reached', 429, { coverage_percent: recon.coverage_percent, dataset_coverage_percent: recon.dataset_coverage_percent });
+      }
       if (dryRun || this.policy(t).mode === 'shadow') {
         this.store.audit(t, 'EXECUTION_DRY_RUN', p.subject_id, cert.certificate_id, { no_mutation: true }, now);
         return { dry_run: true, no_mutation: true, certificate_id: cert.certificate_id };
@@ -868,6 +891,13 @@ export class Fabric {
           this.assertHealthy(t, child.capsule.actor.subject_id, child.capsule.actor.device_id, childNow);
           const state = child.capsule.action.type === 'secret.use' ? this.target.secretState(t, child.capsule.requested_state.secret_id) : this.target.state(t, child.capsule.action.target_resource);
           requireThat(state.version === child.capsule.current_state.version && state.digest === child.capsule.current_state.digest, 'INV-409-STATE', 'Child target state changed', 409);
+          // A denied export child refuses before its cert is consumed —
+          // same reservation-time rule as a standalone export (w10-datagate F3).
+          if (child.capsule.action.type === 'data.export') {
+            const req = child.capsule.requested_state;
+            const recon = reconstructionCheck(this.store.db, this.target.db, { tenant: t, subject: child.capsule.actor.subject_id, dataset: req.dataset, rows: req.row_ids, columns: req.columns, now: childNow, policy: this.policy(t).runtime.reconstruction, record: false });
+            requireThat(recon.allowed, 'INV-429-BUDGET', 'Reconstruction limit reached', 429, { coverage_percent: recon.coverage_percent, dataset_coverage_percent: recon.dataset_coverage_percent });
+          }
           childStored.consumed = true; childStored.status = 'EXECUTING'; childStored.transaction_id = childCert.certificate_id;
           child.status = 'EXECUTING';
           this.store.put(t, 'certificate', childCert.certificate_id, childStored, childNow); this.store.put(t, 'capsule', childId, child, childNow);
@@ -910,7 +940,11 @@ export class Fabric {
       // never-attempted unwind makes the outcome honestly FAILED, not
       // COMPENSATED (w8-composite F1).
       const compensatedIds = new Set((compensations ?? []).filter(c => c.compensated === true).map(c => c.capsule_id));
-      if (status === 'COMPENSATED' && compensations?.some(c => c.compensated === false)) {
+      // COMPENSATED attests that every journaled child was actually unwound:
+      // an executed child without a positive compensation entry, a refused
+      // compensation, or a wedged child each falsify the verdict — it then
+      // lands as FAILED (w10-cert F1).
+      if (status === 'COMPENSATED' && (wedged.length || compensations?.some(c => c.compensated === false) || executed.some(d => !compensatedIds.has(d.child.capsule.capsule_id)))) {
         status = 'FAILED'; reason = `COMPENSATION_INCOMPLETE:${reason}`;
         wedged = [...new Set([...wedged, ...compensations.filter(c => c.compensated === false).map(c => c.capsule_id)])];
       }
@@ -921,7 +955,7 @@ export class Fabric {
         const childCertId = childStored.envelope.payload.certificate_id;
         const priorOutcome = this.store.get(t, 'outcome', childCertId);
         const settledTerminal = priorOutcome && ['VERIFIED', 'FAILED', 'COMPENSATED'].includes(priorOutcome.payload.status);
-        let childStatus = status === 'VERIFIED' ? 'VERIFIED' : status === 'UNCERTAIN' ? 'UNCERTAIN' : status === 'COMPENSATED' && compensatedIds.has(childCapsuleId) ? 'COMPENSATED' : 'FAILED';
+        let childStatus = status === 'VERIFIED' ? 'VERIFIED' : status === 'UNCERTAIN' ? 'UNCERTAIN' : compensatedIds.has(childCapsuleId) ? 'COMPENSATED' : 'FAILED';
         let extras = null;
         // VERIFIED children take their declared post-effects — a composite
         // may not attest an effect that never happened (runtime-audit F-2).
@@ -931,8 +965,8 @@ export class Fabric {
         // never re-fire for an already-settled child (w8-composite F6).
         if (status === 'VERIFIED' && childStatus === 'VERIFIED' && !settledTerminal) {
           extras = this._applyVerifiedEffects(p, t, childRecord, childStored.envelope.payload, done.raw, now, post);
-          if (extras?.gate_denied || extras?.rotation_precondition_lapsed) {
-            status = 'FAILED'; reason = extras?.gate_denied?.code ?? 'ROTATION_PRECONDITION_LAPSED';
+          if (extras?.gate_denied || extras?.rotation_precondition_lapsed || extras?.activation_superseded) {
+            status = 'FAILED'; reason = extras?.gate_denied?.code ?? extras?.activation_superseded?.detail ?? 'ROTATION_PRECONDITION_LAPSED';
             childStatus = 'FAILED';
           }
         }
@@ -973,7 +1007,7 @@ export class Fabric {
   // simulation flag all checked. Shared by finish() and composite children.
   _validateTargetResponse(r, cert, raw, now, { postRead = false } = {}) {
     const responseKeys = ['target_transaction_id', 'capsule_digest', 'authorised_requested_digest', 'observed_state_digest', 'observed_state', 'output', 'status', 'execution_time', 'simulation'];
-    let responseShape = raw && typeof raw === 'object' && !Array.isArray(raw) && Object.keys(raw).length === responseKeys.length && responseKeys.every(key => Object.hasOwn(raw, key)) && raw.observed_state && typeof raw.observed_state === 'object' && !Array.isArray(raw.observed_state) && (raw.output === null || Array.isArray(raw.output));
+    let responseShape = raw && typeof raw === 'object' && !Array.isArray(raw) && Object.keys(raw).length === responseKeys.length && responseKeys.every(key => Object.hasOwn(raw, key)) && (r.capsule.action.type === 'data.export' ? raw.observed_state === null : (raw.observed_state && typeof raw.observed_state === 'object' && !Array.isArray(raw.observed_state))) && (raw.output === null || Array.isArray(raw.output));
     if (responseShape) {
       try { canonical(raw); } catch (error) { if (error instanceof InvariantError) responseShape = false; else throw error; }
     }
@@ -1015,7 +1049,7 @@ export class Fabric {
       const ref = r.capsule.action.type === 'secret.use' ? this.target.secretState(r.capsule.tenant_id, r.capsule.requested_state.secret_id) : this.target.state(r.capsule.tenant_id, r.capsule.action.target_resource);
       postStateOk = Boolean(ref && digest(ref.material_fields) === raw.observed_state_digest && (r.capsule.action.type === 'data.export' ? ref.version === r.capsule.current_state.version : ref.version === r.capsule.current_state.version + 1));
     }
-    const valid = Boolean(responseShape && expected && outputValid && postStateOk && raw.execution_time >= cert.issued_at && raw.execution_time <= now && raw.execution_time < cert.expires_at && digest(expected) === raw.observed_state_digest && raw.status === 'VERIFIED' && raw.target_transaction_id === cert.certificate_id && raw.capsule_digest === cert.capsule_digest && raw.authorised_requested_digest === digest(r.capsule.requested_state) && raw.observed_state_digest === digest(raw.observed_state) && raw.simulation === true);
+    const valid = Boolean(responseShape && expected && outputValid && postStateOk && raw.execution_time >= cert.issued_at && raw.execution_time <= now && raw.execution_time < cert.expires_at && digest(expected) === raw.observed_state_digest && raw.status === 'VERIFIED' && raw.target_transaction_id === cert.certificate_id && raw.capsule_digest === cert.capsule_digest && raw.authorised_requested_digest === digest(r.capsule.requested_state) && (r.capsule.action.type === 'data.export' || raw.observed_state_digest === digest(raw.observed_state)) && raw.simulation === true);
     return { valid, expected, exportRows };
   }
   // Post-effects a VERIFIED outcome declares. Store writes happen in the
@@ -1027,11 +1061,17 @@ export class Fabric {
     const type = r.capsule.action.type;
     if (type === 'policy.change') {
       const next = r.capsule.requested_state.policy, active = this.policy(t);
-      requireThat(next.version === active.version + 1, 'INV-409-STATE', 'Policy activation sequence changed', 409);
+      // A lapsed activation — a sibling took the version, or a staged
+      // candidate already pends — must never throw inside the outcome
+      // transaction: the journal committed, so the honest verdict is FAILED
+      // (w10-cert F2).
+      if (next.version !== active.version + 1) return { activation_superseded: { detail: 'POLICY_SEQUENCE_LAPSED' } };
+      // A staged candidate pending activation conflicts with ANY second
+      // activation — immediate or staged alike (w10-cert F2).
+      if (this.store.get(t, 'policy', 'staged')) return { activation_superseded: { detail: 'POLICY_STAGED_CONFLICT' } };
       // Expiry and staged min-delay are admission-time checks in evaluation();
       // a candidate that cannot legally activate never reaches CERTIFIED.
       if (next.not_before > now) {
-        requireThat(!this.store.get(t, 'policy', 'staged'), 'INV-409-CONFLICT', 'A staged policy is already pending', 409);
         this.store.put(t, 'policy', 'staged', { policy: next, activate_at: next.not_before, staged_at: now, capsule_id: r.capsule.capsule_id }, now);
         this.store.audit(t, 'POLICY_STAGED', p.subject_id, next.policy_id, { activate_at: next.not_before, version: next.version }, now);
       } else {
@@ -1105,14 +1145,23 @@ export class Fabric {
   _recordExportEgress(p, t, r, cert, raw, now) {
     const requested = r.capsule.requested_state, subject = r.capsule.actor.subject_id;
     const dataset = this.target.state(t, requested.dataset).material_fields;
-    const recon = reconstructionCheck(this.store.db, this.target.db, { tenant: t, subject, dataset: requested.dataset, rows: requested.row_ids, columns: requested.columns, now, policy: this.policy(t).runtime.reconstruction });
+    // The egress is billed and touched exactly once per certificate — a
+    // reconcile re-firing the finish path after the crash window re-runs the
+    // budget check read-only but must not double-charge or double-touch the
+    // same disclosure (w10-cert F3).
+    const requestKey = `cert:${cert.certificate_id}`;
+    const alreadyCharged = Boolean(this.store.db.prepare('SELECT 1 FROM usage WHERE tenant=? AND capability=? AND request=?').get(t, requestKey, cert.certificate_id));
+    const recon = reconstructionCheck(this.store.db, this.target.db, { tenant: t, subject, dataset: requested.dataset, rows: requested.row_ids, columns: requested.columns, now, policy: this.policy(t).runtime.reconstruction, record: !alreadyCharged });
     const weight = this.policy(t).runtime.sensitivity_weights[dataset.classification] ?? 1;
     const cost = requested.row_ids.length * requested.columns.length * weight;
-    this.store.db.prepare('INSERT INTO usage VALUES(?,?,?,?,?,?,?)').run(t, subject, requested.dataset, now, cost, `cert:${cert.certificate_id}`, cert.certificate_id);
+    if (!alreadyCharged)
+      this.store.db.prepare('INSERT INTO usage VALUES(?,?,?,?,?,?,?)').run(t, subject, requested.dataset, now, cost, requestKey, cert.certificate_id);
     if (!recon.allowed) return { gate_denied: { code: 'INV-429-BUDGET', detail: { row_count: recon.row_count, column_count: recon.column_count, coverage_percent: recon.coverage_percent } } };
-    let tenantWatermarkKey;
-    try { tenantWatermarkKey = this.dataKey(t, 'watermark'); } catch { tenantWatermarkKey = null; }
-    return { watermarks: watermark(raw.output ?? [], { tenant: t, dataset: requested.dataset, subject, requestId: cert.certificate_id, tenantWatermarkKey: tenantWatermarkKey ?? this.dataKey(t, 'encryption') }).watermarks };
+    // Watermarking requires the dedicated key — falling back to the
+    // row-encryption key would fuse two distinct primitives (w10-datagate F10).
+    const tenantWatermarkKey = this.dataKey(t, 'watermark');
+    requireThat(tenantWatermarkKey, 'INV-503-CONFIG', `Tenant ${t} has no watermark data key`, 503);
+    return { watermarks: watermark(raw.output ?? [], { tenant: t, dataset: requested.dataset, subject, requestId: cert.certificate_id, capabilityId: `cert:${cert.certificate_id}`, tenantWatermarkKey }).watermarks };
   }
   finish(p, cert, raw, status, reason, { postRead = false } = {}) {
     const post = [];
@@ -1127,12 +1176,13 @@ export class Fabric {
       const extras = valid ? this._applyVerifiedEffects(p, t, r, cert, raw, now, post) : null;
       if (extras?.gate_denied) { status = 'FAILED'; reason = extras.gate_denied.code; }
       if (extras?.rotation_precondition_lapsed) { status = 'FAILED'; reason = 'ROTATION_PRECONDITION_LAPSED'; }
+      if (extras?.activation_superseded) { status = 'FAILED'; reason = extras.activation_superseded.detail; }
       // H1: revocation cannot abort a committed reservation — it stops NEW
       // reservations. A revocation that landed between reservation and this
       // finish is recorded and flagged rather than hidden, so the ledger
       // shows the race instead of pretending it never happened.
       const revokedMidFlight = this.revoked(t, 'certificate', cert.certificate_id) || this.revoked(t, 'key', stored.envelope.protected.key_id);
-      const payload = { certificate_id: cert.certificate_id, capsule_digest: cert.capsule_digest, target_transaction_id: cert.certificate_id, observed_state_digest: valid ? raw.observed_state_digest : null, status, reason, execution_time: valid ? raw.execution_time : now, reconciliation_evidence: valid ? digest(raw) : null, simulation: true, output: valid && !extras?.gate_denied ? raw.output : null, watermarks: extras?.watermarks ?? null, gate_denied: extras?.gate_denied?.detail ?? null, revoked_post_reservation: revokedMidFlight || null, supersedes: existing ? digest(existing) : null };
+      const payload = { certificate_id: cert.certificate_id, capsule_digest: cert.capsule_digest, target_transaction_id: cert.certificate_id, observed_state_digest: valid ? raw.observed_state_digest : null, status, reason, execution_time: valid ? raw.execution_time : now, reconciliation_evidence: valid ? digest(raw) : null, simulation: true, output: valid && !extras?.gate_denied ? raw.output : null, watermarks: extras?.watermarks ?? null, gate_denied: extras?.gate_denied?.detail ?? null, revoked_post_reservation: revokedMidFlight || null, composite_child_of: (r.composite_parents ?? []).map(pid => this.store.get(t, 'capsule', pid)?.certificate_id).find(Boolean) ?? null, supersedes: existing ? digest(existing) : null };
       const envelope = this.signAudit(t, payload, 'outcome', extras?.outcome_key_id ?? null);
       this.store.put(t, 'outcome', cert.certificate_id, envelope, now); stored.status = status; r.status = status;
       this.store.put(t, 'certificate', cert.certificate_id, stored, now); this.store.put(t, 'capsule', cert.capsule_id, r, now);
@@ -1175,10 +1225,13 @@ export class Fabric {
         else wedged.push(childId);
       }
       // All children settled VERIFIED → the parent is VERIFIED; a failed or
-      // compensated child resolves the parent to the same verdict; anything
-      // incomplete stays honestly UNCERTAIN.
-      const settled = wedged.length === 0 && allSettledVerified ? 'VERIFIED' : anyFailed ? 'FAILED' : anyCompensated ? 'COMPENSATED' : 'UNCERTAIN';
-      const reasonMap = { VERIFIED: 'RECONCILED_FROM_CHILD_OUTCOMES', FAILED: 'RECONCILED_CHILD_FAILED', COMPENSATED: 'RECONCILED_CHILD_COMPENSATED', UNCERTAIN: 'COMPOSITE_INTERRUPTED_CHILDREN_ATTEMPTED' };
+      // compensated child resolves the parent FAILED (a COMPENSATED child
+      // row can only be written alongside a terminal parent outcome, so
+      // reaching one here names an orphaned compensation — never a clean
+      // parent verdict — w10-cert F7); anything incomplete stays honestly
+      // UNCERTAIN.
+      const settled = wedged.length === 0 && allSettledVerified ? 'VERIFIED' : (anyFailed || anyCompensated) ? 'FAILED' : 'UNCERTAIN';
+      const reasonMap = { VERIFIED: 'RECONCILED_FROM_CHILD_OUTCOMES', FAILED: anyCompensated && !anyFailed ? 'RECONCILED_CHILD_COMPENSATED_ORPHANED' : 'RECONCILED_CHILD_FAILED', UNCERTAIN: 'COMPOSITE_INTERRUPTED_CHILDREN_ATTEMPTED' };
       return this.finishComposite(p, cert, record.capsule, executed, settled, reasonMap[settled], [], this.clock(), wedged);
     }
     return this.finish(p, cert, raw, raw ? 'VERIFIED' : 'UNCERTAIN', raw ? 'RECONCILED_FROM_TARGET_JOURNAL' : 'NO_TARGET_CONFIRMATION_DO_NOT_RETRY');
@@ -1193,6 +1246,10 @@ export class Fabric {
       const callerRoles = this.grantsFor(p.tenant_id, p.subject_id, now).roles ?? this.identity(p).roles;
       requireThat(r.capsule.actor.subject_id === p.subject_id || callerRoles.some(x => ['security', 'policy_admin'].includes(x)), 'INV-403-SCOPE', 'Only the proposing actor or a privileged role may cancel', 403);
       r.status = 'CANCELLED'; this.store.put(p.tenant_id, 'capsule', id, r, now);
+      // The certificate row must not keep reading as a live CERTIFIED
+      // authority after its action is cancelled (w10-cert F8).
+      const cert = r.certificate_id ? this.store.get(p.tenant_id, 'certificate', r.certificate_id) : null;
+      if (cert && cert.status === 'CERTIFIED') { cert.status = 'CANCELLED'; this.store.put(p.tenant_id, 'certificate', r.certificate_id, cert, now); }
       this.store.audit(p.tenant_id, 'ACTION_CANCELLED', p.subject_id, id, { certificate_id: r.certificate_id }, now); return { status: r.status };
     });
   }
@@ -1236,6 +1293,16 @@ export class Fabric {
         // shadow a kind either.
       }[Object.hasOwn({ certificate:1, evidence:1, issuer:1, key:1, subject:1, device:1, capability:1, grant:1, token:1 }, input.kind) ? input.kind : ''];
       requireThat(exists?.(), 'INV-404-NOT-FOUND', `No live ${input.kind} authority with that id`, 404);
+      // The active audit signer is the only key that can attest outcomes —
+      // revoking it without an activatable successor wedges every in-flight
+      // execution permanently (w10-cert F5). A pending, tenant-owned,
+      // unrevoked key covering the audit purposes must exist first.
+      if (input.kind === 'key' && input.id === this.keys(t).audit.key_id) {
+        const needed = this._keyPurposes['audit'] ?? [];
+        const successor = [...this.vault.keys.entries()].some(([kid, e]) => e.pending && !e.revoked && this.ownsVaultKey(t, kid)
+          && (e.purpose === 'any' || needed.every(x => (Array.isArray(e.purpose) ? e.purpose : [e.purpose]).includes(x))));
+        requireThat(successor, 'INV-409-STATE', 'Revoking the active audit signer requires a pending successor key covering the audit purposes — rotate first', 409);
+      }
       const payload = { ...clone(input), tenant_id: t, revoked_at: now, actor: p.subject_id, propagation: 'local-synchronous', remote_propagation: 'NOT_IMPLEMENTED' };
       // Sign the revocation envelope BEFORE the record lands — the signing
       // key is still valid at signature time, and revoking the audit key

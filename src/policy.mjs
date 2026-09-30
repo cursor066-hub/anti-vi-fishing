@@ -103,8 +103,9 @@ export function validatePolicy(p) {
   // NET-005/006: quarantine remediation may only target allowlisted services.
   uniqueStrings(r.remediation_services, 'remediation services', 8);
   fields(r.sensitivity_weights, ['internal', 'confidential', 'restricted']); for (const [k, v] of Object.entries(r.sensitivity_weights)) integer(v, k, 1, 1000);
-  fields(r.reconstruction, ['window_ms', 'max_distinct_rows', 'max_distinct_columns', 'max_coverage_percent']);
+  fields(r.reconstruction, ['window_ms', 'max_distinct_rows', 'max_distinct_columns', 'max_coverage_percent'], ['max_dataset_coverage_percent']);
   integer(r.reconstruction.window_ms, 'reconstruction window', 1000, 2592000000); integer(r.reconstruction.max_distinct_rows, 'rows', 1, 1000000); integer(r.reconstruction.max_distinct_columns, 'columns', 1, 1000); integer(r.reconstruction.max_coverage_percent, 'coverage percent', 1, 100);
+  if (r.reconstruction.max_dataset_coverage_percent !== undefined) integer(r.reconstruction.max_dataset_coverage_percent, 'dataset coverage percent', 1, 100);
   fields(r.network, ['deny_workstation_peers', 'allowed_protocols', 'allowed_ports']);
   requireThat(typeof r.network.deny_workstation_peers === 'boolean' && r.network.allowed_protocols.includes('https') && r.network.allowed_ports.every(x => Number.isSafeInteger(x) && x >= 1 && x <= 65535), 'INV-400-SCHEMA', 'Invalid network policy');
   // Data catalog ceilings: JIT grants and capabilities may only name
@@ -183,7 +184,8 @@ export function emergencyWeakening(base, next) {
   if (!subset(nr.allowed_transforms, br.allowed_transforms)) return 'runtime.allowed_transforms';
   if (nr.max_cost > br.max_cost || nr.rate_per_second > br.rate_per_second || nr.max_fanout > br.max_fanout) return 'runtime.limits';
   for (const w of nr.windows) { const bw = br.windows.find(x => x.duration_ms === w.duration_ms); if (bw && w.limit > bw.limit) return 'runtime.windows'; }
-  if (nr.reconstruction.max_distinct_rows > br.reconstruction.max_distinct_rows || nr.reconstruction.max_distinct_columns > br.reconstruction.max_distinct_columns || nr.reconstruction.max_coverage_percent > br.reconstruction.max_coverage_percent) return 'runtime.reconstruction';
+  const datasetCap = x => x.reconstruction.max_dataset_coverage_percent ?? x.reconstruction.max_coverage_percent;
+  if (nr.reconstruction.max_distinct_rows > br.reconstruction.max_distinct_rows || nr.reconstruction.max_distinct_columns > br.reconstruction.max_distinct_columns || nr.reconstruction.max_coverage_percent > br.reconstruction.max_coverage_percent || datasetCap(nr) > datasetCap(br)) return 'runtime.reconstruction';
   for (const k of Object.keys(br.sensitivity_weights)) if ((nr.sensitivity_weights[k] ?? 0) < br.sensitivity_weights[k]) return 'runtime.sensitivity_weights';
   // Egress and remediation allowlists plus evidence bindings are weakening
   // dimensions too — an emergency policy may never drop a containment
@@ -329,7 +331,10 @@ export function evaluatePolicy({ capsule, policy, evidence = [], approvals = [],
   const signers = [], domains = new Set(), subjects = new Set();
   for (const approval of approvals) {
     const identity = identities[approval.signer_id];
-    if (!identity || identity.revoked || approval.expires_at <= now || identity.subject_id === p.actor.subject_id || !identity.roles.includes(rule.approval_role)) continue;
+    // The grant's beneficiary must not sit in the quorum that approves it —
+    // self-approval through a peer's signer key would defeat separation
+    // (w10-datagate F6).
+    if (!identity || identity.revoked || approval.expires_at <= now || identity.subject_id === p.actor.subject_id || (type === 'identity.jit.grant' && identity.subject_id === p.requested_state.subject_id) || !identity.roles.includes(rule.approval_role)) continue;
     if (rule.require_hardware && !identity.hardware_backed) continue;
     if (!domains.has(identity.failure_domain) && !subjects.has(identity.subject_id)) { signers.push(approval.signer_id); domains.add(identity.failure_domain); subjects.add(identity.subject_id); }
   }

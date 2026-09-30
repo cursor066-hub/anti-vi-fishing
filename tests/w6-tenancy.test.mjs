@@ -76,11 +76,14 @@ test('w6-F5: an export that crosses the reconstruction budget fails with output 
     return h.f.execute(h.p(), h.f.certificate(h.p(), r.capsule.capsule_id));
   };
   assert.equal(exportRow('row-1').payload.status, 'VERIFIED');
-  const denied = exportRow('row-2');
-  assert.equal(denied.payload.status, 'FAILED');
-  assert.equal(denied.payload.reason, 'INV-429-BUDGET');
-  assert.equal(denied.payload.output, null, 'denied export must not carry rows');
-  assert.equal(denied.payload.gate_denied.row_count, 2);
+  // The denial fires at reservation — before the certificate is consumed or
+  // the journal writes — so nothing egresses and nothing bills (w10-datagate F3).
+  const r2 = h.proposed('data.export', { dataset: 'dataset-1', columns: ['id'], row_ids: ['row-2'], max_rows: 1, classification: 'internal', jurisdiction: 'EU' }, { action: { type: 'data.export', target_resource: 'dataset-1', purpose: 'Operations' }, destination: 'customer-vault', policy_version: 2 });
+  h.evidence(r2, { kind: 'dataset_authority' }); h.approve(r2, 1);
+  const cert2 = h.f.certificate(h.p(), r2.capsule.capsule_id);
+  assert.throws(() => h.f.execute(h.p(), cert2), hasCode('INV-429-BUDGET'));
+  assert.equal(h.f.store.must('acme', 'certificate', cert2.payload.certificate_id).consumed ?? false, false, 'denied reservation leaves the certificate unspent');
+  assert.equal(h.f.store.get('acme', 'outcome', cert2.payload.certificate_id) ?? null, null, 'no outcome without egress');
 });
 
 // w6-F2+F6: /v1/keys and /v1/metrics are tenant-scoped on the live surface.

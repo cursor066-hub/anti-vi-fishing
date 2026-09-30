@@ -15,7 +15,7 @@ export class RuntimeGate {
     identifier(input.device_id); identifier(input.resource); text(input.destination, 'destination'); oneOf(input.action, ['data.read', 'service.connect'], 'runtime action');
     for (const k of ['purpose', 'classification', 'jurisdiction']) text(input[k], k);
     uniqueStrings(input.columns, 'columns', 64); uniqueStrings(input.row_ids, 'rows', 256); integer(input.max_cost, 'cost ceiling', 1, 1e9); integer(input.ttl_ms, 'TTL', 1000, 300000);
-    if (input.transforms !== undefined) { requireThat(input.transforms !== null && typeof input.transforms === 'object' && !Array.isArray(input.transforms), 'INV-400-SCHEMA', 'Transforms must be an object keyed by column'); for (const [col, tr] of Object.entries(input.transforms)) { requireThat(tr !== null && typeof tr === 'object' && !Array.isArray(tr), 'INV-400-SCHEMA', 'Transform must be an object'); oneOf(tr.op, ['mask', 'tokenise', 'drop', 'constant'], 'transform op'); } }
+    if (input.transforms !== undefined) { requireThat(input.transforms !== null && typeof input.transforms === 'object' && !Array.isArray(input.transforms), 'INV-400-SCHEMA', 'Transforms must be an object keyed by column'); for (const [col, tr] of Object.entries(input.transforms)) { requireThat(tr !== null && typeof tr === 'object' && !Array.isArray(tr), 'INV-400-SCHEMA', 'Transform must be an object'); oneOf(tr.op, ['mask', 'tokenise', 'drop', 'constant', 'aggregate'], 'transform op'); } }
     return this.f.transaction(principal, now => {
       const t = principal.tenant_id, policy = this.f.policy(t), r = policy.runtime, identity = this.f.identity(principal);
       this.f.assertHealthy(t, principal.subject_id, input.device_id, now);
@@ -127,7 +127,12 @@ export class RuntimeGate {
         if (cap.transforms) rows = applyTransforms(rows, cap.transforms, { tenant: t, dataset: cap.resource, tenantKey: this.f.target.key(t).toString('base64url') });
         // DAT-011: attribution watermark on released rows — returned as
         // separate marks, never injected into the authorised columns.
-        watermarks = watermark(rows, { tenant: t, dataset: cap.resource, subject: cap.subject_id, requestId: input.request_id, tenantWatermarkKey: this.f.dataKey(t, 'watermark') ?? this.f.dataKey(t, 'encryption') }).watermarks;
+        // Attribution marks require the dedicated watermark key — the
+        // row-encryption key is a different primitive, not a fallback
+        // (w10-datagate F10).
+        const watermarkKey = this.f.dataKey(t, 'watermark');
+        requireThat(watermarkKey, 'INV-503-CONFIG', `Tenant ${t} has no watermark data key`, 503);
+        watermarks = watermark(rows, { tenant: t, dataset: cap.resource, subject: cap.subject_id, capabilityId: cap.capability_id, requestId: input.request_id, tenantWatermarkKey: watermarkKey }).watermarks;
       }
       this.f.store.db.prepare('INSERT INTO usage VALUES(?,?,?,?,?,?,?)').run(t, cap.subject_id, cap.resource, now, cost, cap.capability_id, input.request_id);
       this.f.store.audit(t, 'RUNTIME_ALLOWED', principal.subject_id, cap.capability_id, { cost, resource: cap.resource, selection_digest: digest({ columns: input.columns, rows: input.row_ids }), request_id: input.request_id, watermarked: cap.action === 'data.read' }, now);
@@ -144,7 +149,7 @@ export class RuntimeGate {
   recordContainment(principal, input, e) {
     try {
       const t = principal.tenant_id, now = this.f.clock();
-      this.f.store.tx(() => this.f.store.put(t, 'containment', `deny:${input.request_id}:${e.code}`, {
+      this.f.store.tx(() => this.f.store.put(t, 'containment', `deny:${randomUUID()}:${e.code}`, {
         contained_at: now, subject_id: principal.subject_id, device_id: input.device_id ?? null,
         capability_id: input.capability?.payload?.capability_id ?? null, resource: input.resource ?? null,
         destination: input.destination ?? null, action: input.action ?? null, code: e.code,
