@@ -19,6 +19,9 @@ export const ISSUER_ROLES = {
   'audit-committee': { channel: 'authoritative', kinds: ['governance_review'] },
   hris: { channel: 'authoritative', kinds: ['identity_proof', 'recovery_authority'] },
   'device-attestation': { channel: 'device', kinds: ['device_health', 'workload_attestation'] },
+  // A second, independently-keyed attestation domain — secret.use requires
+  // two independent domains and must never be satisfiable by one issuer (w5).
+  'cloud-attestor': { channel: 'device', kinds: ['workload_attestation'] },
   counterparty: { channel: 'counterparty', kinds: ['counterparty_credential', 'ownership'] },
   'build-pipeline': { channel: 'authoritative', kinds: ['build_provenance', 'test_result'] },
   'security-ops': { channel: 'authoritative', kinds: ['technical_validation'] },
@@ -51,6 +54,9 @@ export const ISSUER_RULES = {
   'device-attestation': {
     device_health: { lookup: 'device:${claims.device_id}', expect: { health: 'pass' }, extract: ['firmware_version', 'attested_at'], ttl_ms: 300000, confidence: 96 },
     workload_attestation: { lookup: 'workload:${claims.workload_id}', expect: { attested: 'true' }, extract: ['image_digest', 'attested_at'], ttl_ms: 300000, confidence: 96 }
+  },
+  'cloud-attestor': {
+    workload_attestation: { lookup: 'vm:${claims.workload_id}', expect: { measured: 'true' }, extract: ['measurement_digest', 'measured_at'], ttl_ms: 300000, confidence: 95 }
   },
   'security-ops': {
     technical_validation: { lookup: 'probe:${claims.probe_id}', expect: { result: 'pass' }, extract: ['probed_at', 'method'], ttl_ms: 86400000, confidence: 95 }
@@ -97,6 +103,9 @@ export function issuerRecords(tenant) {
     'device-attestation': {
       'device:operator-device': { health: 'pass', firmware_version: 'if-endpoint-2.1.0', attested_at: 1788640000000 },
       'workload:workload-1': { attested: 'true', image_digest: 'a'.repeat(64), attested_at: 1788640000000 }
+    },
+    'cloud-attestor': {
+      'vm:workload-1': { measured: 'true', measurement_digest: 'c'.repeat(64), measured_at: 1788640000000 }
     },
     'security-ops': {
       'probe:PROBE-001': { result: 'pass', probed_at: 1788640000000, method: 'controlled-bypass-attempt' }

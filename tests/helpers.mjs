@@ -21,7 +21,8 @@ export function fixture(t, tenants = ['acme', 'globex']) {
   function proposed(type = 'finance.beneficiary.create', requested = { vendor_id: 'vendor-1', bank_account: 'TESTBANK000002', currency: 'EUR' }, overrides = {}, principal = p()) {
     const resource = overrides.action?.target_resource ?? `new-${randomUUID()}`;
     const action = { type, target_resource: resource, purpose: 'Synthetic verification' };
-    const input = proposal(type, actor(principal.subject_id), f.target.state(principal.tenant_id, resource), requested, time, { action, ...overrides });
+    const state = type === 'secret.use' ? f.target.secretState(principal.tenant_id, requested.secret_id) : f.target.state(principal.tenant_id, resource);
+    const input = proposal(type, actor(principal.subject_id), state, requested, time, { action, ...overrides });
     // ACT-005: request intent is signed by the actor's identity key.
     const intent = signed(input, setup.identityKeys[principal.tenant_id][principal.subject_id], 'capsule-intent');
     return f.propose(principal, input, randomUUID(), intent);

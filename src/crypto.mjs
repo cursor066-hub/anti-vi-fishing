@@ -52,7 +52,7 @@ export function verifySigned(envelope, publicKeys, purpose) {
   requireThat(envelope && Object.keys(envelope).sort().join() === 'payload,protected,signature', 'INV-401-SIGNATURE', 'Invalid signed envelope', 401);
   const h = envelope.protected;
   requireThat(h && Object.keys(h).sort().join() === 'key_id,profile,purpose,suite' && h.profile === 'IF-CJSON-1' && SUITES[h.suite] && h.purpose === purpose, 'INV-401-SIGNATURE', 'Unsupported signature context', 401);
-  const key = publicKeys[h.key_id];
+  const key = Object.hasOwn(publicKeys ?? {}, h.key_id) ? publicKeys[h.key_id] : undefined;
   requireThat(key && !key.revoked, 'INV-401-SIGNATURE', 'Signer unavailable', 401);
   // Require canonical base64url: mutating unused padding bits must not
   // produce an accepted alternative encoding of the same signature.

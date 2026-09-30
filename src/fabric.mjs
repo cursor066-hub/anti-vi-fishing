@@ -35,6 +35,7 @@ export class Fabric {
         // — never 'any'/exportable, so no future code path can coerce them
         // into signing outside their class or exfiltrating private material.
         const purposes = { execution: ['action-certificate', 'capability'], audit: ['audit', 'outcome', 'revocation', 'coverage', 'checkpoint', 'backup-manifest'] };
+        this._keyPurposes = purposes;
         if (key.private_key && !this.vault.has(key.key_id)) this.vault.importKey({ key_id: key.key_id, public_key: key.public_key, private_key: key.private_key }, purposes[klass], { exportable: false });
         requireThat(this.vault.has(key.key_id), 'INV-503-CONFIG', `Tenant ${klass} key is not in the keystore`, 503);
       }
@@ -306,7 +307,12 @@ export class Fabric {
         const tombstone = this.store.must(t, 'evidence-tombstone', id);
         return { payload: { evidence_id: id, expires_at: 0 }, envelope: { retained_digest: tombstone.original_digest }, revoked: true, issuer: { failure_domain: 'deleted' } };
       }
-      return { ...e, revoked: this.revoked(t, 'evidence', id) || this.revoked(t, 'issuer', e.envelope.protected.key_id) || this.revoked(t, 'key', e.envelope.protected.key_id), issuer: this.tenant(t).issuers[e.envelope.protected.key_id] };
+      const iss = this.tenant(t).issuers[e.envelope.protected.key_id];
+      // Only the issuer's semantic identity is digest-bound — credential
+      // fields (tokens, expiry, endpoint) rotate by design and must never
+      // invalidate a minted certificate or pending approval (w5 F-3).
+      const semantic = iss ? { public_key: iss.public_key, name: iss.name, issuer_id: iss.issuer_id, failure_domain: iss.failure_domain, channel: iss.channel, kinds: iss.kinds, version: iss.version } : iss;
+      return { ...e, revoked: this.revoked(t, 'evidence', id) || this.revoked(t, 'issuer', e.envelope.protected.key_id) || this.revoked(t, 'key', e.envelope.protected.key_id), issuer: semantic };
     });
     const graph_digest = digest(items.map(e => ({ envelope_digest: digest(e.envelope), issuer_digest: digest(e.issuer), revoked: e.revoked })).sort((a, b) => a.envelope_digest < b.envelope_digest ? -1 : 1));
     return { items, digest: graph_digest };
@@ -558,7 +564,7 @@ export class Fabric {
       requireThat(record.capsule_digest === cert.capsule_digest && this.graph(t, record).digest === cert.evidence_graph_digest && digest(this.policy(t)) === cert.policy_digest, 'INV-409-STATE', 'Action, evidence or policy changed', 409);
       requireThat(this.evaluation(t, record, now).decision === 'ALLOW', 'INV-412-EVIDENCE', 'Execution predicates no longer hold', 412);
       this.assertHealthy(t, record.capsule.actor.subject_id, record.capsule.actor.device_id, now);
-      const state = this.target.state(t, record.capsule.action.target_resource);
+      const state = record.capsule.action.type === 'secret.use' ? this.target.secretState(t, record.capsule.requested_state.secret_id) : this.target.state(t, record.capsule.action.target_resource);
       requireThat(state.version === record.capsule.current_state.version && state.digest === record.capsule.current_state.digest, 'INV-409-STATE', 'Target state changed', 409);
       if (dryRun || this.policy(t).mode === 'shadow') {
         this.store.audit(t, 'EXECUTION_DRY_RUN', p.subject_id, cert.certificate_id, { no_mutation: true }, now);
@@ -579,10 +585,10 @@ export class Fabric {
       // A deterministic refusal is a FAILED outcome, honestly recorded — only
       // genuinely ambiguous failures (transport/unknown) are UNCERTAIN
       // (runtime-audit F-9).
-      if (e instanceof InvariantError) return this.finish(p, cert, null, 'FAILED', e.code);
+      if (e instanceof InvariantError) return this.finish(p, cert, null, /^INV-5/.test(e.code ?? '') ? 'UNCERTAIN' : 'FAILED', e.code);
       return this.finish(p, cert, null, 'UNCERTAIN', 'TARGET_RESULT_UNCONFIRMED');
     }
-    return this.finish(p, cert, raw, 'VERIFIED', 'TARGET_RECONCILED');
+    return this.finish(p, cert, raw, 'VERIFIED', 'TARGET_RECONCILED', { postRead: true });
   }
   executeComposite(p, cert, capsule, now, fault) {
     // Children execute in order under the SAME dispatch-time authority checks
@@ -618,7 +624,7 @@ export class Fabric {
           requireThat(child.capsule_digest === childCert.capsule_digest && this.graph(t, child).digest === childCert.evidence_graph_digest && digest(this.policy(t)) === childCert.policy_digest, 'INV-409-STATE', 'Child action, evidence or policy changed', 409);
           requireThat(this.evaluation(t, child, childNow).decision === 'ALLOW', 'INV-412-EVIDENCE', 'Child execution predicates no longer hold', 412);
           this.assertHealthy(t, child.capsule.actor.subject_id, child.capsule.actor.device_id, childNow);
-          const state = this.target.state(t, child.capsule.action.target_resource);
+          const state = child.capsule.action.type === 'secret.use' ? this.target.secretState(t, child.capsule.requested_state.secret_id) : this.target.state(t, child.capsule.action.target_resource);
           requireThat(state.version === child.capsule.current_state.version && state.digest === child.capsule.current_state.digest, 'INV-409-STATE', 'Child target state changed', 409);
           childStored.consumed = true; childStored.status = 'EXECUTING'; childStored.transaction_id = childCert.certificate_id;
           child.status = 'EXECUTING';
@@ -644,7 +650,7 @@ export class Fabric {
       }
       // A child's reply earns VERIFIED only under the same response rules as
       // a standalone execution (runtime-audit F-2).
-      if (!this._validateTargetResponse(child, childCert, raw, this.clock()).valid) {
+      if (!this._validateTargetResponse(child, childCert, raw, this.clock(), { postRead: true }).valid) {
         wedged.push(childId);
         return bail('CHILD_EXECUTION_FAILED:TARGET_RESPONSE_INVALID');
       }
@@ -681,7 +687,7 @@ export class Fabric {
   // A target reply earns VERIFIED only if it is exactly the authorised
   // request applied to the prior state — shape, digests, timing and the
   // simulation flag all checked. Shared by finish() and composite children.
-  _validateTargetResponse(r, cert, raw, now) {
+  _validateTargetResponse(r, cert, raw, now, { postRead = false } = {}) {
     const responseKeys = ['target_transaction_id', 'capsule_digest', 'authorised_requested_digest', 'observed_state_digest', 'observed_state', 'output', 'status', 'execution_time', 'simulation'];
     let responseShape = raw && typeof raw === 'object' && !Array.isArray(raw) && Object.keys(raw).length === responseKeys.length && responseKeys.every(key => Object.hasOwn(raw, key)) && raw.observed_state && typeof raw.observed_state === 'object' && !Array.isArray(raw.observed_state) && (raw.output === null || Array.isArray(raw.output));
     if (responseShape) {
@@ -691,13 +697,13 @@ export class Fabric {
     if (responseShape && Number.isSafeInteger(raw.execution_time)) {
       const c = r.capsule;
       expected = { ...c.current_state.material_fields, ...c.requested_state };
-      if (c.action.type === 'finance.bank.change') expected = { ...expected, first_payment_done: false, payment_eligible_at: raw.execution_time + 60000 };
+      if (c.action.type === 'finance.bank.change') expected = { ...expected, first_payment_done: false, payment_eligible_at: now + 60000 };
       if (c.action.type === 'finance.payment.first') expected = { ...c.current_state.material_fields, first_payment_done: true, payment: c.requested_state, payment_transaction: cert.certificate_id };
       if (c.action.type === 'data.export') expected = c.current_state.material_fields;
-      if (['identity.mfa.reset', 'identity.authenticator.enroll', 'identity.account.recover'].includes(c.action.type)) expected = { ...expected, last_identity_operation: { type: c.action.type, at: raw.execution_time, transaction: cert.certificate_id } };
-      if (c.action.type === 'key.rotate') expected = { ...expected, rotated_at: raw.execution_time, rotation_transaction: cert.certificate_id };
-      if (c.action.type === 'secret.use') expected = { ...c.current_state.material_fields, last_use: { secret_id: c.requested_state.secret_id, operation: c.requested_state.operation, workload_id: c.requested_state.workload_id, at: raw.execution_time, transaction: cert.certificate_id } };
-      if (c.action.type === 'backup.delete') expected = { ...c.current_state.material_fields, deleted_backups: [...(c.current_state.material_fields.deleted_backups ?? []), { backup_id: c.requested_state.backup_id, at: raw.execution_time, transaction: cert.certificate_id }] };
+      if (['identity.mfa.reset', 'identity.authenticator.enroll', 'identity.account.recover'].includes(c.action.type)) expected = { ...expected, last_identity_operation: { type: c.action.type, at: now, transaction: cert.certificate_id } };
+      if (c.action.type === 'key.rotate') expected = { ...expected, rotated_at: now, rotation_transaction: cert.certificate_id };
+      if (c.action.type === 'secret.use') expected = { ...c.current_state.material_fields, last_use: { secret_id: c.requested_state.secret_id, operation: c.requested_state.operation, workload_id: c.requested_state.workload_id, at: now, transaction: cert.certificate_id } };
+      if (c.action.type === 'backup.delete') expected = { ...c.current_state.material_fields, deleted_backups: [...(c.current_state.material_fields.deleted_backups ?? []), { backup_id: c.requested_state.backup_id, at: now, transaction: cert.certificate_id }] };
       if (c.action.type === 'identity.jit.grant') expected = { ...expected };
     }
     let outputValid = r.capsule.action.type !== 'data.export' && raw?.output === null;
@@ -711,7 +717,17 @@ export class Fabric {
         if (outputValid) exportRows = raw.output;
       }
     }
-    const valid = Boolean(responseShape && expected && outputValid && raw.execution_time >= cert.issued_at && raw.execution_time <= now && raw.execution_time < cert.expires_at && digest(expected) === raw.observed_state_digest && raw.status === 'VERIFIED' && raw.target_transaction_id === cert.certificate_id && raw.capsule_digest === cert.capsule_digest && raw.authorised_requested_digest === digest(r.capsule.requested_state) && raw.observed_state_digest === digest(raw.observed_state) && raw.simulation === true);
+    // Post-execution re-read: a connector can claim the authorised state
+    // without ever writing it — only a fresh read of the decisive record
+    // distinguishes "applied" from "reported" (w5 F-6). Reconcile replays
+    // historical outcomes where the state has since moved on, so this check
+    // runs only on the live dispatch path.
+    let postStateOk = true;
+    if (postRead && responseShape && expected) {
+      const ref = r.capsule.action.type === 'secret.use' ? this.target.secretState(r.capsule.tenant_id, r.capsule.requested_state.secret_id) : this.target.state(r.capsule.tenant_id, r.capsule.action.target_resource);
+      postStateOk = Boolean(ref && digest(ref.material_fields) === raw.observed_state_digest && (r.capsule.action.type === 'data.export' ? ref.version === r.capsule.current_state.version : ref.version === r.capsule.current_state.version + 1));
+    }
+    const valid = Boolean(responseShape && expected && outputValid && postStateOk && raw.execution_time >= cert.issued_at && raw.execution_time <= now && raw.execution_time < cert.expires_at && digest(expected) === raw.observed_state_digest && raw.status === 'VERIFIED' && raw.target_transaction_id === cert.certificate_id && raw.capsule_digest === cert.capsule_digest && raw.authorised_requested_digest === digest(r.capsule.requested_state) && raw.observed_state_digest === digest(raw.observed_state) && raw.simulation === true);
     return { valid, expected, exportRows };
   }
   // Post-effects a VERIFIED outcome declares. Store writes happen in the
@@ -782,7 +798,7 @@ export class Fabric {
     }
     return null;
   }
-  finish(p, cert, raw, status, reason) {
+  finish(p, cert, raw, status, reason, { postRead = false } = {}) {
     const post = [];
     const envelope = this.transaction(p, now => {
       const t = p.tenant_id, r = this.store.must(t, 'capsule', cert.capsule_id), stored = this.store.must(t, 'certificate', cert.certificate_id);
@@ -790,7 +806,7 @@ export class Fabric {
       // be overwritten by a second finish (only UNCERTAIN may resolve later).
       const existing = this.store.get(t, 'outcome', cert.certificate_id);
       requireThat(!existing || !['VERIFIED', 'FAILED', 'COMPENSATED'].includes(existing.payload.status), 'INV-409-STATE', 'A terminal execution outcome cannot be overwritten', 409);
-      const { valid } = this._validateTargetResponse(r, cert, raw, now);
+      const { valid } = this._validateTargetResponse(r, cert, raw, now, { postRead });
       if (status === 'VERIFIED' && !valid) { status = 'UNCERTAIN'; reason = 'TARGET_RESPONSE_INVALID'; }
       const extras = valid ? this._applyVerifiedEffects(p, t, r, cert, raw, now, post) : null;
       // H1: revocation cannot abort a committed reservation — it stops NEW
@@ -1163,7 +1179,9 @@ export class Fabric {
     requireThat(['execution', 'audit'].includes(key_class), 'INV-400-SCHEMA', 'key_class must be execution or audit');
     requireThat(SUITES[suite], 'INV-400-SCHEMA', 'Unknown signature suite');
     return this.transaction(p, now => {
-      const pending = this.vault.generate('any', { pending: true, suite });
+      // KEY-007: a rotated key keeps the class's purpose binding — 'any' would
+      // destroy the separation genesis established (w5 F-4).
+      const pending = this.vault.generate(this._keyPurposes?.[key_class] ?? 'any', { pending: true, suite });
       this.persistVault();
       this.store.audit(p.tenant_id, 'ROTATION_PREPARED', p.subject_id, pending.key_id, { key_class, ceremony_bound: true }, now);
       return { key_id: pending.key_id, public_key: pending.public_key, key_class, status: 'pending', note: 'Key generated inside the vault; it cannot sign until a verified key.rotate action activates it.' };

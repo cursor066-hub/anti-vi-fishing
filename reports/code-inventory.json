@@ -6,8 +6,8 @@
       "bytes": 5969
     },
     "src/bootstrap.mjs": {
-      "lines": 222,
-      "bytes": 18606
+      "lines": 231,
+      "bytes": 19180
     },
     "src/canonical.mjs": {
       "lines": 85,
@@ -31,7 +31,7 @@
     },
     "src/crypto.mjs": {
       "lines": 77,
-      "bytes": 4965
+      "bytes": 5021
     },
     "src/datagate.mjs": {
       "lines": 98,
@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 1244,
-      "bytes": 106070
+      "lines": 1262,
+      "bytes": 107957
     },
     "src/issuerd.mjs": {
       "lines": 286,
@@ -67,7 +67,7 @@
     },
     "src/schema.mjs": {
       "lines": 84,
-      "bytes": 9675
+      "bytes": 9766
     },
     "src/secureview.mjs": {
       "lines": 119,
@@ -86,8 +86,8 @@
       "bytes": 16192
     },
     "src/target.mjs": {
-      "lines": 197,
-      "bytes": 14779
+      "lines": 212,
+      "bytes": 15887
     },
     "web/app.js": {
       "lines": 207,
@@ -186,8 +186,8 @@
       "bytes": 7806
     },
     "tests/helpers.mjs": {
-      "lines": 63,
-      "bytes": 5742
+      "lines": 64,
+      "bytes": 5856
     },
     "tests/http-concurrency-ui.test.mjs": {
       "lines": 164,
@@ -224,8 +224,12 @@
     "tests/v2-features.test.mjs": {
       "lines": 345,
       "bytes": 23216
+    },
+    "tests/w5-schema.test.mjs": {
+      "lines": 92,
+      "bytes": 5988
     }
   },
-  "total_files": 56,
-  "total_lines": 8317
+  "total_files": 57,
+  "total_lines": 8452
 }

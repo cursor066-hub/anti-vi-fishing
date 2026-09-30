@@ -6,7 +6,7 @@ export function fields(value, required, optional = []) {
   for (const key of required) if (!Object.hasOwn(value, key)) throw invalid(`Missing field: ${key}`);
   for (const key of Object.keys(value)) if (!required.includes(key) && !optional.includes(key)) throw invalid(`Unknown field: ${key}`);
 }
-export function text(value, name, max = 512) { requireThat(typeof value === 'string' && value.trim().length > 0 && value.length <= max && !/[\x00-\x1F\x7F]/.test(value), 'INV-400-SCHEMA', `Invalid ${name}`); return value; }
+export function text(value, name, max = 512) { requireThat(typeof value === 'string' && value.trim().length > 0 && value.length <= max && !/[\x00-\x1F\x7F\u0080-\u009F\u200B-\u200F\u2028-\u202E\u2060-\u2064\u2066-\u2069\uFEFF\u{E0000}-\u{E007F}]/u.test(value), 'INV-400-SCHEMA', `Invalid ${name}`); return value; }
 export function identifier(value, name = 'identifier') { text(value, name, 128); requireThat(/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/.test(value), 'INV-400-SCHEMA', `Invalid ${name}`); return value; }
 export function integer(value, name, min = 0, max = Number.MAX_SAFE_INTEGER) { requireThat(Number.isSafeInteger(value) && value >= min && value <= max, 'INV-400-SCHEMA', `Invalid ${name}`); return value; }
 export function oneOf(value, values, name) { requireThat(values.includes(value), 'INV-400-SCHEMA', `Unsupported ${name}`); return value; }

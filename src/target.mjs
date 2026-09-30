@@ -38,7 +38,11 @@ export class SimulatedTarget {
   state(tenant, id) {
     const res = this._readResource(tenant, id);
     const material_fields = res.value ?? {};
-    if (material_fields.columns && material_fields.rows === undefined) {
+    // 'rows' is a read-model projection for real datasets only. A write whose
+    // payload merely contains a 'columns' key (e.g. a JIT grant) must not
+    // start projecting rows — the stored record and its digest would drift
+    // apart (w5 F-6 post-read).
+    if (material_fields.columns && material_fields.rows === undefined && this.db.prepare('SELECT 1 FROM dataset_rows WHERE tenant=? AND dataset=? LIMIT 1').get(tenant, id)) {
       material_fields.rows = this.datasetRows(tenant, id);
     }
     return { version: res.version, digest: digest(material_fields), material_fields };
@@ -68,12 +72,22 @@ export class SimulatedTarget {
   seedSecret(tenant, secret_id, fields) {
     return this.tx(() => {
       const state = this.db.prepare('SELECT version FROM secrets_registry WHERE tenant=? AND secret_id=?').get(tenant, secret_id);
-      this.db.prepare('INSERT INTO secrets_registry VALUES(?,?,?,?) ON CONFLICT(tenant,secret_id) DO UPDATE SET version=excluded.version,value=excluded.value').run(tenant, secret_id, (state?.version ?? 0) + 1, encrypt(fields, this.key(tenant), `${tenant}/secret/${secret_id}`));
+      this._writeSecret(tenant, secret_id, (state?.version ?? 0) + 1, fields);
     });
   }
   secret(tenant, secret_id) {
     const row = this.db.prepare('SELECT version,value FROM secrets_registry WHERE tenant=? AND secret_id=?').get(tenant, secret_id);
     return row ? { version: row.version, ...decrypt(row.value, this.key(tenant), `${tenant}/secret/${secret_id}`) } : null;
+  }
+  // For secret.use the DECISIVE record is the registry row — that is the state
+  // a capsule must bind, not an arbitrary resources row (w5 F-7).
+  secretState(tenant, secret_id) {
+    const row = this.secret(tenant, secret_id);
+    const material_fields = row ? Object.fromEntries(Object.entries(row).filter(([k]) => k !== 'version')) : {};
+    return { version: row?.version ?? 0, digest: digest(material_fields), material_fields };
+  }
+  _writeSecret(tenant, secret_id, version, fields) {
+    this.db.prepare('INSERT INTO secrets_registry VALUES(?,?,?,?) ON CONFLICT(tenant,secret_id) DO UPDATE SET version=excluded.version,value=excluded.value').run(tenant, secret_id, version, encrypt(fields, this.key(tenant), `${tenant}/secret/${secret_id}`));
   }
   grant(tenant, grant_id, value) {
     this.db.prepare('INSERT INTO grants VALUES(?,?,?) ON CONFLICT(tenant,grant_id) DO UPDATE SET value=excluded.value').run(tenant, grant_id, encrypt(value, this.key(tenant), `${tenant}/grant/${grant_id}`));
@@ -120,9 +134,9 @@ export class SimulatedTarget {
     this.db.exec('BEGIN IMMEDIATE');
     let outcome;
     try {
-      const state = this.state(tenant, id);
-      requireThat(state.version === capsule.current_state.version && state.digest === capsule.current_state.digest, 'INV-409-STATE', 'Target state changed', 409);
       const requested = capsule.requested_state, type = capsule.action.type;
+      const state = type === 'secret.use' ? this.secretState(tenant, requested.secret_id) : this.state(tenant, id);
+      requireThat(state.version === capsule.current_state.version && state.digest === capsule.current_state.digest, 'INV-409-STATE', 'Target state changed', 409);
       let next = { ...state.material_fields, ...clone(requested) }, output = null;
       if (['finance.vendor.create', 'finance.beneficiary.create'].includes(type)) requireThat(state.version === 0, 'INV-409-STATE', 'Resource already exists', 409);
       if (type === 'finance.bank.change') { requireThat(state.version > 0, 'INV-409-STATE', 'Bank change requires existing resource', 409); next.first_payment_done = false; next.payment_eligible_at = now + 60000; }
@@ -152,7 +166,8 @@ export class SimulatedTarget {
         next = { ...state.material_fields, deleted_backups: [...(state.material_fields.deleted_backups ?? []), { backup_id: requested.backup_id, at: now, transaction: transactionId }] };
       }
       if (fault === 'before-commit') throw new Error('Simulated target transaction failure');
-      if (type !== 'data.export') this.db.prepare('INSERT INTO resources VALUES(?,?,?,?) ON CONFLICT(tenant,id) DO UPDATE SET version=excluded.version,value=excluded.value').run(tenant, id, state.version + 1, encrypt(next, this.key(tenant), `${tenant}/resource/${id}`));
+      if (type === 'secret.use') this._writeSecret(tenant, requested.secret_id, state.version + 1, next);
+      else if (type !== 'data.export') this.db.prepare('INSERT INTO resources VALUES(?,?,?,?) ON CONFLICT(tenant,id) DO UPDATE SET version=excluded.version,value=excluded.value').run(tenant, id, state.version + 1, encrypt(next, this.key(tenant), `${tenant}/resource/${id}`));
       outcome = { target_transaction_id: transactionId, capsule_digest: digest(capsule), authorised_requested_digest: digest(requested), observed_state_digest: digest(next), observed_state: next, output, status: 'VERIFIED', execution_time: now, simulation: true };
       this.db.prepare('INSERT INTO transactions VALUES(?,?,?)').run(tenant, transactionId, encrypt(outcome, this.key(tenant), `${tenant}/transaction/${transactionId}`));
       this.db.exec('COMMIT');

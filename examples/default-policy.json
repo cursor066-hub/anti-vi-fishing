@@ -82,6 +82,9 @@
       "evidence_bindings": {
         "ownership": {
           "account": "requested_state.bank_account"
+        },
+        "payment_confirmation": {
+          "transaction_id": "capsule_id"
         }
       }
     },
@@ -130,6 +133,9 @@
         },
         "recovery_authority": {
           "subject_id": "requested_state.subject_id"
+        },
+        "device_health": {
+          "device_id": "actor.device_id"
         }
       }
     },
@@ -153,6 +159,9 @@
         },
         "recovery_authority": {
           "subject_id": "requested_state.subject_id"
+        },
+        "device_health": {
+          "device_id": "actor.device_id"
         }
       }
     },
@@ -176,6 +185,9 @@
         },
         "recovery_authority": {
           "subject_id": "requested_state.subject_id"
+        },
+        "device_health": {
+          "device_id": "actor.device_id"
         }
       }
     },
@@ -198,6 +210,9 @@
         },
         "recovery_authority": {
           "subject_id": "requested_state.subject_id"
+        },
+        "device_health": {
+          "device_id": "actor.device_id"
         }
       }
     },
@@ -254,6 +269,9 @@
       "evidence_bindings": {
         "workload_attestation": {
           "workload_id": "requested_state.workload_id"
+        },
+        "device_health": {
+          "device_id": "actor.device_id"
         }
       }
     },
@@ -269,7 +287,12 @@
       "independent_domains": 2,
       "max_evidence_age_ms": 3600000,
       "max_quantity": 1000000000,
-      "require_hardware": false
+      "require_hardware": false,
+      "evidence_bindings": {
+        "governance_review": {
+          "action_ref": "capsule_id"
+        }
+      }
     },
     "policy.change": {
       "approval_role": "custodian",
@@ -283,7 +306,12 @@
       "independent_domains": 2,
       "max_evidence_age_ms": 3600000,
       "max_quantity": 1000000000,
-      "require_hardware": false
+      "require_hardware": false,
+      "evidence_bindings": {
+        "governance_review": {
+          "action_ref": "capsule_id"
+        }
+      }
     },
     "key.rotate": {
       "approval_role": "custodian",

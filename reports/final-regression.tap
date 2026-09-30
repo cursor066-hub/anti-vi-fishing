@@ -1589,10 +1589,52 @@ ok 265 - NFR-SEC-004 KEY-002: bootstrap writes vault + master key; config has no
   duration_ms: 0
   type: 'test'
   ...
-1..265
-# tests 265
+# Subtest: w5-F1: text fields reject invisible and bidi format characters
+ok 266 - w5-F1: text fields reject invisible and bidi format characters
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w5-F2: key_id "__proto__" resolves to nothing, not Object.prototype
+ok 267 - w5-F2: key_id "__proto__" resolves to nothing, not Object.prototype
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w5-F3: issuer credential rotation does not invalidate the evidence graph
+ok 268 - w5-F3: issuer credential rotation does not invalidate the evidence graph
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w5-F4: rotation keeps the class purpose binding (no "any" fallback)
+ok 269 - w5-F4: rotation keeps the class purpose binding (no "any" fallback)
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w5-F6: a reported-but-unwritten state cannot certify VERIFIED
+ok 270 - w5-F6: a reported-but-unwritten state cannot certify VERIFIED
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w5-F7: secret.use binds the secrets-registry row, not a resource row
+ok 271 - w5-F7: secret.use binds the secrets-registry row, not a resource row
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w5-F8/F9: derived times use the gate clock; INV-5xx outcomes are UNCERTAIN
+ok 272 - w5-F8/F9: derived times use the gate clock; INV-5xx outcomes are UNCERTAIN
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+1..272
+# tests 272
 # suites 0
-# pass 265
+# pass 272
 # fail 0
 # cancelled 0
 # skipped 0
