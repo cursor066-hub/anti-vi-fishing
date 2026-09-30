@@ -82,16 +82,23 @@ export function watermark(rows, ctx) {
 export function reconstructionCheck(touchDb, catalogDb, { tenant, subject, dataset, rows, columns, now, policy }) {
   // Touch records live on the fabric store's transaction so a rolled-back
   // consume cannot leave phantom access rows (cross-DB atomicity, M2).
+  // Counts are computed PROSPECTIVELY before writing: a denied attempt
+  // records nothing — the ledger measures disclosure, not probing, and a
+  // rejection must not ratchet coverage toward self-DoS (w6-fix F6).
   const window = policy.window_ms ?? 86400000;
-  const ins = touchDb.prepare('INSERT INTO data_access VALUES(?,?,?,?,?,?)');
-  for (const row of rows) for (const c of columns) ins.run(tenant, subject, dataset, row, c, now);
-  const rowCount = touchDb.prepare('SELECT count(DISTINCT row_id) AS n FROM data_access WHERE tenant=? AND subject=? AND dataset=? AND at>?').get(tenant, subject, dataset, now - window).n;
-  const colCount = touchDb.prepare('SELECT count(DISTINCT column_name) AS n FROM data_access WHERE tenant=? AND subject=? AND dataset=? AND at>?').get(tenant, subject, dataset, now - window).n;
+  const touched = touchDb.prepare('SELECT row_id, column_name FROM data_access WHERE tenant=? AND subject=? AND dataset=? AND at>?').all(tenant, subject, dataset, now - window);
+  const rowSet = new Set(touched.map(x => x.row_id));
+  const colSet = new Set(touched.map(x => x.column_name));
+  for (const r of rows) rowSet.add(r);
+  for (const c of columns) colSet.add(c);
+  const rowCount = rowSet.size, colCount = colSet.size;
   const totalRows = catalogDb.prepare('SELECT count(*) AS n FROM dataset_rows WHERE tenant=? AND dataset=?').get(tenant, dataset).n;
   const coveragePercent = totalRows ? Math.floor((rowCount * 100) / totalRows) : 0;
   const limits = policy ?? { max_distinct_rows: 100000, max_distinct_columns: 100000, max_coverage_percent: 100 };
   if (rowCount > limits.max_distinct_rows || colCount > limits.max_distinct_columns || coveragePercent > limits.max_coverage_percent) {
     return { allowed: false, code: 'INV-429-BUDGET', row_count: rowCount, column_count: colCount, coverage_percent: coveragePercent };
   }
+  const ins = touchDb.prepare('INSERT INTO data_access VALUES(?,?,?,?,?,?)');
+  for (const row of rows) for (const c of columns) ins.run(tenant, subject, dataset, row, c, now);
   return { allowed: true, row_count: rowCount, column_count: colCount, coverage_percent: coveragePercent };
 }

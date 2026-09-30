@@ -138,10 +138,15 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
         rateLimit(`login:${req.socket.remoteAddress}`, 20);
         requireThat(req.headers.origin === origin, 'INV-403-ORIGIN', 'Session creation requires same origin', 403);
         const input = await body(req); fields(input, ['token']); const result = authenticateToken(input.token);
+        // A login is a tenant-scoped request too — attribute it once the
+        // token resolves so the slice isn't skewed toward post-auth traffic
+        // only. Failures stay unattributed: a bad token resolves no tenant
+        // (w6-fix F9).
+        requestPrincipal = result.principal; bumpTenant();
         for (const [key, session] of sessions) if (session.expires <= fabric.clock()) sessions.delete(key);
         requireThat(sessions.size < 1000, 'INV-503-CAPACITY', 'Session capacity reached', 503);
         const sid = randomBytes(32).toString('base64url'), csrf = randomBytes(32).toString('base64url');
-        sessions.set(hashBytes(sid), { principal: result.principal, csrf, expires: Math.min(fabric.clock() + 900000, result.expires) });
+        sessions.set(hashBytes(sid), { principal: requestPrincipal, csrf, expires: Math.min(fabric.clock() + 900000, result.expires) });
         res.setHeader('Set-Cookie', `if_session=${sid}; HttpOnly; SameSite=Strict; Path=/; Max-Age=900${origin.startsWith('https:') ? '; Secure' : ''}`);
         return send(200, { ...result.principal, csrf_token: csrf, expires_in: 900 });
       }
@@ -176,9 +181,9 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
         // Read-only view: reconciliation itself is a POST — a GET never writes.
         fabric.authorize(p, ['operator', 'security', 'policy_admin']); const out = fabric.store.get(p.tenant_id, 'outcome', m[1]);
         requireThat(out, 'INV-404-NOT-FOUND', 'No recorded outcome for this certificate', 404);
-        return send(200, out);
+        return send(200, fabric.outcomeView(out));
       }
-      if ((m = /^\/gate\/v1\/outcomes\/([A-Za-z0-9-]+)$/.exec(path)) && req.method === 'POST') return send(200, fabric.reconcile(p, m[1]));
+      if ((m = /^\/gate\/v1\/outcomes\/([A-Za-z0-9-]+)$/.exec(path)) && req.method === 'POST') return send(200, fabric.outcomeView(fabric.reconcile(p, m[1])));
       if ((m = /^\/v1\/resources\/([A-Za-z0-9_.:-]+)$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['operator', 'policy_admin']); requireThat(fabric.target.exists(p.tenant_id, m[1]), 'INV-404-NOT-FOUND', 'Resource not found', 404); const state = fabric.target.state(p.tenant_id, m[1]); if (Array.isArray(state.material_fields.rows)) throw new InvariantError('INV-403-SCOPE', 'Use a data capability for dataset access', 403); return send(200, state); }
       if (path === '/v1/capabilities' && req.method === 'POST') { fabric.authorize(p, ['operator', 'workload']); return send(201, fabric.runtime.issue(p, object(await body(req)))); }
       if (path === '/gate/v1/runtime' && req.method === 'POST') return send(200, fabric.runtime.consume(p, object(await body(req))));
@@ -215,12 +220,12 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
         if (m[2] === 'split') { fields(input, ['secret']); return send(200, fabric.splitCeremonySecret(p, m[1], input.secret)); }
         fields(input, ['shares']); return send(200, fabric.reconstructCeremony(p, m[1], input.shares));
       }
-      if (path === '/v1/keys' && req.method === 'GET') { fabric.authorize(p, ['security', 'policy_admin']); return send(200, { keys: fabric.vault.list().filter(k => k.tenant_id === p.tenant_id).map(({ wrapped, ...k }) => k), firmware: fabric.vault.firmware }); }
+      if (path === '/v1/keys' && req.method === 'GET') { fabric.authorize(p, ['security', 'policy_admin']); return send(200, { keys: fabric.vault.list().filter(k => fabric.ownsVaultKey(p.tenant_id, k.key_id)).map(({ wrapped, ...k }) => k), firmware: fabric.vault.firmware }); }
       if (path === '/v1/keys/rotate-prepare' && req.method === 'POST') { const input = await body(req); fields(input, ['key_class'], ['suite']); return send(201, fabric.prepareRotation(p, input.key_class, input.suite)); }
       if (path === '/v1/config-drift/reassert' && req.method === 'POST') return send(200, fabric.reassertConfig(p));
       if (path === '/v1/clock/recover' && req.method === 'POST') return send(200, fabric.recoverClock(p));
       if (path === '/v1/config-drift' && req.method === 'GET') return send(200, fabric.configDriftStatus(p));
-      if ((m = /^\/v1\/keys\/([A-Za-z0-9_.:-]+)\/attest$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['security', 'auditor']); const e = fabric.vault.keys.get(m[1]); requireThat(e && e.tenant_id === p.tenant_id, 'INV-404-NOT-FOUND', 'Key not found', 404); return send(200, fabric.vault.attest(m[1])); }
+      if ((m = /^\/v1\/keys\/([A-Za-z0-9_.:-]+)\/attest$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['security', 'auditor']); const e = fabric.vault.keys.get(m[1]); requireThat(e && fabric.ownsVaultKey(p.tenant_id, m[1]), 'INV-404-NOT-FOUND', 'Key not found', 404); return send(200, fabric.vault.attest(m[1])); }
       if (path === '/v1/secure-perception/sessions' && req.method === 'POST') { const input = await body(req); fields(input, ['attestation']); return send(201, fabric.perceptionSession(p, input.attestation)); }
       if (path === '/v1/secure-perception/release' && req.method === 'POST') { const input = await body(req); fields(input, ['session_id', 'fields', 'purpose'], ['capsule_id', 'evidence_ref']); const { session_id, ...release } = input; return send(200, fabric.perceptionRelease(p, session_id, release)); }
       if (path === '/v1/secure-perception/fallback' && req.method === 'POST') { const input = await body(req); fields(input, ['fields', 'purpose'], ['reason']); return send(200, fabric.perceptionFallback(p, input)); }

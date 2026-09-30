@@ -107,7 +107,10 @@ export function answerQuery(issuer, request, now) {
   // template — a 'supports' answer proves that exact identifier resolved to
   // a real record. Arbitrary caller claims are never echoed (w6-tenancy F7).
   const lookupBound = {};
-  if (claim === 'supports') for (const m of rule.lookup.matchAll(/\$\{claims\.(\w+)\}/g)) { if (request.claims?.[m[1]] !== undefined) lookupBound[m[1]] = request.claims[m[1]]; }
+  // The extraction charset must equal interpolate()'s exactly: a broader
+  // match echoes claims the lookup never bound, a narrower one silently
+  // drops nested paths (w6-fix F7).
+  if (claim === 'supports') for (const m of rule.lookup.matchAll(/\$\{claims\.([a-z0-9_.]+)\}/g)) { const v = m[1].split('.').reduce((o, k) => o?.[k], request.claims ?? {}); if (v !== undefined) lookupBound[m[1]] = v; }
   const revealed = claim === 'conflict' ? {} : { ...lookupBound, ...extracted, subject_id: resolvedSubject };
   return signed({ ...base, claim, content_digest: digest({ issuer: issuer.issuer, key, record }), claims: revealed, provenance: prov('*'), issuer_version: issuer.version }, issuer.key, 'evidence');
 }

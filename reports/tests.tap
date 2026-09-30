@@ -1907,46 +1907,100 @@ ok 318 - w5-F8/F9: derived times use the gate clock; INV-5xx outcomes are UNCERT
   duration_ms: 0
   type: 'test'
   ...
+# Subtest: w6-fix F1: request_intent payloads carry row digests, never raw rows
+ok 319 - w6-fix F1: request_intent payloads carry row digests, never raw rows
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w6-fix F2: fabricated snapshots on ghost resources and secrets are denied
+ok 320 - w6-fix F2: fabricated snapshots on ghost resources and secrets are denied
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w6-fix F6: denied exports do not burn the reconstruction budget
+ok 321 - w6-fix F6: denied exports do not burn the reconstruction budget
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w6-fix F4: revoked keys cannot sign; revoked pending keys cannot activate
+ok 322 - w6-fix F4: revoked keys cannot sign; revoked pending keys cannot activate
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w6-fix F4b: a revoked pending rotation key is unactivatable
+ok 323 - w6-fix F4b: a revoked pending rotation key is unactivatable
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w6-fix F5: legacy untagged vault keys resolve through tenant bindings
+ok 324 - w6-fix F5: legacy untagged vault keys resolve through tenant bindings
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w6-fix F7: issuerd claim-binding grammar matches interpolation exactly
+ok 325 - w6-fix F7: issuerd claim-binding grammar matches interpolation exactly
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w6-fix F3: stored outcomes serve row digests, not raw exports
+ok 326 - w6-fix F3: stored outcomes serve row digests, not raw exports
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w6-fix F9: session logins are attributed to the resolved tenant
+ok 327 - w6-fix F9: session logins are attributed to the resolved tenant
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
 # Subtest: w6-F1: capsule views and certificates carry row digests, never raw rows
-ok 319 - w6-F1: capsule views and certificates carry row digests, never raw rows
+ok 328 - w6-F1: capsule views and certificates carry row digests, never raw rows
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w6-F3: certified key.rotate cannot activate another tenant's pending key
-ok 320 - w6-F3: certified key.rotate cannot activate another tenant's pending key
+ok 329 - w6-F3: certified key.rotate cannot activate another tenant's pending key
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w6-F4: revoking another tenant's vault key is an INV-404, not a silent no-op
-ok 321 - w6-F4: revoking another tenant's vault key is an INV-404, not a silent no-op
+ok 330 - w6-F4: revoking another tenant's vault key is an INV-404, not a silent no-op
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w6-F5: an export that crosses the reconstruction budget fails with output suppressed
-ok 322 - w6-F5: an export that crosses the reconstruction budget fails with output suppressed
+ok 331 - w6-F5: an export that crosses the reconstruction budget fails with output suppressed
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w6-F2: /v1/keys and attest expose only the caller's own vault entries
-ok 323 - w6-F2: /v1/keys and attest expose only the caller's own vault entries
+ok 332 - w6-F2: /v1/keys and attest expose only the caller's own vault entries
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w6-F7: issuerd never signs unverified caller claims
-ok 324 - w6-F7: issuerd never signs unverified caller claims
+ok 333 - w6-F7: issuerd never signs unverified caller claims
   ---
   duration_ms: 0
   type: 'test'
   ...
-1..324
-# tests 324
+1..333
+# tests 333
 # suites 0
-# pass 324
+# pass 333
 # fail 0
 # cancelled 0
 # skipped 0

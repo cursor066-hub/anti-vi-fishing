@@ -160,11 +160,16 @@ export class Fabric {
   }
   signExecution(t, payload, purpose) {
     const key_id = this.keys(t).execution.key_id;
+    // The ledger, not the vault flag, is authoritative for revocation — a
+    // revoked key keeps verifying old artifacts but must never sign new
+    // envelopes (w6-fix F4).
+    requireThat(!this.revoked(t, 'key', key_id), 'INV-401-SIGNATURE', 'Signing key revoked', 401);
     this.assertSuiteAllowed(t, this.vault.entry(key_id).suite ?? 'Ed25519');
     return this.vault.envelope(key_id, purpose, payload);
   }
   signAudit(t, payload, purpose = 'audit', key_id = null) {
     const kid = key_id ?? this.keys(t).audit.key_id;
+    requireThat(!this.revoked(t, 'key', kid), 'INV-401-SIGNATURE', 'Signing key revoked', 401);
     this.assertSuiteAllowed(t, this.vault.entry(kid).suite ?? 'Ed25519');
     return this.vault.envelope(kid, purpose, payload);
   }
@@ -303,11 +308,39 @@ export class Fabric {
   // are needed internally for predicates and target equality checks, but the
   // read surface exposes only their digest (w6-tenancy F1).
   capsuleView(record) {
-    const view = clone(record), mf = view.capsule?.current_state?.material_fields;
-    if (Array.isArray(mf?.rows)) {
-      view.capsule.current_state = { ...view.capsule.current_state, material_fields: { ...mf, rows: undefined, row_count: mf.rows.length, rows_digest: digest(mf.rows) } };
-    }
+    const view = clone(record);
+    const redact = material_fields => {
+      if (Array.isArray(material_fields?.rows)) return { ...material_fields, rows: undefined, row_count: material_fields.rows.length, rows_digest: digest(material_fields.rows) };
+      return material_fields;
+    };
+    if (view.capsule?.current_state?.material_fields) view.capsule.current_state = { ...view.capsule.current_state, material_fields: redact(view.capsule.current_state.material_fields) };
+    // The signed intent envelope carries the proposal input verbatim — an
+    // unredacted payload would re-expose every row (w6-fix F1). The served
+    // copy is a projection; verification happens at attach time.
+    const intent = view.capsule?.request_intent?.payload;
+    if (intent?.current_state?.material_fields) intent.current_state = { ...intent.current_state, material_fields: redact(intent.current_state.material_fields) };
+    if (intent?.requested_state?.material_fields) intent.requested_state = { ...intent.requested_state, material_fields: redact(intent.requested_state.material_fields) };
     return view;
+  }
+  // A stored outcome is the signed forensic artifact — its served projection
+  // never re-ships exported rows to readers: a second subject cannot drain
+  // row material from the outcome store without a data_access charge
+  // (w6-fix F3).
+  outcomeView(outcome) {
+    const view = clone(outcome), output = view?.payload?.output;
+    if (Array.isArray(output)) view.payload.output = { row_count: output.length, rows_digest: digest(output), redacted: true };
+    return view;
+  }
+  // Tenant ownership of a vault key: entries tagged at mint match directly;
+  // a legacy untagged entry (a keystore file carried over the tenant-binding
+  // upgrade) resolves through the tenant's own key bindings — anything else
+  // is an unreachable orphan on every surface (w6-fix F5).
+  ownsVaultKey(t, key_id) {
+    const entry = this.vault.keys.get(key_id);
+    if (!entry) return false;
+    if (entry.tenant_id != null) return entry.tenant_id === t;
+    const bound = this.keys(t);
+    return Object.values(bound).some(v => v?.key_id === key_id) || (bound.retired ?? []).some(r => r.key_id === key_id);
   }
   // The state reference carried by signed artifacts binds the snapshot by
   // digest — material rows never travel inside a certificate (w6-tenancy F1).
@@ -322,10 +355,12 @@ export class Fabric {
   assertFreshSnapshot(t, capsule) {
     const ref = capsule.current_state;
     if (!ref || ref.version === undefined || ref.digest === undefined) return;
-    // Only real tracked rows can go stale — a resource with no target row has
-    // nothing to fabricate against and is checked at dispatch instead.
-    if (!this.target.exists(t, capsule.action.target_resource)) return;
-    const live = this.target.state(t, capsule.action.target_resource);
+    // The decisive record differs by action class — secret.use binds the
+    // secrets-registry row, everything else binds the resources row
+    // (w6-fix F2). Untracked ids synthesize an empty state, so a fabricated
+    // snapshot (claimed version or fields) fails the comparison instead of
+    // skipping the check.
+    const live = capsule.action.type === 'secret.use' ? this.target.secretState(t, capsule.requested_state?.secret_id) : this.target.state(t, capsule.action.target_resource);
     requireThat(live.version === ref.version && live.digest === ref.digest, 'INV-409-STATE', 'Proposed state snapshot is stale or does not match live target state', 409);
   }
   propose(p, input, idempotencyKey, requestIntent = null) {
@@ -817,10 +852,12 @@ export class Fabric {
       // inside the transaction so the vault can never diverge from a
       // committed VERIFIED outcome (w6 F2/F4).
       const entry = this.vault.keys.get(req.new_key_id);
-      requireThat(entry && entry.pending && !entry.revoked, 'INV-409-STATE', 'Rotation target is not a pending vault key', 409);
+      // Ledger revocation counts too — a pending key revoked between mint
+      // and activation must never be activated (w6-fix F4).
+      requireThat(entry && entry.pending && !entry.revoked && !this.revoked(t, 'key', req.new_key_id), 'INV-409-STATE', 'Rotation target is not a pending vault key', 409);
       // The vault is process-global: a certified rotation may only activate a
       // pending key minted for THIS tenant (w6-tenancy F3).
-      requireThat(entry.tenant_id === t, 'INV-403-SCOPE', 'Vault key is not owned by this tenant', 403);
+      requireThat(this.ownsVaultKey(t, req.new_key_id), 'INV-403-SCOPE', 'Vault key is not owned by this tenant', 403);
       requireThat(req.new_public_key === entry.public_key, 'INV-400-SCHEMA', 'new_public_key does not match the pending vault key');
       const needed = this._keyPurposes[req.key_class] ?? [];
       const offered = Array.isArray(entry.purpose) ? entry.purpose : [entry.purpose];
@@ -947,9 +984,11 @@ export class Fabric {
         // (w6-perception P-2). vault.entry throws on unknown ids; probe the
         // map directly instead.
         // A vault entry resolves only when it belongs to this tenant —
-        // probing another tenant's key id is not an existence oracle
+        // probing another tenant's key id is not an existence oracle.
+        // Legacy untagged entries resolve through the tenant's bindings
+        // (w6-fix F5).
         // (w6-tenancy F4).
-        key: () => (this.vault.keys.get(input.id)?.tenant_id === t ? this.vault.keys.get(input.id) : null) || this.identities(t)[input.id] || this.tenant(t).issuers[input.id] || Object.values(this.perceptionComponents[t] ?? {}).find(c => c.signing.key_id === input.id),
+        key: () => (this.ownsVaultKey(t, input.id) ? this.vault.keys.get(input.id) : null) || this.identities(t)[input.id] || this.tenant(t).issuers[input.id] || Object.values(this.perceptionComponents[t] ?? {}).find(c => c.signing.key_id === input.id),
         subject: () => Object.values(this.tenant(t).identities).some(i => i.subject_id === input.id),
         device: () => Object.values(this.tenant(t).identities).some(i => i.device_id === input.id),
         capability: () => this.store.get(t, 'capability', input.id),
@@ -959,10 +998,15 @@ export class Fabric {
       requireThat(exists?.(), 'INV-404-NOT-FOUND', `No live ${input.kind} authority with that id`, 404);
       if (input.kind === 'grant') this.target.revokeGrant(t, input.id);
       const payload = { ...clone(input), tenant_id: t, revoked_at: now, actor: p.subject_id, propagation: 'local-synchronous', remote_propagation: 'NOT_IMPLEMENTED' };
+      // Sign the revocation envelope BEFORE the record lands — the signing
+      // key is still valid at signature time, and revoking the audit key
+      // itself would otherwise deadlock inside its own record write
+      // (w6-fix F4).
+      const envelope = this.signAudit(p.tenant_id, payload, 'revocation');
       this.store.put(t, 'revocation', `${input.kind}:${input.id}`, payload, now);
       if (input.remediation_service) this.store.audit(t, 'REMEDIATION_REQUESTED', p.subject_id, `${input.kind}:${input.id}`, { service: input.remediation_service, dispatched: false, channel: 'external-system-not-integrated' }, now);
       this.store.audit(t, 'AUTHORITY_REVOKED', p.subject_id, `${input.kind}:${input.id}`, { reason_digest: digest(input.reason) }, now);
-      return this.signAudit(p.tenant_id, payload, 'revocation');
+      return envelope;
     });
   }
   revocations(p, kind = null) {

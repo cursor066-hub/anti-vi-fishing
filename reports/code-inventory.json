@@ -34,20 +34,20 @@
       "bytes": 5021
     },
     "src/datagate.mjs": {
-      "lines": 98,
-      "bytes": 6919
+      "lines": 105,
+      "bytes": 7182
     },
     "src/errors.mjs": {
       "lines": 10,
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 1405,
-      "bytes": 119277
+      "lines": 1449,
+      "bytes": 122302
     },
     "src/issuerd.mjs": {
-      "lines": 292,
-      "bytes": 20581
+      "lines": 295,
+      "bytes": 20807
     },
     "src/keystore.mjs": {
       "lines": 155,
@@ -74,8 +74,8 @@
       "bytes": 9969
     },
     "src/server.mjs": {
-      "lines": 258,
-      "bytes": 27457
+      "lines": 263,
+      "bytes": 27835
     },
     "src/shamir.mjs": {
       "lines": 83,
@@ -237,11 +237,15 @@
       "lines": 92,
       "bytes": 5988
     },
+    "tests/w6-fix.test.mjs": {
+      "lines": 170,
+      "bytes": 12837
+    },
     "tests/w6-tenancy.test.mjs": {
       "lines": 122,
       "bytes": 8534
     }
   },
-  "total_files": 60,
-  "total_lines": 9443
+  "total_files": 61,
+  "total_lines": 9672
 }
