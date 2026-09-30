@@ -51,6 +51,14 @@ jobs:
           python3 scripts/canonical-vectors.py examples/canonical-vectors.json
       - name: Benchmark (asserted eval budget, informational runtime)
         run: node scripts/benchmark.mjs --assert
+      # NFR-SEC-007: the release-attestation pipeline signs provenance with
+      # an ephemeral fixture key and verifies it back — the roundtrip is the
+      # engineering evidence; production keys are never in the repo.
+      - name: Release attestation sign/verify roundtrip
+        run: |
+          node scripts/release-sign.mjs --generate-fixture-key var/relkeys
+          node scripts/release-sign.mjs --key var/relkeys/release-key.pem --public-key var/relkeys/release-key.pub --out var/release-attestation.json --anchors-out var/relkeys/anchors.json
+          node scripts/verify-release.mjs var/release-attestation.json var/relkeys/anchors.json
       - name: AI advisory golden eval
         run: node scripts/ai-eval.mjs
       - name: Requirements traceability

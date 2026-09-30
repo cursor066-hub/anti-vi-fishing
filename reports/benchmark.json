@@ -10,24 +10,24 @@
   },
   "core_deterministic_evaluation": {
     "samples": 2000,
-    "p50_ms": 0.1421760000000063,
-    "p95_ms": 0.22726799999998093,
-    "p99_ms": 0.28462600000000293,
-    "operations_per_second": 6535.355835567741
+    "p50_ms": 0.143100000000004,
+    "p95_ms": 0.2346069999999827,
+    "p99_ms": 0.30809899999999857,
+    "operations_per_second": 6341.16922923408
   },
   "integrated_evaluation_with_sqlite_audit": {
     "samples": 500,
-    "p50_ms": 2.237747000000013,
-    "p95_ms": 2.866901000000098,
-    "p99_ms": 3.1973800000000665,
-    "operations_per_second": 423.9097048115029
+    "p50_ms": 3.092831999999987,
+    "p95_ms": 3.74808500000006,
+    "p99_ms": 4.137275999999929,
+    "operations_per_second": 316.7543972029132
   },
   "local_software_runtime_with_signed_audit": {
     "samples": 500,
-    "p50_ms": 1.5793459999999868,
-    "p95_ms": 2.31167900000014,
-    "p99_ms": 2.865334999999959,
-    "operations_per_second": 589.6804941726335
+    "p50_ms": 1.7363869999999224,
+    "p95_ms": 2.519734999999855,
+    "p99_ms": 3.0610270000001947,
+    "operations_per_second": 552.8185038463184
   },
   "target_network_latency": "not measured: no external target connector",
   "asserted_targets": {
@@ -36,7 +36,7 @@
     "integrated_100_evaluations_per_second": true
   },
   "observations": {
-    "runtime_p99_ms": 2.865334999999959,
+    "runtime_p99_ms": 3.0610270000001947,
     "runtime_p99_at_1_ms_target_met": false
   },
   "production_capacity_claim": false,

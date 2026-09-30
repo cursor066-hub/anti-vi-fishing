@@ -18,11 +18,13 @@ assert len(_verified_ids) == len(set(_verified_ids)), 'verified set must not con
 verified = set(_verified_ids)
 # w9-srs corrections: KEY-002 (Shamir quorum), NFR-TST-004 (release gate)
 # and PER-006 (release-field constraints) are implemented and tested —
-# promoted. NFR-SEC-007 has no signed-provenance path at all — demoted to
-# NOT_IMPLEMENTED. NFR-SEC-002 overclaimed VERIFIED without an independent
+# promoted. NFR-SEC-002 overclaimed VERIFIED without an independent
 # review artifact — demoted to PARTIAL. NFR-MNT-004 is met by the
-# CODEOWNERS policy extended to every security-critical module.
-not_implemented = set('''NFR-AVL-003 NFR-OPS-003 NFR-SEC-007'''.split())
+# CODEOWNERS policy extended to every security-critical module. w10:
+# NFR-SEC-007 gains a real signed-provenance path (release-sign.mjs +
+# verify-release.mjs, tested roundtrip) — promoted NOT_IMPLEMENTED to
+# PARTIAL; production-grade KMS signing remains external.
+not_implemented = set('''NFR-AVL-003 NFR-OPS-003'''.split())
 external = set('''PER-001 PER-002 PER-003 PER-004 PER-005 KEY-001 KEY-003 KEY-006 KEY-011 NFR-AVL-001 NFR-PRV-003 NFR-OPS-001 NFR-USA-001 NFR-USA-002 NFR-USA-003 NFR-CMP-001 NFR-CMP-003 NFR-CMP-004'''.split())
 by_prefix = {
 'COV': ('Coverage/integration owner', 'R2', 'src/coverage.mjs; src/fabric.mjs', 'All four coverage labels are representable; actual target discovery, drift agents, independently executed bypass tests and historical guarantee intervals are not established. All manifests suppress production guarantee.'),
@@ -40,7 +42,7 @@ by_prefix = {
 'AIG': ('AI governance owner', 'R2', 'src/policy.mjs; src/advisory.mjs; docs/SECURITY.md', 'A deterministic advisory extractor exists with confidence/provenance marking and zero authority. External model providers, continuous evaluation and provider agreements are not implemented.'),
 'CON': ('Target integration owner', 'R2', 'src/target.mjs; src/connectors.mjs; src/issuerd.mjs', 'Controlled SQLite target simulator plus real HTTP evidence issuers with manifest drift revalidation. Real bank/ERP/cloud APIs, least-privilege credentials and support workflow are missing.'),
 'UX': ('Frontend/accessibility owner', 'R2', 'web/index.html; web/app.js; web/style.css', 'Full operator console (actions, policy, runtime, keys, ceremonies, connectors, proofs, perception, grants, audit) over the HTTP API exists. Browser rendering, responsive screenshots, Playwright journeys, WCAG and human comprehension studies were unavailable.'),
-'NFR-SEC': ('Security/release owner', 'R2', 'docs/SECURITY.md; tests/', 'Focused security tests, an adversarial suite and a seeded canonical-JSON fuzz corpus are implemented; ASVS certification, full SAST/DAST, advisory review, signed release provenance and penetration assessment are not.'),
+'NFR-SEC': ('Security/release owner', 'R2', 'docs/SECURITY.md; scripts/release-sign.mjs; scripts/verify-release.mjs; tests/', 'Focused security tests, an adversarial suite, a seeded canonical-JSON fuzz corpus and signed SLSA-lite release provenance (detached envelope + pinned-anchor verification) are implemented; ASVS certification, full SAST/DAST, advisory review, KMS-backed release signing and penetration assessment are not.'),
 'NFR-PERF': ('Performance owner', 'R2/R4', 'reports/benchmark.json; scripts/benchmark.mjs', 'Single-host synthetic microbenchmark, not production load/soak evidence. Runtime signed-audit p99 does not meet the 1 ms target; see measured report.'),
 'NFR-AVL': ('Platform/SRE owner', 'R2', 'docs/RUNBOOKS.md; scripts/backup.mjs; scripts/restore-check.mjs', 'Engine-native online backup and offline restore-verification tooling are implemented and drilled. No multi-zone deployment, consensus/replication, production availability measurement, SLA or validated RTO/RPO exercise.'),
 'NFR-PRV': ('Privacy/legal owner', 'R2', 'docs/SECURITY.md; docs/RUNBOOKS.md', 'Synthetic data/minimisation defaults and logical retention only. Legal basis, DPIA, regional contracts, full deletion and biometric hardware evidence require external review/integration.'),

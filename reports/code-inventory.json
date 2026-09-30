@@ -102,8 +102,8 @@
       "bytes": 5093
     },
     "scripts/benchmark.mjs": {
-      "lines": 32,
-      "bytes": 3957
+      "lines": 37,
+      "bytes": 4370
     },
     "scripts/canonical-vectors.py": {
       "lines": 42,
@@ -129,6 +129,10 @@
       "lines": 16,
       "bytes": 1398
     },
+    "scripts/release-sign.mjs": {
+      "lines": 66,
+      "bytes": 4040
+    },
     "scripts/report.mjs": {
       "lines": 131,
       "bytes": 9768
@@ -146,8 +150,8 @@
       "bytes": 269
     },
     "scripts/traceability.py": {
-      "lines": 72,
-      "bytes": 13848
+      "lines": 74,
+      "bytes": 14099
     },
     "scripts/verify-export-webcrypto.mjs": {
       "lines": 61,
@@ -156,6 +160,10 @@
     "scripts/verify-export.mjs": {
       "lines": 11,
       "bytes": 813
+    },
+    "scripts/verify-release.mjs": {
+      "lines": 44,
+      "bytes": 2993
     },
     "scripts/verify-vectors-webcrypto.mjs": {
       "lines": 124,
@@ -216,6 +224,10 @@
     "tests/regression.test.mjs": {
       "lines": 1024,
       "bytes": 71006
+    },
+    "tests/release-attestation.test.mjs": {
+      "lines": 65,
+      "bytes": 4266
     },
     "tests/runtime-audit.test.mjs": {
       "lines": 83,
@@ -290,6 +302,6 @@
       "bytes": 12714
     }
   },
-  "total_files": 72,
-  "total_lines": 12151
+  "total_files": 75,
+  "total_lines": 12333
 }
