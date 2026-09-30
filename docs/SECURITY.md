@@ -67,6 +67,7 @@ Residual honest limits:
 - **Reconstruction budget is per-subject.** The ledger keys on `(tenant, subject, dataset)`: N colluding subjects hold N× the coverage budget — inherent to per-subject accounting; cross-subject correlation is an SIEM/witness-layer concern.
 - **Process-global objects carry tenant attribution, not isolation.** The `KeyVault` and the monotone clock row are process-global; vault entries now carry `tenant_id` and every consumer (rotate/revoke/list/attest) enforces ownership, but in-process memory disclosure between tenants is out of scope — tenant separation is at the store/envelope layer, not the heap.
 - **Process-wide metrics exist but are not served.** `/v1/metrics` returns only the caller's tenant slice; unattributed requests (no resolvable principal) are counted process-wide and never attributed to a tenant.
+- **The SQL layer trusts its callers.** `readDataset`/`executePlan` re-verify the caller's own plan arguments rather than enforcing columns/row_ids at the query layer — safe today because every caller pre-validates through the gate, but any future direct consumer must enforce grants itself; the invariant is documented at the call site and in `docs/ARCHITECTURE.md`.
 
 ## Reporting and release ownership
 

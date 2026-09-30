@@ -146,8 +146,8 @@
       "bytes": 269
     },
     "scripts/traceability.py": {
-      "lines": 54,
-      "bytes": 12711
+      "lines": 62,
+      "bytes": 13150
     },
     "scripts/verify-export-webcrypto.mjs": {
       "lines": 61,
@@ -243,5 +243,5 @@
     }
   },
   "total_files": 60,
-  "total_lines": 9435
+  "total_lines": 9443
 }
