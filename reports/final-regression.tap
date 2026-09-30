@@ -1422,86 +1422,22 @@ ok 237 - CONC-G R2-46: a wedged composite child is named in the parent outcome
   type: 'test'
   ...
 # Subtest: release attestation signs and verifies against pinned anchors
-not ok 238 - release attestation signs and verifies against pinned anchors
+ok 238 - release attestation signs and verifies against pinned anchors
   ---
   duration_ms: 0
   type: 'test'
-  location: '/home/ubuntu/repos/anti-vi-fishing/tests/release-attestation.test.mjs:17:1'
-  failureType: 'testCodeFailure'
-  error: |-
-    working tree is not clean — commit or stash changes before signing
-    
-    
-    1 !== 0
-    
-  code: 'ERR_ASSERTION'
-  name: 'AssertionError'
-  expected: 0
-  actual: 1
-  operator: 'strictEqual'
-  stack: |-
-    ok (file:///home/ubuntu/repos/anti-vi-fishing/tests/release-attestation.test.mjs:15:28)
-    TestContext.<anonymous> (file:///home/ubuntu/repos/anti-vi-fishing/tests/release-attestation.test.mjs:22:15)
-    Test.runInAsyncScope (node:async_hooks:227:14)
-    Test.run (node:internal/test_runner/test:1382:25)
-    Test.start (node:internal/test_runner/test:1242:17)
-    startSubtestAfterBootstrap (node:internal/test_runner/harness:387:17)
   ...
 # Subtest: tampered attestation payload fails verification
-not ok 239 - tampered attestation payload fails verification
+ok 239 - tampered attestation payload fails verification
   ---
   duration_ms: 0
   type: 'test'
-  location: '/home/ubuntu/repos/anti-vi-fishing/tests/release-attestation.test.mjs:35:1'
-  failureType: 'testCodeFailure'
-  error: |-
-    working tree is not clean — commit or stash changes before signing
-    
-    
-    1 !== 0
-    
-  code: 'ERR_ASSERTION'
-  name: 'AssertionError'
-  expected: 0
-  actual: 1
-  operator: 'strictEqual'
-  stack: |-
-    ok (file:///home/ubuntu/repos/anti-vi-fishing/tests/release-attestation.test.mjs:15:28)
-    TestContext.<anonymous> (file:///home/ubuntu/repos/anti-vi-fishing/tests/release-attestation.test.mjs:38:15)
-    Test.runInAsyncScope (node:async_hooks:227:14)
-    Test.run (node:internal/test_runner/test:1382:25)
-    Test.processPendingSubtests (node:internal/test_runner/test:960:18)
-    Test.postRun (node:internal/test_runner/test:1522:19)
-    Test.run (node:internal/test_runner/test:1447:12)
-    async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3)
   ...
 # Subtest: validly-signed attestation for a different manifest is refused
-not ok 240 - validly-signed attestation for a different manifest is refused
+ok 240 - validly-signed attestation for a different manifest is refused
   ---
   duration_ms: 0
   type: 'test'
-  location: '/home/ubuntu/repos/anti-vi-fishing/tests/release-attestation.test.mjs:50:1'
-  failureType: 'testCodeFailure'
-  error: |-
-    working tree is not clean — commit or stash changes before signing
-    
-    
-    1 !== 0
-    
-  code: 'ERR_ASSERTION'
-  name: 'AssertionError'
-  expected: 0
-  actual: 1
-  operator: 'strictEqual'
-  stack: |-
-    ok (file:///home/ubuntu/repos/anti-vi-fishing/tests/release-attestation.test.mjs:15:28)
-    TestContext.<anonymous> (file:///home/ubuntu/repos/anti-vi-fishing/tests/release-attestation.test.mjs:53:15)
-    Test.runInAsyncScope (node:async_hooks:227:14)
-    Test.run (node:internal/test_runner/test:1382:25)
-    Test.processPendingSubtests (node:internal/test_runner/test:960:18)
-    Test.postRun (node:internal/test_runner/test:1522:19)
-    Test.run (node:internal/test_runner/test:1447:12)
-    async Test.processPendingSubtests (node:internal/test_runner/test:960:7)
   ...
 # Subtest: RUN-001 DAT-001: local scoped synthetic data read enforces rows and columns
 ok 241 - RUN-001 DAT-001: local scoped synthetic data read enforces rows and columns
@@ -3035,8 +2971,8 @@ ok 494 - w9-schema F-9: a leftover deployment dir gets an actionable refusal
 1..494
 # tests 494
 # suites 0
-# pass 491
-# fail 3
+# pass 494
+# fail 0
 # cancelled 0
 # skipped 0
 # todo 0
