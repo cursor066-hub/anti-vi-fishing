@@ -1,0 +1,72 @@
+{
+  "release": "0.1.0-engineering.1",
+  "production_release": "BLOCKED",
+  "blocked_items": [
+    {
+      "id": "full-srs-implementation",
+      "status": "BLOCKED",
+      "reason": "Full R0–R5 SRS is not implemented; see requirement-level PARTIAL/NOT_IMPLEMENTED rows."
+    },
+    {
+      "id": "real-target-total-mediation",
+      "status": "BLOCKED",
+      "reason": "No ERP/bank/customer target accounts, API contracts or credentials were supplied."
+    },
+    {
+      "id": "customer-hardware-key-governance",
+      "status": "BLOCKED",
+      "reason": "No HSM/MPC devices, separated custodian hardware or real key ceremony."
+    },
+    {
+      "id": "phishing-resistant-identity",
+      "status": "BLOCKED",
+      "reason": "WebAuthn, federation, trusted device attestation and protected recovery are not implemented."
+    },
+    {
+      "id": "secure-perception",
+      "status": "BLOCKED",
+      "reason": "No attested trusted display/input hardware or hostile-OS test environment."
+    },
+    {
+      "id": "network-enforcement",
+      "status": "BLOCKED",
+      "reason": "Decision simulation does not enforce real packets, endpoint health or quarantine."
+    },
+    {
+      "id": "multi-zone-dr",
+      "status": "BLOCKED",
+      "reason": "No assigned infrastructure or credentials; no multi-zone backend or live DR evidence."
+    },
+    {
+      "id": "browser-accessibility",
+      "status": "BLOCKED",
+      "reason": "No browser or Playwright installed; package installation prohibited; no visual/WCAG/usability evidence."
+    },
+    {
+      "id": "freshness-supply-chain",
+      "status": "BLOCKED",
+      "reason": "nodejs.org:443 denied by network allowlist; current advisory and release provenance validation unavailable."
+    },
+    {
+      "id": "independent-security-assessment",
+      "status": "BLOCKED",
+      "reason": "No independent assessor, real-system penetration test or signed acceptance."
+    },
+    {
+      "id": "runtime-latency-target",
+      "status": "NOT_MET",
+      "reason": "Measured durable signed-audit software runtime p99 exceeds the 1 ms target; microbenchmark is not dataplane validation."
+    },
+    {
+      "id": "operational-legal-ownership",
+      "status": "BLOCKED",
+      "reason": "No assigned on-call team, reporting channel, legal/compliance sign-off, contracts or named maintainers."
+    },
+    {
+      "id": "live-production-verification",
+      "status": "BLOCKED",
+      "reason": "No production environment assigned; deployment, health, live flows and rollback not executed."
+    }
+  ],
+  "engineering_tests_do_not_override_external_acceptance": true
+}

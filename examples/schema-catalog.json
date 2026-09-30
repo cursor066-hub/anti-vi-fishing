@@ -1,0 +1,316 @@
+{
+  "finance.vendor.create": {
+    "id": "if:finance.vendor.create:1",
+    "version": 1,
+    "type": "finance.vendor.create",
+    "requested": {
+      "name": "text",
+      "tax_id": "text",
+      "bank_account": "account",
+      "currency": "currency"
+    },
+    "validation_profile": "IF-ACTION-1",
+    "currency_profile": {
+      "codes": [
+        "EUR",
+        "USD",
+        "GBP",
+        "CHF",
+        "CAD",
+        "AUD",
+        "NZD",
+        "SGD"
+      ],
+      "minor_units_per_major": 100
+    }
+  },
+  "finance.bank.change": {
+    "id": "if:finance.bank.change:1",
+    "version": 1,
+    "type": "finance.bank.change",
+    "requested": {
+      "bank_account": "account",
+      "currency": "currency"
+    },
+    "validation_profile": "IF-ACTION-1",
+    "currency_profile": {
+      "codes": [
+        "EUR",
+        "USD",
+        "GBP",
+        "CHF",
+        "CAD",
+        "AUD",
+        "NZD",
+        "SGD"
+      ],
+      "minor_units_per_major": 100
+    }
+  },
+  "finance.beneficiary.create": {
+    "id": "if:finance.beneficiary.create:1",
+    "version": 1,
+    "type": "finance.beneficiary.create",
+    "requested": {
+      "vendor_id": "id",
+      "bank_account": "account",
+      "currency": "currency"
+    },
+    "validation_profile": "IF-ACTION-1",
+    "currency_profile": {
+      "codes": [
+        "EUR",
+        "USD",
+        "GBP",
+        "CHF",
+        "CAD",
+        "AUD",
+        "NZD",
+        "SGD"
+      ],
+      "minor_units_per_major": 100
+    }
+  },
+  "finance.payment.first": {
+    "id": "if:finance.payment.first:1",
+    "version": 1,
+    "type": "finance.payment.first",
+    "requested": {
+      "beneficiary_id": "id",
+      "bank_account": "account",
+      "amount_minor": "positive",
+      "currency": "currency",
+      "invoice_id": "id"
+    },
+    "validation_profile": "IF-ACTION-1",
+    "currency_profile": {
+      "codes": [
+        "EUR",
+        "USD",
+        "GBP",
+        "CHF",
+        "CAD",
+        "AUD",
+        "NZD",
+        "SGD"
+      ],
+      "minor_units_per_major": 100
+    }
+  },
+  "data.export": {
+    "id": "if:data.export:1",
+    "version": 1,
+    "type": "data.export",
+    "requested": {
+      "dataset": "id",
+      "columns": "strings",
+      "row_ids": "strings",
+      "max_rows": "positive",
+      "classification": "text",
+      "jurisdiction": "text"
+    },
+    "validation_profile": "IF-ACTION-1",
+    "currency_profile": {
+      "codes": [
+        "EUR",
+        "USD",
+        "GBP",
+        "CHF",
+        "CAD",
+        "AUD",
+        "NZD",
+        "SGD"
+      ],
+      "minor_units_per_major": 100
+    }
+  },
+  "identity.mfa.reset": {
+    "id": "if:identity.mfa.reset:1",
+    "version": 1,
+    "type": "identity.mfa.reset",
+    "requested": {
+      "subject_id": "id",
+      "authenticator_id": "id"
+    },
+    "validation_profile": "IF-ACTION-1",
+    "currency_profile": {
+      "codes": [
+        "EUR",
+        "USD",
+        "GBP",
+        "CHF",
+        "CAD",
+        "AUD",
+        "NZD",
+        "SGD"
+      ],
+      "minor_units_per_major": 100
+    }
+  },
+  "identity.authenticator.enroll": {
+    "id": "if:identity.authenticator.enroll:1",
+    "version": 1,
+    "type": "identity.authenticator.enroll",
+    "requested": {
+      "subject_id": "id",
+      "credential_digest": "hash"
+    },
+    "validation_profile": "IF-ACTION-1",
+    "currency_profile": {
+      "codes": [
+        "EUR",
+        "USD",
+        "GBP",
+        "CHF",
+        "CAD",
+        "AUD",
+        "NZD",
+        "SGD"
+      ],
+      "minor_units_per_major": 100
+    }
+  },
+  "identity.account.recover": {
+    "id": "if:identity.account.recover:1",
+    "version": 1,
+    "type": "identity.account.recover",
+    "requested": {
+      "subject_id": "id",
+      "privilege": "text"
+    },
+    "validation_profile": "IF-ACTION-1",
+    "currency_profile": {
+      "codes": [
+        "EUR",
+        "USD",
+        "GBP",
+        "CHF",
+        "CAD",
+        "AUD",
+        "NZD",
+        "SGD"
+      ],
+      "minor_units_per_major": 100
+    }
+  },
+  "cloud.firewall.change": {
+    "id": "if:cloud.firewall.change:1",
+    "version": 1,
+    "type": "cloud.firewall.change",
+    "requested": {
+      "protocol": "text",
+      "port": "positive",
+      "source_cidr": "text",
+      "service_id": "id"
+    },
+    "validation_profile": "IF-ACTION-1",
+    "currency_profile": {
+      "codes": [
+        "EUR",
+        "USD",
+        "GBP",
+        "CHF",
+        "CAD",
+        "AUD",
+        "NZD",
+        "SGD"
+      ],
+      "minor_units_per_major": 100
+    }
+  },
+  "code.release": {
+    "id": "if:code.release:1",
+    "version": 1,
+    "type": "code.release",
+    "requested": {
+      "source_commit": "hash",
+      "artifact_digest": "hash",
+      "provenance_digest": "hash",
+      "test_digest": "hash",
+      "deployment_target": "id"
+    },
+    "validation_profile": "IF-ACTION-1",
+    "currency_profile": {
+      "codes": [
+        "EUR",
+        "USD",
+        "GBP",
+        "CHF",
+        "CAD",
+        "AUD",
+        "NZD",
+        "SGD"
+      ],
+      "minor_units_per_major": 100
+    }
+  },
+  "secret.use": {
+    "id": "if:secret.use:1",
+    "version": 1,
+    "type": "secret.use",
+    "requested": {
+      "secret_id": "id",
+      "operation": "text",
+      "workload_id": "id"
+    },
+    "validation_profile": "IF-ACTION-1",
+    "currency_profile": {
+      "codes": [
+        "EUR",
+        "USD",
+        "GBP",
+        "CHF",
+        "CAD",
+        "AUD",
+        "NZD",
+        "SGD"
+      ],
+      "minor_units_per_major": 100
+    }
+  },
+  "backup.delete": {
+    "id": "if:backup.delete:1",
+    "version": 1,
+    "type": "backup.delete",
+    "requested": {
+      "backup_id": "id",
+      "recovery_set": "id"
+    },
+    "validation_profile": "IF-ACTION-1",
+    "currency_profile": {
+      "codes": [
+        "EUR",
+        "USD",
+        "GBP",
+        "CHF",
+        "CAD",
+        "AUD",
+        "NZD",
+        "SGD"
+      ],
+      "minor_units_per_major": 100
+    }
+  },
+  "policy.change": {
+    "id": "if:policy.change:1",
+    "version": 1,
+    "type": "policy.change",
+    "requested": {
+      "policy": "object"
+    },
+    "validation_profile": "IF-ACTION-1",
+    "currency_profile": {
+      "codes": [
+        "EUR",
+        "USD",
+        "GBP",
+        "CHF",
+        "CAD",
+        "AUD",
+        "NZD",
+        "SGD"
+      ],
+      "minor_units_per_major": 100
+    }
+  }
+}

@@ -1,0 +1,73 @@
+[
+  {
+    "name": "vector-1",
+    "value": null,
+    "sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b"
+  },
+  {
+    "name": "vector-2",
+    "value": true,
+    "sha256": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b"
+  },
+  {
+    "name": "vector-3",
+    "value": false,
+    "sha256": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa"
+  },
+  {
+    "name": "vector-4",
+    "value": 0,
+    "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+  },
+  {
+    "name": "vector-5",
+    "value": 9007199254740991,
+    "sha256": "f40b423c2dd95ff2b2f027e22208f438cf7242862e5e746860e697308c9add26"
+  },
+  {
+    "name": "vector-6",
+    "value": -9007199254740991,
+    "sha256": "4c933a456bb8f2e9894b2d0b26480439cd72d52fb8a27cbf8fd7f323f22c7815"
+  },
+  {
+    "name": "vector-7",
+    "value": {
+      "b": 2,
+      "a": 1
+    },
+    "sha256": "43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777"
+  },
+  {
+    "name": "vector-8",
+    "value": {
+      "greeting": "Žižek 🛡 café",
+      "nested": [
+        1,
+        {
+          "zero": 0
+        }
+      ]
+    },
+    "sha256": "13cbe6cb77f57b14e125c0bcbb7fe42c8cd48f89c8d89ab62c673d520c527ac2"
+  },
+  {
+    "name": "vector-9",
+    "value": {
+      "123hash": {
+        "x": "\n\t"
+      }
+    },
+    "sha256": "4ed97718ba9df41696e73251cb978412725552fab803bef548efcc91964c6f30"
+  },
+  {
+    "name": "vector-10",
+    "value": {
+      "alpha": [
+        "é",
+        "🎛"
+      ],
+      "omega": {}
+    },
+    "sha256": "4a71503ca1837fd932715abc78cd89a1b8855135db4178663585e5338f7af584"
+  }
+]

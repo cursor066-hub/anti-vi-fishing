@@ -1,0 +1,31 @@
+# Review-only single-host staging unit. No live deployment was executed.
+[Unit]
+Description=Invariant Fabric isolated engineering gate
+After=network.target
+
+[Service]
+Type=simple
+User=invariant
+Group=invariant
+WorkingDirectory=/opt/invariant-fabric
+ExecStart=/usr/bin/node /opt/invariant-fabric/src/cli.mjs serve --dir /var/lib/invariant-fabric --port 8080
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/invariant-fabric
+RestrictSUIDSGID=true
+LockPersonality=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

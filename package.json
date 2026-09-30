@@ -1,0 +1,17 @@
+{
+  "name": "invariant-fabric",
+  "version": "0.1.0-engineering.1",
+  "private": true,
+  "type": "module",
+  "description": "Exact-action authorization, software gates and verifiable evidence; engineering release, not production certified",
+  "engines": { "node": ">=24.16.0 <25" },
+  "scripts": {
+    "test": "node --test --test-concurrency=1 tests/*.test.mjs",
+    "check": "node scripts/check.mjs",
+    "simulate": "node scripts/simulate.mjs",
+    "benchmark": "node scripts/benchmark.mjs",
+    "start": "node src/cli.mjs serve",
+    "verify": "node scripts/verify-export.mjs",
+    "release:check": "node scripts/release-check.mjs"
+  }
+}

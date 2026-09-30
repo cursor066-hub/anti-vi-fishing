@@ -1,0 +1,4 @@
+* text=auto eol=lf
+# Preserve the supplied specification and raw execution logs byte-for-byte.
+spec/** -text -whitespace
+reports/*.tap -text -whitespace

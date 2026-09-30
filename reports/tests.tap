@@ -1,0 +1,530 @@
+TAP version 13
+# Subtest: ACT-001 ACT-003: stable field order and exact material binding
+ok 1 - ACT-001 ACT-003: stable field order and exact material binding
+  ---
+  duration_ms: 2.067249
+  type: 'test'
+  ...
+# Subtest: ACT-007: ambiguous encodings and unknown types rejected
+ok 2 - ACT-007: ambiguous encodings and unknown types rejected
+  ---
+  duration_ms: 0.645795
+  type: 'test'
+  ...
+# Subtest: ACT-003: strict parser rejects duplicate keys, trailing values and prototype keys
+ok 3 - ACT-003: strict parser rejects duplicate keys, trailing values and prototype keys
+  ---
+  duration_ms: 0.85521
+  type: 'test'
+  ...
+# Subtest: ACT-003: 2000 deterministic canonical round trips with integer and Unicode vectors
+ok 4 - ACT-003: 2000 deterministic canonical round trips with integer and Unicode vectors
+  ---
+  duration_ms: 80.934247
+  type: 'test'
+  ...
+# Subtest: ACT-007: oversized nesting and bodies rejected
+ok 5 - ACT-007: oversized nesting and bodies rejected
+  ---
+  duration_ms: 1.075297
+  type: 'test'
+  ...
+# Subtest: COM-002 KEY-007: Ed25519 domain-separated signatures reject every altered field
+ok 6 - COM-002 KEY-007: Ed25519 domain-separated signatures reject every altered field
+  ---
+  duration_ms: 5.444702
+  type: 'test'
+  ...
+# Subtest: AUD-003: AES-GCM binds ciphertext to tenant, record id and key
+ok 7 - AUD-003: AES-GCM binds ciphertext to tenant, record id and key
+  ---
+  duration_ms: 2.122048
+  type: 'test'
+  ...
+# Subtest: COM-002: all independently signed certificate binding mutations still fail registered-authority equality
+ok 8 - COM-002: all independently signed certificate binding mutations still fail registered-authority equality
+  ---
+  duration_ms: 88.175135
+  type: 'test'
+  ...
+# Subtest: RUN-004: runtime issuer-key revocation and active-policy change invalidate cached token
+ok 9 - RUN-004: runtime issuer-key revocation and active-policy change invalidate cached token
+  ---
+  duration_ms: 39.491803
+  type: 'test'
+  ...
+# Subtest: DAT-001 COM-009: exact data export cannot return extra columns from downstream
+ok 10 - DAT-001 COM-009: exact data export cannot return extra columns from downstream
+  ---
+  duration_ms: 48.612849
+  type: 'test'
+  ...
+# Subtest: DAT-001: caller cannot mislabel dataset jurisdiction or sensitivity
+ok 11 - DAT-001: caller cannot mislabel dataset jurisdiction or sensitivity
+  ---
+  duration_ms: 37.766737
+  type: 'test'
+  ...
+# Subtest: IDN-001 POL-011: an initiator cannot approve their own protected action even with an eligible signing key
+ok 12 - IDN-001 POL-011: an initiator cannot approve their own protected action even with an eligible signing key
+  ---
+  duration_ms: 37.330877
+  type: 'test'
+  ...
+# Subtest: AIG-006: source prose cannot override typed policy fields
+ok 13 - AIG-006: source prose cannot override typed policy fields
+  ---
+  duration_ms: 35.726725
+  type: 'test'
+  ...
+# Subtest: KEY-010 NFR-MNT-002: independent verifiers reject signed-log tampering and duplicate JSON keys
+ok 14 - KEY-010 NFR-MNT-002: independent verifiers reject signed-log tampering and duplicate JSON keys
+  ---
+  duration_ms: 281.881214
+  type: 'test'
+  ...
+# Subtest: ACT-007 UX-002: unsupported or ambiguous currency scales fail rather than render a false amount
+ok 15 - ACT-007 UX-002: unsupported or ambiguous currency scales fail rather than render a false amount
+  ---
+  duration_ms: 34.051137
+  type: 'test'
+  ...
+# Subtest: POL-001 POL-002 POL-015: exact inputs and trusted test time produce identical decision and reasons
+ok 16 - POL-001 POL-002 POL-015: exact inputs and trusted test time produce identical decision and reasons
+  ---
+  duration_ms: 216.75406
+  type: 'test'
+  ...
+# Subtest: HTTP: health, ready, console assets and hardened headers are served
+ok 17 - HTTP: health, ready, console assets and hardened headers are served
+  ---
+  duration_ms: 73.798017
+  type: 'test'
+  ...
+# Subtest: HTTP: missing/expired auth, cross origin, unknown host, traversal and cross-tenant objects denied
+ok 18 - HTTP: missing/expired auth, cross origin, unknown host, traversal and cross-tenant objects denied
+  ---
+  duration_ms: 52.237606
+  type: 'test'
+  ...
+# Subtest: HTTP: duplicate keys, wrong content-type and huge bodies reject safely
+ok 19 - HTTP: duplicate keys, wrong content-type and huge bodies reject safely
+  ---
+  duration_ms: 41.77342
+  type: 'test'
+  ...
+# Subtest: HTTP: same-origin HttpOnly cookie session requires CSRF and logs out
+ok 20 - HTTP: same-origin HttpOnly cookie session requires CSRF and logs out
+  ---
+  duration_ms: 39.612467
+  type: 'test'
+  ...
+# Subtest: HTTP: full propose -> evidence -> independent signatures -> ALLOW -> certificate -> execute -> audit
+ok 21 - HTTP: full propose -> evidence -> independent signatures -> ALLOW -> certificate -> execute -> audit
+  ---
+  duration_ms: 88.269578
+  type: 'test'
+  ...
+# Subtest: PER-007 PER-009: Secure Perception remains explicitly unavailable and fails closed
+ok 22 - PER-007 PER-009: Secure Perception remains explicitly unavailable and fails closed
+  ---
+  duration_ms: 35.15333
+  type: 'test'
+  ...
+# Subtest: COM-003 NFR-TST-002: eight independent gate workers race; exactly one certificate is consumed
+ok 23 - COM-003 NFR-TST-002: eight independent gate workers race; exactly one certificate is consumed
+  ---
+  duration_ms: 481.301784
+  type: 'test'
+  ...
+# Subtest: DAT-002: concurrent gates cannot overspend shared rolling budget
+ok 24 - DAT-002: concurrent gates cannot overspend shared rolling budget
+  ---
+  duration_ms: 385.196357
+  type: 'test'
+  ...
+# Subtest: NFR-SEC-004: bootstrap creates random credentials, private files and refuses overwrite
+ok 25 - NFR-SEC-004: bootstrap creates random credentials, private files and refuses overwrite
+  ---
+  duration_ms: 54.693028
+  type: 'test'
+  ...
+# Subtest: UX-002 UX-003: UI state logic exposes no generic approval or executable non-ALLOW state
+ok 26 - UX-002 UX-003: UI state logic exposes no generic approval or executable non-ALLOW state
+  ---
+  duration_ms: 0.883998
+  type: 'test'
+  ...
+# Subtest: UX-007: static interface labels all named inputs and uses no unsafe DOM injection sink
+ok 27 - UX-007: static interface labels all named inputs and uses no unsafe DOM injection sink
+  ---
+  duration_ms: 0.594661
+  type: 'test'
+  ...
+# Subtest: COM-001 COM-009 COM-010: exact approved action executes and produces signed verified outcome
+ok 28 - COM-001 COM-009 COM-010: exact approved action executes and produces signed verified outcome
+  ---
+  duration_ms: 81.061335
+  type: 'test'
+  ...
+# Subtest: ACT-008: tampered schema digest rejected
+ok 29 - ACT-008: tampered schema digest rejected
+  ---
+  duration_ms: 32.762102
+  type: 'test'
+  ...
+# Subtest: ACT-011 COM-006: proposal idempotency returns exact first result; changed request rejected
+ok 30 - ACT-011 COM-006: proposal idempotency returns exact first result; changed request rejected
+  ---
+  duration_ms: 38.18734
+  type: 'test'
+  ...
+# Subtest: POL-003 POL-005: missing evidence/approvals cannot mint or execute
+ok 31 - POL-003 POL-005: missing evidence/approvals cannot mint or execute
+  ---
+  duration_ms: 39.11983
+  type: 'test'
+  ...
+# Subtest: POL-007: denied nonce cannot be revived or re-evaluated
+ok 32 - POL-007: denied nonce cannot be revived or re-evaluated
+  ---
+  duration_ms: 37.350342
+  type: 'test'
+  ...
+# Subtest: POL-006 COM-013: cooldown defers exact bank change
+ok 33 - POL-006 COM-013: cooldown defers exact bank change
+  ---
+  duration_ms: 38.01165
+  type: 'test'
+  ...
+# Subtest: COM-003: consumed certificate is never replayed
+ok 34 - COM-003: consumed certificate is never replayed
+  ---
+  duration_ms: 62.294318
+  type: 'test'
+  ...
+# Subtest: COM-004 ACT-004: stale target state invalidates certificate
+ok 35 - COM-004 ACT-004: stale target state invalidates certificate
+  ---
+  duration_ms: 54.492549
+  type: 'test'
+  ...
+# Subtest: COM-004: expired certificate fails closed
+ok 36 - COM-004: expired certificate fails closed
+  ---
+  duration_ms: 50.673452
+  type: 'test'
+  ...
+# Subtest: COM-011: dry-run does not mutate or consume certificate
+ok 37 - COM-011: dry-run does not mutate or consume certificate
+  ---
+  duration_ms: 59.357238
+  type: 'test'
+  ...
+# Subtest: COM-012: post-commit timeout becomes UNCERTAIN; reconciliation finds one durable mutation
+ok 38 - COM-012: post-commit timeout becomes UNCERTAIN; reconciliation finds one durable mutation
+  ---
+  duration_ms: 63.625762
+  type: 'test'
+  ...
+# Subtest: COM-005 COM-012: target failure before commit rolls back and stays uncertain without blind retry
+ok 39 - COM-005 COM-012: target failure before commit rolls back and stays uncertain without blind retry
+  ---
+  duration_ms: 56.844831
+  type: 'test'
+  ...
+# Subtest: CON-004 COM-009: malformed-response cannot produce false success
+ok 40 - CON-004 COM-009: malformed-response cannot produce false success
+  ---
+  duration_ms: 56.374413
+  type: 'test'
+  ...
+# Subtest: CON-004 COM-009: altered-response cannot produce false success
+ok 41 - CON-004 COM-009: altered-response cannot produce false success
+  ---
+  duration_ms: 55.363774
+  type: 'test'
+  ...
+# Subtest: COM-012: process crash reservation survives restart and prevents replay
+ok 42 - COM-012: process crash reservation survives restart and prevents replay
+  ---
+  duration_ms: 62.119518
+  type: 'test'
+  ...
+# Subtest: COM-013: cancellation closes issued authority
+ok 43 - COM-013: cancellation closes issued authority
+  ---
+  duration_ms: 50.05956
+  type: 'test'
+  ...
+# Subtest: NFR-SEC-005: cross-tenant read and execution rejected
+ok 44 - NFR-SEC-005: cross-tenant read and execution rejected
+  ---
+  duration_ms: 47.526835
+  type: 'test'
+  ...
+# Subtest: IDN-002: auditor login grants no mutation authority
+ok 45 - IDN-002: auditor login grants no mutation authority
+  ---
+  duration_ms: 30.07601
+  type: 'test'
+  ...
+# Subtest: AUD-003 CON-003: stored sensitive fields never appear as plaintext in database/WAL
+ok 46 - AUD-003 CON-003: stored sensitive fields never appear as plaintext in database/WAL
+  ---
+  duration_ms: 48.070762
+  type: 'test'
+  ...
+# Subtest: AUD-004: persisted clock regression halts security mutation
+ok 47 - AUD-004: persisted clock regression halts security mutation
+  ---
+  duration_ms: 32.192692
+  type: 'test'
+  ...
+# Subtest: EVD-001 EVD-002: correlated issuer and derivative evidence cannot satisfy independence
+ok 48 - EVD-001 EVD-002: correlated issuer and derivative evidence cannot satisfy independence
+  ---
+  duration_ms: 46.778995
+  type: 'test'
+  ...
+# Subtest: EVD-005 AIG-006: email/advisory evidence cannot confer authority
+ok 49 - EVD-005 AIG-006: email/advisory evidence cannot confer authority
+  ---
+  duration_ms: 47.659339
+  type: 'test'
+  ...
+# Subtest: EVD-009: conflicting evidence remains escrow despite sufficient positive sources
+ok 50 - EVD-009: conflicting evidence remains escrow despite sufficient positive sources
+  ---
+  duration_ms: 49.505757
+  type: 'test'
+  ...
+# Subtest: EVD-008: evidence revocation invalidates pending certificate immediately
+ok 51 - EVD-008: evidence revocation invalidates pending certificate immediately
+  ---
+  duration_ms: 50.166077
+  type: 'test'
+  ...
+# Subtest: EVD-003: tampered issuer signature and wrong tenant evidence are rejected
+ok 52 - EVD-003: tampered issuer signature and wrong tenant evidence are rejected
+  ---
+  duration_ms: 37.082015
+  type: 'test'
+  ...
+# Subtest: IDN-001: software signature cannot satisfy hardware-required policy
+ok 53 - IDN-001: software signature cannot satisfy hardware-required policy
+  ---
+  duration_ms: 46.506986
+  type: 'test'
+  ...
+# Subtest: POL-011: duplicate signer cannot satisfy threshold
+ok 54 - POL-011: duplicate signer cannot satisfy threshold
+  ---
+  duration_ms: 46.004458
+  type: 'test'
+  ...
+# Subtest: ACT-010: material change or graph change invalidates exact approval
+ok 55 - ACT-010: material change or graph change invalidates exact approval
+  ---
+  duration_ms: 38.939251
+  type: 'test'
+  ...
+# Subtest: COM-014 POL-009: 3-of-5 customer software quorum protects exact policy activation
+ok 56 - COM-014 POL-009: 3-of-5 customer software quorum protects exact policy activation
+  ---
+  duration_ms: 75.209731
+  type: 'test'
+  ...
+# Subtest: UC-02: exact first payment enforces beneficiary amount and cannot repeat
+ok 57 - UC-02: exact first payment enforces beneficiary amount and cannot repeat
+  ---
+  duration_ms: 58.670625
+  type: 'test'
+  ...
+# Subtest: COM-009: self-consistent but unauthorised observed state must not pass reconciliation
+ok 58 - COM-009: self-consistent but unauthorised observed state must not pass reconciliation
+  ---
+  duration_ms: 57.027026
+  type: 'test'
+  ...
+# Subtest: POL-010: exact candidate simulation required before policy certificate
+ok 59 - POL-010: exact candidate simulation required before policy certificate
+  ---
+  duration_ms: 52.443502
+  type: 'test'
+  ...
+# Subtest: RUN-001 DAT-001: local scoped synthetic data read enforces rows and columns
+ok 60 - RUN-001 DAT-001: local scoped synthetic data read enforces rows and columns
+  ---
+  duration_ms: 54.999761
+  type: 'test'
+  ...
+# Subtest: DAT-002 DAT-009: low-and-slow extraction accumulates across newly minted capabilities
+ok 61 - DAT-002 DAT-009: low-and-slow extraction accumulates across newly minted capabilities
+  ---
+  duration_ms: 245.774637
+  type: 'test'
+  ...
+# Subtest: DAT-002: rolling budget recovers after bounded window expires
+ok 62 - DAT-002: rolling budget recovers after bounded window expires
+  ---
+  duration_ms: 41.875705
+  type: 'test'
+  ...
+# Subtest: DAT-003: server-controlled sensitivity weight increases information charge
+ok 63 - DAT-003: server-controlled sensitivity weight increases information charge
+  ---
+  duration_ms: 35.637748
+  type: 'test'
+  ...
+# Subtest: RUN-002 DAT-004: destination binding cannot be broadened
+ok 64 - RUN-002 DAT-004: destination binding cannot be broadened
+  ---
+  duration_ms: 33.969237
+  type: 'test'
+  ...
+# Subtest: RUN-002 DAT-004: device_id binding cannot be broadened
+ok 65 - RUN-002 DAT-004: device_id binding cannot be broadened
+  ---
+  duration_ms: 33.645894
+  type: 'test'
+  ...
+# Subtest: RUN-002 DAT-004: resource binding cannot be broadened
+ok 66 - RUN-002 DAT-004: resource binding cannot be broadened
+  ---
+  duration_ms: 34.095066
+  type: 'test'
+  ...
+# Subtest: RUN-002 DAT-004: purpose binding cannot be broadened
+ok 67 - RUN-002 DAT-004: purpose binding cannot be broadened
+  ---
+  duration_ms: 35.634911
+  type: 'test'
+  ...
+# Subtest: DAT-006: SQL-shaped columns and unrestricted row sets rejected
+ok 68 - DAT-006: SQL-shaped columns and unrestricted row sets rejected
+  ---
+  duration_ms: 36.353681
+  type: 'test'
+  ...
+# Subtest: RUN-007: cross-tenant capability cannot be consumed
+ok 69 - RUN-007: cross-tenant capability cannot be consumed
+  ---
+  duration_ms: 34.184644
+  type: 'test'
+  ...
+# Subtest: RUN-004 IDN-008: device quarantine rejects issued capability immediately
+ok 70 - RUN-004 IDN-008: device quarantine rejects issued capability immediately
+  ---
+  duration_ms: 35.446653
+  type: 'test'
+  ...
+# Subtest: RUN-003: stale configured device health prevents renewal
+ok 71 - RUN-003: stale configured device health prevents renewal
+  ---
+  duration_ms: 32.412962
+  type: 'test'
+  ...
+# Subtest: RUN-002: runtime request replay does not spend twice or return data twice
+ok 72 - RUN-002: runtime request replay does not spend twice or return data twice
+  ---
+  duration_ms: 36.950912
+  type: 'test'
+  ...
+# Subtest: NET-003 NET-004: local service envelope rejects other port and excess request rate
+ok 73 - NET-003 NET-004: local service envelope rejects other port and excess request rate
+  ---
+  duration_ms: 73.680366
+  type: 'test'
+  ...
+# Subtest: DAT-005 POL-004: restricted export requires explicit new SHIELD proposal
+ok 74 - DAT-005 POL-004: restricted export requires explicit new SHIELD proposal
+  ---
+  duration_ms: 39.185585
+  type: 'test'
+  ...
+# Subtest: AUD-001 AUD-005: export verifies with pinned root and rejects edit, reorder, removal and wrong root
+ok 75 - AUD-001 AUD-005: export verifies with pinned root and rejects edit, reorder, removal and wrong root
+  ---
+  duration_ms: 54.571489
+  type: 'test'
+  ...
+# Subtest: AUD-008: externally pinned prior checkpoint detects a fork and truncation
+ok 76 - AUD-008: externally pinned prior checkpoint detects a fork and truncation
+  ---
+  duration_ms: 38.631045
+  type: 'test'
+  ...
+# Subtest: AUD-001: append-only triggers reject SQL update and deletion
+ok 77 - AUD-001: append-only triggers reject SQL update and deletion
+  ---
+  duration_ms: 28.977312
+  type: 'test'
+  ...
+# Subtest: AUD-007: audit export access is itself recorded
+ok 78 - AUD-007: audit export access is itself recorded
+  ---
+  duration_ms: 30.596751
+  type: 'test'
+  ...
+# Subtest: DAT-012: expired evidence is held for active actions and legal hold; terminal evidence logically deleted
+ok 79 - DAT-012: expired evidence is held for active actions and legal hold; terminal evidence logically deleted
+  ---
+  duration_ms: 42.855006
+  type: 'test'
+  ...
+# Subtest: COV-002 COV-007 COV-008: no manual declaration can claim ENFORCED or production guarantee
+ok 80 - COV-002 COV-007 COV-008: no manual declaration can claim ENFORCED or production guarantee
+  ---
+  duration_ms: 32.575878
+  type: 'test'
+  ...
+# Subtest: POL-010 UX-008: policy simulation records diff without activating candidate
+ok 81 - POL-010 UX-008: policy simulation records diff without activating candidate
+  ---
+  duration_ms: 39.548217
+  type: 'test'
+  ...
+# Subtest: POL-012: fewer than 3 customer bootstrap signers cannot start the service
+ok 82 - POL-012: fewer than 3 customer bootstrap signers cannot start the service
+  ---
+  duration_ms: 36.194912
+  type: 'test'
+  ...
+1..82
+# tests 82
+# suites 0
+# pass 82
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 5392.97316
+# start of coverage report
+# -------------------------------------------------------------------
+# file               | line % | branch % | funcs % | uncovered lines
+# -------------------------------------------------------------------
+# scripts            |        |          |         | 
+#  verify-export.mjs | 100.00 |    20.00 |  100.00 | 
+# src                |        |          |         | 
+#  bootstrap.mjs     | 100.00 |   100.00 |  100.00 | 
+#  canonical.mjs     | 100.00 |    89.89 |  100.00 | 
+#  coverage.mjs      | 100.00 |    66.67 |  100.00 | 
+#  crypto.mjs        |  92.68 |    93.75 |   87.50 | 39-41
+#  errors.mjs        | 100.00 |   100.00 |  100.00 | 
+#  fabric.mjs        |  99.06 |    95.65 |  100.00 | 94-96
+#  policy.mjs        | 100.00 |    84.40 |  100.00 | 
+#  runtime.mjs       | 100.00 |   100.00 |  100.00 | 
+#  schema.mjs        | 100.00 |    91.11 |  100.00 | 
+#  server.mjs        |  98.46 |    69.86 |   92.31 | 33 123
+#  store.mjs         | 100.00 |    95.24 |  100.00 | 
+#  target.mjs        |  97.30 |    88.57 |   92.31 | 72-73
+# tests              |        |          |         | 
+#  helpers.mjs       | 100.00 |   100.00 |  100.00 | 
+#  race-worker.mjs   | 100.00 |   100.00 |  100.00 | 
+# web                |        |          |         | 
+#  app.js            |  13.16 |    72.73 |   15.91 | 11 17-114
+# -------------------------------------------------------------------
+# all files          |  91.39 |    86.90 |   83.81 | 
+# -------------------------------------------------------------------
+# end of coverage report

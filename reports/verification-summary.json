@@ -1,0 +1,46 @@
+{
+  "generated_at": "2026-09-05T20:03:34.627110+00:00",
+  "engineering_checks": "PASS",
+  "production_release": "BLOCKED",
+  "unique_test_cases_executed": 83,
+  "full_suite_baseline": {
+    "tests": 82,
+    "suites": 0,
+    "pass": 82,
+    "fail": 0,
+    "cancelled": 0,
+    "skipped": 0,
+    "todo": 0,
+    "duration_ms": 5392.97316
+  },
+  "final_affected_regression_suite": {
+    "tests": 76,
+    "suites": 0,
+    "pass": 76,
+    "fail": 0,
+    "cancelled": 0,
+    "skipped": 0,
+    "todo": 0,
+    "duration_ms": 4889.685564
+  },
+  "simulations_passed": 15,
+  "simulations_total": 15,
+  "independent_audit_verifiers": [
+    "Node Ed25519 / product verifier",
+    "Bun WebCrypto / independent implementation"
+  ],
+  "canonical_digest_implementations": [
+    "JavaScript",
+    "Python standard library"
+  ],
+  "cli_http_smoke": "reports/cli-http-smoke.json",
+  "browser_visual_verified": false,
+  "playwright_executed": false,
+  "external_target_verified": false,
+  "independent_penetration_test": false,
+  "current_security_advisories_verified": false,
+  "production_deployment_verified": false,
+  "runtime_p99_ms": 2.9992950000000747,
+  "runtime_p99_1ms_target_met": false,
+  "coverage_caveat": "tests.tap contains baseline instrumentation before final response-schema hardening; final-regression.tap verifies the affected final code. Browser event handlers were not executed by a browser."
+}

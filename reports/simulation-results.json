@@ -1,0 +1,98 @@
+{
+  "simulated": true,
+  "real_systems_tested": false,
+  "scenarios": [
+    {
+      "name": "Exact approved finance mutation",
+      "expected": "VERIFIED",
+      "actual": "VERIFIED",
+      "pass": true
+    },
+    {
+      "name": "Replay of consumed authority",
+      "expected": "INV-409-REPLAY",
+      "actual": "INV-409-REPLAY",
+      "pass": true
+    },
+    {
+      "name": "Response lost after durable target commit",
+      "expected": "UNCERTAIN",
+      "actual": "UNCERTAIN",
+      "pass": true
+    },
+    {
+      "name": "Reconcile post-commit timeout without repeat payment",
+      "expected": "VERIFIED",
+      "actual": "VERIFIED",
+      "pass": true
+    },
+    {
+      "name": "Direct mutation without certificate",
+      "expected": "INV-401-SIGNATURE",
+      "actual": "INV-401-SIGNATURE",
+      "pass": true
+    },
+    {
+      "name": "Target state changes after approval",
+      "expected": "INV-409-STATE",
+      "actual": "INV-409-STATE",
+      "pass": true
+    },
+    {
+      "name": "CEO email and AI advice cannot authorise",
+      "expected": "ESCROW",
+      "actual": "ESCROW",
+      "pass": true
+    },
+    {
+      "name": "Public database exposure request",
+      "expected": "DENY",
+      "actual": "DENY",
+      "pass": true
+    },
+    {
+      "name": "Synthetic minimum-column data read",
+      "expected": "ALLOW",
+      "actual": "ALLOW",
+      "pass": true
+    },
+    {
+      "name": "Destination substitution",
+      "expected": "INV-403-SCOPE",
+      "actual": "INV-403-SCOPE",
+      "pass": true
+    },
+    {
+      "name": "Restricted column injection",
+      "expected": "INV-403-SCOPE",
+      "actual": "INV-403-SCOPE",
+      "pass": true
+    },
+    {
+      "name": "Low-and-slow extraction across new capabilities",
+      "expected": "INV-429-BUDGET",
+      "actual": "INV-429-BUDGET",
+      "pass": true
+    },
+    {
+      "name": "Device quarantine prevents renewal",
+      "expected": "INV-403-QUARANTINE",
+      "actual": "INV-403-QUARANTINE",
+      "pass": true
+    },
+    {
+      "name": "Offline signed audit integrity",
+      "expected": true,
+      "actual": true,
+      "pass": true
+    },
+    {
+      "name": "Audit deletion detection",
+      "expected": "INV-409-AUDIT",
+      "actual": "INV-409-AUDIT",
+      "pass": true
+    }
+  ],
+  "allowed_low_and_slow_queries": 50,
+  "all_pass": true
+}

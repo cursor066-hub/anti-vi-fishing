@@ -1,0 +1,254 @@
+{
+  "policy_id": "constitution:acme",
+  "tenant_id": "acme",
+  "version": 1,
+  "not_before": 1,
+  "expires_at": 4102444800000,
+  "max_capsule_ttl_ms": 3600000,
+  "certificate_ttl_ms": 60000,
+  "capability_ttl_ms": 60000,
+  "mode": "engineering",
+  "rules": {
+    "finance.vendor.create": {
+      "approval_role": "approver",
+      "approval_threshold": 2,
+      "cooldown_ms": 0,
+      "destinations": [],
+      "evidence_kinds": [
+        "ownership"
+      ],
+      "forbidden_fields": [],
+      "independent_domains": 2,
+      "max_evidence_age_ms": 3600000,
+      "max_quantity": 1000000000,
+      "require_hardware": false
+    },
+    "finance.bank.change": {
+      "approval_role": "approver",
+      "approval_threshold": 2,
+      "cooldown_ms": 60000,
+      "destinations": [],
+      "evidence_kinds": [
+        "ownership"
+      ],
+      "forbidden_fields": [],
+      "independent_domains": 2,
+      "max_evidence_age_ms": 3600000,
+      "max_quantity": 1000000000,
+      "require_hardware": false
+    },
+    "finance.beneficiary.create": {
+      "approval_role": "approver",
+      "approval_threshold": 2,
+      "cooldown_ms": 0,
+      "destinations": [],
+      "evidence_kinds": [
+        "ownership"
+      ],
+      "forbidden_fields": [],
+      "independent_domains": 2,
+      "max_evidence_age_ms": 3600000,
+      "max_quantity": 1000000000,
+      "require_hardware": false
+    },
+    "finance.payment.first": {
+      "approval_role": "approver",
+      "approval_threshold": 2,
+      "cooldown_ms": 0,
+      "destinations": [],
+      "evidence_kinds": [
+        "ownership"
+      ],
+      "forbidden_fields": [],
+      "independent_domains": 2,
+      "max_evidence_age_ms": 3600000,
+      "max_quantity": 10000000,
+      "require_hardware": false
+    },
+    "data.export": {
+      "approval_role": "approver",
+      "approval_threshold": 0,
+      "cooldown_ms": 0,
+      "destinations": [
+        "customer-vault"
+      ],
+      "evidence_kinds": [
+        "dataset_authority"
+      ],
+      "forbidden_fields": [
+        "passport",
+        "payment_token",
+        "password"
+      ],
+      "independent_domains": 1,
+      "max_evidence_age_ms": 3600000,
+      "max_quantity": 1000,
+      "require_hardware": false
+    },
+    "identity.mfa.reset": {
+      "approval_role": "approver",
+      "approval_threshold": 2,
+      "cooldown_ms": 0,
+      "destinations": [],
+      "evidence_kinds": [
+        "identity_proof",
+        "recovery_authority"
+      ],
+      "forbidden_fields": [],
+      "independent_domains": 2,
+      "max_evidence_age_ms": 3600000,
+      "max_quantity": 1000000000,
+      "require_hardware": false
+    },
+    "identity.authenticator.enroll": {
+      "approval_role": "approver",
+      "approval_threshold": 2,
+      "cooldown_ms": 0,
+      "destinations": [],
+      "evidence_kinds": [
+        "identity_proof",
+        "recovery_authority"
+      ],
+      "forbidden_fields": [],
+      "independent_domains": 2,
+      "max_evidence_age_ms": 3600000,
+      "max_quantity": 1000000000,
+      "require_hardware": false
+    },
+    "identity.account.recover": {
+      "approval_role": "approver",
+      "approval_threshold": 2,
+      "cooldown_ms": 0,
+      "destinations": [],
+      "evidence_kinds": [
+        "identity_proof",
+        "recovery_authority"
+      ],
+      "forbidden_fields": [],
+      "independent_domains": 2,
+      "max_evidence_age_ms": 3600000,
+      "max_quantity": 1000000000,
+      "require_hardware": false
+    },
+    "cloud.firewall.change": {
+      "approval_role": "approver",
+      "approval_threshold": 2,
+      "cooldown_ms": 0,
+      "destinations": [],
+      "evidence_kinds": [
+        "ownership"
+      ],
+      "forbidden_fields": [],
+      "independent_domains": 2,
+      "max_evidence_age_ms": 3600000,
+      "max_quantity": 1000000000,
+      "require_hardware": false
+    },
+    "code.release": {
+      "approval_role": "approver",
+      "approval_threshold": 2,
+      "cooldown_ms": 0,
+      "destinations": [],
+      "evidence_kinds": [
+        "build_provenance",
+        "test_result"
+      ],
+      "forbidden_fields": [],
+      "independent_domains": 2,
+      "max_evidence_age_ms": 3600000,
+      "max_quantity": 1000000000,
+      "require_hardware": false
+    },
+    "secret.use": {
+      "approval_role": "approver",
+      "approval_threshold": 2,
+      "cooldown_ms": 0,
+      "destinations": [],
+      "evidence_kinds": [
+        "workload_attestation"
+      ],
+      "forbidden_fields": [],
+      "independent_domains": 2,
+      "max_evidence_age_ms": 3600000,
+      "max_quantity": 1000000000,
+      "require_hardware": false
+    },
+    "backup.delete": {
+      "approval_role": "custodian",
+      "approval_threshold": 3,
+      "cooldown_ms": 120000,
+      "destinations": [],
+      "evidence_kinds": [
+        "governance_review"
+      ],
+      "forbidden_fields": [],
+      "independent_domains": 2,
+      "max_evidence_age_ms": 3600000,
+      "max_quantity": 1000000000,
+      "require_hardware": false
+    },
+    "policy.change": {
+      "approval_role": "custodian",
+      "approval_threshold": 3,
+      "cooldown_ms": 120000,
+      "destinations": [],
+      "evidence_kinds": [
+        "governance_review"
+      ],
+      "forbidden_fields": [],
+      "independent_domains": 2,
+      "max_evidence_age_ms": 3600000,
+      "max_quantity": 1000000000,
+      "require_hardware": false
+    }
+  },
+  "runtime": {
+    "max_cost": 10000,
+    "rate_per_second": 20,
+    "max_fanout": 4,
+    "windows": [
+      {
+        "duration_ms": 60000,
+        "limit": 100
+      },
+      {
+        "duration_ms": 3600000,
+        "limit": 1000
+      },
+      {
+        "duration_ms": 86400000,
+        "limit": 5000
+      },
+      {
+        "duration_ms": 2592000000,
+        "limit": 10000
+      }
+    ],
+    "destinations": [
+      "customer-vault",
+      "erp-service"
+    ],
+    "services": [
+      "erp-service"
+    ],
+    "forbidden_columns": [
+      "passport",
+      "payment_token",
+      "password"
+    ],
+    "jurisdictions": [
+      "EU"
+    ],
+    "purposes": [
+      "operations"
+    ],
+    "classifications": [
+      "internal"
+    ],
+    "sensitivity_weights": {
+      "internal": 1,
+      "confidential": 5,
+      "restricted": 10
+    }
+  }
+}

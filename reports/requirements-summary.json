@@ -1,0 +1,13 @@
+{
+  "total_requirements": 211,
+  "functional_requirements": 166,
+  "nonfunctional_requirements": 45,
+  "status_counts": {
+    "NOT_IMPLEMENTED": 32,
+    "VERIFIED_IN_ENGINEERING_PROFILE": 55,
+    "PARTIAL": 96,
+    "BLOCKED_EXTERNAL": 28
+  },
+  "production_ready": false,
+  "interpretation": "Verified means directly exercised in the declared engineering profile only, not closure of external/production acceptance. Counts are not product completion percentages."
+}

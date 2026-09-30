@@ -1,0 +1,24 @@
+{
+  "bootstrap_exit": 0,
+  "health": {
+    "production_ready": false,
+    "profile": "engineering",
+    "status": "ok"
+  },
+  "console_http_status": 200,
+  "console_contains_expected_banner": true,
+  "authenticated_identity": "operator",
+  "synthetic_read": {
+    "decision": "ALLOW",
+    "row_count": 1,
+    "columns": [
+      "id",
+      "name"
+    ],
+    "cost": 2
+  },
+  "graceful_shutdown_exit": 0,
+  "unexpected_server_error": false,
+  "browser_visual_verification": false,
+  "production_target_tested": false
+}

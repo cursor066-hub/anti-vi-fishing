@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""Map every numbered SRS requirement, including unimplemented/external gaps."""
+import csv, json, re, pathlib, collections
+root = pathlib.Path(__file__).resolve().parents[1]
+source = (root / 'spec/Invariant_Fabric_SRS_and_System_Architecture.md').read_text()
+rows = []
+for line in source.splitlines():
+    parts = [part.strip() for part in line.split('|')]
+    if len(parts) >= 5 and re.fullmatch(r'(?:[A-Z]{2,3}|NFR-[A-Z]+)-\d{3}', parts[1]):
+        rows.append({'id': parts[1], 'requirement': parts[2], 'minimum_acceptance': parts[3]})
+assert len(rows) == 211 and len({r['id'] for r in rows}) == 211
+verified = set('''COV-002 COV-007 COV-008 ACT-001 ACT-003 ACT-004 ACT-006 ACT-007 ACT-008 ACT-011 EVD-001 EVD-002 EVD-003 EVD-005 EVD-008 EVD-009 EVD-011 POL-001 POL-002 POL-003 POL-005 POL-006 POL-007 POL-009 POL-010 POL-015 COM-001 COM-002 COM-003 COM-005 COM-006 COM-009 COM-010 COM-011 COM-012 RUN-002 RUN-007 DAT-002 DAT-003 DAT-004 DAT-009 IDN-002 IDN-008 AUD-001 AUD-005 AUD-007 AUD-008 AUD-009 AIG-001 AIG-006 AIG-008 AIG-009 CON-004 CON-005 CON-010'''.split())
+not_implemented = set('''COV-001 COV-004 COV-010 ACT-012 POL-008 POL-013 RUN-010 DAT-007 DAT-011 IDN-004 IDN-005 IDN-009 NET-001 NET-005 NET-006 KEY-005 KEY-008 KEY-009 AUD-010 AIG-003 AIG-004 AIG-007 AIG-010 CON-002 CON-006 CON-008 UX-006 NFR-AVL-003 NFR-OPS-003 NFR-OPS-004 NFR-OPS-005 NFR-MNT-005'''.split())
+external = set('''PER-001 PER-002 PER-003 PER-004 PER-005 PER-006 PER-010 KEY-001 KEY-002 KEY-003 KEY-006 KEY-011 NFR-SEC-003 NFR-SEC-007 NFR-SEC-008 NFR-AVL-001 NFR-AVL-005 NFR-PRV-001 NFR-PRV-003 NFR-OPS-001 NFR-MNT-004 NFR-USA-001 NFR-USA-002 NFR-USA-003 NFR-CMP-001 NFR-CMP-003 NFR-CMP-004 NFR-TST-004'''.split())
+by_prefix = {
+'COV': ('Coverage/integration owner', 'R2', 'src/coverage.mjs; src/fabric.mjs', 'Actual target discovery, drift agents, independently executed bypass tests and historical guarantee intervals are not established. All manifests suppress production guarantee.'),
+'ACT': ('Core security maintainer', 'R0', 'src/canonical.mjs; src/schema.mjs; src/fabric.mjs', 'Typed single actions are implemented. Composition, independent high-assurance protocol review and some full-platform semantics are not implemented.'),
+'EVD': ('Evidence integration owner', 'R1', 'src/fabric.mjs; src/policy.mjs', 'Evidence issuer signatures and conservative dependency rules are implemented; source acquisition, issuer onboarding and real authority verification are not.'),
+'POL': ('Customer policy governance owner', 'R2', 'src/policy.mjs; src/fabric.mjs', 'Deterministic local constitution and delayed software-quorum policy activation exist; emergency policy profiles, production staged release and protected full lifecycle remain gaps.'),
+'COM': ('Gate security maintainer', 'R2', 'src/fabric.mjs; src/target.mjs', 'State/replay/reservation/observed-outcome behavior is tested against a simulator. Real target credential isolation and total mediation are not proven.'),
+'RUN': ('Runtime enforcement owner', 'R4', 'src/runtime.mjs', 'Local software decisions and persistent budgets are implemented; packet integration, certified configuration integrity, independent remote revocation and local-cache SLA are not established.'),
+'DAT': ('Data gate/privacy owner', 'R3', 'src/runtime.mjs; src/target.mjs; src/fabric.mjs', 'Synthetic dataset selection and budgets only. No real database query rewriting/credential broker, output watermark, per-record crypto-shredding or backup erasure.'),
+'IDN': ('Identity security owner', 'R3', 'src/server.mjs; src/fabric.mjs', 'Local 24-hour tokens, software approvals and quarantine are exercised. WebAuthn/federation, real device attestation, protected recovery and JIT identity lifecycle are not integrated.'),
+'NET': ('Network enforcement owner', 'R4', 'src/runtime.mjs', 'Software envelope decisions only; no kernel, endpoint, switch, proxy, actual packet or network quarantine enforcement.'),
+'PER': ('Trusted hardware owner', 'R5', 'src/server.mjs; docs/SECURITY.md', 'Hardware unavailable. Secure Perception fails closed and is never claimed by the ordinary UI. No hostile-OS extraction or usability demonstration exists.'),
+'KEY': ('Independent customer custodians', 'R2/R5', 'src/crypto.mjs; src/bootstrap.mjs; docs/SECURITY.md', 'Ed25519 software keys and 3-of-5 multisignature only. No HSM/MPC shares, certified custody, root recovery, rotation/migration or post-quantum implementation.'),
+'AUD': ('Audit/privacy owner', 'R2', 'src/store.mjs; scripts/verify-export.mjs; scripts/verify-export-webcrypto.mjs', 'Signed local hash chain and independently pinned checkpoint verification are implemented. External witness publication, role-specific field views and complete retention erasure remain gaps.'),
+'AIG': ('AI governance owner', 'R2', 'src/policy.mjs; docs/SECURITY.md', 'AI is disabled and has no authority or network/data access. A configured advisory model, provenance pipeline, provider agreements and model-evaluation lifecycle are not implemented.'),
+'CON': ('Target integration owner', 'R2', 'src/target.mjs', 'Controlled SQLite target simulator, not a bank/ERP/cloud connector. Real target APIs, least-privilege credentials, support workflow and upgrade revalidation are missing.'),
+'UX': ('Frontend/accessibility owner', 'R2', 'web/index.html; web/app.js; web/style.css', 'Functional HTTP integration and static UI/logic checks exist. Browser rendering, responsive screenshots, Playwright journeys, WCAG and human comprehension studies were unavailable.'),
+'NFR-SEC': ('Security/release owner', 'R2', 'docs/SECURITY.md; tests/', 'Focused security tests are not ASVS certification, full SAST/DAST, current advisory review, independently signed release provenance or penetration assessment.'),
+'NFR-PERF': ('Performance owner', 'R2/R4', 'reports/benchmark.json; scripts/benchmark.mjs', 'Single-host synthetic microbenchmark, not production load/soak evidence. Runtime signed-audit p99 does not meet the 1 ms target; see measured report.'),
+'NFR-AVL': ('Platform/SRE owner', 'R2', 'docs/RUNBOOKS.md', 'No multi-zone deployment, consensus/replication, production availability measurement, SLA or validated RTO/RPO exercise.'),
+'NFR-PRV': ('Privacy/legal owner', 'R2', 'docs/SECURITY.md; docs/RUNBOOKS.md', 'Synthetic data/minimisation defaults and logical retention only. Legal basis, DPIA, regional contracts, full deletion and biometric hardware evidence require external review/integration.'),
+'NFR-OPS': ('Platform/SRE owner', 'R2', 'docs/RUNBOOKS.md; deploy/', 'Runbook and staging templates are supplied, but no assigned production account, operational staff, incident system or live release/DR exercise exists.'),
+'NFR-MNT': ('Maintainer/release owner', 'R2', 'docs/API.md; reports/sbom.cdx.json', 'Versioned engineering API and runtime inventory are supplied; human ownership, full dual certificate/policy conformance, lifecycle notices and release process are incomplete.'),
+'NFR-USA': ('Product/accessibility researcher', 'R2/R5', 'web/; docs/WORKFLOWS.md', 'No browser, accessibility audit or independent human comprehension/usability study was available.'),
+'NFR-CMP': ('Qualified legal/compliance owner', 'R2', 'docs/PRODUCTION-ACCEPTANCE.md; docs/SECURITY.md', 'No certification, legal opinion, executed compliance mapping, disclosure operation or sector/regulatory assessment is claimed.'),
+'NFR-TST': ('Independent verification/release owner', 'R2', 'tests/; reports/tests.tap; docs/requirements.csv', 'Synthetic software and adversarial evidence is included; independent red team, real target tests and signed production acceptance remain unclosed.')
+}
+tests = list((root/'tests').glob('*.test.mjs'))
+for row in rows:
+    prefix = row['id'].rsplit('-', 1)[0]
+    owner, baseline, implementation, limitation = by_prefix[prefix]
+    matches = [str(p.relative_to(root)) for p in tests if row['id'] in p.read_text()]
+    row.update(status='VERIFIED_IN_ENGINEERING_PROFILE' if row['id'] in verified else 'NOT_IMPLEMENTED' if row['id'] in not_implemented else 'BLOCKED_EXTERNAL' if row['id'] in external else 'PARTIAL', owner_role=owner, named_owner='Not assigned; required before production', release_baseline=baseline, verification_method='Automated test / simulation' if matches else 'Source inspection / analysis; external acceptance still required', implementation=implementation, stored_evidence='; '.join(matches + ['reports/tests.tap', 'reports/final-regression.tap']) if matches else 'docs/PRODUCTION-ACCEPTANCE.md', limitations=limitation, production_acceptance='NOT_APPROVED')
+(root/'docs').mkdir(exist_ok=True)
+with (root/'docs/requirements.csv').open('w', newline='') as file:
+    writer = csv.DictWriter(file, fieldnames=list(rows[0]), lineterminator="\n"); writer.writeheader(); writer.writerows(rows)
+summary = {'total_requirements':len(rows),'functional_requirements':sum(not r['id'].startswith('NFR-') for r in rows),'nonfunctional_requirements':sum(r['id'].startswith('NFR-') for r in rows),'status_counts':dict(collections.Counter(r['status'] for r in rows)), 'production_ready':False, 'interpretation':'Verified means directly exercised in the declared engineering profile only, not closure of external/production acceptance. Counts are not product completion percentages.'}
+(root/'reports/requirements-summary.json').write_text(json.dumps(summary, indent=2)+'\n')
+(root/'docs/REQUIREMENTS.md').write_text('# Requirements traceability\n\nAll **211** numbered rows in the supplied SRS are preserved in `requirements.csv`: **166 functional** and **45 non-functional**. No missing requirements were silently removed or treated as optional. Original source language, minimum acceptance, evidence method, accountable role, baseline and current gap are recorded. Named human owners remain unassigned, which itself prevents production acceptance.\n\n`VERIFIED_IN_ENGINEERING_PROFILE` means the narrow software behavior was exercised, not that the full real-system or hardware claim is satisfied. `PARTIAL` means relevant code or analysis exists but material acceptance remains. `NOT_IMPLEMENTED` explicitly identifies functionality absent from the build. `BLOCKED_EXTERNAL` identifies absent hardware, customer resources or independent/organisational evidence. No row is marked production-approved.\n\nThe trace references tests by requirement IDs and source modules. Reports are stored under `reports/`. Some tests exercise only the safe-rejection side of a requirement (for example rejecting software signatures under hardware-required policy); that does **not** implement the missing hardware path.\n\nStatus counts: '+json.dumps(summary['status_counts'])+'.\n')
+print(json.dumps(summary))

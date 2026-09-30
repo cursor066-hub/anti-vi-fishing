@@ -1,0 +1,128 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-09-05T20:03:34.473Z",
+    "component": {
+      "type": "application",
+      "name": "invariant-fabric",
+      "version": "0.1.0-engineering.1"
+    },
+    "properties": [
+      {
+        "name": "invariant:production-ready",
+        "value": "false"
+      },
+      {
+        "name": "invariant:third-party-application-dependencies",
+        "value": "none"
+      },
+      {
+        "name": "invariant:current-advisories-reviewed",
+        "value": "false: egress policy denied official documentation access"
+      }
+    ]
+  },
+  "components": [
+    {
+      "type": "platform",
+      "name": "node",
+      "version": "24.16.0",
+      "properties": [
+        {
+          "name": "invariant:inventory-source",
+          "value": "Node process.versions; not a complete transitive runtime SBOM"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "brotli",
+      "version": "1.2.0",
+      "properties": [
+        {
+          "name": "invariant:inventory-source",
+          "value": "Node process.versions; not a complete transitive runtime SBOM"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "icu",
+      "version": "78.3",
+      "properties": [
+        {
+          "name": "invariant:inventory-source",
+          "value": "Node process.versions; not a complete transitive runtime SBOM"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "nghttp2",
+      "version": "1.68.0",
+      "properties": [
+        {
+          "name": "invariant:inventory-source",
+          "value": "Node process.versions; not a complete transitive runtime SBOM"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "openssl",
+      "version": "3.5.6",
+      "properties": [
+        {
+          "name": "invariant:inventory-source",
+          "value": "Node process.versions; not a complete transitive runtime SBOM"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "sqlite",
+      "version": "3.53.0",
+      "properties": [
+        {
+          "name": "invariant:inventory-source",
+          "value": "Node process.versions; not a complete transitive runtime SBOM"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "uv",
+      "version": "1.52.1",
+      "properties": [
+        {
+          "name": "invariant:inventory-source",
+          "value": "Node process.versions; not a complete transitive runtime SBOM"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "v8",
+      "version": "13.6.233.17-node.49",
+      "properties": [
+        {
+          "name": "invariant:inventory-source",
+          "value": "Node process.versions; not a complete transitive runtime SBOM"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "zlib",
+      "version": "1.3.1-e00f703",
+      "properties": [
+        {
+          "name": "invariant:inventory-source",
+          "value": "Node process.versions; not a complete transitive runtime SBOM"
+        }
+      ]
+    }
+  ]
+}
