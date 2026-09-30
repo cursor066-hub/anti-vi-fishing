@@ -211,6 +211,7 @@ test('w5-M4/L4/L5: connectors auth-gated; unknown resource and key 404', async t
   assert.equal((await h.request('/v1/keys/no-such-key/attest', { token: h.setup.credentials.acme.security })).status, 404);
 });
 
+// NFR-MNT-001: route↔spec parity — every documented path is a real route.
 test('w5-M8: a wrong method on a documented path is a 405 on every route', async t => {
   const h = await httpFixture(t), spec = JSON.parse(readFileSync('docs/openapi.json', 'utf8'));
   for (const template of Object.keys(ROUTE_METHODS)) assert.ok(spec.paths[template], `route ${template} missing from openapi.json`);

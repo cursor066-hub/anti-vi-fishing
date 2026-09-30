@@ -14,7 +14,7 @@ import { openSession, releaseFields, workspaceFallback } from './secureview.mjs'
 import { extract, explain, classifyIntent } from './advisory.mjs';
 import { fields, text, identifier, integer, uniqueStrings, validateProposal } from './schema.mjs';
 import { evaluatePolicy, validatePolicy, policyDiff } from './policy.mjs';
-import { declarePath, coverageManifest, applyDriftToPaths, coverageAt } from './coverage.mjs';
+import { declarePath, coverageManifest, applyDriftToPaths, coverageAt, effectiveStatus } from './coverage.mjs';
 import { watermark, reconstructionCheck } from './datagate.mjs';
 import { requireThat, InvariantError } from './errors.mjs';
 import { join } from 'node:path';
@@ -1117,7 +1117,19 @@ export class Fabric {
     if (to === 'UNKNOWN') this.store.insert(tenant, 'coverage-task', `${cause}:${path.path_id}`, { path_id: path.path_id, owner: path.owner, cause, opened_at: now, status: 'open', required_action: 'attach independently executed technical validation evidence' }, now);
     if (to === 'UNCOVERED') this.store.insert(tenant, 'coverage-task', `${cause}:${path.path_id}`, { path_id: path.path_id, owner: path.owner, cause, opened_at: now, status: 'open', required_action: 'close this declared-unprotected path or bring it under enforced coverage' }, now);
   }
-  coverage(p) { this.authorize(p, ['operator', 'approver', 'custodian', 'security', 'auditor', 'policy_admin']); return coverageManifest(p.tenant_id, this.store.list(p.tenant_id, 'coverage'), this.clock(), payload => this.signAudit(p.tenant_id, payload, 'coverage')); }
+  coverage(p) {
+    this.authorize(p, ['operator', 'approver', 'custodian', 'security', 'auditor', 'policy_admin']);
+    return this.transaction(p, now => {
+      // Evidence-expiry is a real transition, not a computed convenience: a
+      // MONITORED path that ages out is recorded UNKNOWN with its coverage
+      // event and owner task, exactly like a drift-driven drop (w8-ledger
+      // COV-005). Idempotent — stored UNKNOWN paths never re-fire.
+      for (const path of this.store.list(p.tenant_id, 'coverage', 10000))
+        if ((path.status === 'MONITORED' || path.status === 'ENFORCED') && effectiveStatus(path, now) === 'UNKNOWN')
+          this.coverageTransition(p.tenant_id, path, 'UNKNOWN', 'evidence-expired', now);
+      return coverageManifest(p.tenant_id, this.store.list(p.tenant_id, 'coverage'), now, payload => this.signAudit(p.tenant_id, payload, 'coverage'));
+    });
+  }
   // COV-009: what the coverage record showed at an arbitrary past instant —
   // answered from the coverage-event log, not the current mutable state.
   coverageAt(p, at) {

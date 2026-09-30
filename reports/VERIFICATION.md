@@ -2,7 +2,7 @@
 
 ## Executed evidence
 
-**358 automated test cases passed, 0 failed** (node --test over tests/). TAP output in reports/tests.tap.
+**361 automated test cases passed, 0 failed** (node --test over tests/). TAP output in reports/tests.tap.
 
 **22 simulation scenarios** run by scripts/simulate.mjs (reports/simulation-results.json).
 
@@ -10,8 +10,8 @@
 
 | Status | Count |
 |---|---|
-| VERIFIED_IN_ENGINEERING_PROFILE | 172 |
-| PARTIAL | 10 |
+| VERIFIED_IN_ENGINEERING_PROFILE | 170 |
+| PARTIAL | 12 |
 | BLOCKED_EXTERNAL | 27 |
 | NOT_IMPLEMENTED | 2 |
 

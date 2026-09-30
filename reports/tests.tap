@@ -2147,10 +2147,28 @@ ok 358 - w7-seam F9: wedged composite reconciles composite-aware
   duration_ms: 0
   type: 'test'
   ...
-1..358
-# tests 358
+# Subtest: COV-004: a live manifest drift drops the dependent path to UNKNOWN and opens an owner task
+ok 359 - COV-004: a live manifest drift drops the dependent path to UNKNOWN and opens an owner task
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: COV-005: stale evidence transitions to UNKNOWN at read time with event and owner task
+ok 360 - COV-005: stale evidence transitions to UNKNOWN at read time with event and owner task
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: COV-005: a fresh MONITORED path produces no expiry task or event
+ok 361 - COV-005: a fresh MONITORED path produces no expiry task or event
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+1..361
+# tests 361
 # suites 0
-# pass 358
+# pass 361
 # fail 0
 # cancelled 0
 # skipped 0

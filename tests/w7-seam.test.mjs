@@ -24,7 +24,7 @@ function validationEnvelope(h, path, issuer, overrides = {}) {
 // w7-seam F1: coverage promotion applies the same trust floor as action
 // evidence — advisory flag, sub-90 confidence, communication channel and
 // out-of-kind envelopes can never promote a path; the cited evidence row is
-// persisted on the ledger rather than left dangling.
+// persisted on the ledger rather than left dangling. (COV-010 trust floor)
 test('w7-seam F1: technicalValidation enforces advisory/confidence/channel/kind bars and persists evidence', t => {
   const h = fixture(t);
   h.f.declareCoverage(h.p('security'), { path_id: 'pv', action_type: 'data.export', target: 'dataset-1', environment: 'prod', connector_version: '1.0', owner: 'op', status: 'UNKNOWN', path_class: 'api', max_age_ms: 60000, configuration_digest: digest({ c: 1 }) });
@@ -51,7 +51,7 @@ test('w7-seam F2/F10: history replays in order and revalidation extends coverage
   h.f.technicalValidation(h.p('security'), 'pr', validationEnvelope(h, path(), 'security-ops').envelope);
   const t2 = h.now();
   // F2: replay at t2 must answer MONITORED — oldest event applied last would
-  // falsify it back to UNKNOWN.
+  // falsify it back to UNKNOWN. (COV-009 arbitrary-instant replay)
   assert.equal(h.f.coverageAt(h.p('auditor'), t2).paths['pr'].status, 'MONITORED');
   assert.equal(h.f.coverageAt(h.p('auditor'), t0 + 500).paths['pr'].status, 'UNKNOWN', 'status before validation stays UNKNOWN');
   // F10: age past the window, re-validate, evidence window refreshes.
