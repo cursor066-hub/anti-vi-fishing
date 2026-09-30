@@ -70,7 +70,7 @@ try {
     bootstrap(join(drillDir, 'deploy'), ['acme'], Date.now());
     const drill = spawnSync(process.execPath, ['scripts/backup.mjs', '--dir', join(drillDir, 'deploy'), '--out', join(drillDir, 'backup')], { encoding: 'utf8' });
     scenario('Engine-native online backup completes', 0, () => drill.status);
-    const check = spawnSync(process.execPath, ['scripts/restore-check.mjs', '--dir', join(drillDir, 'backup')], { encoding: 'utf8' });
+    const check = spawnSync(process.execPath, ['scripts/restore-check.mjs', '--dir', join(drillDir, 'backup'), '--trusted-keys', join(drillDir, 'deploy', 'config.json')], { encoding: 'utf8' });
     scenario('Offline restore verification of drill backup', 0, () => check.status);
   } finally { rmSync(drillDir, { recursive: true, force: true }); }
   // Results are written AFTER every scenario — the report must cover the

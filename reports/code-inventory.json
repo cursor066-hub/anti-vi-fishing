@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 1449,
-      "bytes": 122302
+      "lines": 1456,
+      "bytes": 122936
     },
     "src/issuerd.mjs": {
       "lines": 295,
@@ -74,32 +74,32 @@
       "bytes": 9969
     },
     "src/server.mjs": {
-      "lines": 263,
-      "bytes": 27835
+      "lines": 276,
+      "bytes": 28879
     },
     "src/shamir.mjs": {
       "lines": 83,
       "bytes": 3566
     },
     "src/store.mjs": {
-      "lines": 232,
-      "bytes": 16192
+      "lines": 243,
+      "bytes": 16959
     },
     "src/target.mjs": {
       "lines": 215,
       "bytes": 16023
     },
     "web/app.js": {
-      "lines": 207,
-      "bytes": 30757
+      "lines": 216,
+      "bytes": 31300
     },
     "scripts/ai-eval.mjs": {
       "lines": 34,
       "bytes": 1934
     },
     "scripts/backup.mjs": {
-      "lines": 64,
-      "bytes": 4229
+      "lines": 79,
+      "bytes": 5093
     },
     "scripts/benchmark.mjs": {
       "lines": 32,
@@ -134,12 +134,12 @@
       "bytes": 8304
     },
     "scripts/restore-check.mjs": {
-      "lines": 72,
-      "bytes": 4278
+      "lines": 119,
+      "bytes": 7667
     },
     "scripts/simulate.mjs": {
       "lines": 82,
-      "bytes": 7504
+      "bytes": 7563
     },
     "scripts/start-local.sh": {
       "lines": 10,
@@ -187,7 +187,7 @@
     },
     "tests/helpers.mjs": {
       "lines": 74,
-      "bytes": 6871
+      "bytes": 6896
     },
     "tests/http-concurrency-ui.test.mjs": {
       "lines": 245,
@@ -244,8 +244,12 @@
     "tests/w6-tenancy.test.mjs": {
       "lines": 122,
       "bytes": 8534
+    },
+    "tests/w7-fix.test.mjs": {
+      "lines": 221,
+      "bytes": 14600
     }
   },
-  "total_files": 61,
-  "total_lines": 9672
+  "total_files": 62,
+  "total_lines": 9995
 }

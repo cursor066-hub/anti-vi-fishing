@@ -107,8 +107,16 @@ if (typeof document !== 'undefined') {
     const has = (...r) => state.me.roles.some(x => r.includes(x));
     // Affordances mirror the server's own authorization sets — a nav entry is
     // hidden exactly when every API call under it would 403 (UX-004).
-    const access = { actions: canActions, propose: state.me.roles.includes('operator'), coverage: true, policy: has('policy_admin', 'security'), runtime: has('operator', 'workload'), audit: has('auditor', 'security', 'operator', 'policy_admin'), keys: has('security', 'policy_admin'), ceremonies: admin, connectors: has('operator', 'security', 'policy_admin', 'auditor'), proofs: has('operator', 'security', 'auditor'), perception: has('operator', 'approver', 'custodian', 'security'), grants: has('operator', 'security', 'auditor') };
+    const access = { actions: canActions, propose: state.me.roles.includes('operator'), coverage: true, policy: has('policy_admin', 'security'), runtime: has('operator', 'workload'), audit: has('auditor', 'security'), keys: has('security', 'policy_admin'), ceremonies: admin, connectors: has('operator', 'security', 'policy_admin', 'auditor'), proofs: has('operator', 'security', 'auditor'), perception: has('operator', 'approver', 'custodian', 'security'), grants: has('operator', 'security', 'auditor') };
     document.querySelectorAll('nav button').forEach(b => { b.hidden = !access[b.dataset.view]; });
+    // Per-ACTION affordances inside a visible view must also mirror the
+    // server's role set: a button that always 403s is a dishonest
+    // affordance (w7-console F3).
+    $('rotate-form').hidden = !has('security', 'custodian');
+    $('ceremony-form').hidden = !has('security', 'custodian');
+    $('ack-form').hidden = !has('custodian');
+    $('split-form').hidden = !has('security', 'custodian');
+    $('reconstruct-form').hidden = !has('security', 'custodian');
     if (canActions) { show('actions'); await loadList(); } else { show('audit'); }
     notify('Connected to the isolated engineering workspace. Targets and evidence issuers are synthetic.');
   });
@@ -187,6 +195,7 @@ if (typeof document !== 'undefined') {
       const tr = node('tr'), title = node('td', i.name ?? i.key_id.slice(0, 12)); title.append(node('span', i.key_id.slice(0, 12), 'resource'));
       const cell = node('td'), button = node('button', 'Drift check', 'secondary');
       if (!i.endpoint) { button.disabled = true; button.title = 'No live endpoint registered'; }
+      button.hidden = !(state.me?.roles ?? []).some(r => ['security', 'policy_admin'].includes(r));
       button.addEventListener('click', async () => { try { $('drift-result').textContent = JSON.stringify(await api(`/v1/connectors/${i.key_id}/drift-check`, { method: 'POST', body: {} }), null, 2); } catch (error) { notify(error.message || 'Drift check failed.', true); } });
       cell.append(button); tr.append(title, node('td', `${i.channel} / ${i.failure_domain}`), node('td', i.endpoint ?? 'offline envelope only'), node('td', i.revoked ? 'revoked' : 'trusted'), cell); $('connector-rows').append(tr);
     }

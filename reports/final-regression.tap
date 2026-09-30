@@ -1997,10 +1997,70 @@ ok 333 - w6-F7: issuerd never signs unverified caller claims
   duration_ms: 0
   type: 'test'
   ...
-1..333
-# tests 333
+# Subtest: w7-clock F1: recoverClock records the discontinuity and un-wedges the gate
+ok 334 - w7-clock F1: recoverClock records the discontinuity and un-wedges the gate
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w7-clock F2: succession certificates survive an expired active policy
+ok 335 - w7-clock F2: succession certificates survive an expired active policy
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w7-clock F3: token revocation kills its cookie sessions immediately
+ok 336 - w7-clock F3: token revocation kills its cookie sessions immediately
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w7-console F4: logout kills every sibling session of the same token
+ok 337 - w7-console F4: logout kills every sibling session of the same token
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w7-console F1: per-tenant session cap fires before the global cap
+ok 338 - w7-console F1: per-tenant session cap fires before the global cap
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w7-backup F1: the manifest must verify under an external trust anchor, not keys inside the artifact
+ok 339 - w7-backup F1: the manifest must verify under an external trust anchor, not keys inside the artifact
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w7-backup F4: wal sidecars and symlinked artifacts are rejected
+ok 340 - w7-backup F4: wal sidecars and symlinked artifacts are rejected
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w7-backup F3/F7: committed audit heads catch truncation and a dropped audit table
+ok 341 - w7-backup F3/F7: committed audit heads catch truncation and a dropped audit table
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w7-backup F6: traversal entries inside a signed payload are rejected
+ok 342 - w7-backup F6: traversal entries inside a signed payload are rejected
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w7-backup F5: a torn cross-database snapshot fails the referential check
+ok 343 - w7-backup F5: a torn cross-database snapshot fails the referential check
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+1..343
+# tests 343
 # suites 0
-# pass 333
+# pass 343
 # fail 0
 # cancelled 0
 # skipped 0

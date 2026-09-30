@@ -151,11 +151,22 @@ export class Store {
     requireThat(Number.isSafeInteger(now) && now > 0, 'INV-503-TIME', 'Clock unavailable', 503);
     const row = this.db.prepare('SELECT last FROM clock WHERE id=1').get();
     requireThat(recovery || !row || now >= row.last, 'INV-503-TIME', 'Clock regression; security operations halted', 503);
+    // Recovery writes the operator-asserted host time: `last` is the
+    // regression detector, not the time source — expiry is evaluated
+    // against host time either way, and an over-high `last` would wedge
+    // the gate permanently after an honest rewind (VM snapshot restore).
     this.db.prepare('INSERT INTO clock VALUES(1,?) ON CONFLICT(id) DO UPDATE SET last=excluded.last').run(now);
+    return now;
   }
   audit(tenant, type, actor, reference, metadata, now) {
-    const last = this.db.prepare('SELECT seq,hash FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1').get(tenant);
-    const entry = { tenant_id: tenant, sequence: (last?.seq ?? 0) + 1, previous: last?.hash ?? '0'.repeat(64), type, actor, reference, metadata, time: now };
+    const last = this.db.prepare('SELECT seq,hash,envelope FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1').get(tenant);
+    // The chain's `time` is a monotone logical clock: verifyAudit requires
+    // non-decreasing entry times, so an accepted host rewind must not write
+    // a regressed value into the chain (it would break verification
+    // permanently — w7-clock F1). The rewound host reading is still on the
+    // record inside the CLOCK_RECOVERED entry's metadata.
+    const priorTime = last ? JSON.parse(last.envelope).payload.time : 0;
+    const entry = { tenant_id: tenant, sequence: (last?.seq ?? 0) + 1, previous: last?.hash ?? '0'.repeat(64), type, actor, reference, metadata, time: Math.max(now, priorTime) };
     const hash = digest(entry), envelope = this.auditSigners[tenant].sign(entry);
     this.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run(tenant, entry.sequence, entry.previous, hash, canonical(envelope));
     return { hash, envelope };

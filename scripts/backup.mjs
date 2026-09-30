@@ -45,15 +45,30 @@ const databases = ['fabric.db', 'target.db'].map(n => join(dir, n));
 mkdirSync(out, { recursive: true, mode: 0o700 });
 const payload = { format: 'IF-BACKUP-1', created_at: new Date().toISOString(), source_dir: dir, databases: [] };
 for (const src of databases) {
+  // DatabaseSync CREATES a missing file — probing existence first keeps an
+  // absent source from producing a certified empty backup (w7-backup F2).
+  if (!existsSync(src)) { console.error(`skip missing ${src}`); continue; }
   let db;
-  try { db = new DatabaseSync(src); } catch { console.error(`skip missing ${src}`); continue; }
+  try { db = new DatabaseSync(src); } catch { console.error(`skip unreadable ${src}`); continue; }
   const dest = join(out, basename(src));
-  db.exec('PRAGMA wal_checkpoint(FULL)');
+  // TRUNCATE, not FULL: no -wal sidecar may survive next to the artifact —
+  // an unhashed sidecar would control the view a verifier opens
+  // (w7-backup F4).
+  db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
   await backup(db, dest);
   const version = db.prepare('PRAGMA user_version').get().user_version;
+  const entry = { file: basename(src), sha256: await sha256(dest), user_version: version };
+  // Commit each tenant's audit head into the signed payload — a
+  // tail-truncated backup must fail verification instead of re-certifying
+  // (w7-backup F3).
+  try {
+    const heads = {};
+    for (const row of db.prepare('SELECT tenant,seq,hash FROM audit ORDER BY tenant,seq').all()) heads[row.tenant] = { entries: row.seq, head_hash: row.hash };
+    entry.audit_heads = heads;
+  } catch { /* this database carries no audit table */ }
   db.close();
   chmodSync(dest, 0o600);
-  payload.databases.push({ file: basename(src), sha256: await sha256(dest), user_version: version });
+  payload.databases.push(entry);
 }
 if (!payload.databases.length) { console.error('no databases were backed up'); process.exit(1); }
 // Key material lives outside the database (vault file / config); a complete

@@ -213,8 +213,12 @@ export class Fabric {
     return this.store.tx(() => {
       const now = this.clock();
       const prior = this.store.db.prepare('SELECT last FROM clock WHERE id=1').get()?.last ?? null;
+      // Recovery records the discontinuity explicitly: prior_last is what
+      // the ledger believed, recovered_at is the operator-asserted honest
+      // host time. An external verifier sees the jump on the signed chain
+      // — time discontinuity is evidence, not silent rewriting (w7-clock F1).
       this.store.clock(now, { recovery: true });
-      this.store.audit(p.tenant_id, 'CLOCK_RECOVERED', p.subject_id, 'local-gate', { prior_last: prior, recovered_at: now }, now);
+      this.store.audit(p.tenant_id, 'CLOCK_RECOVERED', p.subject_id, 'local-gate', { prior_last: prior, recovered_at: now, regression_ms: prior !== null ? prior - now : 0 }, now);
       return { recovered_at: now, prior_last: prior };
     });
   }
@@ -631,7 +635,10 @@ export class Fabric {
       // The floor runs over still-valid approvals only — a lapsed approval
       // must not mint an already-dead certificate that wedges the capsule in
       // CERTIFIED (policy-audit F12).
-      const graph = this.graph(t, r), expiry = Math.min(now + policy.certificate_ttl_ms, r.capsule.expires_at, policy.expires_at, ...graph.items.map(e => e.payload.expires_at), ...r.approvals.filter(a => a.payload.expires_at > now).map(a => a.payload.expires_at));
+      // A policy.change capsule binds the NEXT constitution, not the expiry
+      // of the dead one — an expired constitution must still permit its own
+      // succession or the tenant wedges permanently (w7-clock F2).
+      const graph = this.graph(t, r), expiry = Math.min(now + policy.certificate_ttl_ms, r.capsule.expires_at, r.capsule.action.type === 'policy.change' ? Infinity : policy.expires_at, ...graph.items.map(e => e.payload.expires_at), ...r.approvals.filter(a => a.payload.expires_at > now).map(a => a.payload.expires_at));
       requireThat(expiry > now, 'INV-409-STATE', 'Certificate would be stillborn; re-approve the action', 409);
       const certificate_id = randomUUID();
       const payload = { certificate_id, tenant_id: t, capsule_id: id, capsule_digest: r.capsule_digest, evidence_graph_digest: graph.digest, policy_id: policy.policy_id, policy_version: policy.version, policy_digest: digest(policy), decision: 'ALLOW', constraints: { destination: r.capsule.destination, quantity: r.capsule.quantity, requested_digest: digest(r.capsule.requested_state), current_state: this.stateRef(r.capsule.current_state), exclusions: r.capsule.exclusions }, target_gate_id: this.config.gate_id, signer_set: decision.eligible_signers, nonce: r.capsule.nonce, issued_at: now, expires_at: expiry, single_use: true, suite, revocation_ref: `certificate:${certificate_id}` };

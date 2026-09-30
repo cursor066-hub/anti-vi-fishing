@@ -41,7 +41,7 @@ export const ROUTE_METHODS = new Map(Object.entries({
   '/v1/secure-perception/fallback': 'POST', '/v1/advisory': 'POST',
 }).map(([k, v]) => [k, v.split(',')]));
 
-export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin = `http://127.0.0.1:${port}` } = {}) {
+export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin = `http://127.0.0.1:${port}`, tenantSessionCap = 250 } = {}) {
   requireThat(['127.0.0.1', '::1'].includes(host), 'INV-503-RELEASE', 'Engineering HTTP service must bind to loopback', 503);
   const web = fileURLToPath(new URL('../web/', import.meta.url));
   const sessions = new Map(), rate = new Map();
@@ -70,6 +70,9 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
     if (authorization) { requireThat(/^Bearer [A-Za-z0-9_-]{43}$/.test(authorization), 'INV-401-AUTH', 'Authentication required', 401); return authenticateToken(authorization.slice(7)).principal; }
     const sid = /(?:^|;\s*)if_session=([A-Za-z0-9_-]{43})(?:;|$)/.exec(req.headers.cookie ?? '')?.[1], session = sid ? sessions.get(hashBytes(sid)) : null;
     requireThat(session && session.expires > fabric.clock(), 'INV-401-AUTH', 'Authentication required', 401);
+    // A session minted from a token dies with it — token revocation checked
+    // at mint time alone would leave a residual window (w7-clock F3).
+    requireThat(!fabric.revoked(session.principal.tenant_id, 'token', session.token_hash), 'INV-401-AUTH', 'Authentication required', 401);
     if (req.method !== 'GET') requireThat(req.headers['x-csrf-token'] === session.csrf && req.headers.origin === origin, 'INV-403-CSRF', 'Request origin or CSRF token rejected', 403);
     fabric.authorize(session.principal, ['operator', 'approver', 'custodian', 'security', 'auditor', 'policy_admin', 'workload']); return session.principal;
   }
@@ -145,14 +148,24 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
         requestPrincipal = result.principal; bumpTenant();
         for (const [key, session] of sessions) if (session.expires <= fabric.clock()) sessions.delete(key);
         requireThat(sessions.size < 1000, 'INV-503-CAPACITY', 'Session capacity reached', 503);
+        // Per-tenant ceiling too: the global cap alone lets one spoofed
+        // flood lock every other tenant out (w7-console F1).
+        requireThat([...sessions.values()].filter(s => s.principal.tenant_id === requestPrincipal.tenant_id).length < tenantSessionCap, 'INV-503-CAPACITY', 'Tenant session capacity reached', 503);
         const sid = randomBytes(32).toString('base64url'), csrf = randomBytes(32).toString('base64url');
-        sessions.set(hashBytes(sid), { principal: requestPrincipal, csrf, expires: Math.min(fabric.clock() + 900000, result.expires) });
+        sessions.set(hashBytes(sid), { principal: requestPrincipal, csrf, expires: Math.min(fabric.clock() + 900000, result.expires), token_hash: hashBytes(input.token) });
         res.setHeader('Set-Cookie', `if_session=${sid}; HttpOnly; SameSite=Strict; Path=/; Max-Age=900${origin.startsWith('https:') ? '; Secure' : ''}`);
         return send(200, { ...result.principal, csrf_token: csrf, expires_in: 900 });
       }
       const p = auth(req); requestPrincipal = p; bumpTenant(); rateLimit(`subject:${p.tenant_id}:${p.subject_id}`, 300);
       if (path === '/session/logout' && req.method === 'POST') {
-        const sid = /(?:^|;\s*)if_session=([A-Za-z0-9_-]{43})(?:;|$)/.exec(req.headers.cookie ?? '')?.[1]; if (sid) sessions.delete(hashBytes(sid));
+        // Logout retires every sibling session minted from the same
+        // credential — one stolen token's sessions must not linger under a
+        // device the user never sees (w7-console F4).
+        const sid = /(?:^|;\s*)if_session=([A-Za-z0-9_-]{43})(?:;|$)/.exec(req.headers.cookie ?? '')?.[1];
+        if (sid) {
+          const doomed = sessions.get(hashBytes(sid))?.token_hash;
+          for (const [key, session] of sessions) if (session.token_hash === doomed) sessions.delete(key);
+        }
         res.setHeader('Set-Cookie', 'if_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'); return send(200, { logged_out: true });
       }
       if (path === '/v1/me' && req.method === 'GET') return send(200, { ...p, roles: fabric.identity(p).roles, device_id: fabric.identity(p).device_id, profile: 'engineering', secure_perception: 'dev-attested-software', perception_components: Object.keys(fabric.perceptionComponents[p.tenant_id] ?? {}) });
