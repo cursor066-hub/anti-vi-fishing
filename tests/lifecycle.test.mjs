@@ -72,10 +72,12 @@ test('AUD-003 CON-003: stored sensitive fields never appear as plaintext in data
 test('AUD-004: persisted clock regression halts security mutation', t => { const h = fixture(t); h.proposed(); h.advance(-1); assert.throws(() => h.proposed(), hasCode('INV-503-TIME')); });
 test('EVD-001 EVD-002: correlated issuer and derivative evidence cannot satisfy independence', t => {
   const h = fixture(t), r = h.proposed(), first = h.evidence(r); h.evidence(r, { issuer: 'registry', dependencies: [first.payload.evidence_id] }); h.approve(r);
-  assert.ok(h.f.evaluate(h.p(), r.capsule.capsule_id).reasons.some(x => x.code === 'EVIDENCE_INDEPENDENCE'));
+  const decision = h.f.evaluate(h.p(), r.capsule.capsule_id);
+  assert.equal(decision.decision, 'ESCROW', 'the reason code must accompany a real withholding, not decorate an ALLOW');
+  assert.ok(decision.reasons.some(x => x.code === 'EVIDENCE_INDEPENDENCE'));
 });
 test('EVD-005 AIG-006: email/advisory evidence cannot confer authority', t => { const h = fixture(t), r = h.proposed(); h.evidence(r, { issuer: 'email' }); h.evidence(r, { issuer: 'bank', advisory: true }); h.approve(r); assert.equal(h.f.evaluate(h.p(), r.capsule.capsule_id).decision, 'ESCROW'); });
-test('EVD-009: conflicting evidence remains escrow despite sufficient positive sources', t => { const h = fixture(t), r = h.proposed(); h.evidence(r); h.evidence(r, { issuer: 'registry' }); h.evidence(r, { issuer: 'governance', kind: 'governance_review', claim: 'conflict' }); h.approve(r); assert.ok(h.f.evaluate(h.p(), r.capsule.capsule_id).reasons.some(x => x.code === 'EVIDENCE_CONFLICT')); });
+test('EVD-009: conflicting evidence remains escrow despite sufficient positive sources', t => { const h = fixture(t), r = h.proposed(); h.evidence(r); h.evidence(r, { issuer: 'registry' }); h.evidence(r, { issuer: 'governance', kind: 'governance_review', claim: 'conflict' }); h.approve(r); const decision = h.f.evaluate(h.p(), r.capsule.capsule_id); assert.equal(decision.decision, 'ESCROW'); assert.ok(decision.reasons.some(x => x.code === 'EVIDENCE_CONFLICT')); });
 test('EVD-008 POL-014: evidence revocation invalidates pending certificate immediately and survives in audit', t => {
   const h = fixture(t), { record, certificate } = h.ready(), r = h.f.getCapsule(h.p(), record.capsule.capsule_id);
   h.f.revoke(h.p('security'), { kind: 'evidence', id: r.evidence[0], reason: 'Test source compromise' });
@@ -84,6 +86,12 @@ test('EVD-008 POL-014: evidence revocation invalidates pending certificate immed
   assert.throws(() => h.f.execute(h.p(), certificate), hasCode('INV-409-STATE'));
   const auditTypes = h.f.store.auditPage('acme', { limit: 500 }).entries.map(e => e.envelope.payload.type);
   assert.ok(auditTypes.includes('AUTHORITY_REVOKED'));
+  // A real policy transition must not resurrect revoked authority: stage and
+  // activate the next constitution version, then re-present the certificate.
+  const next = clone(h.f.policy('acme')); next.version = 2; next.not_before = h.now() - 1;
+  h.f.store.put('acme', 'policy', 'staged', { policy: next, activate_at: next.not_before, staged_at: h.now() }, h.now());
+  h.f.activateDuePolicies('acme', h.now());
+  assert.equal(h.f.policy('acme').version, 2, 'the constitution actually transitioned');
   assert.throws(() => h.f.execute(h.p(), certificate), hasCode('INV-409-STATE'));
 });
 test('EVD-003: tampered issuer signature and wrong tenant evidence are rejected', t => {

@@ -2,13 +2,13 @@
   "generated_by": "scripts/report.mjs",
   "engineering_checks": "PASS",
   "production_release": "BLOCKED (expected)",
-  "unique_test_cases_executed": 473,
+  "unique_test_cases_executed": 476,
   "failed": 0,
   "scenarios_run": 22,
   "requirement_status_counts": {
     "VERIFIED_IN_ENGINEERING_PROFILE": 173,
-    "PARTIAL": 18,
-    "BLOCKED_EXTERNAL": 18,
+    "PARTIAL": 20,
+    "BLOCKED_EXTERNAL": 16,
     "NOT_IMPLEMENTED": 2
   },
   "ledger_total": 211

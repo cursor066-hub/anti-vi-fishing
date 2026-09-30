@@ -81,7 +81,7 @@ test('POL-001 POL-015: exact inputs and trusted test time produce identical deci
   // operator but never echoes the sensitive request content back.
   const denied = h.f.evaluate(h.p(), h.proposed().capsule.capsule_id);
   assert.ok(denied.reasons.length > 0 && denied.reasons.every(x => typeof x.code === 'string' && x.code.length > 0));
-  assert.ok(!JSON.stringify(denied).includes('TESTBANK000001'));
+  assert.ok(!JSON.stringify(denied).includes('TESTBANK000001')); assert.ok(!JSON.stringify(denied).includes('TESTBANK000002'));
 });
 test('CON-004 COM-012: missing data-output fields return UNCERTAIN rather than an exception after dispatch', t => {
   const h = fixture(t), r = h.proposed('data.export', { dataset: 'dataset-1', columns: ['id'], row_ids: ['row-1'], max_rows: 1, classification: 'internal', jurisdiction: 'EU' }, { action: { type: 'data.export', target_resource: 'dataset-1', purpose: 'Operations' }, destination: 'customer-vault' });

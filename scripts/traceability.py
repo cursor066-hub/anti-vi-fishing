@@ -25,7 +25,11 @@ verified = set(_verified_ids)
 # verify-release.mjs, tested roundtrip) — promoted NOT_IMPLEMENTED to
 # PARTIAL; production-grade KMS signing remains external.
 not_implemented = set('''NFR-AVL-003 NFR-OPS-003'''.split())
-external = set('''PER-001 PER-002 PER-003 PER-004 PER-005 KEY-001 KEY-003 KEY-006 KEY-011 NFR-AVL-001 NFR-PRV-003 NFR-OPS-001 NFR-USA-001 NFR-USA-002 NFR-USA-003 NFR-CMP-001 NFR-CMP-003 NFR-CMP-004'''.split())
+external = set('''PER-001 PER-002 PER-003 PER-004 PER-005 KEY-001 KEY-003 NFR-AVL-001 NFR-PRV-003 NFR-OPS-001 NFR-USA-001 NFR-USA-002 NFR-USA-003 NFR-CMP-001 NFR-CMP-003 NFR-CMP-004'''.split())
+# w11-ledger corrections: KEY-006's inventory/transition-plan acceptance is
+# a real document (docs/ALGORITHM-AGILITY.md bound to SUITES by test) and
+# KEY-011's trusted-component firmware trust is implemented via
+# secure_perception.allowed_firmware — both honest PARTIALs, not external.
 by_prefix = {
 'COV': ('Coverage/integration owner', 'R2', 'src/coverage.mjs; src/fabric.mjs', 'All four coverage labels are representable; actual target discovery, drift agents, independently executed bypass tests and historical guarantee intervals are not established. All manifests suppress production guarantee.'),
 'ACT': ('Core security maintainer', 'R0', 'src/canonical.mjs; src/schema.mjs; src/fabric.mjs', 'Typed actions and same-actor certified-children composition are implemented. Cross-actor choreography and independent high-assurance protocol review are not.'),
@@ -53,10 +57,20 @@ by_prefix = {
 'NFR-TST': ('Independent verification/release owner', 'R2', 'tests/; reports/tests.tap; docs/requirements.csv', 'Synthetic software and adversarial evidence is included; independent red team, real target tests and signed production acceptance remain unclosed.')
 }
 tests = sorted((root/'tests').glob('*.test.mjs'), key=lambda p: p.name) + [root/'scripts/simulate.mjs', root/'scripts/ai-eval.mjs']
+# A citation must name the requirement inside a real test() block that also
+# asserts — an ID sitting in a comment alone cannot mint evidence
+# (w11-ledger F3). Script harnesses (simulate/ai-eval) are executable
+# scenarios cited by file, so their whole text counts.
+def evidence_blocks(path):
+    text = path.read_text()
+    if not path.name.endswith('.test.mjs'):
+        return [text]
+    return re.split(r'(?m)^test\(', text)[1:]
 for row in rows:
     prefix = row['id'].rsplit('-', 1)[0]
     owner, baseline, implementation, limitation = by_prefix[prefix]
-    matches = [str(p.relative_to(root)) for p in tests if row['id'] in p.read_text()]
+    matches = [str(p.relative_to(root)) for p in tests
+               if any(row['id'] in b and ('assert' in b or 'requireThat' in b or 'hasCode' in b or 'throws' in b or not p.name.endswith('.test.mjs')) for b in evidence_blocks(p))]
     # Evidence lists only the files that literally name the requirement —
     # corpus-level artifacts would be boilerplate on every row (w6-ledger S3).
     status = 'VERIFIED_IN_ENGINEERING_PROFILE' if row['id'] in verified else 'NOT_IMPLEMENTED' if row['id'] in not_implemented else 'BLOCKED_EXTERNAL' if row['id'] in external else 'PARTIAL'

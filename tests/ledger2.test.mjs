@@ -166,7 +166,7 @@ test('AIG-004: advisory output records model identity, version, provider and dig
   const entry = h.f.store.auditPage('acme', { after: 0, limit: 100 }).entries.map(e => e.envelope.payload).find(x => x.type === 'AI_ADVISORY');
   assert.ok(entry, 'advisory audit exists');
   const m = entry.metadata;
-  assert.ok(m.model && m.model_version && (m.prompt_digest || m.tool_context_digest || m.provider !== undefined), JSON.stringify(m));
+  for (const field of ['model', 'model_version', 'provider', 'prompt_digest', 'tool_context_digest', 'output_digest']) assert.ok(m[field] !== undefined, `AI_ADVISORY audit metadata missing ${field}`); assert.equal(m.advisory, true);
 });
 test('CON-010: the target manifest surfaces limitations and the engineering profile flag', t => {
   const h = fixture(t), manifest = h.f.target.manifest();

@@ -50,7 +50,7 @@ test('HTTP: same-origin HttpOnly cookie session requires CSRF and logs out', asy
   assert.equal((await h.request('/session/logout', { method: 'POST', token: null, body: {}, headers: { ...headers, 'X-CSRF-Token': login.data.csrf_token } })).status, 200);
   assert.equal((await h.request('/v1/me', { token: null, headers })).status, 401);
 });
-test('HTTP: full propose -> evidence -> independent signatures -> ALLOW -> certificate -> execute -> audit', async t => {
+test('HTTP UX-001: full propose -> evidence -> independent signatures -> ALLOW -> certificate -> execute -> audit', async t => {
   const h = await httpFixture(t), type = 'finance.beneficiary.create', resource = `new-${randomUUID()}`;
   const input = proposal(type, h.actor(), h.f.target.state('acme', resource), { vendor_id: 'vendor-1', bank_account: 'TESTBANK000004', currency: 'EUR' }, h.now(), { action: { type, target_resource: resource, purpose: 'API contract integration' } });
   const created = await h.request('/v1/action-capsules', { method: 'POST', body: { input, signature: signed(input, h.setup.identityKeys.acme.operator, 'capsule-intent') }, headers: { 'Idempotency-Key': randomUUID() } }); assert.equal(created.status, 201); const r = created.data, id = r.capsule.capsule_id;
@@ -98,7 +98,7 @@ test('DAT-002: concurrent gates cannot overspend shared rolling budget', async t
 test('NFR-SEC-004: bootstrap creates random credentials, private files and refuses overwrite', t => {
   const h = fixture(t), directory = join(h.directory, 'new-deployment'); bootstrap(directory); const config = loadConfiguration(directory); assert.equal(config.profile, 'engineering'); assert.ok(readFileSync(join(directory, 'access-tokens.json'), 'utf8').length > 100); assert.throws(() => bootstrap(directory), hasCode('INV-409-CONFLICT')); assert.throws(() => new h.f.constructor({ ...config, profile: 'production' }, directory), hasCode('INV-503-RELEASE'));
 });
-test('UX-002 UX-003: UI state logic exposes no generic approval or executable non-ALLOW state', () => {
+test('UX-002 UX-003 UX-005: UI state logic exposes no generic approval or executable non-ALLOW state', () => {
   assert.equal(actionAvailability('ESCROW', ['operator']).mint, false); assert.equal(actionAvailability('CERTIFIED', ['auditor']).execute, false); assert.equal(actionAvailability('CERTIFIED', ['operator']).execute, true); assert.match(nextAction('UNCERTAIN'), /Do not submit/);
   for (const value of ['', '0', '-1', '1.1', '1e3']) assert.throws(() => typedValue(value, 'positive')); assert.equal(typedValue('100', 'positive'), 100); assert.throws(() => csvSelection('a,a'));
 });
