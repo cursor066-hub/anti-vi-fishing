@@ -587,3 +587,28 @@ test('CON-008 R2-14: vendor support access is time-bound, approved and revoked b
   h.advance(61000);
   assert.throws(() => h.f.runtime.issue(h.p('custodian-2'), runtimeInput({ device_id: 'custodian-2-device' })), hasCode('INV-403-ROLE'));
 });
+
+test('AUD-002 R2-15: the complete action chain is reconstructable from the audit log', t => {
+  const h = fixture(t); const r = h.ready(); h.f.execute(h.p(), r.certificate);
+  const entries = h.f.store.auditPage('acme', { limit: 500 }).entries.map(e => e.envelope.payload);
+  const capsuleId = r.record.capsule.capsule_id, certId = r.certificate.payload.certificate_id;
+  const chain = entries.filter(e => e.reference === capsuleId || e.reference === certId);
+  // Every lifecycle stage is present and linked to this action.
+  for (const type of ['CAPSULE_PROPOSED', 'EVIDENCE_ATTACHED', 'EXACT_ACTION_APPROVED', 'CERTIFICATE_ISSUED', 'EXECUTION_RESERVED', 'EXECUTION_OUTCOME'])
+    assert.ok(chain.some(e => e.type === type), `missing stage ${type}`);
+  assert.equal(chain.find(e => e.type === 'CERTIFICATE_ISSUED').metadata.certificate_id, certId);
+  assert.equal(chain.find(e => e.type === 'EXECUTION_OUTCOME').metadata.status, 'VERIFIED');
+  assert.ok(chain.filter(e => e.type === 'EVIDENCE_ATTACHED').length >= 2);
+});
+
+test('AUD-004 R2-16: a replay attempt is identifiable from log state and ordering is monotonic', t => {
+  const h = fixture(t); const r = h.ready(); h.f.execute(h.p(), r.certificate);
+  assert.throws(() => h.f.execute(h.p(), r.certificate), hasCode('INV-409-REPLAY'));
+  const entries = h.f.store.auditPage('acme', { limit: 500 }).entries.map(e => e.envelope.payload);
+  const rejected = entries.find(e => e.type === 'SECURITY_OPERATION_REJECTED' && e.metadata?.code === 'INV-409-REPLAY');
+  assert.ok(rejected, 'replay attempt must leave an identifiable log record');
+  for (let i = 1; i < entries.length; i++) {
+    assert.equal(entries[i].sequence, entries[i - 1].sequence + 1);
+    assert.ok(entries[i].time >= entries[i - 1].time, 'audit timestamps must be monotonically ordered');
+  }
+});

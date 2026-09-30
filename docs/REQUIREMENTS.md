@@ -6,4 +6,4 @@ All **211** numbered rows in the supplied SRS are preserved in `requirements.csv
 
 The trace references tests by requirement IDs and source modules. Reports are stored under `reports/`. Some tests exercise only the safe-rejection side of a requirement (for example rejecting software signatures under hardware-required policy); that does **not** implement the missing hardware path.
 
-Status counts: {"PARTIAL": 105, "VERIFIED_IN_ENGINEERING_PROFILE": 77, "BLOCKED_EXTERNAL": 27, "NOT_IMPLEMENTED": 2}.
+Status counts: {"PARTIAL": 103, "VERIFIED_IN_ENGINEERING_PROFILE": 79, "BLOCKED_EXTERNAL": 27, "NOT_IMPLEMENTED": 2}.
