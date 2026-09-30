@@ -83,14 +83,23 @@ test('w6-fix F6: denied exports do not burn the reconstruction budget', t => {
 test('w6-fix F4: revoked keys cannot sign; revoked pending keys cannot activate', t => {
   const h = fixture(t);
   const auditKey = h.f.keys('acme').audit.key_id, execKey = h.f.keys('acme').execution.key_id;
+  // Revoking a bound signer with no pending successor is refused — rotate
+  // first (w11-lifecycle F1/F2).
+  assert.throws(() => h.f.revoke(h.p('security'), { kind: 'key', id: execKey, reason: 'compromised' }), hasCode('INV-409-STATE'));
+  const pending = h.f.prepareRotation(h.p('security'), 'execution');
   h.f.revoke(h.p('security'), { kind: 'key', id: execKey, reason: 'compromised' });
-  assert.throws(() => h.f.signExecution('acme', { probe: 1 }, 'capability'), hasCode('INV-401-SIGNATURE'));
-  // Revoking the audit key outright now refuses unless a pending successor
-  // covers the audit purposes — rotate first (w10-cert F5).
+  // Vault-level signing under the revoked key is refused outright.
+  assert.throws(() => h.f.vault.sign(execKey, 'capability', 'probe'), hasCode('INV-401-SIGNATURE'));
+  // Fabric-level signing recovers: a marked envelope under the pending
+  // successor keeps the gate live until the rotation commits.
+  const env = h.f.signExecution('acme', { probe: 1 }, 'capability');
+  assert.equal(env.protected.key_id, pending.key_id);
+  assert.equal(env.payload.recovery_signing.superseded_key, execKey);
   assert.throws(() => h.f.revoke(h.p('security'), { kind: 'key', id: auditKey, reason: 'compromised' }), hasCode('INV-409-STATE'));
   h.f.prepareRotation(h.p('security'), 'audit');
   h.f.revoke(h.p('security'), { kind: 'key', id: auditKey, reason: 'compromised' });
-  assert.throws(() => h.f.signAudit('acme', { probe: 1 }, 'outcome'), hasCode('INV-401-SIGNATURE'));
+  const aenv = h.f.signAudit('acme', { probe: 1 }, 'outcome');
+  assert.equal(aenv.payload.recovery_signing.superseded_key, auditKey);
 });
 test('w6-fix F4b: a revoked pending rotation key is unactivatable', t => {
   const h = fixture(t);
@@ -104,7 +113,7 @@ test('w6-fix F4b: a revoked pending rotation key is unactivatable', t => {
   h.approve(r, 3); h.advance(60001);
   const cert = h.f.certificate(h.p(), r.capsule.capsule_id);
   assert.throws(() => h.f.execute(h.p(), cert), hasCode('INV-409-STATE'));
-  assert.equal(h.f.vault.keys.get(pending.key_id).pending, true, 'revoked pending key stays pending');
+  assert.equal(h.f.vault.keys.get(pending.key_id).revoked, true, 'the vault flag mirrors the ledger revocation');
 });
 
 // w6-fix F5: a legacy vault key minted before tenant tagging resolves its

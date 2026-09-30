@@ -80,7 +80,7 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
     // A session minted from a token dies with it — token revocation checked
     // at mint time alone would leave a residual window (w7-clock F3).
     requireThat(!fabric.revoked(session.principal.tenant_id, 'token', session.token_hash), 'INV-401-AUTH', 'Authentication required', 401);
-    if (req.method !== 'GET') requireThat(req.headers['x-csrf-token'] === session.csrf && req.headers.origin === origin, 'INV-403-CSRF', 'Request origin or CSRF token rejected', 403);
+    if (req.method !== 'GET') requireThat(typeof req.headers['x-csrf-token'] === 'string' && req.headers['x-csrf-token'].length === session.csrf.length && timingSafeEqual(Buffer.from(req.headers['x-csrf-token']), Buffer.from(session.csrf)) && req.headers.origin === origin, 'INV-403-CSRF', 'Request origin or CSRF token rejected', 403);
     fabric.authorize(session.principal, ['operator', 'approver', 'custodian', 'security', 'auditor', 'policy_admin', 'workload']); return session.principal;
   }
   // Canonical integer grammar for query params — the same strictness the
@@ -217,9 +217,9 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
         // Read-only view: reconciliation itself is a POST — a GET never writes.
         fabric.authorize(p, ['operator', 'security', 'policy_admin']); const out = fabric.store.get(p.tenant_id, 'outcome', m[1]);
         requireThat(out, 'INV-404-NOT-FOUND', 'No recorded outcome for this certificate', 404);
-        return send(200, fabric.outcomeView(out));
+        return send(200, fabric.outcomeView(p.tenant_id, out));
       }
-      if ((m = /^\/gate\/v1\/outcomes\/([A-Za-z0-9-]+)$/.exec(path)) && req.method === 'POST') return send(200, fabric.outcomeView(fabric.reconcile(p, m[1])));
+      if ((m = /^\/gate\/v1\/outcomes\/([A-Za-z0-9-]+)$/.exec(path)) && req.method === 'POST') return send(200, fabric.outcomeView(p.tenant_id, fabric.reconcile(p, m[1])));
       if ((m = /^\/v1\/resources\/([A-Za-z0-9_.:-]+)$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['operator', 'policy_admin']); requireThat(fabric.target.exists(p.tenant_id, m[1]), 'INV-404-NOT-FOUND', 'Resource not found', 404); const state = fabric.target.state(p.tenant_id, m[1]); if (Array.isArray(state.material_fields.rows)) throw new InvariantError('INV-403-SCOPE', 'Use a data capability for dataset access', 403); return send(200, state); }
       if (path === '/v1/capabilities' && req.method === 'POST') { fabric.authorize(p, ['operator', 'workload']); return send(201, fabric.runtime.issue(p, object(await body(req)))); }
       if (path === '/gate/v1/runtime' && req.method === 'POST') return send(200, fabric.runtime.consume(p, object(await body(req))));

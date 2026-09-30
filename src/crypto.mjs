@@ -1,7 +1,15 @@
-import { generateKeyPairSync, createPrivateKey, createPublicKey, sign, verify, randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
+import { generateKeyPairSync, createPrivateKey, createPublicKey, sign, verify, randomBytes, createCipheriv, createDecipheriv, timingSafeEqual } from 'node:crypto';
 import { canonical, digest } from './canonical.mjs';
 import { requireThat } from './errors.mjs';
 
+// Constant-time equality for fixed-length secret comparisons (MACs,
+// tokens, commitments). `===` exits on the first differing byte and leaks
+// the match prefix; both inputs here are public-form strings/hex/base64
+// whose lengths are fixed by construction (w11-timing LOW-1/2/3).
+export const ctEqual = (a, b) => {
+  const x = Buffer.from(String(a)), y = Buffer.from(String(b));
+  return x.length === y.length && timingSafeEqual(x, y);
+};
 export const SUITES = {
   Ed25519: { curve: 'ed25519', namedCurve: null, hash: null, dsaEncoding: null },
   ES256: { curve: 'ec', namedCurve: 'P-256', hash: 'sha256', dsaEncoding: 'ieee-p1363' }
@@ -54,6 +62,9 @@ export function verifySigned(envelope, publicKeys, purpose) {
   requireThat(h && Object.keys(h).sort().join() === 'key_id,profile,purpose,suite' && h.profile === 'IF-CJSON-1' && Object.hasOwn(SUITES, h.suite) && h.purpose === purpose, 'INV-401-SIGNATURE', 'Unsupported signature context', 401);
   const key = Object.hasOwn(publicKeys ?? {}, h.key_id) ? publicKeys[h.key_id] : undefined;
   requireThat(key && !key.revoked, 'INV-401-SIGNATURE', 'Signer unavailable', 401);
+  // An anchor that declares a suite pins it — the protected header is
+  // attacker-writable and must not relabel the key's algorithm (supply F-L3).
+  if (key.suite !== undefined) requireThat(key.suite === h.suite, 'INV-401-SIGNATURE', 'Envelope suite differs from the anchor-declared suite', 401);
   // Require canonical base64url: mutating unused padding bits must not
   // produce an accepted alternative encoding of the same signature.
   requireThat(typeof envelope.signature === 'string' && /^[A-Za-z0-9_-]{86}$/.test(envelope.signature)

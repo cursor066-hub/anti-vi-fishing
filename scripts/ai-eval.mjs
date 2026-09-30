@@ -4,6 +4,7 @@
 // pattern change must regenerate the corpus deliberately — this suite is the
 // tripwire that makes silent advisory drift impossible.
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { extract, explain, classifyIntent } from '../src/advisory.mjs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -28,6 +29,9 @@ for (const c of corpus.cases) {
   else if (first !== second) { fail++; failures.push(`${c.id}: non-deterministic output across calls`); }
   else pass++;
 }
-const report = { suite: 'IF-AI-EVAL-1', cases: corpus.cases.length, pass, fail, failures: failures.slice(0, 20) };
+// The corpus digest goes into the report so the eval evidence names the
+// exact golden set it ran against — a same-commit corpus edit is visible in
+// the artifact (supply-chain L5).
+const report = { suite: 'IF-AI-EVAL-1', cases: corpus.cases.length, corpus_sha256: createHash('sha256').update(readFileSync(join(root, 'ai-eval', 'cases.json'))).digest('hex'), pass, fail, failures: failures.slice(0, 20) };
 console.log(JSON.stringify(report, null, 2));
 process.exit(fail ? 1 : 0);

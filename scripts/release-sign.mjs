@@ -38,6 +38,16 @@ const head = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' });
 const manifestRaw = existsSync('MANIFEST.sha256') ? readFileSync('MANIFEST.sha256', 'utf8') : '';
 if (!manifestRaw || head.status !== 0) { console.error('MANIFEST.sha256 missing or git unavailable — sign a tracked release tree'); process.exit(1); }
 
+// An attestation over HEAD must describe HEAD: staged or dirty working
+// files would let provenance claim a commit the bytes do not match
+// (supply-chain M5). Refuse to sign anything but a clean tree.
+const dirty = spawnSync('git', ['status', '--porcelain'], { encoding: 'utf8' });
+if (dirty.status !== 0 || dirty.stdout.trim()) { console.error('working tree is not clean — commit or stash changes before signing'); process.exit(1); }
+// And the manifest must be fresh at signing time — otherwise the stale
+// inventory is cemented into signed provenance (supply-chain M5).
+const fresh = spawnSync(process.execPath, ['scripts/manifest.mjs', '--verify'], { encoding: 'utf8' });
+if (fresh.status !== 0) { console.error(`manifest is stale — regenerate before signing: ${(fresh.stderr || fresh.stdout).trim()}`); process.exit(1); }
+
 const tracked = spawnSync('git', ['ls-files'], { encoding: 'utf8' });
 const files = tracked.status === 0 ? tracked.stdout.split('\n').filter(Boolean).sort() : [];
 const key = { key_id: arg('key-id') ?? digest({ public_key: readFileSync(publicPath, 'utf8') }).slice(0, 32), public_key: readFileSync(publicPath, 'utf8'), private_key: readFileSync(keyPath, 'utf8'), suite: arg('suite') ?? 'Ed25519' };
@@ -55,9 +65,11 @@ const attestation = signed(provenance, key, 'release.attestation');
 const out = arg('out') ?? 'reports/release-attestation.json';
 mkdirSync(out.split('/').slice(0, -1).join('/') || '.', { recursive: true });
 writeFileSync(out, JSON.stringify(attestation, null, 2) + '\n');
-// Convenience for tests/CI: emit the trust-anchor file verify-release
-// consumes. Production anchors are pinned by the CONSUMER, never shipped.
-const anchorsOut = arg('anchors-out');
+// Convenience for tests/CI ONLY: emit the trust-anchor file verify-release
+// consumes. Production anchors are pinned by the CONSUMER, never shipped —
+// the flag is named for its test purpose so no operator mistakes a
+// self-minted anchor for pinning (supply-chain M5).
+const anchorsOut = arg('test-anchors-out');
 if (anchorsOut) {
   mkdirSync(anchorsOut.split('/').slice(0, -1).join('/') || '.', { recursive: true });
   writeFileSync(anchorsOut, JSON.stringify({ [key.key_id]: { public_key: key.public_key, suite: key.suite } }, null, 2) + '\n');

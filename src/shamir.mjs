@@ -5,20 +5,24 @@ import { requireThat } from './errors.mjs';
 // polynomial x^8+x^4+x^3+x+1 (0x11b). Each share is per-byte independent
 // Lagrange evaluation at x=i. Shares reveal nothing below threshold k.
 
-const EXP = new Uint8Array(512), LOG = new Uint8Array(256);
-(() => {
-  // Generator is x+1 (0x03), the primitive element of GF(2^8) under 0x11b;
-  // x (0x02) has order 51 and cannot generate the full field.
-  let x = 1;
-  for (let i = 0; i < 255; i++) {
-    EXP[i] = x; LOG[x] = i;
-    let x2 = x << 1; if (x2 & 0x100) x2 ^= 0x11b;
-    x = x2 ^ x; // multiply by 3: x*2 ^ x
+// GF(2^8) arithmetic without secret-indexed table lookups: bit-serial
+// multiply with masked reduction, inversion via a^254 = ((a^127)^2). Table
+// lookups at secret-derived offsets would index cache lines by share bytes
+// — the classic finite-field cache-timing channel (w11-timing MED-1).
+const mul = (a, b) => {
+  let r = 0;
+  for (let i = 0; i < 8; i++) {
+    r ^= a & -(b >>> i & 1);
+    const msb = a >>> 7;
+    a = ((a << 1) ^ (msb * 0x1b)) & 0xff;
   }
-  for (let i = 255; i < 512; i++) EXP[i] = EXP[i - 255];
-})();
-const mul = (a, b) => (a === 0 || b === 0 ? 0 : EXP[LOG[a] + LOG[b]]);
-const inv = a => (a === 0 ? 0 : EXP[255 - LOG[a]]);
+  return r;
+};
+const inv = a => {
+  let r = a; // a^1 → a^3 → a^7 → a^15 → a^31 → a^63 → a^127
+  for (let i = 0; i < 6; i++) r = mul(mul(r, r), a);
+  return mul(r, r); // a^254; a=0 stays 0
+};
 
 function splitByte(secret, n, k, rand) {
   const poly = [secret, ...rand.slice(0, k - 1)];

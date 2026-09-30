@@ -1,6 +1,6 @@
 import { generateKeyPairSync, diffieHellman, hkdfSync, createCipheriv, createDecipheriv, randomBytes, createPublicKey, createPrivateKey } from 'node:crypto';
 import { canonical, digest, parseStrict } from './canonical.mjs';
-import { signed, verifySigned, generateKey } from './crypto.mjs';
+import { signed, verifySigned, generateKey, ctEqual } from './crypto.mjs';
 import { fields, text, identifier, integer, uniqueStrings } from './schema.mjs';
 import { requireThat, InvariantError } from './errors.mjs';
 
@@ -50,7 +50,7 @@ export function openSession(component, attestation, policy, now) {
   // and a caller-set far-future expiry may not outlive the session horizon
   // the policy grants (w6-perception P-9).
   requireThat(Number.isSafeInteger(attestation.payload.expires_at) && attestation.payload.expires_at > now && attestation.payload.expires_at <= now + (sp.session_ttl_ms ?? 300000), 'INV-401-ATTESTATION', 'Attestation expired or outlives the session horizon', 401);
-  requireThat(!sp.nonce || attestation.payload.nonce === sp.nonce, 'INV-400-SCHEMA', 'Attestation nonce does not match policy');
+  requireThat(!sp.nonce || ctEqual(attestation.payload.nonce, sp.nonce), 'INV-400-SCHEMA', 'Attestation nonce does not match policy');
   const server = generateKeyPairSync('ec', { namedCurve: 'P-256' });
   const session = {
     session_id: 'sv-' + digest({ component: attestation.payload.component, now, salt: randomBytes(8).toString('hex') }).slice(0, 24),
@@ -66,7 +66,9 @@ export function openSession(component, attestation, policy, now) {
 function deriveKey(session) {
   const priv = typeof session._server_private === 'string' ? createPrivateKey(session._server_private) : session._server_private;
   const shared = diffieHellman({ privateKey: priv, publicKey: createPublicKey(session.component_ecdh) });
-  return Buffer.from(hkdfSync('sha256', shared, Buffer.from('if-secure-perception-1'), Buffer.from(session.session_id), 32));
+  const key = Buffer.from(hkdfSync('sha256', shared, Buffer.from('if-secure-perception-1'), Buffer.from(session.session_id), 32));
+  shared.fill(0); // transient ECDH secret does not outlive key derivation
+  return key;
 }
 
 export function releaseFields(session, release, policy, now) {
@@ -93,6 +95,7 @@ export function openRelease(component, release) {
   const priv = typeof component._ecdh_private === 'string' ? createPrivateKey(component._ecdh_private) : component._ecdh_private;
   const shared = diffieHellman({ privateKey: priv, publicKey: createPublicKey(release.ephemeral_public) });
   const key = Buffer.from(hkdfSync('sha256', shared, Buffer.from('if-secure-perception-1'), Buffer.from(release.binding.session_id), 32));
+  shared.fill(0); // transient ECDH secret does not outlive key derivation
   const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(release.nonce, 'base64url'));
   decipher.setAuthTag(Buffer.from(release.tag, 'base64url'));
   const plaintext = Buffer.concat([decipher.update(Buffer.from(release.ciphertext, 'base64url')), decipher.final()]).toString('utf8');
@@ -100,7 +103,7 @@ export function openRelease(component, release) {
   // The outer binding is unauthenticated metadata — the authenticated copy
   // inside the ciphertext must agree with it, or the release was tampered.
   const { data, ...innerBinding } = inner;
-  requireThat(canonical(innerBinding) === canonical(release.binding), 'INV-401-TAMPER', 'Release binding does not match the authenticated plaintext', 401);
+  requireThat(ctEqual(canonical(innerBinding), canonical(release.binding)), 'INV-401-TAMPER', 'Release binding does not match the authenticated plaintext', 401);
   return inner;
 }
 

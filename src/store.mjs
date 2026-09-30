@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { encrypt, decrypt, verifySigned } from './crypto.mjs';
+import { encrypt, decrypt, verifySigned, ctEqual } from './crypto.mjs';
 import { merkleRoot } from './merkle.mjs';
 import { canonical, digest } from './canonical.mjs';
 import { requireThat, InvariantError } from './errors.mjs';
@@ -201,7 +201,12 @@ export class Store {
     // record inside the CLOCK_RECOVERED entry's metadata.
     const priorTime = last ? JSON.parse(last.envelope).payload.time : 0;
     const entry = { tenant_id: tenant, sequence: (last?.seq ?? 0) + 1, previous: last?.hash ?? '0'.repeat(64), type, actor, reference, metadata, time: Math.max(now, priorTime) };
-    const hash = digest(entry), envelope = this.auditSigners[tenant].sign(entry);
+    // Hash what is actually attested: the signer may add a bound marker (the
+    // recovery_signing annotation when a pending successor signs after a
+    // key-revoke — w11-lifecycle F2), so the row digest binds the envelope's
+    // payload, not the pre-signature entry.
+    const envelope = this.auditSigners[tenant].sign(entry);
+    const hash = digest(envelope.payload);
     this.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run(tenant, entry.sequence, entry.previous, hash, canonical(envelope));
     return { hash, envelope };
   }
@@ -219,7 +224,7 @@ export class Store {
     let previous = anchor?.hash ?? '0'.repeat(64);
     const entries = rows.map(r => {
       const envelope = JSON.parse(r.envelope);
-      requireThat(digest(envelope.payload) === r.hash && envelope.payload.sequence === r.seq && envelope.payload.previous === previous, 'INV-409-AUDIT-TAMPER', 'Audit row failed integrity verification', 409);
+      requireThat(ctEqual(digest(envelope.payload), r.hash) && envelope.payload.sequence === r.seq && ctEqual(envelope.payload.previous, previous), 'INV-409-AUDIT-TAMPER', 'Audit row failed integrity verification', 409);
       previous = r.hash;
       return { sequence: r.seq, hash: r.hash, envelope };
     });
@@ -247,7 +252,7 @@ export class Store {
     requireThat(typeof key === 'string' && /^[A-Za-z0-9_-]{8,128}$/.test(key), 'INV-400-SCHEMA', 'An 8–128 character Idempotency-Key is required');
     const row = this.db.prepare('SELECT hash,result FROM idempotency WHERE tenant=? AND scope=? AND key=?').get(tenant, scope, key);
     if (row) {
-      requireThat(row.hash === requestHash, 'INV-409-IDEMPOTENCY', 'Idempotency key reused for a different request', 409);
+      requireThat(ctEqual(row.hash, requestHash), 'INV-409-IDEMPOTENCY', 'Idempotency key reused for a different request', 409);
       return decrypt(row.result, this.key(tenant), `${tenant}/idempotency/${scope}/${key}`);
     }
     const result = fn();
@@ -264,13 +269,13 @@ export function verifyAudit(bundle, pinnedKeys, priorCheckpoint = null) {
   let previous = '0'.repeat(64), sequence = 0, time = 0;
   for (const item of bundle.entries) {
     const entry = verifySigned(item.envelope, pinnedKeys, 'audit');
-    requireThat(entry.tenant_id === checkpoint.tenant_id && entry.sequence === ++sequence && entry.previous === previous && entry.time >= time && digest(entry) === item.hash, 'INV-409-AUDIT', 'Audit continuity failure', 409);
+    requireThat(entry.tenant_id === checkpoint.tenant_id && entry.sequence === ++sequence && ctEqual(entry.previous, previous) && entry.time >= time && ctEqual(digest(entry), item.hash), 'INV-409-AUDIT', 'Audit continuity failure', 409);
     previous = item.hash; time = entry.time;
-    if (prior && sequence === prior.size) requireThat(previous === prior.head, 'INV-409-FORK', 'Witness checkpoint disagrees', 409);
+    if (prior && sequence === prior.size) requireThat(ctEqual(previous, prior.head), 'INV-409-FORK', 'Witness checkpoint disagrees', 409);
   }
-  requireThat(checkpoint.size === sequence && checkpoint.head === previous && (!prior || (checkpoint.tenant_id === prior.tenant_id && sequence >= prior.size)), 'INV-409-AUDIT', 'Missing or inconsistent checkpoint', 409);
+  requireThat(checkpoint.size === sequence && ctEqual(checkpoint.head, previous) && (!prior || (checkpoint.tenant_id === prior.tenant_id && sequence >= prior.size)), 'INV-409-AUDIT', 'Missing or inconsistent checkpoint', 409);
   // The signed tree_head anchors the entry set under the Merkle root —
   // recompute it rather than trusting the attested value (crypto-audit I-1).
-  requireThat(checkpoint.tree_head === merkleRoot(bundle.entries.map(i => i.hash)), 'INV-409-AUDIT', 'Checkpoint tree head does not match the audit entries', 409);
+  requireThat(ctEqual(checkpoint.tree_head, merkleRoot(bundle.entries.map(i => i.hash))), 'INV-409-AUDIT', 'Checkpoint tree head does not match the audit entries', 409);
   return { valid: true, entries: sequence, head: previous, tenant_id: checkpoint.tenant_id };
 }

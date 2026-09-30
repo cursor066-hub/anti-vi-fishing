@@ -2,7 +2,7 @@ import { createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify, r
 import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync, renameSync, rmSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { canonical, digest } from './canonical.mjs';
-import { encrypt, decrypt, SUITES, verifySuite, signSuite, verifySigned } from './crypto.mjs';
+import { encrypt, decrypt, SUITES, verifySuite, signSuite, verifySigned, ctEqual } from './crypto.mjs';
 import { fields, text, identifier, integer } from './schema.mjs';
 import { requireThat, InvariantError } from './errors.mjs';
 
@@ -71,12 +71,13 @@ export class KeyVault {
     this.keys.set(key.key_id, { key_id: key.key_id, tenant_id, public_key: key.public_key, purpose, suite, exportable, revoked: false, generated_inside: false, wrapped: encrypt(key.private_key, this.masterKey, `vault/${key.key_id}`), created_firmware: 'imported' });
     return { key_id: key.key_id, public_key: key.public_key, suite, purpose, exportable };
   }
-  _private(key_id) { return decrypt(this.entry(key_id).wrapped, this.masterKey, `vault/${key_id}`); }
-  sign(key_id, purpose, message) {
-    const e = this.entry(key_id);
+  _private(key_id, entry = null) { return decrypt((entry ?? this.entry(key_id)).wrapped, this.masterKey, `vault/${key_id}`); }
+  sign(key_id, purpose, message, { allowPending = false } = {}) {
+    const e = this.keys.get(key_id);
+    requireThat(e && !e.revoked && (allowPending || !e.pending), 'INV-401-SIGNATURE', 'Key unavailable, revoked or pending activation', 401);
     requireThat(e.purpose === 'any' || e.purpose === purpose || (Array.isArray(e.purpose) && e.purpose.includes(purpose)), 'INV-403-SCOPE', `Key is bound to purpose ${e.purpose}`, 403);
     requireThat(Object.hasOwn(SUITES, e.suite), 'INV-400-SCHEMA', 'Unapproved algorithm suite');
-    return signSuite(e.suite, Buffer.isBuffer(message) ? message : Buffer.from(message), this._private(key_id));
+    return signSuite(e.suite, Buffer.isBuffer(message) ? message : Buffer.from(message), this._private(key_id, e));
   }
   verify(key_id, message, signatureB64) {
     const e = this.entry(key_id);
@@ -87,9 +88,16 @@ export class KeyVault {
   }
   // Envelope signing with the IF-CJSON-1 profile; identical wire shape to
   // crypto.signed() but the private key never leaves the vault.
-  envelope(key_id, purpose, payload) {
-    const h = { profile: 'IF-CJSON-1', suite: this.entry(key_id).suite, key_id, purpose };
-    return { protected: h, payload, signature: this.sign(key_id, purpose, canonical({ protected: h, payload })) };
+  // allowPending is the single scoped exception for recovery signing: when a
+  // class's configured key is revoked, its pending successor must be able to
+  // sign marked recovery envelopes or the tenant bricks (w11-lifecycle F1/F2).
+  // Callers opt in only through Fabric._signingKeyId — pending keys can never
+  // silently mint ordinary signatures.
+  envelope(key_id, purpose, payload, { allowPending = false } = {}) {
+    const e = this.keys.get(key_id);
+    requireThat(e && !e.revoked && (allowPending || !e.pending), 'INV-401-SIGNATURE', 'Key unavailable, revoked or pending activation', 401);
+    const h = { profile: 'IF-CJSON-1', suite: e.suite, key_id, purpose };
+    return { protected: h, payload, signature: this.sign(key_id, purpose, canonical({ protected: h, payload }), { allowPending }) };
   }
   export(key_id) {
     const e = this.entry(key_id);
@@ -122,7 +130,7 @@ export class KeyVault {
     const { mac, ...state } = JSON.parse(readFileSync(path, 'utf8'));
     requireThat(state.format === STORE_FORMAT, 'INV-503-CONFIG', 'Unrecognised keystore format', 503);
     const vault = new KeyVault(masterKey, { firmware: state.firmware });
-    requireThat(stateMac(vault.masterKey, state) === mac, 'INV-503-CONFIG', 'Keystore integrity check failed (state MAC mismatch)', 503);
+    requireThat(ctEqual(stateMac(vault.masterKey, state), mac), 'INV-503-CONFIG', 'Keystore integrity check failed (state MAC mismatch)', 503);
     const attestorPrivate = decrypt(state.attestor_wrapped, vault.masterKey, 'vault/attestor');
     // Restore the full attestor identity — persisting only the private key
     // corrupted key_id/public_key on every restart (crypto-audit H-1).

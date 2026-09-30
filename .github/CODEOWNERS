@@ -11,6 +11,12 @@ docs/production-acceptance.json @cursor066-hub
 MANIFEST.sha256          @cursor066-hub
 scripts/ai-eval.mjs      @cursor066-hub
 ai-eval/                 @cursor066-hub
+scripts/                 @cursor066-hub
+package.json             @cursor066-hub
+reports/                 @cursor066-hub
+examples/                @cursor066-hub
+spec/                    @cursor066-hub
+web/                     @cursor066-hub
 
 # Security-critical components carry explicit review requirements — no
 # single-owner merge on the files that define authorization, custody,

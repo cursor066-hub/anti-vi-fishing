@@ -39,7 +39,7 @@ export class Fabric {
         if (key.private_key && !this.vault.has(key.key_id)) this.vault.importKey({ key_id: key.key_id, public_key: key.public_key, private_key: key.private_key }, purposes[klass], { exportable: false, tenant_id: tenant });
         requireThat(this.vault.has(key.key_id), 'INV-503-CONFIG', `Tenant ${klass} key is not in the keystore`, 503);
       }
-      auditSigners[tenant] = { key_id: t.keys.audit.key_id, public_key: t.keys.audit.public_key, keys: () => this.auditPublicKeys(tenant), sign: (payload, purpose = 'audit') => this.vault.envelope(this.keys(tenant).audit.key_id, purpose, payload) };
+      auditSigners[tenant] = { key_id: t.keys.audit.key_id, public_key: t.keys.audit.public_key, keys: () => this.auditPublicKeys(tenant), sign: (payload, purpose = 'audit') => { const sel = this._signingKeyId(tenant, 'audit'); return this.vault.envelope(sel.key_id, purpose, this._recoveryBody(sel, payload), { allowPending: sel.recovery }); } };
     }
     this.store = new Store(join(directory, 'fabric.db'), encryption, auditSigners);
     this.target = new SimulatedTarget(join(directory, 'target.db'), encryption); this.runtime = new RuntimeGate(this);
@@ -183,27 +183,52 @@ export class Fabric {
   executionPublic(t) {
     const out = { [this.keys(t).execution.key_id]: { public_key: this.keys(t).execution.public_key } };
     for (const e of this.keys(t).retired ?? []) out[e.key_id] = { public_key: e.public_key };
+    // A revoked bound key must not blind verification of recovery-signed
+    // envelopes: pending successors covering the class verify too
+    // (w11-lifecycle F1).
+    if (this.revoked(t, 'key', this.keys(t).execution.key_id)) for (const [kid, e] of this.vault.keys) if (e.pending && !e.revoked && this.ownsVaultKey(t, kid)) out[kid] = { public_key: e.public_key };
     return out;
   }
   auditPublicKeys(t) {
     const out = { [this.keys(t).audit.key_id]: { public_key: this.keys(t).audit.public_key } };
     for (const e of this.keys(t).retired ?? []) out[e.key_id] = { public_key: e.public_key };
+    if (this.revoked(t, 'key', this.keys(t).audit.key_id)) for (const [kid, e] of this.vault.keys) if (e.pending && !e.revoked && this.ownsVaultKey(t, kid)) out[kid] = { public_key: e.public_key };
     return out;
   }
+  // Resolves the key allowed to mint class envelopes right now: the bound
+  // key when live, else the pending, tenant-owned successor minted before
+  // the revoke — the designed escape that keeps a compromise-response from
+  // bricking the tenant (w11-lifecycle F1/F2). Recovery envelopes carry a
+  // `recovery_signing` marker naming the superseded key, so the ledger tells
+  // the truth about which authority signed.
+  _signingKeyId(t, klass) {
+    const configured = this.keys(t)[klass]?.key_id;
+    if (configured && !this.revoked(t, 'key', configured) && this.vault.has(configured)) return { key_id: configured, recovery: false };
+    const needed = this._keyPurposes[klass] ?? [];
+    const successor = [...this.vault.keys.entries()].find(([kid, e]) => e.pending && !e.revoked && this.ownsVaultKey(t, kid)
+      && (e.purpose === 'any' || needed.every(x => (Array.isArray(e.purpose) ? e.purpose : [e.purpose]).includes(x))));
+    requireThat(successor, 'INV-401-SIGNATURE', `${klass} signing key unavailable and no pending successor exists — rotate first`, 401);
+    return { key_id: successor[0], recovery: true, superseded: configured ?? null };
+  }
+  _recoveryBody(sel, payload) {
+    return sel.recovery ? { ...payload, recovery_signing: { superseded_key: sel.superseded } } : payload;
+  }
   signExecution(t, payload, purpose) {
-    const key_id = this.keys(t).execution.key_id;
+    const sel = this._signingKeyId(t, 'execution');
     // The ledger, not the vault flag, is authoritative for revocation — a
     // revoked key keeps verifying old artifacts but must never sign new
-    // envelopes (w6-fix F4).
-    requireThat(!this.revoked(t, 'key', key_id), 'INV-401-SIGNATURE', 'Signing key revoked', 401);
-    this.assertSuiteAllowed(t, this.vault.entry(key_id).suite ?? 'Ed25519');
-    return this.vault.envelope(key_id, purpose, payload);
+    // envelopes (w6-fix F4). Recovery signing uses the pending successor via
+    // the scoped allowPending path.
+    const e = this.vault.keys.get(sel.key_id);
+    this.assertSuiteAllowed(t, e?.suite ?? 'Ed25519');
+    return this.vault.envelope(sel.key_id, purpose, this._recoveryBody(sel, payload), { allowPending: sel.recovery });
   }
-  signAudit(t, payload, purpose = 'audit', key_id = null) {
-    const kid = key_id ?? this.keys(t).audit.key_id;
-    requireThat(!this.revoked(t, 'key', kid), 'INV-401-SIGNATURE', 'Signing key revoked', 401);
-    this.assertSuiteAllowed(t, this.vault.entry(kid).suite ?? 'Ed25519');
-    return this.vault.envelope(kid, purpose, payload);
+  signAudit(t, payload, purpose = 'audit', key_id = null, { allowPending = false } = {}) {
+    const sel = key_id ? { key_id, recovery: false } : this._signingKeyId(t, 'audit');
+    if (key_id) requireThat(!this.revoked(t, 'key', key_id), 'INV-401-SIGNATURE', 'Signing key revoked', 401);
+    const e = this.vault.keys.get(sel.key_id);
+    this.assertSuiteAllowed(t, e?.suite ?? 'Ed25519');
+    return this.vault.envelope(sel.key_id, purpose, this._recoveryBody(sel, payload), { allowPending: allowPending || sel.recovery });
   }
   assertSuiteAllowed(t, suite) {
     requireThat((this.policy(t).algorithms?.allowed_suites ?? ['Ed25519']).includes(suite), 'INV-451-POLICY', 'Signature suite retired by constitution', 451);
@@ -271,13 +296,60 @@ export class Fabric {
     const identity = Object.values(this.tenant(p.tenant_id).identities).find(x => x.subject_id === p.subject_id);
     requireThat(identity && !identity.revoked, 'INV-401-AUTH', 'Authentication required', 401); return identity;
   }
-  authorize(p, roles) {
+  authorize(p, roles, { auditDeny = true } = {}) {
     requireThat(p && Object.hasOwn(this.config.tenants ?? {}, p.tenant_id), 'INV-401-AUTH', 'Authentication required', 401);
     const identity = this.identity(p);
     const effective = this.grantsFor(p.tenant_id, p.subject_id, this.clock()).roles ?? identity.roles;
-    requireThat(effective.some(r => roles.includes(r)), 'INV-403-ROLE', 'Permission denied', 403);
+    const denied = !effective.some(r => roles.includes(r));
+    // A rejection raised outside a transaction would otherwise leave no
+    // trace — hostile role probing must land in the ledger too (w11 F7).
+    if (denied && auditDeny && !this.store.db.isTransaction) this._rejectionAudit(p.tenant_id, p.subject_id, 'INV-403-ROLE', `Role denied for ${roles.join('/')}`);
+    requireThat(!denied, 'INV-403-ROLE', 'Permission denied', 403);
     requireThat(!this.revoked(p.tenant_id, 'subject', p.subject_id), 'INV-403-QUARANTINE', 'Identity unavailable', 403);
     return identity;
+  }
+  // Denials raised before the store transaction opens never reached the
+  // audit chain — every reject path that can fire pre-transaction reports
+  // itself (w11 F7). Audit failure must never mask the original denial.
+  _rejectionAudit(t, subject_id, code, message, details = null) {
+    const now = this.clock();
+    try { this.store.audit(t, 'AUTHORIZATION_DENIED', subject_id ?? 'anonymous', null, { code, message: String(message).slice(0, 200) }, now); } catch { /* ledger write failure does not change the verdict */ }
+    // Quarantine denials land in the containment ledger too — a quarantined
+    // device hammering proposals must be reconstructible, not invisible
+    // (w11-lifecycle F5; NET-010 coverage of pre-transaction denials).
+    if (details?.quarantine_denial) {
+      try { this.store.put(t, 'containment', `deny:${randomUUID()}`, { contained_at: now, subject_id: subject_id ?? null, device_id: details.device ?? null, capability_id: null, resource: null, destination: null, action: null, code, request_id: 'gate-deny', dropped_requests: 1 }, now); } catch { /* containment logging never masks the verdict */ }
+    }
+  }
+  // Stored-record integrity anchored in the actor's own signature: the
+  // request_intent envelope covers the capsule's proposal fields, so a
+  // store-level tamper that forgets (or cannot) re-sign is detected — the
+  // stored capsule_digest field is not trusted as the anchor (w11 F1/F2).
+  _capsuleIntegrity(t, record) {
+    const intent = record?.capsule?.request_intent;
+    requireThat(intent && typeof intent === 'object', 'INV-409-INTEGRITY', 'Capsule carries no signed request intent', 409);
+    const kid = intent?.protected?.key_id, signer = kid ? this.identities(t)[kid] : null;
+    requireThat(signer, 'INV-409-INTEGRITY', 'Request intent signed by an unknown identity', 409);
+    let payload = null;
+    try { payload = verifySigned(intent, { [kid]: { public_key: signer.public_key } }, 'capsule-intent'); } catch { payload = null; }
+    requireThat(payload, 'INV-409-INTEGRITY', 'Request intent signature no longer verifies', 409);
+    const { request_intent, capsule_id, tenant_id, received_at, ...signedInput } = record.capsule;
+    requireThat(digest(payload) === digest(signedInput), 'INV-409-INTEGRITY', 'Stored capsule diverged from the signed request intent', 409);
+    requireThat(record.capsule_digest === digest(record.capsule), 'INV-409-INTEGRITY', 'Stored capsule digest does not match its contents', 409);
+    return payload;
+  }
+  // A stored outcome is only trustworthy as a vault-signed envelope — a
+  // planted row (store-level write without vault access) fails the
+  // signature, never just shape (w11 F5).
+  _outcomeIntegrity(t, envelope) {
+    // keys.get, not entry(): a pending key must still verify the recovery
+    // envelopes it legitimately signed (w11-lifecycle F2) — only its
+    // signature path is gated, never its verification.
+    const kid = envelope?.protected?.key_id, entry = kid ? this.vault.keys.get(kid) : null;
+    requireThat(entry && !entry.revoked, 'INV-409-INTEGRITY', 'Outcome signed by an unknown vault key', 409);
+    requireThat(this.ownsVaultKey(t, kid), 'INV-409-INTEGRITY', 'Outcome signed by a key outside this tenant', 409);
+    verifySigned(envelope, { [kid]: { public_key: entry.public_key } }, 'outcome');
+    return envelope;
   }
   // IDN: JIT grants merge with static identity grants. A grant only ever adds
   // scope already permitted by the runtime policy; it cannot exceed it.
@@ -290,6 +362,10 @@ export class Fabric {
     const merged = { roles: [...(identity?.roles ?? [])], resources: [...base.resources], actions: [...base.actions], destinations: [...base.destinations], columns: [...base.columns], row_ids: [...base.row_ids] };
     for (const g of this.target.grants(tenant, subject_id, now)) {
       for (const k of Object.keys(merged)) for (const v of g[k] ?? []) if (!merged[k].includes(v)) merged[k].push(v);
+      // A grant may widen data scope but never mint privileged roles —
+      // administrative/approval roles flow only from the identity registry,
+      // not from time-boxed access grants (w11 F9).
+      merged.roles = merged.roles.filter(r => (identity?.roles ?? []).includes(r) || ['operator', 'workload'].includes(r));
     }
     return merged;
   }
@@ -319,7 +395,7 @@ export class Fabric {
   }
   transaction(principal, fn, { allowDuringDrift = false } = {}) {
     try {
-      this.authorize(principal, ['operator', 'approver', 'custodian', 'security', 'auditor', 'policy_admin', 'workload']);
+      this.authorize(principal, ['operator', 'approver', 'custodian', 'security', 'auditor', 'policy_admin', 'workload'], { auditDeny: false });
       // RUN-010: a drifting gate configuration withdraws privileges until a
       // security actor re-attests the observed config snapshot.
       // Drift quarantine is durable (a 'config-flag' record), not just the
@@ -368,6 +444,15 @@ export class Fabric {
   }
   identities(t) { return Object.fromEntries(Object.entries(this.tenant(t).identities).map(([id, v]) => [id, { ...v, revoked: v.revoked || this.revoked(t, 'key', id) || this.revoked(t, 'subject', v.subject_id) || this.revoked(t, 'device', v.device_id) }])); }
   assertHealthy(t, subject, device, now) {
+    try {
+      this._assertHealthy(t, subject, device, now);
+    } catch (error) {
+      // Pre-transaction quarantine denials audit themselves (w11 F7).
+      if (error instanceof InvariantError && !this.store.db.isTransaction) this._rejectionAudit(t, subject, error.code, error.message, error.details);
+      throw error;
+    }
+  }
+  _assertHealthy(t, subject, device, now) {
     requireThat(!this.revoked(t, 'subject', subject) && !this.revoked(t, 'device', device), 'INV-403-QUARANTINE', 'Subject or device quarantined', 403, { quarantine_denial: true, subject, device });
     const identity = Object.values(this.tenant(t).identities).find(x => x.subject_id === subject);
     requireThat(identity && identity.device_id === device && identity.health_expires_at > now, 'INV-403-HEALTH', 'Configured device health evidence expired or mismatched', 403);
@@ -395,7 +480,8 @@ export class Fabric {
   // never re-ships exported rows to readers: a second subject cannot drain
   // row material from the outcome store without a data_access charge
   // (w6-fix F3).
-  outcomeView(outcome) {
+  outcomeView(t, outcome) {
+    if (outcome) this._outcomeIntegrity(t, outcome);
     const view = clone(outcome), output = view?.payload?.output;
     if (Array.isArray(output)) view.payload.output = { row_count: output.length, rows_digest: digest(output), redacted: true };
     return view;
@@ -476,6 +562,13 @@ export class Fabric {
         return { payload: { evidence_id: id, expires_at: 0 }, envelope: { retained_digest: tombstone.original_digest }, revoked: true, issuer: { failure_domain: 'deleted' } };
       }
       const iss = this.tenant(t).issuers[e.envelope.protected.key_id];
+      // The stored payload is a clone of the SIGNED envelope — divergence
+      // means store-level tampering, and evaluation must die on it, not
+      // silently reason over the edited clone (w11 F6). The issuer-trust
+      // ceiling is re-proven here too: attach-time checks do not cover
+      // post-attach mutation of payload.kind (w11 F6).
+      requireThat(digest(e.payload) === digest(e.envelope.payload), 'INV-409-INTEGRITY', 'Stored evidence diverged from its signed envelope', 409);
+      requireThat(iss?.kinds?.includes(e.envelope.payload.kind), 'INV-403-SCOPE', 'Evidence kind exceeds issuer trust', 403);
       // Only the issuer's semantic identity is digest-bound — credential
       // fields (tokens, expiry, endpoint) rotate by design and must never
       // invalidate a minted certificate or pending approval (w5 F-3).
@@ -489,6 +582,7 @@ export class Fabric {
     this.authorize(p, ['operator', 'security', 'policy_admin']);
     return this.transaction(p, now => {
       const t = p.tenant_id, record = this.store.must(t, 'capsule', id); this.ensureMutable(record);
+      this._capsuleIntegrity(t, record);
       // Attaching wipes collected approvals by design (new evidence invalidates
       // the evaluation), so only the proposing actor may do it — a third party
       // must not grief another actor's capsule (HTTP-audit finding).
@@ -525,6 +619,21 @@ export class Fabric {
       requireThat(record.evidence.length < 32, 'INV-429-CAPACITY', 'Evidence set limit reached', 429);
       const issuer = this.tenant(t).issuers[envelope.protected.key_id];
       requireThat(issuer.kinds.includes(payload.kind), 'INV-403-SCOPE', 'Issuer is not trusted for this evidence kind', 403);
+      // Evidence supersession (w11-lifecycle F4): a fresh envelope from the
+      // same issuer+kind retires its predecessors, so one expired/stale
+      // envelope cannot wedge the capsule forever. Two classes stay sticky
+      // and are never superseded — 'conflict' claims (a signed veto must
+      // outlive later supports, or conflicts could be laundered away) and
+      // envelopes whose issuer/key was since revoked (a revocation is an
+      // authority statement, not staleness). The superseded rows stay in
+      // record.evidence — the trail is never erased, only evaluated out.
+      for (const eid of record.evidence) {
+        const e = this.store.get(t, 'evidence', eid);
+        if (e && !e.superseded_by && e.envelope?.protected?.key_id === envelope.protected.key_id && e.envelope?.payload?.kind === payload.kind && e.envelope?.payload?.claim !== 'conflict' && !this.revoked(t, 'issuer', e.envelope.protected.key_id) && !this.revoked(t, 'key', e.envelope.protected.key_id)) {
+          e.superseded_by = payload.evidence_id;
+          this.store.put(t, 'evidence', eid, e, now);
+        }
+      }
       requireThat(!payload.issuer_version || payload.issuer_version === issuer.version, 'INV-403-SCOPE', 'Issuer version drifted from registration', 403);
       this.store.insert(t, 'evidence', payload.evidence_id, { payload: clone(payload), envelope: clone(envelope), legal_hold: false }, now);
       record.evidence.push(payload.evidence_id); record.status = 'EVIDENCED'; record.approvals = []; record.decision = null;
@@ -720,15 +829,22 @@ export class Fabric {
       }
       if (problems.length) return { decision: 'ESCROW', reasons: problems.map(x => ({ code: x.code, message: `Composite child ${x.child}: ${x.code.toLowerCase().replace(/_/g, ' ')}${x.status ? ` (${x.status})` : ''}` })), explanation: 'Every child of a composite must be independently certified.', owner: record.capsule.actor.subject_id, expires_at: record.capsule.expires_at, evaluated_at: now, policy_version: policy.version, policy_digest: digest(policy), eligible_signers: [] };
     }
-    const approvals = record.approvals.filter(a => a.payload.policy_digest === digest(policy) && a.payload.evidence_graph_digest === graph.digest).map(a => {
+    // The approval's signed challenge binds the RECOMPUTED capsule digest —
+    // an approval granted over a capsule that has since been rewritten
+    // (with a synced stored digest) must silently drop out (w11 F2).
+    const capsuleDigest = digest(record.capsule);
+    const approvals = record.approvals.filter(a => a.payload.policy_digest === digest(policy) && a.payload.evidence_graph_digest === graph.digest && a.payload.capsule_digest === capsuleDigest).map(a => {
       try { return verifySigned(a, identities, 'action-approval'); } catch { return null; }
     }).filter(Boolean);
-    return evaluatePolicy({ capsule: record.capsule, policy, evidence: graph.items, approvals, identities, quarantined: this.revoked(t, 'subject', record.capsule.actor.subject_id) || this.revoked(t, 'device', record.capsule.actor.device_id), now });
+    // Superseded evidence keeps its seat in the graph/digest (the signed
+    // trail is never rewritten) but is retired from evaluation — only the
+    // live set speaks (w11-lifecycle F4).
+    return evaluatePolicy({ capsule: record.capsule, policy, evidence: graph.items.filter(e => !e.superseded_by), approvals, identities, quarantined: this.revoked(t, 'subject', record.capsule.actor.subject_id) || this.revoked(t, 'device', record.capsule.actor.device_id), now });
   }
   evaluate(p, id) {
     this.authorize(p, ['operator', 'policy_admin', 'approver', 'custodian']);
     return this.transaction(p, now => {
-      const record = this.store.must(p.tenant_id, 'capsule', id); this.ensureMutable(record);
+      const record = this.store.must(p.tenant_id, 'capsule', id); this.ensureMutable(record); this._capsuleIntegrity(p.tenant_id, record);
       this.assertHealthy(p.tenant_id, record.capsule.actor.subject_id, record.capsule.actor.device_id, now);
       // The decisioning principal's own device must be live too — the gate
       // revokes a device everywhere or nowhere (w11-approval F6).
@@ -742,7 +858,7 @@ export class Fabric {
   certificate(p, id) {
     this.authorize(p, ['operator', 'policy_admin']);
     return this.transaction(p, now => {
-      const t = p.tenant_id, r = this.store.must(t, 'capsule', id); this.ensureMutable(r);
+      const t = p.tenant_id, r = this.store.must(t, 'capsule', id); this.ensureMutable(r); this._capsuleIntegrity(t, r);
       requireThat(!r.certificate_id, 'INV-409-REPLAY', 'Action already has a certificate', 409);
       this.assertFreshSnapshot(t, r.capsule);
       const decision = this.evaluation(t, r, now), policy = this.policy(t);
@@ -751,7 +867,11 @@ export class Fabric {
       // Minting on behalf of another actor still requires the minting
       // principal's device to be healthy (w11-approval F6).
       if (p.subject_id !== r.capsule.actor.subject_id) this.assertHealthy(t, p.subject_id, this.identity(p).device_id, now);
-      const suite = this.vault.entry(this.keys(t).execution.key_id).suite ?? 'Ed25519';
+      // Resolve the signing key BEFORE any further work — a revoked
+      // execution key must not dead-end certificate minting while a pending
+      // successor exists (w11-lifecycle F1).
+      const execSel = this._signingKeyId(t, 'execution');
+      const suite = this.vault.keys.get(execSel.key_id)?.suite ?? 'Ed25519';
       requireThat(policy.algorithms.allowed_suites.includes(suite), 'INV-451-POLICY', 'Certificate suite is no longer approved by policy', 451);
       // The floor runs over still-valid approvals only — a lapsed approval
       // must not mint an already-dead certificate that wedges the capsule in
@@ -759,11 +879,10 @@ export class Fabric {
       // A policy.change capsule binds the NEXT constitution, not the expiry
       // of the dead one — an expired constitution must still permit its own
       // succession or the tenant wedges permanently (w7-clock F2).
-      const graph = this.graph(t, r), expiry = Math.min(now + policy.certificate_ttl_ms, r.capsule.expires_at, r.capsule.action.type === 'policy.change' ? Infinity : policy.expires_at, ...graph.items.map(e => e.payload.expires_at), ...r.approvals.filter(a => a.payload.expires_at > now).map(a => a.payload.expires_at));
+      const graph = this.graph(t, r), expiry = Math.min(now + policy.certificate_ttl_ms, r.capsule.expires_at, r.capsule.action.type === 'policy.change' ? Infinity : policy.expires_at, ...graph.items.filter(e => !e.superseded_by).map(e => e.payload.expires_at), ...r.approvals.filter(a => a.payload.expires_at > now).map(a => a.payload.expires_at));
       requireThat(expiry > now, 'INV-409-STATE', 'Certificate would be stillborn; re-approve the action', 409);
       const certificate_id = randomUUID();
       const payload = { certificate_id, tenant_id: t, capsule_id: id, capsule_digest: r.capsule_digest, evidence_graph_digest: graph.digest, policy_id: policy.policy_id, policy_version: policy.version, policy_digest: digest(policy), decision: 'ALLOW', constraints: { destination: r.capsule.destination, quantity: r.capsule.quantity, requested_digest: digest(r.capsule.requested_state), current_state: this.stateRef(r.capsule.current_state), exclusions: r.capsule.exclusions }, target_gate_id: this.config.gate_id, signer_set: decision.eligible_signers, nonce: r.capsule.nonce, issued_at: now, expires_at: expiry, single_use: true, suite, revocation_ref: `certificate:${certificate_id}` };
-      requireThat(!this.revoked(t, 'key', this.keys(t).execution.key_id) && this.vault.has(this.keys(t).execution.key_id), 'INV-401-SIGNATURE', 'Execution key revoked', 401);
       const envelope = this.signExecution(t, payload, 'action-certificate');
       this.store.insert(t, 'certificate', payload.certificate_id, { envelope, consumed: false, status: 'CERTIFIED', issued_at: now }, now);
       r.certificate_id = payload.certificate_id; r.status = 'CERTIFIED'; r.decision = decision; this.store.put(t, 'capsule', id, r, now);
@@ -782,6 +901,8 @@ export class Fabric {
       requireThat(cert.tenant_id === t && cert.target_gate_id === this.config.gate_id, 'INV-403-SCOPE', 'Certificate scope mismatch', 403);
       requireThat(!this.revoked(t, 'key', envelope.protected.key_id) && !this.revoked(t, 'certificate', cert.certificate_id) && cert.issued_at <= now && cert.expires_at > now, 'INV-401-CERTIFICATE', 'Certificate expired or revoked', 401);
       const stored = this.store.must(t, 'certificate', cert.certificate_id), record = this.store.must(t, 'capsule', cert.capsule_id);
+      this._capsuleIntegrity(t, record);
+      requireThat(record.capsule.tenant_id === t, 'INV-403-SCOPE', 'Capsule tenant does not match the certificate tenant', 403);
       requireThat(digest(stored.envelope) === digest(envelope), 'INV-401-CERTIFICATE', 'Certificate does not match issued authority', 401);
       requireThat(!stored.consumed && record.status === 'CERTIFIED', 'INV-409-REPLAY', 'Certificate already consumed or action cancelled', 409);
       // A composite child's certificate is spendable only through its parent
@@ -944,6 +1065,8 @@ export class Fabric {
     const post = [];
     const envelope = this.transaction(p, now => {
       const t = p.tenant_id, r = this.store.must(t, 'capsule', cert.capsule_id), stored = this.store.must(t, 'certificate', cert.certificate_id);
+      requireThat(stored.consumed, 'INV-409-STATE', 'Certificate was never reserved for execution', 409);
+      this._capsuleIntegrity(t, r);
       const existing = this.store.get(t, 'outcome', cert.certificate_id);
       requireThat(!existing || !['VERIFIED', 'FAILED', 'COMPENSATED'].includes(existing.payload.status), 'INV-409-STATE', 'A terminal execution outcome cannot be overwritten', 409);
       // Compensation is claimed only where it actually ran — a refused or
@@ -1016,6 +1139,9 @@ export class Fabric {
   // request applied to the prior state — shape, digests, timing and the
   // simulation flag all checked. Shared by finish() and composite children.
   _validateTargetResponse(r, cert, raw, now, { postRead = false } = {}) {
+    // The response can only ever describe a capsule of this tenant — a
+    // cross-tenant journal row must invalidate, never validate (w11 F3).
+    if (r.capsule.tenant_id !== cert.tenant_id) return { valid: false, detail: 'capsule-tenant-mismatch' };
     const responseKeys = ['target_transaction_id', 'capsule_digest', 'authorised_requested_digest', 'observed_state_digest', 'observed_state', 'output', 'status', 'execution_time', 'simulation'];
     let responseShape = raw && typeof raw === 'object' && !Array.isArray(raw) && Object.keys(raw).length === responseKeys.length && responseKeys.every(key => Object.hasOwn(raw, key)) && (r.capsule.action.type === 'data.export' ? raw.observed_state === null : (raw.observed_state && typeof raw.observed_state === 'object' && !Array.isArray(raw.observed_state))) && (raw.output === null || Array.isArray(raw.output));
     if (responseShape) {
@@ -1118,23 +1244,30 @@ export class Fabric {
       }
       if (!preconditions) return { rotation_precondition_lapsed: true };
       const klass = req.key_class, previous = this.keys(t)[klass];
-      // Activation, repointing and retiring run inside the transaction; only
-      // the vault file write stays post-commit. The rotation's own outcome is
-      // signed by the retiring key — it was the authoritative signer when the
-      // action verified — then its private half is revoked post-commit (w6
-      // F2/F11).
-      this.vault.activate(req.new_key_id);
-      this.tenant(t).keys[klass] = { key_id: req.new_key_id, public_key: req.new_public_key };
-      this.tenant(t).keys.retired = [...(this.tenant(t).keys.retired ?? []), { key_class: klass, key_id: previous.key_id, public_key: previous.public_key, retired_at: now }];
+      // The ledger is authoritative: the key-rotation record commits in-tx,
+      // while every in-memory mutation (activation, repoint, retire,
+      // revoke) runs post-commit — a failed outcome write can never leave
+      // the vault/config repointed against a ledger that shows no rotation
+      // (w11-lifecycle F2c). _reconcileLedger heals crash-between windows.
+      const previousRevoked = this.revoked(t, 'key', previous.key_id);
       // revoke_old is the operator's declared choice — the ledger attests
       // what was actually done, never a hardcoded true (w7-seam F7).
       const revokeOld = req.revoke_old !== false;
       this.store.put(t, 'key-rotation', req.new_key_id, { new_key_id: req.new_key_id, new_public_key: req.new_public_key, key_class: klass, previous_key_id: previous.key_id, previous_public_key: previous.public_key, revoke_old: revokeOld, rotated_at: now, capsule_id: r.capsule.capsule_id }, now);
       this.store.audit(t, 'KEY_ROTATED', p.subject_id, req.new_key_id, { key_class: klass, previous_key_id: previous.key_id, ceremony_id: req.ceremony_id, revoke_old: revokeOld }, now);
-      post.push(() => { if (revokeOld) this.vault.revoke(previous.key_id); this.persistVault(); });
-      // Only an audit-class rotation changes the outcome signer; other
-      // classes leave the audit key untouched.
-      if (klass === 'audit') return { outcome_key_id: previous.key_id };
+      post.push(() => {
+        this.vault.activate(req.new_key_id);
+        this.tenant(t).keys[klass] = { key_id: req.new_key_id, public_key: req.new_public_key };
+        this.tenant(t).keys.retired = [...(this.tenant(t).keys.retired ?? []), { key_class: klass, key_id: previous.key_id, public_key: previous.public_key, retired_at: now }];
+        if (revokeOld) this.vault.revoke(previous.key_id);
+        this.persistVault();
+      });
+      // Only an audit-class rotation changes the outcome signer. When the
+      // retiring key is already ledger-revoked it cannot attest its own
+      // succession — the outcome is signed by the incoming key (still
+      // pending until post-commit activation) via the scoped allowPending
+      // path instead of throwing and rolling the rotation back (w11 F2).
+      if (klass === 'audit') return { outcome_key_id: previousRevoked ? req.new_key_id : previous.key_id, outcome_allow_pending: previousRevoked };
       return null;
     }
     if (type === 'identity.jit.grant') {
@@ -1177,6 +1310,11 @@ export class Fabric {
     const post = [];
     const envelope = this.transaction(p, now => {
       const t = p.tenant_id, r = this.store.must(t, 'capsule', cert.capsule_id), stored = this.store.must(t, 'certificate', cert.certificate_id);
+      // finish is reachable only after the reservation consumed the
+      // certificate — an outcome row cannot be forged ahead of dispatch
+      // (w11 F4). Record integrity is re-proven before effects fire (w11 F1).
+      requireThat(stored.consumed, 'INV-409-STATE', 'Certificate was never reserved for execution', 409);
+      this._capsuleIntegrity(t, r);
       // Terminal outcomes are immutable — a VERIFIED/FAILED result can never
       // be overwritten by a second finish (only UNCERTAIN may resolve later).
       const existing = this.store.get(t, 'outcome', cert.certificate_id);
@@ -1193,7 +1331,7 @@ export class Fabric {
       // shows the race instead of pretending it never happened.
       const revokedMidFlight = this.revoked(t, 'certificate', cert.certificate_id) || this.revoked(t, 'key', stored.envelope.protected.key_id);
       const payload = { certificate_id: cert.certificate_id, capsule_digest: cert.capsule_digest, target_transaction_id: cert.certificate_id, observed_state_digest: valid ? raw.observed_state_digest : null, status, reason, execution_time: valid ? raw.execution_time : now, reconciliation_evidence: valid ? digest(raw) : null, simulation: true, output: valid && !extras?.gate_denied ? raw.output : null, watermarks: extras?.watermarks ?? null, gate_denied: extras?.gate_denied?.detail ?? null, revoked_post_reservation: revokedMidFlight || null, composite_child_of: (r.composite_parents ?? []).map(pid => this.store.get(t, 'capsule', pid)?.certificate_id).find(Boolean) ?? null, supersedes: existing ? digest(existing) : null };
-      const envelope = this.signAudit(t, payload, 'outcome', extras?.outcome_key_id ?? null);
+      const envelope = this.signAudit(t, payload, 'outcome', extras?.outcome_key_id ?? null, { allowPending: extras?.outcome_allow_pending === true });
       this.store.put(t, 'outcome', cert.certificate_id, envelope, now); stored.status = status; r.status = status;
       this.store.put(t, 'certificate', cert.certificate_id, stored, now); this.store.put(t, 'capsule', cert.capsule_id, r, now);
       this.store.audit(t, 'EXECUTION_OUTCOME', p.subject_id, cert.certificate_id, { status, reason, outcome_digest: digest(envelope), supersedes: existing ? digest(existing) : null, revoked_post_reservation: revokedMidFlight || null }, now);
@@ -1205,11 +1343,15 @@ export class Fabric {
   }
   reconcile(p, id) {
     this.authorize(p, ['operator', 'security', 'policy_admin']); const t = p.tenant_id, stored = this.store.must(t, 'certificate', id);
+    // A recorded outcome without a consumed reservation is always forged
+    // (w11 F4) — the consumed check precedes every stored-row read, and the
+    // row itself must re-verify as a vault-signed envelope before it is
+    // served (w11 F5).
+    requireThat(stored.consumed, 'INV-409-STATE', 'Execution has not started', 409);
     const current = this.store.get(t, 'outcome', id);
     // COMPENSATED is terminal too — reconcile returns any settled outcome
     // instead of throwing where VERIFIED/FAILED simply answer (w7-seam F8).
-    if (current && ['VERIFIED', 'FAILED', 'COMPENSATED'].includes(current.payload.status)) return current;
-    requireThat(stored.consumed, 'INV-409-STATE', 'Execution has not started', 409);
+    if (current && ['VERIFIED', 'FAILED', 'COMPENSATED'].includes(current.payload.status)) return this._outcomeIntegrity(t, current);
     const cert = stored.envelope.payload, raw = this.target.outcome(t, id);
     const record = this.store.must(t, 'capsule', cert.capsule_id);
     if (record.capsule.action.type === 'action.composite') {
@@ -1249,7 +1391,10 @@ export class Fabric {
   cancel(p, id) {
     this.authorize(p, ['operator', 'security', 'policy_admin']);
     return this.transaction(p, now => {
-      const r = this.store.must(p.tenant_id, 'capsule', id); requireThat(!['EXECUTING', 'VERIFIED', 'UNCERTAIN', 'FAILED', 'COMPENSATED'].includes(r.status), 'INV-409-STATE', 'Dispatched action cannot be cancelled; reconcile first', 409);
+      // CANCELLED and DENY are terminal too — re-cancelling rewrites the
+      // forensic record (a second ACTION_CANCELLED, a DENY verdict silently
+      // overwritten to CANCELLED) (w11-lifecycle F6/F7).
+      const r = this.store.must(p.tenant_id, 'capsule', id); requireThat(!['EXECUTING', 'VERIFIED', 'UNCERTAIN', 'FAILED', 'COMPENSATED', 'CANCELLED', 'DENY'].includes(r.status), 'INV-409-STATE', 'Dispatched or terminal action cannot be cancelled; reconcile first', 409);
       this.assertHealthy(p.tenant_id, p.subject_id, this.identity(p).device_id, now);
       // Same anti-grief rule attachEvidence already carries: only the
       // proposing actor — or a privileged role — may cancel (w9-network F9).
@@ -1303,15 +1448,19 @@ export class Fabric {
         // shadow a kind either.
       }[Object.hasOwn({ certificate:1, evidence:1, issuer:1, key:1, subject:1, device:1, capability:1, grant:1, token:1 }, input.kind) ? input.kind : ''];
       requireThat(exists?.(), 'INV-404-NOT-FOUND', `No live ${input.kind} authority with that id`, 404);
-      // The active audit signer is the only key that can attest outcomes —
-      // revoking it without an activatable successor wedges every in-flight
-      // execution permanently (w10-cert F5). A pending, tenant-owned,
-      // unrevoked key covering the audit purposes must exist first.
-      if (input.kind === 'key' && input.id === this.keys(t).audit.key_id) {
-        const needed = this._keyPurposes['audit'] ?? [];
+      // Re-revocation is refused: the first revocation's `revoked_at` is the
+      // forensically important fact and must never be rewritten (w11 F6).
+      requireThat(!this.revoked(t, input.kind, input.id), 'INV-409-STATE', 'Authority already revoked', 409);
+      // The bound execution or audit signer cannot be revoked without a
+      // pending, tenant-owned successor covering its purposes — the recovery
+      // rotation needs certificates and outcome signatures to keep flowing,
+      // and only the successor supplies them (w10-cert F5, w11-lifecycle
+      // F1/F2: an unguarded execution-key revoke bricked the whole tenant).
+      for (const klass of ['execution', 'audit']) if (input.kind === 'key' && input.id === this.keys(t)[klass]?.key_id) {
+        const needed = this._keyPurposes[klass] ?? [];
         const successor = [...this.vault.keys.entries()].some(([kid, e]) => e.pending && !e.revoked && this.ownsVaultKey(t, kid)
           && (e.purpose === 'any' || needed.every(x => (Array.isArray(e.purpose) ? e.purpose : [e.purpose]).includes(x))));
-        requireThat(successor, 'INV-409-STATE', 'Revoking the active audit signer requires a pending successor key covering the audit purposes — rotate first', 409);
+        requireThat(successor, 'INV-409-STATE', `Revoking the active ${klass} signer requires a pending successor key covering the ${klass} purposes — rotate first`, 409);
       }
       const payload = { ...clone(input), tenant_id: t, revoked_at: now, actor: p.subject_id, propagation: 'local-synchronous', remote_propagation: 'NOT_IMPLEMENTED' };
       // Sign the revocation envelope BEFORE the record lands — the signing
@@ -1329,6 +1478,11 @@ export class Fabric {
     // a ledger-confirmed revoke that can't reach the dataplane is healed by
     // _reconcileLedger on the next open (w9-network F5).
     if (input.kind === 'grant') this.target.revokeGrant(p.tenant_id, input.id);
+    // A ledger revocation on a vault key also flips the vault flag — the
+    // ledger stays authoritative (post-commit), and vault-level APIs that
+    // consult only their own entry map cannot sign under a revoked key
+    // (w11-fix F4).
+    if (input.kind === 'key' && this.ownsVaultKey(p.tenant_id, input.id)) { this.vault.revoke(input.id); this.persistVault(); }
     return env;
   }
   revocations(p, kind = null) {
@@ -1568,11 +1722,15 @@ export class Fabric {
     fields(payload, ['tenant_id', 'capsule_id', 'capsule_digest', 'evidence_graph_digest', 'policy_digest', 'signer_id', 'approved_at', 'expires_at']);
     requireThat(payload.tenant_id === t && payload.signer_id === envelope.protected.key_id, 'INV-403-SCOPE', 'Approval scope mismatch', 403);
     const identity = this.identities(t)[payload.signer_id]; requireThat(identity.subject_id === p.subject_id, 'INV-403-SCOPE', 'Approval signer does not match authenticated identity', 403);
-    const record = this.store.must(t, 'capsule', capsuleId); this.ensureMutable(record);
+    const record = this.store.must(t, 'capsule', capsuleId); this.ensureMutable(record); this._capsuleIntegrity(t, record);
     requireThat(identity.subject_id !== record.capsule.actor.subject_id, 'INV-403-SEPARATION', 'An initiator cannot approve their own action', 403);
     requireThat(payload.capsule_digest === record.capsule_digest && payload.evidence_graph_digest === this.graph(t, record).digest && payload.policy_digest === digest(this.policy(t)), 'INV-409-STATE', 'Approval no longer matches action, evidence or policy', 409);
     integer(payload.approved_at, 'approval time', now - 300000, now + 5000); integer(payload.expires_at, 'approval expiry', now + 1, Math.min(record.capsule.expires_at, payload.approved_at + 300000));
-    requireThat(!record.approvals.some(a => a.payload.signer_id === payload.signer_id), 'INV-409-REPLAY', 'Signer already approved this action', 409);
+    // Only a LIVE approval binds the signer: a lapsed envelope stops counting
+    // in evaluation, and it must not also burn the signer's future votes —
+    // otherwise ESCROW past the 5-minute approval TTL permanently wedges the
+    // quorum (w11-lifecycle F3).
+    requireThat(!record.approvals.some(a => a.payload.signer_id === payload.signer_id && a.payload.expires_at > now), 'INV-409-REPLAY', 'Signer already approved this action', 409);
     record.approvals.push(clone(envelope)); this.store.put(t, 'capsule', capsuleId, record, now);
     this.store.audit(t, 'EXACT_ACTION_APPROVED', p.subject_id, capsuleId, { approval_digest: digest(envelope), signer_id: payload.signer_id }, now);
     return { capsule_id: capsuleId, signer_id: payload.signer_id, approvals: record.approvals.length };
@@ -1742,6 +1900,9 @@ export class Fabric {
       // The reconstructed secret's digest goes on the audit record so the
       // ledger can prove WHICH secret the quorum reconstructed (w6 F6).
       const secret_digest = digest({ secret: Buffer.from(secret).toString('base64url') });
+      // Share material and the reconstructed secret are consumables — the
+      // Buffers are zeroed before this endpoint returns (w11-timing MED-4).
+      for (const s of shares) s.y.fill(0); secret.fill(0);
       this.store.audit(t, 'CEREMONY_RECONSTRUCTED', p.subject_id, ceremony.ceremony_id, { quorum: artifact.quorum, purpose: ceremony.purpose, secret_digest }, now);
       return { artifact, reconstructed: true, secret_digest, note: 'Secret reconstructed under ceremony quorum; raw material is not returned by this endpoint.' };
     });

@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { canonical, digest } from './canonical.mjs';
-import { signed, verifySigned } from './crypto.mjs';
+import { signed, verifySigned, ctEqual } from './crypto.mjs';
 import { split, reconstruct, encodeShare, decodeShare } from './shamir.mjs';
 import { fields, text, identifier, integer, uniqueStrings } from './schema.mjs';
 import { requireThat, InvariantError } from './errors.mjs';
@@ -105,7 +105,7 @@ export function reconstructSecret(ceremony, presentedShares, now) {
   for (const s of presentedShares) {
     const commitment = ceremony.share_commitments.find(c => c.share_index === s.x);
     requireThat(commitment, 'INV-403-ROLE', `Share index ${s.x} was not committed in this ceremony`, 403);
-    requireThat(commitment.commitment === digest({ ceremony_id: ceremony.ceremony_id, x: s.x, y: Buffer.from(s.y).toString('base64url') }), 'INV-403-ROLE', 'Share does not match its ceremony commitment', 403);
+    requireThat(ctEqual(commitment.commitment, digest({ ceremony_id: ceremony.ceremony_id, x: s.x, y: Buffer.from(s.y).toString('base64url') })), 'INV-403-ROLE', 'Share does not match its ceremony commitment', 403);
     byIndex.set(s.x, s);
   }
   const shares = [...byIndex.values()];

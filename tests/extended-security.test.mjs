@@ -35,7 +35,11 @@ test('COM-002: expiry, revocation and live re-evaluation each kill execution ind
   assert.throws(() => h.f.execute(h.p(), c3), e => ['INV-412-EVIDENCE', 'INV-403-QUARANTINE', 'INV-401-AUTH'].includes(e.code), 'live re-evaluation/health fails');
 });
 test('RUN-004: runtime issuer-key revocation and active-policy change invalidate cached token', t => {
-  const h = fixture(t), cap = h.f.runtime.issue(h.p(), runtimeInput()); h.f.revoke(h.p('security'), { kind: 'key', id: cap.protected.key_id, reason: 'Execution key compromise drill' });
+  const h = fixture(t), cap = h.f.runtime.issue(h.p(), runtimeInput());
+  // A pending successor must exist before the bound signer can be revoked
+  // (w11-lifecycle F1) — the capability signed by the old key still dies.
+  h.f.prepareRotation(h.p('security'), 'execution');
+  h.f.revoke(h.p('security'), { kind: 'key', id: cap.protected.key_id, reason: 'Execution key compromise drill' });
   assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap)), hasCode('INV-401-CAPABILITY'));
 });
 test('DAT-001 COM-009: exact data export cannot return extra columns from downstream', t => {

@@ -65,7 +65,8 @@ export function defaultPolicy(tenant) {
     runtime: { max_cost: 10000, rate_per_second: 20, max_fanout: 4, windows: [{ duration_ms: 60000, limit: 100 }, { duration_ms: 3600000, limit: 1000 }, { duration_ms: 86400000, limit: 5000 }, { duration_ms: 2592000000, limit: 10000 }], destinations: ['customer-vault', 'erp-service'], services: ['erp-service'], forbidden_columns: ['passport', 'payment_token', 'password'], jurisdictions: ['EU'], purposes: ['operations'], classifications: ['internal'], remediation_services: ['device-wipe', 'mdm-notify'], sensitivity_weights: { internal: 1, confidential: 5, restricted: 10 }, reconstruction: { window_ms: 86400000, max_distinct_rows: 5000, max_distinct_columns: 100, max_coverage_percent: 90 }, network: { deny_workstation_peers: true, allowed_protocols: ['https'], allowed_ports: [443] }, datasets: ['dataset-1'], allowed_columns: ['id', 'name', 'region', 'passport'], allowed_transforms: ['mask', 'tokenise', 'drop', 'constant', 'aggregate'] } };
 }
 export function validatePolicy(p) {
-  fields(p, ['policy_id', 'tenant_id', 'version', 'not_before', 'expires_at', 'max_capsule_ttl_ms', 'certificate_ttl_ms', 'capability_ttl_ms', 'mode', 'rules', 'runtime', 'fail_modes', 'max_stale_ms', 'staged_policy', 'secure_perception', 'algorithms'], ['emergency_of', 'stale_ms', 'retention']);
+  fields(p, ['policy_id', 'tenant_id', 'version', 'not_before', 'expires_at', 'max_capsule_ttl_ms', 'certificate_ttl_ms', 'capability_ttl_ms', 'mode', 'rules', 'runtime', 'fail_modes', 'max_stale_ms', 'staged_policy', 'secure_perception', 'algorithms'], ['emergency_of', 'stale_ms', 'retention', 'allow_weakening']);
+  requireThat(p.allow_weakening === undefined || p.allow_weakening === true, 'INV-451-POLICY', 'allow_weakening must be true when declared');
   text(p.policy_id, 'policy id'); text(p.tenant_id, 'tenant'); integer(p.version, 'version', 1); integer(p.not_before, 'activation time', 1); integer(p.expires_at, 'expiry', p.not_before + 1);
   integer(p.max_capsule_ttl_ms, 'capsule TTL', 1000, 86400000); integer(p.certificate_ttl_ms, 'certificate TTL', 1000, 300000); integer(p.capability_ttl_ms, 'capability TTL', 1000, 300000);
   oneOf(p.mode, ['engineering', 'shadow', 'disabled'], 'deployment mode');
@@ -149,12 +150,17 @@ export function validatePolicy(p) {
 // base but must not weaken it along any dimension. Returns the first weakening
 // found, or null. Subset = stricter for allowlists; superset = stricter for
 // denylists and required evidence.
-export function emergencyWeakening(base, next) {
-  const extra = base.staged_policy.emergency_extra_custodians;
+export function emergencyWeakening(base, next, now = 0) {
+  // The custodian surcharge binds only an emergency candidate: a normal
+  // successor must meet the base thresholds, not base + emergency_extra
+  // (otherwise every plain policy.change would read as weakening — POL-008).
+  const extra = next.emergency_of !== undefined ? base.staged_policy.emergency_extra_custodians : 0;
   const subset = (a, b) => a.every(x => b.includes(x));
   const superset = (a, b) => b.every(x => a.includes(x));
   if (next.mode !== base.mode) return 'mode';
-  if (next.expires_at > base.expires_at) return 'expires_at';
+  // Extending the horizon weakens a LIVE base; a base that already expired
+  // cannot be weakened by its succession — resetting expiry is required.
+  if (base.expires_at > now && next.expires_at > base.expires_at) return 'expires_at';
   if (next.max_capsule_ttl_ms > base.max_capsule_ttl_ms) return 'max_capsule_ttl_ms';
   if (next.certificate_ttl_ms > base.certificate_ttl_ms) return 'certificate_ttl_ms';
   if (next.capability_ttl_ms > base.capability_ttl_ms) return 'capability_ttl_ms';
@@ -264,8 +270,15 @@ export function evaluatePolicy({ capsule, policy, evidence = [], approvals = [],
     if (next.emergency_of !== undefined) {
       if (next.emergency_of !== policy.version) return result('DENY', [reason('EMERGENCY_BASE', 'Emergency policy must amend the currently active version.')]);
       if (next.expires_at - now > policy.staged_policy.emergency_max_ttl_ms) return result('DENY', [reason('EMERGENCY_TTL', 'Emergency policies must carry a bounded lifetime.')]);
-      const weak = emergencyWeakening(policy, next);
+      const weak = emergencyWeakening(policy, next, now);
       if (weak) return result('DENY', [reason('EMERGENCY_WEAKER', `Emergency policy weakens the base: ${weak}`)]);
+    } else {
+      // An ordinary successor that loosens any governance dimension is
+      // refused unless it declares the weakening itself — the flag lands in
+      // POLICY_STAGED and the transcript so the quorum approves knowingly,
+      // and it prices in the emergency-grade custodian floor (w11 F8).
+      const weak = emergencyWeakening(policy, next, now);
+      if (weak && next.allow_weakening !== true) return result('DENY', [reason('POLICY_WEAKENING', `Successor weakens the base: ${weak}. Set allow_weakening on the candidate to amend down deliberately.`)]);
     }
   }
   if (type === 'key.rotate') {
@@ -327,7 +340,7 @@ export function evaluatePolicy({ capsule, policy, evidence = [], approvals = [],
     else issues.push(reason('EVIDENCE_MISSING', `Required evidence kind: ${kind}.`));
   }
   if (independent < rule.independent_domains) issues.push(reason('EVIDENCE_INDEPENDENCE', 'Independent source domains are insufficient.'));
-  const requiredApprovals = rule.approval_threshold + (type === 'policy.change' && p.requested_state.policy?.emergency_of !== undefined ? policy.staged_policy.emergency_extra_custodians : 0);
+  const requiredApprovals = rule.approval_threshold + (type === 'policy.change' && (p.requested_state.policy?.emergency_of !== undefined || p.requested_state.policy?.allow_weakening === true) ? policy.staged_policy.emergency_extra_custodians : 0);
   // Quorum = distinct subjects AND distinct failure domains — one person
   // holding two registered keys must not satisfy a two-of-two threshold
   // (policy-audit F8).

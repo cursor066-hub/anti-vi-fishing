@@ -59,6 +59,10 @@ Residual honest limits:
 - SQLite `secure_delete` cannot guarantee erasure of pages already flushed into filesystem snapshots or earlier backups — the retention report marks pre-erasure backup media as out of scope.
 - A **file-level** `DELETE`/`UPDATE` bypassing the API leaves orphan wrapped DEKs (the key outliving its ciphertext) — a generic property, mitigated only by convention: all deletion goes through `remove`/`shred`, which destroy the DEK first.
 - A WAL checkpoint is best-effort under writer contention; a busy checkpoint keeps the shred flag armed and retries on the next commit.
+- **The store is trusted for tenancy but re-proven for integrity.** Rows write `tenant_id` as committed data; every read path that can mutate state re-verifies the record against the actor's own signed envelope (`request_intent` for capsules, the issuer envelope for evidence, the vault-signed envelope for outcomes) rather than trusting any stored digest column — an attacker who can `UPDATE` the file must also forge signatures, not just move digest fields in sync (w11-redteam).
+- **Ledger reads are not audit-logged.** Reads of audit data (`auditPage`, `graph`, checkpoint serves) are intentionally unaudited — auditing reads of the audit log would be self-referential noise; the integrity of what a reader receives is cryptographic (digests recomputed on serve), not procedural.
+- **Credential files are at-rest filesystem objects.** `config.json`, `master.key`, `vault.keys` and fixture private keys carry `0600` permissions and nothing else — there is no envelope encryption or OS keyring integration in this profile; process-level compromise of the deployment user reads them. Real custody (HSM/MPC/keyring) is on the external list.
+- **Zeroization is best-effort over transient buffers.** Reconstructed secrets, share y-coordinates and ECDH shared secrets are `fill(0)`ed after use; copies already made by the JIT (interned strings, TLS-borrowed buffers, GC cycles) are outside software reach — constant-time and zeroization claims in pure JS are engineering-honest, not proof-grade.
 
 ### Data gate design limits (w6-tenancy audit)
 
