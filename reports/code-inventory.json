@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 2297,
-      "bytes": 191591
+      "lines": 2316,
+      "bytes": 192972
     },
     "src/issuerd.mjs": {
       "lines": 411,
@@ -51,7 +51,7 @@
     },
     "src/keystore.mjs": {
       "lines": 170,
-      "bytes": 12567
+      "bytes": 12574
     },
     "src/merkle.mjs": {
       "lines": 121,
@@ -262,8 +262,8 @@
       "bytes": 10570
     },
     "tests/w12-redteam.test.mjs": {
-      "lines": 223,
-      "bytes": 14336
+      "lines": 243,
+      "bytes": 15989
     },
     "tests/w5-mutations.test.mjs": {
       "lines": 192,
@@ -335,5 +335,5 @@
     }
   },
   "total_files": 83,
-  "total_lines": 14846
+  "total_lines": 14885
 }

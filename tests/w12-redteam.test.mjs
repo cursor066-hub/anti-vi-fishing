@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto';
 import { fixture, hasCode, runtimeInput, runtimeRequest } from './helpers.mjs';
 import { Store } from '../src/store.mjs';
 import { digest } from '../src/canonical.mjs';
-import { signed } from '../src/crypto.mjs';
+import { signed, verifySigned, generateKey } from '../src/crypto.mjs';
 
 // R1: deleting the mutable revocation row cannot un-quarantine a device —
 // revocation is anchored on the signed AUTHORITY_REVOKED chain event.
@@ -219,4 +219,24 @@ test('w12 R20: replaying a real audit envelope is refused by the index', t => {
   const head = h.f.store.db.prepare('SELECT seq,hash FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1').get('acme');
   h.f.store.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run('acme', head.seq + 1, head.hash, digest(JSON.parse(earlier.envelope).payload), earlier.envelope);
   assert.throws(() => h.f.revoked('acme', 'device', 'x'), hasCode('INV-409-AUDIT-TAMPER'));
+});
+
+// R21: a forged key-rotation record is not a verification-key source —
+// lineage corroboration requires vault attestation, so the record alone can
+// never enroll a public key the attacker controls.
+test('w12 R21: a forged rotation record cannot enroll an attacker verify key', t => {
+  const h = fixture(t);
+  const atk = generateKey();
+  h.f.store.put('acme', 'key-rotation', atk.key_id, { key_class: 'audit', new_key_id: atk.key_id, new_public_key: atk.public_key, previous_key_id: 'deadbeef', previous_public_key: 'beef', revoke_old: false, rotated_at: h.now(), capsule_id: 'fake' }, h.now());
+  // Cold open on the poisoned store: reconcile skips the record (its new
+  // key is not vault-resident) and the verify set stays clean.
+  const f2 = new h.f.constructor(h.setup.config, h.directory, h.now);
+  t.after(() => f2.close());
+  const forged = signed({ tenant_id: 'acme', sequence: 1, previous: '0'.repeat(64), type: 'POLICY_ACTIVATED', actor: 'mallory', reference: 'policy:active', metadata: { policy_digest: 'x'.repeat(64) }, time: h.now() }, atk, 'audit');
+  assert.throws(() => verifySigned(forged, f2.auditPublicKeys('acme'), 'audit'), hasCode('INV-401-SIGNATURE'));
+  // Same for a runtime injection into the live vault map: membership is
+  // not attestation — the wrapped material cannot be faked without the
+  // master key.
+  h.f.vault.keys.set(atk.key_id, { key_id: atk.key_id, tenant_id: 'acme', purpose: ['audit'], public_key: atk.public_key, wrapped: 'forged', pending: false });
+  assert.throws(() => verifySigned(forged, h.f.auditPublicKeys('acme'), 'audit'), hasCode('INV-401-SIGNATURE'));
 });

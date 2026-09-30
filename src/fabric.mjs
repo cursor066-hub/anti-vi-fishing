@@ -4,7 +4,7 @@ import { SimulatedTarget } from './target.mjs';
 import { RuntimeGate } from './runtime.mjs';
 import { digest, clone, canonical } from './canonical.mjs';
 import { verifySigned, decrypt } from './crypto.mjs';
-import { KeyVault } from './keystore.mjs';
+import { KeyVault, derivePublic } from './keystore.mjs';
 import { merkleRoot, inclusionProof, consistencyProof, verifyInclusion } from './merkle.mjs';
 import { httpJson, postOnce, readWithRetry, driftCheck } from './connectors.mjs';
 import { createCeremony, acknowledge, commitShares, splitSecret, reconstructSecret, ceremonyReport } from './ceremony.mjs';
@@ -51,6 +51,11 @@ export class Fabric {
     }
     this.store = new Store(join(directory, 'fabric.db'), encryption, auditSigners);
     this.target = new SimulatedTarget(join(directory, 'target.db'), encryption); this.runtime = new RuntimeGate(this);
+    // Retired-key declarations are authentic only from the signed config —
+    // _reconcileLedger appends store-derived entries (attacker-writable) to
+    // the same list, so verification trusts the declared set by key_id plus
+    // whatever the vault itself can attest (w13 fixverify).
+    this._declaredRetired = Object.fromEntries(Object.entries(config.tenants ?? {}).map(([tn, row]) => [tn, new Map((row.keys?.retired ?? []).filter(r => !r.derived).map(r => [r.key_id, r.public_key]))]));
     this._reconcileLedger();
     this.perceptionComponents = {};
     for (const [tenant, t] of Object.entries(config.tenants)) this.perceptionComponents[tenant] = this._deepFreeze(clone(t.components ?? {}));
@@ -112,7 +117,11 @@ export class Fabric {
           const previous = this.tenant(tenant).keys[rot.key_class];
           this.tenant(tenant).keys[rot.key_class] = { key_id: rot.new_key_id, public_key: rot.new_public_key };
           if (previous && !(this.tenant(tenant).keys.retired ?? []).some(x => x.key_id === previous.key_id)) {
-            this.tenant(tenant).keys.retired = [...(this.tenant(tenant).keys.retired ?? []), { key_class: rot.key_class, key_id: previous.key_id, public_key: previous.public_key, retired_at: rot.rotated_at }];
+            // `derived` marks store-sourced lineage: only unmarked (config-
+            // declared) retired entries join the declared-verification set,
+            // so a forged rotation record cannot launder an attacker key
+            // into a later cold-open's trust set (w13 fixverify).
+            this.tenant(tenant).keys.retired = [...(this.tenant(tenant).keys.retired ?? []), { key_class: rot.key_class, key_id: previous.key_id, public_key: previous.public_key, retired_at: rot.rotated_at, derived: true }];
           }
           dirty = true;
         }
@@ -222,27 +231,37 @@ export class Fabric {
     return plain;
   }
   keys(t) { return this.tenant(t).keys; }
-  // Verification keys for a signing class: everything that could ever have
-  // legitimately signed — the configured key, retired lineage, every
-  // key-rotation record's previous/next keys, and pending recovery
-  // successors. Past signatures stay valid when a key is later revoked or
-  // rotated out — the ledger records which authority signed (recovery_
-  // signing), so verification must see the whole lineage, including on a
-  // cold start where _reconcileLedger restores only the latest rotation.
-  // Admitting the superset is safe: an insider without private material
-  // cannot forge a signature under any of them (w13 fixverify).
+  // Verification keys for a signing class. Sources, in order of trust:
+  // the configured key (frozen config or a vault-gated reconcile pointer);
+  // every tenant-owned VAULT key covering the class — vault residency is
+  // authenticated because a fake entry cannot unwrap at load, and rotated
+  // or revoked keys stay resident, so the whole rotation lineage verifies
+  // on a cold start; retired declarations that are either config-declared
+  // or corroborated by a matching vault entry. key-rotation RECORDS are
+  // deliberately NOT a key source: they are mutable store rows, and a
+  // forged record could otherwise enroll an attacker public key into the
+  // verification set (w13 fixverify regression catch).
+  // Runtime membership is not proof of vault residency: an entry injected
+  // into the live map must re-derive its public half from wrapped material
+  // under the master key — impossible without that key, the same guarantee
+  // the vault's load-time check gives (w13 fixverify).
+  _vaultAttested(kid, public_key) {
+    const e = this.vault.keys.get(kid);
+    if (!e || e.public_key !== public_key) return false;
+    try { return derivePublic(decrypt(e.wrapped, this.vault.masterKey, `vault/${kid}`)) === public_key; } catch { return false; }
+  }
   _verifyKeys(t, klass) {
     const out = {};
     const cur = this.keys(t)[klass];
     if (cur) out[cur.key_id] = { public_key: cur.public_key };
-    for (const e of this.keys(t).retired ?? []) if (!e.key_class || e.key_class === klass) out[e.key_id] = { public_key: e.public_key };
-    for (const rot of this.store.list(t, 'key-rotation', 1000)) if (rot.key_class === klass) {
-      out[rot.previous_key_id] = { public_key: rot.previous_public_key };
-      out[rot.new_key_id] = { public_key: rot.new_public_key };
-    }
     const needed = this._keyPurposes[klass] ?? [];
-    for (const [kid, e] of this.vault.keys) if (e.pending && this.ownsVaultKey(t, kid)
-      && (e.purpose === 'any' || needed.every(x => (Array.isArray(e.purpose) ? e.purpose : [e.purpose]).includes(x)))) out[kid] = { public_key: e.public_key };
+    for (const [kid, e] of this.vault.keys) if (this.ownsVaultKey(t, kid)
+      && (e.purpose === 'any' || needed.every(x => (Array.isArray(e.purpose) ? e.purpose : [e.purpose]).includes(x)))
+      && this._vaultAttested(kid, e.public_key)) out[kid] = { public_key: e.public_key };
+    for (const e of this.keys(t).retired ?? []) {
+      if (e.key_class && e.key_class !== klass) continue;
+      if (this._declaredRetired[t]?.get(e.key_id) === e.public_key || this._vaultAttested(e.key_id, e.public_key)) out[e.key_id] = { public_key: e.public_key };
+    }
     return out;
   }
   executionPublic(t) { return this._verifyKeys(t, 'execution'); }

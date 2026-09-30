@@ -6,7 +6,7 @@ import { encrypt, decrypt, SUITES, verifySuite, signSuite, verifySigned, ctEqual
 import { fields, text, identifier, integer } from './schema.mjs';
 import { requireThat, InvariantError } from './errors.mjs';
 
-const derivePublic = pem => createPublicKey(createPrivateKey(pem)).export({ type: 'spki', format: 'pem' });
+export const derivePublic = pem => createPublicKey(createPrivateKey(pem)).export({ type: 'spki', format: 'pem' });
 const stateMac = (masterKey, state) => createHmac('sha256', masterKey).update(canonical(state)).digest('base64url');
 
 // IF-SOFTHSM-1: software keystore profile. Keys are generated inside the
