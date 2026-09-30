@@ -15,7 +15,7 @@ import { extract, explain, classifyIntent } from './advisory.mjs';
 import { fields, text, identifier, integer, uniqueStrings, validateProposal } from './schema.mjs';
 import { evaluatePolicy, validatePolicy, policyDiff } from './policy.mjs';
 import { declarePath, coverageManifest, applyDriftToPaths, coverageAt } from './coverage.mjs';
-import { watermark } from './datagate.mjs';
+import { watermark, reconstructionCheck } from './datagate.mjs';
 import { requireThat, InvariantError } from './errors.mjs';
 import { join } from 'node:path';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
@@ -36,7 +36,7 @@ export class Fabric {
         // into signing outside their class or exfiltrating private material.
         const purposes = { execution: ['action-certificate', 'capability'], audit: ['audit', 'outcome', 'revocation', 'coverage', 'checkpoint', 'backup-manifest'] };
         this._keyPurposes = purposes;
-        if (key.private_key && !this.vault.has(key.key_id)) this.vault.importKey({ key_id: key.key_id, public_key: key.public_key, private_key: key.private_key }, purposes[klass], { exportable: false });
+        if (key.private_key && !this.vault.has(key.key_id)) this.vault.importKey({ key_id: key.key_id, public_key: key.public_key, private_key: key.private_key }, purposes[klass], { exportable: false, tenant_id: tenant });
         requireThat(this.vault.has(key.key_id), 'INV-503-CONFIG', `Tenant ${klass} key is not in the keystore`, 503);
       }
       auditSigners[tenant] = { key_id: t.keys.audit.key_id, public_key: t.keys.audit.public_key, keys: () => this.auditPublicKeys(tenant), sign: (payload, purpose = 'audit') => this.vault.envelope(this.keys(tenant).audit.key_id, purpose, payload) };
@@ -298,7 +298,36 @@ export class Fabric {
     const identity = Object.values(this.tenant(t).identities).find(x => x.subject_id === subject);
     requireThat(identity && identity.device_id === device && identity.health_expires_at > now, 'INV-403-HEALTH', 'Configured device health evidence expired or mismatched', 403);
   }
-  getCapsule(p, id) { this.authorize(p, ['operator', 'approver', 'custodian', 'security', 'policy_admin', 'auditor']); return this.store.must(p.tenant_id, 'capsule', identifier(id)); }
+  getCapsule(p, id) { this.authorize(p, ['operator', 'approver', 'custodian', 'security', 'policy_admin', 'auditor']); return this.capsuleView(this.store.must(p.tenant_id, 'capsule', identifier(id))); }
+  // A capsule read never returns raw dataset rows: current_state snapshots
+  // are needed internally for predicates and target equality checks, but the
+  // read surface exposes only their digest (w6-tenancy F1).
+  capsuleView(record) {
+    const view = clone(record), mf = view.capsule?.current_state?.material_fields;
+    if (Array.isArray(mf?.rows)) {
+      view.capsule.current_state = { ...view.capsule.current_state, material_fields: { ...mf, rows: undefined, row_count: mf.rows.length, rows_digest: digest(mf.rows) } };
+    }
+    return view;
+  }
+  // The state reference carried by signed artifacts binds the snapshot by
+  // digest — material rows never travel inside a certificate (w6-tenancy F1).
+  stateRef(current_state) {
+    const ref = { version: current_state.version, digest: current_state.digest };
+    if (current_state.material_fields !== undefined) ref.material_fields_digest = digest(current_state.material_fields);
+    return ref;
+  }
+  // The snapshot a proposer embeds must still describe live target state at
+  // decision time — a fabricated or stale current_state cannot earn an
+  // evaluation or a certificate (w6-tenancy F1).
+  assertFreshSnapshot(t, capsule) {
+    const ref = capsule.current_state;
+    if (!ref || ref.version === undefined || ref.digest === undefined) return;
+    // Only real tracked rows can go stale — a resource with no target row has
+    // nothing to fabricate against and is checked at dispatch instead.
+    if (!this.target.exists(t, capsule.action.target_resource)) return;
+    const live = this.target.state(t, capsule.action.target_resource);
+    requireThat(live.version === ref.version && live.digest === ref.digest, 'INV-409-STATE', 'Proposed state snapshot is stale or does not match live target state', 409);
+  }
   propose(p, input, idempotencyKey, requestIntent = null) {
     this.authorize(p, ['operator', 'workload', 'policy_admin']); validateProposal(input);
     requireThat(input.actor.subject_id === p.subject_id && input.actor.identity_class === this.identity(p).identity_class, 'INV-403-ACTOR', 'Actor must match authenticated identity', 403);
@@ -547,6 +576,7 @@ export class Fabric {
     return this.transaction(p, now => {
       const record = this.store.must(p.tenant_id, 'capsule', id); this.ensureMutable(record);
       this.assertHealthy(p.tenant_id, record.capsule.actor.subject_id, record.capsule.actor.device_id, now);
+      this.assertFreshSnapshot(p.tenant_id, record.capsule);
       record.decision = this.evaluation(p.tenant_id, record, now); record.status = record.decision.decision;
       this.store.put(p.tenant_id, 'capsule', id, record, now); this.store.audit(p.tenant_id, 'POLICY_EVALUATED', p.subject_id, id, { decision: record.status, decision_digest: digest(record.decision) }, now);
       return record.decision;
@@ -557,6 +587,7 @@ export class Fabric {
     return this.transaction(p, now => {
       const t = p.tenant_id, r = this.store.must(t, 'capsule', id); this.ensureMutable(r);
       requireThat(!r.certificate_id, 'INV-409-REPLAY', 'Action already has a certificate', 409);
+      this.assertFreshSnapshot(t, r.capsule);
       const decision = this.evaluation(t, r, now), policy = this.policy(t);
       requireThat(decision.decision === 'ALLOW', 'INV-412-EVIDENCE', 'Only ALLOW may receive an execution certificate', 412, decision);
       this.assertHealthy(t, r.capsule.actor.subject_id, r.capsule.actor.device_id, now);
@@ -568,7 +599,7 @@ export class Fabric {
       const graph = this.graph(t, r), expiry = Math.min(now + policy.certificate_ttl_ms, r.capsule.expires_at, policy.expires_at, ...graph.items.map(e => e.payload.expires_at), ...r.approvals.filter(a => a.payload.expires_at > now).map(a => a.payload.expires_at));
       requireThat(expiry > now, 'INV-409-STATE', 'Certificate would be stillborn; re-approve the action', 409);
       const certificate_id = randomUUID();
-      const payload = { certificate_id, tenant_id: t, capsule_id: id, capsule_digest: r.capsule_digest, evidence_graph_digest: graph.digest, policy_id: policy.policy_id, policy_version: policy.version, policy_digest: digest(policy), decision: 'ALLOW', constraints: { destination: r.capsule.destination, quantity: r.capsule.quantity, requested_digest: digest(r.capsule.requested_state), current_state: r.capsule.current_state, exclusions: r.capsule.exclusions }, target_gate_id: this.config.gate_id, signer_set: decision.eligible_signers, nonce: r.capsule.nonce, issued_at: now, expires_at: expiry, single_use: true, suite, revocation_ref: `certificate:${certificate_id}` };
+      const payload = { certificate_id, tenant_id: t, capsule_id: id, capsule_digest: r.capsule_digest, evidence_graph_digest: graph.digest, policy_id: policy.policy_id, policy_version: policy.version, policy_digest: digest(policy), decision: 'ALLOW', constraints: { destination: r.capsule.destination, quantity: r.capsule.quantity, requested_digest: digest(r.capsule.requested_state), current_state: this.stateRef(r.capsule.current_state), exclusions: r.capsule.exclusions }, target_gate_id: this.config.gate_id, signer_set: decision.eligible_signers, nonce: r.capsule.nonce, issued_at: now, expires_at: expiry, single_use: true, suite, revocation_ref: `certificate:${certificate_id}` };
       requireThat(!this.revoked(t, 'key', this.keys(t).execution.key_id) && this.vault.has(this.keys(t).execution.key_id), 'INV-401-SIGNATURE', 'Execution key revoked', 401);
       const envelope = this.signExecution(t, payload, 'action-certificate');
       this.store.insert(t, 'certificate', payload.certificate_id, { envelope, consumed: false, status: 'CERTIFIED', issued_at: now }, now);
@@ -787,6 +818,9 @@ export class Fabric {
       // committed VERIFIED outcome (w6 F2/F4).
       const entry = this.vault.keys.get(req.new_key_id);
       requireThat(entry && entry.pending && !entry.revoked, 'INV-409-STATE', 'Rotation target is not a pending vault key', 409);
+      // The vault is process-global: a certified rotation may only activate a
+      // pending key minted for THIS tenant (w6-tenancy F3).
+      requireThat(entry.tenant_id === t, 'INV-403-SCOPE', 'Vault key is not owned by this tenant', 403);
       requireThat(req.new_public_key === entry.public_key, 'INV-400-SCHEMA', 'new_public_key does not match the pending vault key');
       const needed = this._keyPurposes[req.key_class] ?? [];
       const offered = Array.isArray(entry.purpose) ? entry.purpose : [entry.purpose];
@@ -833,9 +867,13 @@ export class Fabric {
       // channel (runtime-audit F-7).
       const requested = r.capsule.requested_state, subject = r.capsule.actor.subject_id;
       const dataset = this.target.state(t, requested.dataset).material_fields;
+      // The export channel is gated by the same cumulative reconstruction
+      // budget as capability reads — an export may not sail past a coverage
+      // denial (w6-tenancy F5). Touch rows stay committed for the attempt.
+      const recon = reconstructionCheck(this.store.db, this.target.db, { tenant: t, subject, dataset: requested.dataset, rows: requested.row_ids, columns: requested.columns, now, policy: this.policy(t).runtime.reconstruction });
+      if (!recon.allowed) return { gate_denied: { code: 'INV-429-BUDGET', detail: { row_count: recon.row_count, column_count: recon.column_count, coverage_percent: recon.coverage_percent } } };
       const weight = this.policy(t).runtime.sensitivity_weights[dataset.classification] ?? 1;
       const cost = requested.row_ids.length * requested.columns.length * weight;
-      for (const row of requested.row_ids) for (const c of requested.columns) this.store.db.prepare('INSERT INTO data_access VALUES(?,?,?,?,?,?)').run(t, subject, requested.dataset, row, c, now);
       this.store.db.prepare('INSERT INTO usage VALUES(?,?,?,?,?,?,?)').run(t, subject, requested.dataset, now, cost, `cert:${cert.certificate_id}`, cert.certificate_id);
       return { watermarks: watermark(raw.output ?? [], { tenant: t, dataset: requested.dataset, subject, requestId: cert.certificate_id, tenantWatermarkKey: this.tenant(t).watermark_key ?? this.tenant(t).encryption_key }).watermarks };
     }
@@ -852,12 +890,13 @@ export class Fabric {
       const { valid } = this._validateTargetResponse(r, cert, raw, now, { postRead });
       if (status === 'VERIFIED' && !valid) { status = 'UNCERTAIN'; reason = 'TARGET_RESPONSE_INVALID'; }
       const extras = valid ? this._applyVerifiedEffects(p, t, r, cert, raw, now, post) : null;
+      if (extras?.gate_denied) { status = 'FAILED'; reason = extras.gate_denied.code; }
       // H1: revocation cannot abort a committed reservation — it stops NEW
       // reservations. A revocation that landed between reservation and this
       // finish is recorded and flagged rather than hidden, so the ledger
       // shows the race instead of pretending it never happened.
       const revokedMidFlight = this.revoked(t, 'certificate', cert.certificate_id) || this.revoked(t, 'key', stored.envelope.protected.key_id);
-      const payload = { certificate_id: cert.certificate_id, capsule_digest: cert.capsule_digest, target_transaction_id: cert.certificate_id, observed_state_digest: valid ? raw.observed_state_digest : null, status, reason, execution_time: valid ? raw.execution_time : now, reconciliation_evidence: valid ? digest(raw) : null, simulation: true, output: valid ? raw.output : null, watermarks: extras?.watermarks ?? null, revoked_post_reservation: revokedMidFlight || null, supersedes: existing ? digest(existing) : null };
+      const payload = { certificate_id: cert.certificate_id, capsule_digest: cert.capsule_digest, target_transaction_id: cert.certificate_id, observed_state_digest: valid ? raw.observed_state_digest : null, status, reason, execution_time: valid ? raw.execution_time : now, reconciliation_evidence: valid ? digest(raw) : null, simulation: true, output: valid && !extras?.gate_denied ? raw.output : null, watermarks: extras?.watermarks ?? null, gate_denied: extras?.gate_denied?.detail ?? null, revoked_post_reservation: revokedMidFlight || null, supersedes: existing ? digest(existing) : null };
       const envelope = this.signAudit(t, payload, 'outcome', extras?.outcome_key_id ?? null);
       this.store.put(t, 'outcome', cert.certificate_id, envelope, now); stored.status = status; r.status = status;
       this.store.put(t, 'certificate', cert.certificate_id, stored, now); this.store.put(t, 'capsule', cert.capsule_id, r, now);
@@ -907,7 +946,10 @@ export class Fabric {
         // perception component signing key, which must also be revocable
         // (w6-perception P-2). vault.entry throws on unknown ids; probe the
         // map directly instead.
-        key: () => this.vault.keys.get(input.id) || this.identities(t)[input.id] || this.tenant(t).issuers[input.id] || Object.values(this.perceptionComponents[t] ?? {}).find(c => c.signing.key_id === input.id),
+        // A vault entry resolves only when it belongs to this tenant —
+        // probing another tenant's key id is not an existence oracle
+        // (w6-tenancy F4).
+        key: () => (this.vault.keys.get(input.id)?.tenant_id === t ? this.vault.keys.get(input.id) : null) || this.identities(t)[input.id] || this.tenant(t).issuers[input.id] || Object.values(this.perceptionComponents[t] ?? {}).find(c => c.signing.key_id === input.id),
         subject: () => Object.values(this.tenant(t).identities).some(i => i.subject_id === input.id),
         device: () => Object.values(this.tenant(t).identities).some(i => i.device_id === input.id),
         capability: () => this.store.get(t, 'capability', input.id),
@@ -1252,7 +1294,7 @@ export class Fabric {
     return this.transaction(p, now => {
       // KEY-007: a rotated key keeps the class's purpose binding — 'any' would
       // destroy the separation genesis established (w5 F-4).
-      const pending = this.vault.generate(this._keyPurposes?.[key_class] ?? 'any', { pending: true, suite });
+      const pending = this.vault.generate(this._keyPurposes?.[key_class] ?? 'any', { pending: true, suite, tenant_id: p.tenant_id });
       this.persistVault();
       this.store.audit(p.tenant_id, 'ROTATION_PREPARED', p.subject_id, pending.key_id, { key_class, ceremony_bound: true }, now);
       return { key_id: pending.key_id, public_key: pending.public_key, key_class, status: 'pending', note: 'Key generated inside the vault; it cannot sign until a verified key.rotate action activates it.' };

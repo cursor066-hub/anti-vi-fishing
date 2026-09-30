@@ -142,7 +142,7 @@ test('M-ceremony-floor: reconstruction with zero custodian acknowledgements is r
 test('M-ceremony-gate: key.rotate citing an unacknowledged ceremony is refused at application time', t => {
   const h = fixture(t);
   const id = `cer-${randomUUID()}`;
-  const pending = h.f.vault.generate(['action-certificate', 'capability'], { pending: true });
+  const pending = h.f.prepareRotation(h.p('security'), 'execution');
   h.f.createCeremony(h.p('security'), { ceremony_id: id, purpose: 'key.rotate', threshold: 2, custodians: ['custodian-1', 'custodian-2'], valid_until: h.now() + 3600000, min_delay_ms: 120000, rotation: { key_class: 'execution', new_key_id: pending.key_id } });
   const r = h.proposed('key.rotate', { key_class: 'execution', new_key_id: pending.key_id, new_public_key: pending.public_key, ceremony_id: id, revoke_old: false }, { action: { type: 'key.rotate', target_resource: 'key-store', purpose: 'Rotation drill' } });
   h.evidence(r, { kind: 'governance_review' }); h.evidence(r, { kind: 'governance_review', issuer: 'audit-committee' }); h.approve(r, 3); h.advance(61000);

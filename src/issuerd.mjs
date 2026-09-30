@@ -102,7 +102,13 @@ export function answerQuery(issuer, request, now) {
   // claims.subject_id to the capsule's actor, so the lie must be impossible
   // below the signature.
   const resolvedSubject = record.subject_id ?? request.claims?.subject_id ?? request.subject_id;
-  const revealed = claim === 'conflict' ? {} : { ...(request.claims ?? {}), ...extracted, subject_id: resolvedSubject };
+  // Only fields the issuer verified may appear under the signature: expect/
+  // extract fields, the resolved subject, and claims bound into the lookup
+  // template — a 'supports' answer proves that exact identifier resolved to
+  // a real record. Arbitrary caller claims are never echoed (w6-tenancy F7).
+  const lookupBound = {};
+  if (claim === 'supports') for (const m of rule.lookup.matchAll(/\$\{claims\.(\w+)\}/g)) { if (request.claims?.[m[1]] !== undefined) lookupBound[m[1]] = request.claims[m[1]]; }
+  const revealed = claim === 'conflict' ? {} : { ...lookupBound, ...extracted, subject_id: resolvedSubject };
   return signed({ ...base, claim, content_digest: digest({ issuer: issuer.issuer, key, record }), claims: revealed, provenance: prov('*'), issuer_version: issuer.version }, issuer.key, 'evidence');
 }
 

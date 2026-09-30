@@ -36,13 +36,16 @@ export class KeyVault {
   has(key_id) { return this.keys.has(key_id) && !this.keys.get(key_id).revoked; }
   entry(key_id) { const e = this.keys.get(key_id); requireThat(e && !e.revoked && !e.pending, 'INV-401-SIGNATURE', 'Key unavailable, revoked or pending activation', 401); return e; }
   publicKey(key_id) { return this.keys.get(key_id)?.public_key ?? null; }
-  generate(purpose, { suite = 'Ed25519', exportable = false, key_id = null, pending = false } = {}) {
+  generate(purpose, { suite = 'Ed25519', exportable = false, key_id = null, pending = false, tenant_id = null } = {}) {
     requireThat(SUITES[suite], 'INV-400-SCHEMA', 'Unapproved algorithm suite');
     for (const p of Array.isArray(purpose) ? purpose : [purpose]) text(p, 'key purpose', 64);
     const raw = this._generateRaw(suite);
     const id = key_id ?? raw.key_id;
     requireThat(!this.keys.has(id), 'INV-409-CONFLICT', 'Key id already exists', 409);
-    this.keys.set(id, { key_id: id, public_key: raw.public_key, purpose, suite, exportable, revoked: false, pending, generated_inside: true, wrapped: encrypt(raw.private_key, this.masterKey, `vault/${id}`), created_firmware: this.firmware });
+    // The vault is process-global — every entry carries its owning tenant so
+    // no tenant-scoped path can sign, rotate, revoke or list another
+    // tenant's material (w6-tenancy F2/F3/F4).
+    this.keys.set(id, { key_id: id, tenant_id, public_key: raw.public_key, purpose, suite, exportable, revoked: false, pending, generated_inside: true, wrapped: encrypt(raw.private_key, this.masterKey, `vault/${id}`), created_firmware: this.firmware });
     return { key_id: id, public_key: raw.public_key, suite, purpose, exportable, pending };
   }
   // A pending key cannot sign until a verified key.rotate action activates it.
@@ -56,7 +59,7 @@ export class KeyVault {
   // Import of externally generated material (dev/test path and ceremony
   // reconstruction). Imported keys are recorded generated_inside:false so the
   // attestation stays honest.
-  importKey(key, purpose, { exportable = false, suite = 'Ed25519' } = {}) {
+  importKey(key, purpose, { exportable = false, suite = 'Ed25519', tenant_id = null } = {}) {
     fields(key, ['key_id', 'public_key', 'private_key']);
     requireThat(typeof key.private_key === 'string' && key.private_key.includes('PRIVATE KEY') && key.private_key.length <= 8192, 'INV-400-SCHEMA', 'Invalid private key');
     requireThat(SUITES[suite], 'INV-400-SCHEMA', 'Unapproved algorithm suite');
@@ -65,7 +68,7 @@ export class KeyVault {
     // whatever private material was handed in (crypto-audit M-2).
     requireThat(derivePublic(key.private_key) === key.public_key, 'INV-401-SIGNATURE', 'Imported keypair is inconsistent', 401);
     requireThat(!this.keys.has(key.key_id), 'INV-409-CONFLICT', 'Key id already exists', 409);
-    this.keys.set(key.key_id, { key_id: key.key_id, public_key: key.public_key, purpose, suite, exportable, revoked: false, generated_inside: false, wrapped: encrypt(key.private_key, this.masterKey, `vault/${key.key_id}`), created_firmware: 'imported' });
+    this.keys.set(key.key_id, { key_id: key.key_id, tenant_id, public_key: key.public_key, purpose, suite, exportable, revoked: false, generated_inside: false, wrapped: encrypt(key.private_key, this.masterKey, `vault/${key.key_id}`), created_firmware: 'imported' });
     return { key_id: key.key_id, public_key: key.public_key, suite, purpose, exportable };
   }
   _private(key_id) { return decrypt(this.entry(key_id).wrapped, this.masterKey, `vault/${key_id}`); }

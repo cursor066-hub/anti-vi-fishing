@@ -99,7 +99,7 @@ test('KEY-005: rotating the audit key Ed25519 -> ES256 keeps old entries verifia
   const h = fixture(t);
   h.ready(); // entries under the original Ed25519 audit key
   const oldHead = h.f.store.auditHashes('acme').at(-1);
-  const pending = h.f.vault.generate(['audit', 'outcome', 'revocation', 'coverage', 'checkpoint', 'backup-manifest'], { suite: 'ES256', pending: true });
+  const pending = h.f.prepareRotation(h.p('security'), 'audit', 'ES256');
   const custodians = ['custodian-1', 'custodian-2'];
   const c = h.f.createCeremony(h.p('security'), { ceremony_id: 'cer-es256', purpose: 'key.rotate', threshold: 2, custodians, valid_until: h.now() + 3600000, min_delay_ms: 120000, rotation: { key_class: 'audit', new_key_id: pending.key_id } });
   for (const subject of custodians) h.f.acknowledgeCeremony(h.p(subject), signAcknowledgement(c, subject, h.setup.custodianKeys.acme[subject], h.now()));

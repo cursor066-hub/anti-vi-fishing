@@ -134,8 +134,14 @@ test('RUN-006: rejection metrics count by reason code on the live HTTP surface',
   await h.request('/v1/revocations', { method: 'POST', token: h.setup.credentials.acme.auditor, body: {} }); // 403 role
   const m = await h.request('/v1/metrics', { token: h.setup.credentials.acme.security });
   assert.equal(m.status, 200);
-  assert.ok(m.data.unauthorised >= 1);
+  assert.equal(m.data.scope, 'tenant');
+  // Requests whose principal never resolves (bad/missing token) cannot be
+  // charged to any tenant; attributable rejections are counted per tenant.
+  assert.equal(m.data.unauthorised, 0);
   assert.ok(m.data.rejections['INV-403-ROLE'] >= 1, JSON.stringify(m.data.rejections));
+  const g = await h.request('/v1/metrics', { token: h.setup.credentials.globex.security });
+  assert.equal(g.data.scope, 'tenant');
+  assert.deepEqual(g.data.rejections, {}, 'one tenant must not observe another tenant\'s traffic');
 });
 
 test('UX-007: the controlled-workspace fallback succeeds end-to-end when policy permits', async t => {

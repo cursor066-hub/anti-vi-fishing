@@ -1907,10 +1907,46 @@ ok 318 - w5-F8/F9: derived times use the gate clock; INV-5xx outcomes are UNCERT
   duration_ms: 0
   type: 'test'
   ...
-1..318
-# tests 318
+# Subtest: w6-F1: capsule views and certificates carry row digests, never raw rows
+ok 319 - w6-F1: capsule views and certificates carry row digests, never raw rows
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w6-F3: certified key.rotate cannot activate another tenant's pending key
+ok 320 - w6-F3: certified key.rotate cannot activate another tenant's pending key
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w6-F4: revoking another tenant's vault key is an INV-404, not a silent no-op
+ok 321 - w6-F4: revoking another tenant's vault key is an INV-404, not a silent no-op
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w6-F5: an export that crosses the reconstruction budget fails with output suppressed
+ok 322 - w6-F5: an export that crosses the reconstruction budget fails with output suppressed
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w6-F2: /v1/keys and attest expose only the caller's own vault entries
+ok 323 - w6-F2: /v1/keys and attest expose only the caller's own vault entries
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w6-F7: issuerd never signs unverified caller claims
+ok 324 - w6-F7: issuerd never signs unverified caller claims
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+1..324
+# tests 324
 # suites 0
-# pass 318
+# pass 324
 # fail 0
 # cancelled 0
 # skipped 0

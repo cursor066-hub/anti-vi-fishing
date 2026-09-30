@@ -45,7 +45,7 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
   requireThat(['127.0.0.1', '::1'].includes(host), 'INV-503-RELEASE', 'Engineering HTTP service must bind to loopback', 503);
   const web = fileURLToPath(new URL('../web/', import.meta.url));
   const sessions = new Map(), rate = new Map();
-  const metrics = { requests: 0, errors: 0, unauthorised: 0, rejections: {} };
+  const metrics = { requests: 0, errors: 0, unauthorised: 0, rejections: {}, tenants: {} };
   function rateLimit(key, max, window = 60000) {
     const now = Date.now();
     if (rate.size > 10000) for (const [k, v] of rate) if (v.reset <= now) rate.delete(k);
@@ -108,6 +108,9 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
   const server = http.createServer({ maxHeaderSize: 16384 }, async (req, res) => {
     metrics.requests++; const requestId = randomBytes(12).toString('hex');
     let requestPrincipal = null;
+    // Per-tenant mirrors are counted once the principal resolves — the
+    // process-global roll-up is never served to tenants (w6-tenancy F6).
+    const bumpTenant = () => { if (requestPrincipal) { const tm = metrics.tenants[requestPrincipal.tenant_id] ??= { requests: 0, errors: 0, unauthorised: 0, rejections: {} }; tm.requests++; } };
     res.setHeader('X-Request-Id', requestId); res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('X-Frame-Options', 'DENY'); res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
     res.setHeader('Content-Security-Policy', "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
@@ -142,7 +145,7 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
         res.setHeader('Set-Cookie', `if_session=${sid}; HttpOnly; SameSite=Strict; Path=/; Max-Age=900${origin.startsWith('https:') ? '; Secure' : ''}`);
         return send(200, { ...result.principal, csrf_token: csrf, expires_in: 900 });
       }
-      const p = auth(req); requestPrincipal = p; rateLimit(`subject:${p.tenant_id}:${p.subject_id}`, 300);
+      const p = auth(req); requestPrincipal = p; bumpTenant(); rateLimit(`subject:${p.tenant_id}:${p.subject_id}`, 300);
       if (path === '/session/logout' && req.method === 'POST') {
         const sid = /(?:^|;\s*)if_session=([A-Za-z0-9_-]{43})(?:;|$)/.exec(req.headers.cookie ?? '')?.[1]; if (sid) sessions.delete(hashBytes(sid));
         res.setHeader('Set-Cookie', 'if_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'); return send(200, { logged_out: true });
@@ -153,9 +156,9 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       if (path === '/v1/action-capsules' && req.method === 'GET') {
         fabric.authorize(p, ['operator', 'approver', 'custodian', 'security', 'policy_admin', 'auditor']);
         const limit = qint(url.searchParams.get('limit'), 'limit', 50, 1, 100), offset = qint(url.searchParams.get('offset'), 'offset', 0, 0, 1000000);
-        return send(200, { items: fabric.store.list(p.tenant_id, 'capsule', limit, offset), limit, offset });
+        return send(200, { items: fabric.store.list(p.tenant_id, 'capsule', limit, offset).map(c => fabric.capsuleView(c)), limit, offset });
       }
-      if (path === '/v1/action-capsules' && req.method === 'POST') { const input = await body(req); fields(input, ['input', 'signature']); return send(201, fabric.propose(p, input.input, req.headers['idempotency-key'], input.signature)); }
+      if (path === '/v1/action-capsules' && req.method === 'POST') { const input = await body(req); fields(input, ['input', 'signature']); return send(201, fabric.capsuleView(fabric.propose(p, input.input, req.headers['idempotency-key'], input.signature))); }
       let m;
       if ((m = /^\/v1\/action-capsules\/([A-Za-z0-9-]+)$/.exec(path)) && req.method === 'GET') return send(200, fabric.getCapsule(p, m[1]));
       if ((m = /^\/v1\/action-capsules\/([A-Za-z0-9-]+)\/approval-challenge$/.exec(path)) && req.method === 'GET') return send(200, fabric.approvalChallenge(p, m[1]));
@@ -191,7 +194,7 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       if (path === '/v1/retention/sweep' && req.method === 'POST') { fields(await body(req), []); return send(200, fabric.retentionSweep(p)); }
       // RUN-006: rejections are reason-coded — every denial carries the INV
       // code so dashboards can facet by cause without parsing message text.
-      if (path === '/v1/metrics' && req.method === 'GET') { fabric.authorize(p, ['security']); return send(200, { ...metrics, scope: 'process', analytics_enabled: false }); }
+      if (path === '/v1/metrics' && req.method === 'GET') { fabric.authorize(p, ['security']); const tm = metrics.tenants[p.tenant_id] ?? { requests: 0, errors: 0, unauthorised: 0, rejections: {} }; return send(200, { ...tm, scope: 'tenant', analytics_enabled: false }); }
       if (path === '/v1/revocations' && req.method === 'GET') return send(200, fabric.revocations(p));
       if (path === '/v1/grants' && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'auditor', 'policy_admin']); return send(200, fabric.listGrants(p, url.searchParams.get('subject'))); }
       if (path === '/v1/subjects' && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'auditor', 'policy_admin']); return send(200, { items: Object.values(fabric.identities(p.tenant_id)).map(i => ({ subject_id: i.subject_id, roles: i.roles, device_id: i.device_id, identity_class: i.identity_class, health_expires_at: i.health_expires_at })) }); }
@@ -212,12 +215,12 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
         if (m[2] === 'split') { fields(input, ['secret']); return send(200, fabric.splitCeremonySecret(p, m[1], input.secret)); }
         fields(input, ['shares']); return send(200, fabric.reconstructCeremony(p, m[1], input.shares));
       }
-      if (path === '/v1/keys' && req.method === 'GET') { fabric.authorize(p, ['security', 'policy_admin']); return send(200, { keys: fabric.vault.list().map(({ wrapped, ...k }) => k), firmware: fabric.vault.firmware }); }
+      if (path === '/v1/keys' && req.method === 'GET') { fabric.authorize(p, ['security', 'policy_admin']); return send(200, { keys: fabric.vault.list().filter(k => k.tenant_id === p.tenant_id).map(({ wrapped, ...k }) => k), firmware: fabric.vault.firmware }); }
       if (path === '/v1/keys/rotate-prepare' && req.method === 'POST') { const input = await body(req); fields(input, ['key_class'], ['suite']); return send(201, fabric.prepareRotation(p, input.key_class, input.suite)); }
       if (path === '/v1/config-drift/reassert' && req.method === 'POST') return send(200, fabric.reassertConfig(p));
       if (path === '/v1/clock/recover' && req.method === 'POST') return send(200, fabric.recoverClock(p));
       if (path === '/v1/config-drift' && req.method === 'GET') return send(200, fabric.configDriftStatus(p));
-      if ((m = /^\/v1\/keys\/([A-Za-z0-9_.:-]+)\/attest$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['security', 'auditor']); requireThat(fabric.vault.keys.has(m[1]), 'INV-404-NOT-FOUND', 'Key not found', 404); return send(200, fabric.vault.attest(m[1])); }
+      if ((m = /^\/v1\/keys\/([A-Za-z0-9_.:-]+)\/attest$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['security', 'auditor']); const e = fabric.vault.keys.get(m[1]); requireThat(e && e.tenant_id === p.tenant_id, 'INV-404-NOT-FOUND', 'Key not found', 404); return send(200, fabric.vault.attest(m[1])); }
       if (path === '/v1/secure-perception/sessions' && req.method === 'POST') { const input = await body(req); fields(input, ['attestation']); return send(201, fabric.perceptionSession(p, input.attestation)); }
       if (path === '/v1/secure-perception/release' && req.method === 'POST') { const input = await body(req); fields(input, ['session_id', 'fields', 'purpose'], ['capsule_id', 'evidence_ref']); const { session_id, ...release } = input; return send(200, fabric.perceptionRelease(p, session_id, release)); }
       if (path === '/v1/secure-perception/fallback' && req.method === 'POST') { const input = await body(req); fields(input, ['fields', 'purpose'], ['reason']); return send(200, fabric.perceptionFallback(p, input)); }
@@ -234,6 +237,7 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       metrics.errors++; if (e.status === 401) metrics.unauthorised++;
       const known = e instanceof InvariantError;
       if (known) metrics.rejections[e.code] = (metrics.rejections[e.code] ?? 0) + 1;
+      if (requestPrincipal) { const tm = metrics.tenants[requestPrincipal.tenant_id] ??= { requests: 0, errors: 0, unauthorised: 0, rejections: {} }; tm.errors++; if (e.status === 401) tm.unauthorised++; if (known) tm.rejections[e.code] = (tm.rejections[e.code] ?? 0) + 1; }
       // UX-010: the reason code is stable contract; the message may carry
       // field-level internals, so it is redacted for principals without a
       // security/auditor role — they get code + request_id to take up out

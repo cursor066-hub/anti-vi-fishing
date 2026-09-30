@@ -60,6 +60,14 @@ Residual honest limits:
 - A **file-level** `DELETE`/`UPDATE` bypassing the API leaves orphan wrapped DEKs (the key outliving its ciphertext) — a generic property, mitigated only by convention: all deletion goes through `remove`/`shred`, which destroy the DEK first.
 - A WAL checkpoint is best-effort under writer contention; a busy checkpoint keeps the shred flag armed and retries on the next commit.
 
+### Data gate design limits (w6-tenancy audit)
+
+- **Capsule snapshots are stored plaintext.** A capsule's `current_state.material_fields` holds the dataset rows it was proposed against — required so the governed path can pin and later re-verify the exact snapshot. Rows are redacted from every read surface (`capsuleView` serves `{row_count, rows_digest}`; certificate `constraints.current_state` carries `{version, digest, material_fields_digest}`), so an approver sees digests, not data they were never granted. The stored plaintext sits in the same `fabric.db` trust boundary as the audit chain above.
+- **Watermarks are forensic, not robust.** The attribution watermark is separable HMAC metadata bound to the exported field set — an attacker who can mutate exported fields strips it; any mutation also invalidates attribution. It deters and attributes leaks, it cannot prevent copying.
+- **Reconstruction budget is per-subject.** The ledger keys on `(tenant, subject, dataset)`: N colluding subjects hold N× the coverage budget — inherent to per-subject accounting; cross-subject correlation is an SIEM/witness-layer concern.
+- **Process-global objects carry tenant attribution, not isolation.** The `KeyVault` and the monotone clock row are process-global; vault entries now carry `tenant_id` and every consumer (rotate/revoke/list/attest) enforces ownership, but in-process memory disclosure between tenants is out of scope — tenant separation is at the store/envelope layer, not the heap.
+- **Process-wide metrics exist but are not served.** `/v1/metrics` returns only the caller's tenant slice; unattributed requests (no resolvable principal) are counted process-wide and never attributed to a tenant.
+
 ## Reporting and release ownership
 
 No operational security-reporting inbox, legal entity, incident team, signer identity or external assessor was provisioned. This is a public-release blocker, not a fictitious security contact. Deployment owners must establish a monitored private reporting channel, acknowledgement/escalation policy and update process before any public beta. Do not send real vulnerabilities or customer data to an unverified address from a draft document.
