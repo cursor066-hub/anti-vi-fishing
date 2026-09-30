@@ -103,6 +103,224 @@
     "payload": {},
     "signature": "hIHLcWK1JJyK5EgUtF_B42BjjHpFnqie7ZBN8iBn9eBeqgOuaovQjJ6vHS00SkgcqNe4hb6vtunicJ1OAgO8Cg"
    }
+  },
+  {
+   "name": "reject-extra-envelope-key",
+   "expect": "reject",
+   "purpose": "capability",
+   "key_id": "df497f0df790b77f1c609aa33e86a01f",
+   "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAlFWDKWozHsNAmNQDSl1x8/C5U665ti+ISfloIPduVY8=\n-----END PUBLIC KEY-----\n",
+   "envelope": {
+    "protected": {
+     "profile": "IF-CJSON-1",
+     "suite": "Ed25519",
+     "key_id": "df497f0df790b77f1c609aa33e86a01f",
+     "purpose": "capability"
+    },
+    "payload": {
+     "capability_id": "cap-001",
+     "subject_id": "operator-1",
+     "action": "data.read",
+     "columns": [
+      "id",
+      "name"
+     ],
+     "row_ids": [
+      "row-1"
+     ],
+     "max_cost": 10,
+     "issued_at": 1700000000000,
+     "expires_at": 1700000060000
+    },
+    "signature": "PzFC05wOUsocdIUHgJaVAPZql0RmptHgal11dNDbwUPjWid-Y-cySRPi_YAWcKNGl7q51p_aQWGDPcMqHjkcAA",
+    "unsigned_extra": 1
+   }
+  },
+  {
+   "name": "reject-missing-signature",
+   "expect": "reject",
+   "purpose": "capability",
+   "key_id": "df497f0df790b77f1c609aa33e86a01f",
+   "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAlFWDKWozHsNAmNQDSl1x8/C5U665ti+ISfloIPduVY8=\n-----END PUBLIC KEY-----\n",
+   "envelope": {
+    "protected": {
+     "profile": "IF-CJSON-1",
+     "suite": "Ed25519",
+     "key_id": "df497f0df790b77f1c609aa33e86a01f",
+     "purpose": "capability"
+    },
+    "payload": {
+     "capability_id": "cap-001",
+     "subject_id": "operator-1",
+     "action": "data.read",
+     "columns": [
+      "id",
+      "name"
+     ],
+     "row_ids": [
+      "row-1"
+     ],
+     "max_cost": 10,
+     "issued_at": 1700000000000,
+     "expires_at": 1700000060000
+    }
+   }
+  },
+  {
+   "name": "reject-extra-protected-key",
+   "expect": "reject",
+   "purpose": "capability",
+   "key_id": "df497f0df790b77f1c609aa33e86a01f",
+   "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAlFWDKWozHsNAmNQDSl1x8/C5U665ti+ISfloIPduVY8=\n-----END PUBLIC KEY-----\n",
+   "envelope": {
+    "protected": {
+     "profile": "IF-CJSON-1",
+     "suite": "Ed25519",
+     "key_id": "df497f0df790b77f1c609aa33e86a01f",
+     "purpose": "capability",
+     "nonce": "x"
+    },
+    "payload": {
+     "capability_id": "cap-001",
+     "subject_id": "operator-1",
+     "action": "data.read",
+     "columns": [
+      "id",
+      "name"
+     ],
+     "row_ids": [
+      "row-1"
+     ],
+     "max_cost": 10,
+     "issued_at": 1700000000000,
+     "expires_at": 1700000060000
+    },
+    "signature": "PzFC05wOUsocdIUHgJaVAPZql0RmptHgal11dNDbwUPjWid-Y-cySRPi_YAWcKNGl7q51p_aQWGDPcMqHjkcAA"
+   }
+  },
+  {
+   "name": "reject-wrong-purpose",
+   "expect": "reject",
+   "purpose": "evidence",
+   "key_id": "df497f0df790b77f1c609aa33e86a01f",
+   "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAlFWDKWozHsNAmNQDSl1x8/C5U665ti+ISfloIPduVY8=\n-----END PUBLIC KEY-----\n",
+   "envelope": {
+    "protected": {
+     "profile": "IF-CJSON-1",
+     "suite": "Ed25519",
+     "key_id": "df497f0df790b77f1c609aa33e86a01f",
+     "purpose": "capability"
+    },
+    "payload": {
+     "capability_id": "cap-001",
+     "subject_id": "operator-1",
+     "action": "data.read",
+     "columns": [
+      "id",
+      "name"
+     ],
+     "row_ids": [
+      "row-1"
+     ],
+     "max_cost": 10,
+     "issued_at": 1700000000000,
+     "expires_at": 1700000060000
+    },
+    "signature": "PzFC05wOUsocdIUHgJaVAPZql0RmptHgal11dNDbwUPjWid-Y-cySRPi_YAWcKNGl7q51p_aQWGDPcMqHjkcAA"
+   }
+  },
+  {
+   "name": "reject-unknown-suite",
+   "expect": "reject",
+   "purpose": "capability",
+   "key_id": "df497f0df790b77f1c609aa33e86a01f",
+   "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAlFWDKWozHsNAmNQDSl1x8/C5U665ti+ISfloIPduVY8=\n-----END PUBLIC KEY-----\n",
+   "envelope": {
+    "protected": {
+     "profile": "IF-CJSON-1",
+     "suite": "RSA-PSS",
+     "key_id": "df497f0df790b77f1c609aa33e86a01f",
+     "purpose": "capability"
+    },
+    "payload": {
+     "capability_id": "cap-001",
+     "subject_id": "operator-1",
+     "action": "data.read",
+     "columns": [
+      "id",
+      "name"
+     ],
+     "row_ids": [
+      "row-1"
+     ],
+     "max_cost": 10,
+     "issued_at": 1700000000000,
+     "expires_at": 1700000060000
+    },
+    "signature": "PzFC05wOUsocdIUHgJaVAPZql0RmptHgal11dNDbwUPjWid-Y-cySRPi_YAWcKNGl7q51p_aQWGDPcMqHjkcAA"
+   }
+  },
+  {
+   "name": "reject-malleated-signature",
+   "expect": "reject",
+   "purpose": "capability",
+   "key_id": "df497f0df790b77f1c609aa33e86a01f",
+   "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAlFWDKWozHsNAmNQDSl1x8/C5U665ti+ISfloIPduVY8=\n-----END PUBLIC KEY-----\n",
+   "envelope": {
+    "protected": {
+     "profile": "IF-CJSON-1",
+     "suite": "Ed25519",
+     "key_id": "df497f0df790b77f1c609aa33e86a01f",
+     "purpose": "capability"
+    },
+    "payload": {
+     "capability_id": "cap-001",
+     "subject_id": "operator-1",
+     "action": "data.read",
+     "columns": [
+      "id",
+      "name"
+     ],
+     "row_ids": [
+      "row-1"
+     ],
+     "max_cost": 10,
+     "issued_at": 1700000000000,
+     "expires_at": 1700000060000
+    },
+    "signature": "PzFC05wOUsocdIUHgJaVAPZql0RmptHgal11dNDbwUPjWid-Y-cySRPi_YAWcKNGl7q51p_aQWGDPcMqHjkcAB"
+   }
+  },
+  {
+   "name": "reject-tampered-payload",
+   "expect": "reject",
+   "purpose": "capability",
+   "key_id": "df497f0df790b77f1c609aa33e86a01f",
+   "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAlFWDKWozHsNAmNQDSl1x8/C5U665ti+ISfloIPduVY8=\n-----END PUBLIC KEY-----\n",
+   "envelope": {
+    "protected": {
+     "profile": "IF-CJSON-1",
+     "suite": "Ed25519",
+     "key_id": "df497f0df790b77f1c609aa33e86a01f",
+     "purpose": "capability"
+    },
+    "payload": {
+     "capability_id": "cap-001",
+     "subject_id": "operator-1",
+     "action": "data.read",
+     "columns": [
+      "id",
+      "name"
+     ],
+     "row_ids": [
+      "row-1"
+     ],
+     "max_cost": 999,
+     "issued_at": 1700000000000,
+     "expires_at": 1700000060000
+    },
+    "signature": "PzFC05wOUsocdIUHgJaVAPZql0RmptHgal11dNDbwUPjWid-Y-cySRPi_YAWcKNGl7q51p_aQWGDPcMqHjkcAA"
+   }
   }
  ]
 }

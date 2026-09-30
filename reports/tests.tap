@@ -101,8 +101,8 @@ ok 17 - IF-CJSON-1: every recorded vector produces the recorded output
   duration_ms: 0
   type: 'test'
   ...
-# Subtest: IF-ENVELOPE-1: recorded envelopes verify under node:crypto
-ok 18 - IF-ENVELOPE-1: recorded envelopes verify under node:crypto
+# Subtest: IF-ENVELOPE-1: recorded envelopes verify under node:crypto — and the recorded rejections fail
+ok 18 - IF-ENVELOPE-1: recorded envelopes verify under node:crypto — and the recorded rejections fail
   ---
   duration_ms: 0
   type: 'test'
@@ -2147,124 +2147,196 @@ ok 358 - w7-seam F9: wedged composite reconciles composite-aware
   duration_ms: 0
   type: 'test'
   ...
+# Subtest: CAN-F1: revocation existence oracle is own-property only — prototype members cannot mint revocation records
+ok 359 - CAN-F1: revocation existence oracle is own-property only — prototype members cannot mint revocation records
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: CAN-F2: evidence binding on an inherited member can never be satisfied by a constant claim
+ok 360 - CAN-F2: evidence binding on an inherited member can never be satisfied by a constant claim
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: CAN-F2b: evidence binding on an object-valued leaf can never be satisfied vacuously
+ok 361 - CAN-F2b: evidence binding on an object-valued leaf can never be satisfied vacuously
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: CAN-F3: verifyAttestation shares verifySigned strictness — extra keys, malleated encoding, prototype key_id
+ok 362 - CAN-F3: verifyAttestation shares verifySigned strictness — extra keys, malleated encoding, prototype key_id
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: CAN-F4: every body the parser admits fits inside the envelope wrap — depth 31 in, 32 out
+ok 363 - CAN-F4: every body the parser admits fits inside the envelope wrap — depth 31 in, 32 out
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: CAN-F5: schema-layer type confusion surfaces as INV-400-SCHEMA, never 500/503
+ok 364 - CAN-F5: schema-layer type confusion surfaces as INV-400-SCHEMA, never 500/503
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: CAN-F6: canonical() rejects every Object.prototype member name as a key
+ok 365 - CAN-F6: canonical() rejects every Object.prototype member name as a key
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: CAN-F7: committed parse vectors and envelope rejection vectors are honoured by the shipped implementation
+ok 366 - CAN-F7: committed parse vectors and envelope rejection vectors are honoured by the shipped implementation
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: CAN-F10: evidence claims must be a scalar map — strings, numbers and arrays are schema-invalid
+ok 367 - CAN-F10: evidence claims must be a scalar map — strings, numbers and arrays are schema-invalid
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: CAN-F11: prototype-member suite names never satisfy the suite allowlist
+ok 368 - CAN-F11: prototype-member suite names never satisfy the suite allowlist
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: CAN-F8: query grammar rejects -0 exactly like the body grammar
+ok 369 - CAN-F8: query grammar rejects -0 exactly like the body grammar
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: CAN-F12: capsule nonces and perception attestation nonces live in separate namespaces
+ok 370 - CAN-F12: capsule nonces and perception attestation nonces live in separate namespaces
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
 # Subtest: w8 F9: composite over an expired child certificate escrows at evaluation
-ok 359 - w8 F9: composite over an expired child certificate escrows at evaluation
+ok 371 - w8 F9: composite over an expired child certificate escrows at evaluation
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w8 F8: a certified composite child certificate refuses solo execution
-ok 360 - w8 F8: a certified composite child certificate refuses solo execution
+ok 372 - w8 F8: a certified composite child certificate refuses solo execution
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w8 F1/F3/F7/F16: uncompensated bail records FAILED parent + per-child outcomes
-ok 361 - w8 F1/F3/F7/F16: uncompensated bail records FAILED parent + per-child outcomes
+ok 373 - w8 F1/F3/F7/F16: uncompensated bail records FAILED parent + per-child outcomes
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w8 F4/F6: a verified composite child settles to its recorded outcome without re-firing effects
-ok 362 - w8 F4/F6: a verified composite child settles to its recorded outcome without re-firing effects
+ok 374 - w8 F4/F6: a verified composite child settles to its recorded outcome without re-firing effects
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w8 F2: an egressed export inside a failed composite is charged and watermarked
-ok 363 - w8 F2: an egressed export inside a failed composite is charged and watermarked
+ok 375 - w8 F2: an egressed export inside a failed composite is charged and watermarked
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w8 F5: reconcile verifies a time-embedded journal entry after the clock moved
-ok 364 - w8 F5: reconcile verifies a time-embedded journal entry after the clock moved
+ok 376 - w8 F5: reconcile verifies a time-embedded journal entry after the clock moved
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w8 F11/F13: re-declare preserves validation; UNCOVERED cannot self-promote; validation earns ENFORCED
-ok 365 - w8 F11/F13: re-declare preserves validation; UNCOVERED cannot self-promote; validation earns ENFORCED
+ok 377 - w8 F11/F13: re-declare preserves validation; UNCOVERED cannot self-promote; validation earns ENFORCED
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w8 F10/F12/F14: unreachable issuer stales paths; same-ms replays keep write order; re-drift never throws
-ok 366 - w8 F10/F12/F14: unreachable issuer stales paths; same-ms replays keep write order; re-drift never throws
+ok 378 - w8 F10/F12/F14: unreachable issuer stales paths; same-ms replays keep write order; re-drift never throws
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w8 F10 (unit): same-ms coverage events replay in insertion order
-ok 367 - w8 F10 (unit): same-ms coverage events replay in insertion order
+ok 379 - w8 F10 (unit): same-ms coverage events replay in insertion order
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: F1: pre-AAD-upgrade rows decrypt via the legacy fallback
-ok 368 - F1: pre-AAD-upgrade rows decrypt via the legacy fallback
+ok 380 - F1: pre-AAD-upgrade rows decrypt via the legacy fallback
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: F2: a contended WAL checkpoint keeps committed work green and the flag armed
-ok 369 - F2: a contended WAL checkpoint keeps committed work green and the flag armed
+ok 381 - F2: a contended WAL checkpoint keeps committed work green and the flag armed
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: F3: superseding target writes truncate the WAL at commit
-ok 370 - F3: superseding target writes truncate the WAL at commit
+ok 382 - F3: superseding target writes truncate the WAL at commit
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: COV-004: a live manifest drift drops the dependent path to UNKNOWN and opens an owner task
-ok 371 - COV-004: a live manifest drift drops the dependent path to UNKNOWN and opens an owner task
+ok 383 - COV-004: a live manifest drift drops the dependent path to UNKNOWN and opens an owner task
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: COV-005: stale evidence transitions to UNKNOWN at read time with event and owner task
-ok 372 - COV-005: stale evidence transitions to UNKNOWN at read time with event and owner task
+ok 384 - COV-005: stale evidence transitions to UNKNOWN at read time with event and owner task
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: COV-005: a fresh MONITORED path produces no expiry task or event
-ok 373 - COV-005: a fresh MONITORED path produces no expiry task or event
+ok 385 - COV-005: a fresh MONITORED path produces no expiry task or event
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: W8-TOOLING restore-check: execution keys never join the audit trust anchor (F1)
-ok 374 - W8-TOOLING restore-check: execution keys never join the audit trust anchor (F1)
+ok 386 - W8-TOOLING restore-check: execution keys never join the audit trust anchor (F1)
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: W8-TOOLING restore-check: db carrying audit table without committed heads fails (F5)
-ok 375 - W8-TOOLING restore-check: db carrying audit table without committed heads fails (F5)
+ok 387 - W8-TOOLING restore-check: db carrying audit table without committed heads fails (F5)
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: W8-TOOLING cli sign: keyfile consistency + option parse errors (F7)
-ok 376 - W8-TOOLING cli sign: keyfile consistency + option parse errors (F7)
+ok 388 - W8-TOOLING cli sign: keyfile consistency + option parse errors (F7)
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: W8-TOOLING cli init: duplicated tenants dedupe instead of half-writing (F9)
-ok 377 - W8-TOOLING cli init: duplicated tenants dedupe instead of half-writing (F9)
+ok 389 - W8-TOOLING cli init: duplicated tenants dedupe instead of half-writing (F9)
   ---
   duration_ms: 0
   type: 'test'
   ...
-1..377
-# tests 377
+1..389
+# tests 389
 # suites 0
-# pass 377
+# pass 389
 # fail 0
 # cancelled 0
 # skipped 0

@@ -60,7 +60,9 @@ export async function httpJson(url, { method = 'GET', body, timeout_ms = 10000, 
       res.on('data', c => { size += c.length; if (size <= 1048576) chunks.push(c); });
       res.on('end', () => {
         try {
-          const textBody = Buffer.concat(chunks).toString('utf8');
+          // Fatal decode — replacement characters must never reach the
+          // canonicalizer as if they were the sender's bytes (w8-canonical F9).
+          const textBody = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks));
           requireThat(size <= 1048576, 'INV-413-CONNECTOR', 'Connector response too large', 413);
           requireThat((res.headers['content-type'] ?? '').split(';')[0] === 'application/json', 'INV-502-CONNECTOR', 'Connector returned non-JSON', 502);
           const data = parseStrict(textBody);

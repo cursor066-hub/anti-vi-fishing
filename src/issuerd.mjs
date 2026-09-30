@@ -238,7 +238,7 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
       if (req.method === 'POST' && (m = /^\/v1\/issuers\/([A-Za-z0-9_-]+)\/issue$/.exec(url.pathname))) {
         const chunks = []; let size = 0;
         for await (const c of req) { size += c.length; requireThat(size <= 262144, 'INV-413-BODY', 'Request too large', 413); chunks.push(c); }
-        const request = parseStrict(Buffer.concat(chunks).toString('utf8'));
+        const request = parseStrict(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));
         fields(request, ['tenant_id', 'capsule_digest', 'kind', 'subject_id', 'claims'], ['dependencies']);
         identifier(request.tenant_id, 'tenant'); identifier(request.subject_id, 'subject'); text(request.kind, 'kind', 64);
         requireThat(/^[a-f0-9]{64}$/.test(request.capsule_digest), 'INV-400-SCHEMA', 'capsule_digest must be a digest');

@@ -15,7 +15,7 @@ export class RuntimeGate {
     identifier(input.device_id); identifier(input.resource); text(input.destination, 'destination'); oneOf(input.action, ['data.read', 'service.connect'], 'runtime action');
     for (const k of ['purpose', 'classification', 'jurisdiction']) text(input[k], k);
     uniqueStrings(input.columns, 'columns', 64); uniqueStrings(input.row_ids, 'rows', 256); integer(input.max_cost, 'cost ceiling', 1, 1e9); integer(input.ttl_ms, 'TTL', 1000, 300000);
-    if (input.transforms !== undefined) { for (const [col, tr] of Object.entries(input.transforms)) { oneOf(tr.op, ['mask', 'tokenise', 'drop', 'constant'], 'transform op'); } }
+    if (input.transforms !== undefined) { for (const [col, tr] of Object.entries(input.transforms)) { requireThat(tr !== null && typeof tr === 'object' && !Array.isArray(tr), 'INV-400-SCHEMA', 'Transform must be an object'); oneOf(tr.op, ['mask', 'tokenise', 'drop', 'constant'], 'transform op'); } }
     return this.f.transaction(principal, now => {
       const t = principal.tenant_id, policy = this.f.policy(t), r = policy.runtime, identity = this.f.identity(principal);
       this.f.assertHealthy(t, principal.subject_id, input.device_id, now);

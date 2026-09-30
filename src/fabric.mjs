@@ -398,11 +398,14 @@ export class Fabric {
     return this.transaction(p, now => this.store.idempotent(p.tenant_id, 'propose', idempotencyKey, digest(input), () => {
       const policy = this.policy(p.tenant_id); this.assertHealthy(p.tenant_id, p.subject_id, input.actor.device_id, now);
       requireThat(input.created_at <= now + 5000 && input.created_at >= now - 300000 && input.expires_at > now && input.expires_at - input.created_at <= policy.max_capsule_ttl_ms, 'INV-400-SCHEMA', 'Capsule timing invalid');
-      const prior = this.store.db.prepare('SELECT capsule FROM nonces WHERE tenant=? AND nonce=?').get(p.tenant_id, input.nonce);
+      // Nonce namespaces are per-surface: a capsule must not squat on an
+      // attestation nonce (or vice versa) to block a legitimate session
+      // open (w8-canonical F12).
+      const prior = this.store.db.prepare('SELECT capsule FROM nonces WHERE tenant=? AND nonce=?').get(p.tenant_id, 'capsule:' + input.nonce);
       requireThat(!prior, 'INV-409-REPLAY', 'Nonce is already bound to another action', 409);
       const capsule = { ...clone(input), request_intent: clone(requestIntent), capsule_id: randomUUID(), tenant_id: p.tenant_id, received_at: now };
       const record = { capsule, capsule_digest: digest(capsule), status: 'CANONICALISED', evidence: [], approvals: [], decision: null, certificate_id: null, created_at: now };
-      this.store.db.prepare('INSERT INTO nonces VALUES(?,?,?)').run(p.tenant_id, input.nonce, capsule.capsule_id);
+      this.store.db.prepare('INSERT INTO nonces VALUES(?,?,?)').run(p.tenant_id, 'capsule:' + input.nonce, capsule.capsule_id);
       this.store.insert(p.tenant_id, 'capsule', capsule.capsule_id, record, now);
       this.store.audit(p.tenant_id, 'CAPSULE_PROPOSED', p.subject_id, capsule.capsule_id, { capsule_digest: record.capsule_digest, action_type: capsule.action.type }, now);
       return record;
@@ -451,9 +454,15 @@ export class Fabric {
       // satisfy a requirement, so it stays attachable as denial evidence.
       if (payload.claim === 'supports') {
         const bindings = (this.policy(t).rules[record.capsule.action.type]?.evidence_bindings ?? {})[payload.kind] ?? {};
+        // A binding only holds on an own-property scalar leaf:
+        // '[object Object]' is equal for every object pair and inherited
+        // members resolve to attacker-known values, so object-valued or
+        // inherited paths must never satisfy a binding (w8-canonical F2).
+        const scalar = v => v === null || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean';
         for (const [claimField, path] of Object.entries(bindings)) {
-          const expected = path.split('.').reduce((o, k) => o?.[k], record.capsule);
-          requireThat(expected !== undefined && String(payload.claims?.[claimField]) === String(expected), 'INV-403-SCOPE', `Evidence claims do not describe this action (claims.${claimField} must equal ${path})`, 403);
+          const expected = path.split('.').reduce((o, k) => (o !== null && typeof o === 'object' && Object.hasOwn(o, k)) ? o[k] : undefined, record.capsule);
+          const actual = payload.claims?.[claimField];
+          requireThat(scalar(expected) && scalar(actual) && canonical(actual) === canonical(expected), 'INV-403-SCOPE', `Evidence claims do not describe this action (claims.${claimField} must equal ${path})`, 403);
         }
       }
       requireThat(payload.dependencies.every(dep => record.evidence.includes(dep)), 'INV-400-SCHEMA', 'Dependencies must already belong to this action');
@@ -472,6 +481,12 @@ export class Fabric {
     this.assertSuiteAllowed(t, envelope.protected.suite);
     fields(payload, ['evidence_id', 'tenant_id', 'capsule_digest', 'kind', 'content_digest', 'acquired_at', 'expires_at', 'confidence', 'advisory', 'claim', 'dependencies', 'provenance', 'retention_until'], ['claims', 'issuer_version']);
     identifier(payload.evidence_id); text(payload.kind, 'evidence kind'); text(payload.provenance, 'provenance', 2048); uniqueStrings(payload.dependencies, 'dependencies', 32);
+    // claims is a flat scalar map — anything else is unbound junk carried
+    // under an issuer signature into the evidence graph (w8-canonical F10).
+    if (payload.claims !== undefined) {
+      requireThat(typeof payload.claims === 'object' && payload.claims !== null && !Array.isArray(payload.claims), 'INV-400-SCHEMA', 'Evidence claims must be an object');
+      for (const v of Object.values(payload.claims)) requireThat(v === null || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean', 'INV-400-SCHEMA', 'Evidence claims values must be scalar');
+    }
     const now = this.clock();
     integer(payload.confidence, 'confidence', 0, 100); integer(payload.acquired_at, 'acquisition time', 1, now + 5000); integer(payload.expires_at, 'evidence expiry', now + 1); integer(payload.retention_until, 'retention', payload.expires_at);
     // AUD-006: the envelope cannot claim a retention window past the policy
@@ -502,8 +517,12 @@ export class Fabric {
     const bindings = (this.policy(t).rules[record.capsule.action.type]?.evidence_bindings ?? {})[input.kind] ?? {};
     const claims = { ...(input.claims ?? {}) };
     for (const [claimField, path] of Object.entries(bindings)) {
-      const expected = path.split('.').reduce((o, k) => o?.[k], record.capsule);
+      // Own-property walk + scalar leaf — matching the attach-side binding
+      // contract so acquisition can never mint unattachable claims
+      // (w8-canonical F2).
+      const expected = path.split('.').reduce((o, k) => (o !== null && typeof o === 'object' && Object.hasOwn(o, k)) ? o[k] : undefined, record.capsule);
       requireThat(expected !== undefined, 'INV-400-SCHEMA', `Action lacks the field the evidence binding requires (${path})`, 400);
+      requireThat(expected === null || typeof expected === 'string' || typeof expected === 'number' || typeof expected === 'boolean', 'INV-400-SCHEMA', `Evidence binding path ${path} must resolve to a scalar claim`, 400);
       claims[claimField] = expected;
     }
     let envelope;
@@ -1127,7 +1146,10 @@ export class Fabric {
       const exists = {
         certificate: () => this.store.get(t, 'certificate', input.id),
         evidence: () => this.store.get(t, 'evidence', input.id),
-        issuer: () => this.tenant(t).issuers[input.id],
+        // Existence must be own-property — inherited Object.prototype
+        // members ('constructor', 'toString', ...) are not live authorities
+        // and must never mint revocation records (w8-canonical F1).
+        issuer: () => Object.hasOwn(this.tenant(t).issuers, input.id) ? this.tenant(t).issuers[input.id] : null,
         // A revocable key is a vault entry, an identity, an issuer — or a
         // perception component signing key, which must also be revocable
         // (w6-perception P-2). vault.entry throws on unknown ids; probe the
@@ -1137,13 +1159,15 @@ export class Fabric {
         // Legacy untagged entries resolve through the tenant's bindings
         // (w6-fix F5).
         // (w6-tenancy F4).
-        key: () => (this.ownsVaultKey(t, input.id) ? this.vault.keys.get(input.id) : null) || this.identities(t)[input.id] || this.tenant(t).issuers[input.id] || Object.values(this.perceptionComponents[t] ?? {}).find(c => c.signing.key_id === input.id),
+        key: () => (this.ownsVaultKey(t, input.id) ? this.vault.keys.get(input.id) : null) || (Object.hasOwn(this.identities(t), input.id) ? this.identities(t)[input.id] : null) || (Object.hasOwn(this.tenant(t).issuers, input.id) ? this.tenant(t).issuers[input.id] : null) || Object.values(this.perceptionComponents[t] ?? {}).find(c => c.signing.key_id === input.id),
         subject: () => Object.values(this.tenant(t).identities).some(i => i.subject_id === input.id),
         device: () => Object.values(this.tenant(t).identities).some(i => i.device_id === input.id),
         capability: () => this.store.get(t, 'capability', input.id),
         grant: () => this.target.allGrants(t).some(g => g.grant_id === input.id),
-        token: () => this.tenant(t).auth[input.id],
-      }[input.kind];
+        token: () => Object.hasOwn(this.tenant(t).auth, input.id) ? this.tenant(t).auth[input.id] : null,
+        // `exists` itself is a table lookup — the prototype chain must not
+        // shadow a kind either.
+      }[Object.hasOwn({ certificate:1, evidence:1, issuer:1, key:1, subject:1, device:1, capability:1, grant:1, token:1 }, input.kind) ? input.kind : ''];
       requireThat(exists?.(), 'INV-404-NOT-FOUND', `No live ${input.kind} authority with that id`, 404);
       if (input.kind === 'grant') this.target.revokeGrant(t, input.id);
       const payload = { ...clone(input), tenant_id: t, revoked_at: now, actor: p.subject_id, propagation: 'local-synchronous', remote_propagation: 'NOT_IMPLEMENTED' };
@@ -1538,6 +1562,7 @@ export class Fabric {
     return this.transaction(p, now => {
       const ceremony = this.store.must(p.tenant_id, 'ceremony', identifier(ceremony_id));
       requireThat(ceremony.status === 'planned', 'INV-409-STATE', 'Shares were already committed for this ceremony', 409);
+      requireThat(typeof secretB64 === 'string', 'INV-400-SCHEMA', 'Secret must be a base64url string');
       const secret = Buffer.from(secretB64, 'base64url');
       requireThat(secret.length >= 16 && secret.length <= 512, 'INV-400-SCHEMA', 'Secret size out of bounds');
       const shares = splitSecret(secret, ceremony);
@@ -1551,7 +1576,7 @@ export class Fabric {
   prepareRotation(p, key_class, suite = 'Ed25519') {
     this.authorize(p, ['security', 'custodian']);
     requireThat(['execution', 'audit'].includes(key_class), 'INV-400-SCHEMA', 'key_class must be execution or audit');
-    requireThat(SUITES[suite], 'INV-400-SCHEMA', 'Unknown signature suite');
+    requireThat(Object.hasOwn(SUITES, suite), 'INV-400-SCHEMA', 'Unknown signature suite');
     return this.transaction(p, now => {
       // KEY-007: a rotated key keeps the class's purpose binding — 'any' would
       // destroy the separation genesis established (w5 F-4).
@@ -1578,9 +1603,9 @@ export class Fabric {
       const session = openSession(component, attestation, this.policy(t), now);
       this.assertHealthy(t, p.subject_id, this.identity(p).device_id, now);
       // Replay guard: an attestation nonce may mint exactly one session.
-      const seen = this.store.db.prepare('SELECT capsule FROM nonces WHERE tenant=? AND nonce=?').get(t, attestation.payload.nonce);
+      const seen = this.store.db.prepare('SELECT capsule FROM nonces WHERE tenant=? AND nonce=?').get(t, 'perception:' + attestation.payload.nonce);
       requireThat(!seen, 'INV-409-REPLAY', 'Attestation nonce already consumed', 409);
-      this.store.db.prepare('INSERT INTO nonces VALUES(?,?,?)').run(t, attestation.payload.nonce, `perception:${session.session_id}`);
+      this.store.db.prepare('INSERT INTO nonces VALUES(?,?,?)').run(t, 'perception:' + attestation.payload.nonce, `perception:${session.session_id}`);
       const stored = { ...session, _server_private: session._server_private.export({ type: 'pkcs8', format: 'pem' }), creator: p.subject_id };
       this.store.insert(t, 'perception-session', session.session_id, stored, now);
       this.store.audit(t, 'PERCEPTION_SESSION', p.subject_id, session.session_id, { component: session.component, assurance: session.assurance, firmware: session.firmware_version }, now);

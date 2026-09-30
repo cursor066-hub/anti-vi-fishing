@@ -10,7 +10,7 @@ export const SUITES = {
 // low-s is enforced on both sign and verify so signatures are non-malleable.
 const P256_ORDER = BigInt('0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551');
 export function signSuite(suite, message, privatePem) {
-  const s = SUITES[suite];
+  const s = Object.hasOwn(SUITES, suite) ? SUITES[suite] : undefined;
   requireThat(s, 'INV-400-SCHEMA', 'Unsupported algorithm suite');
   const key = s.dsaEncoding ? { key: createPrivateKey(privatePem), dsaEncoding: s.dsaEncoding } : createPrivateKey(privatePem);
   const sig = sign(s.hash, message, key);
@@ -27,7 +27,7 @@ export function signSuite(suite, message, privatePem) {
 // same message, so low-s is the canonical form — high-s is rejected.
 const P256_HALF_ORDER = BigInt('0x7FFFFFFF80000000FFFFFFFFFFFFFFFFDE737D56D38BCF4279DCE5617E3192A8');
 export function verifySuite(suite, message, publicPem, signature) {
-  const s = SUITES[suite];
+  const s = Object.hasOwn(SUITES, suite) ? SUITES[suite] : undefined;
   if (!s) return false;
   if (s.dsaEncoding === 'ieee-p1363' && signature.length === 64) {
     const scalar = BigInt('0x' + signature.subarray(32).toString('hex'));
@@ -37,7 +37,7 @@ export function verifySuite(suite, message, publicPem, signature) {
   return verify(s.hash, message, key, signature);
 }
 export function generateKey(suite = 'Ed25519') {
-  const s = SUITES[suite];
+  const s = Object.hasOwn(SUITES, suite) ? SUITES[suite] : undefined;
   requireThat(s, 'INV-400-SCHEMA', 'Unsupported algorithm suite');
   const { privateKey, publicKey } = generateKeyPairSync(s.curve, s.namedCurve ? { namedCurve: s.namedCurve } : {});
   const pub = publicKey.export({ type: 'spki', format: 'pem' });
@@ -51,7 +51,7 @@ export function signed(payload, key, purpose) {
 export function verifySigned(envelope, publicKeys, purpose) {
   requireThat(envelope && Object.keys(envelope).sort().join() === 'payload,protected,signature', 'INV-401-SIGNATURE', 'Invalid signed envelope', 401);
   const h = envelope.protected;
-  requireThat(h && Object.keys(h).sort().join() === 'key_id,profile,purpose,suite' && h.profile === 'IF-CJSON-1' && SUITES[h.suite] && h.purpose === purpose, 'INV-401-SIGNATURE', 'Unsupported signature context', 401);
+  requireThat(h && Object.keys(h).sort().join() === 'key_id,profile,purpose,suite' && h.profile === 'IF-CJSON-1' && Object.hasOwn(SUITES, h.suite) && h.purpose === purpose, 'INV-401-SIGNATURE', 'Unsupported signature context', 401);
   const key = Object.hasOwn(publicKeys ?? {}, h.key_id) ? publicKeys[h.key_id] : undefined;
   requireThat(key && !key.revoked, 'INV-401-SIGNATURE', 'Signer unavailable', 401);
   // Require canonical base64url: mutating unused padding bits must not

@@ -80,7 +80,10 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
   // JSON body parser applies: no hex/exponent/whitespace/signed spellings
   // (w5-http M-3).
   const qint = (raw, name, def, min, max) => {
-    requireThat(raw === null || /^-?(0|[1-9]\d*)$/.test(raw), 'INV-400-SCHEMA', `Invalid ${name}`, 400);
+    // '-0' matches the integer grammar but is not a canonical integer —
+    // the body grammar rejects it and the query grammar must agree
+    // (w8-canonical F8).
+    requireThat(raw === null || (/^-?(0|[1-9]\d*)$/.test(raw) && raw !== '-0'), 'INV-400-SCHEMA', `Invalid ${name}`, 400);
     return integer(raw === null ? def : Number(raw), name, min, max);
   };
   // Only the declared params for a path may appear — unknowns and duplicates

@@ -2,7 +2,7 @@ import { createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify, r
 import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync, renameSync, rmSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { canonical, digest } from './canonical.mjs';
-import { encrypt, decrypt, SUITES, verifySuite, signSuite } from './crypto.mjs';
+import { encrypt, decrypt, SUITES, verifySuite, signSuite, verifySigned } from './crypto.mjs';
 import { fields, text, identifier, integer } from './schema.mjs';
 import { requireThat, InvariantError } from './errors.mjs';
 
@@ -27,7 +27,7 @@ export class KeyVault {
     this.attestor = this._generateRaw();
   }
   _generateRaw(suite = 'Ed25519') {
-    const s = SUITES[suite];
+    const s = Object.hasOwn(SUITES, suite) ? SUITES[suite] : undefined;
     requireThat(s, 'INV-400-SCHEMA', 'Unsupported algorithm suite');
     const { privateKey, publicKey } = generateKeyPairSync(s.curve, s.namedCurve ? { namedCurve: s.namedCurve } : {});
     const public_pem = publicKey.export({ type: 'spki', format: 'pem' });
@@ -37,7 +37,7 @@ export class KeyVault {
   entry(key_id) { const e = this.keys.get(key_id); requireThat(e && !e.revoked && !e.pending, 'INV-401-SIGNATURE', 'Key unavailable, revoked or pending activation', 401); return e; }
   publicKey(key_id) { return this.keys.get(key_id)?.public_key ?? null; }
   generate(purpose, { suite = 'Ed25519', exportable = false, key_id = null, pending = false, tenant_id = null } = {}) {
-    requireThat(SUITES[suite], 'INV-400-SCHEMA', 'Unapproved algorithm suite');
+    requireThat(Object.hasOwn(SUITES, suite), 'INV-400-SCHEMA', 'Unapproved algorithm suite');
     for (const p of Array.isArray(purpose) ? purpose : [purpose]) text(p, 'key purpose', 64);
     const raw = this._generateRaw(suite);
     const id = key_id ?? raw.key_id;
@@ -62,7 +62,7 @@ export class KeyVault {
   importKey(key, purpose, { exportable = false, suite = 'Ed25519', tenant_id = null } = {}) {
     fields(key, ['key_id', 'public_key', 'private_key']);
     requireThat(typeof key.private_key === 'string' && key.private_key.includes('PRIVATE KEY') && key.private_key.length <= 8192, 'INV-400-SCHEMA', 'Invalid private key');
-    requireThat(SUITES[suite], 'INV-400-SCHEMA', 'Unapproved algorithm suite');
+    requireThat(Object.hasOwn(SUITES, suite), 'INV-400-SCHEMA', 'Unapproved algorithm suite');
     // The advertised public key must be the public half of the private key —
     // otherwise the vault would attest a foreign identity while signing with
     // whatever private material was handed in (crypto-audit M-2).
@@ -75,13 +75,13 @@ export class KeyVault {
   sign(key_id, purpose, message) {
     const e = this.entry(key_id);
     requireThat(e.purpose === 'any' || e.purpose === purpose || (Array.isArray(e.purpose) && e.purpose.includes(purpose)), 'INV-403-SCOPE', `Key is bound to purpose ${e.purpose}`, 403);
-    requireThat(SUITES[e.suite], 'INV-400-SCHEMA', 'Unapproved algorithm suite');
+    requireThat(Object.hasOwn(SUITES, e.suite), 'INV-400-SCHEMA', 'Unapproved algorithm suite');
     return signSuite(e.suite, Buffer.isBuffer(message) ? message : Buffer.from(message), this._private(key_id));
   }
   verify(key_id, message, signatureB64) {
     const e = this.entry(key_id);
     try {
-      if (!SUITES[e.suite]) return false;
+      if (!Object.hasOwn(SUITES, e.suite)) return false;
       return verifySuite(e.suite, Buffer.isBuffer(message) ? message : Buffer.from(message), e.public_key, Buffer.from(signatureB64, 'base64url'));
     } catch { return false; }
   }
@@ -143,12 +143,11 @@ export class KeyVault {
     return new KeyVault(masterKey);
   }
 }
+// One verifier, one strictness level: attestations pass through the same
+// envelope checks as every other signed object — exact 3-key envelope,
+// exact 4-key protected header, required suite, canonical base64url
+// signature, own-property key lookup, and uniform INV-401 failures
+// (w8-canonical F3).
 export function verifyAttestation(envelope, attestorKeys) {
-  const h = envelope?.protected;
-  requireThat(h && h.profile === 'IF-CJSON-1' && h.purpose === 'key-attestation' && SUITES[h.suite ?? 'Ed25519'], 'INV-401-SIGNATURE', 'Invalid attestation envelope', 401);
-  const key = attestorKeys[h.key_id];
-  requireThat(key && !key.revoked, 'INV-401-SIGNATURE', 'Attestor unavailable', 401);
-  const ok = verifySuite(h.suite ?? 'Ed25519', Buffer.from(canonical({ protected: h, payload: envelope.payload })), key.public_key, Buffer.from(envelope.signature, 'base64url'));
-  requireThat(ok, 'INV-401-SIGNATURE', 'Attestation signature failed', 401);
-  return envelope.payload;
+  return verifySigned(envelope, attestorKeys, 'key-attestation');
 }

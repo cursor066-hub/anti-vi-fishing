@@ -19,7 +19,12 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.exceptions import InvalidSignature
 
 KEY_RE = re.compile(r'^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}$')
-FORBIDDEN = {'__proto__', 'prototype', 'constructor'}
+# Parity with src/canonical.mjs: every Object.prototype member name is a
+# forbidden key, not only the classic pollution trio (w8-canonical F6).
+FORBIDDEN = {'__proto__', 'prototype', 'constructor', 'toString',
+             'toLocaleString', 'valueOf', 'hasOwnProperty', 'isPrototypeOf',
+             'propertyIsEnumerable', '__defineGetter__', '__defineSetter__',
+             '__lookupGetter__', '__lookupSetter__', 'watch', 'unwatch'}
 
 class CanonError(Exception):
     pass
@@ -49,7 +54,9 @@ def canon(value, depth=0):
     if isinstance(value, str):
         if unicodedata.normalize('NFC', value) != value: raise CanonError('non-NFC')
         if any(0xD800 <= ord(c) <= 0xDFFF for c in value): raise CanonError('surrogate')
-        if len(value) > 65536: raise CanonError('too long')
+        # The bound counts UTF-16 code units — the wire unit — not code
+        # points; 40000 astral chars are 80000 units (w8-canonical F7).
+        if len(value.encode('utf-16-le')) // 2 > 65536: raise CanonError('too long')
         return esc_string(value)
     if isinstance(value, list):
         if len(value) > 10000: raise CanonError('array too long')
@@ -81,18 +88,32 @@ def main():
             failed += 1
             print(f"FAIL canonical/{v['name']}")
     ev = json.load(open('vectors/envelope-vectors.json'))
-    for v in ev['vectors']:
-        env = v['envelope']
-        if sorted(env) != ['payload', 'protected', 'signature'] or sorted(env['protected']) != ['key_id', 'profile', 'purpose', 'suite']:
-            failed += 1; print(f"FAIL envelope-shape/{v['name']}"); continue
-        if env['protected']['profile'] != 'IF-CJSON-1' or env['protected']['suite'] != 'Ed25519' or env['protected']['purpose'] != v['purpose']:
-            failed += 1; print(f"FAIL header/{v['name']}"); continue
+    def verify_envelope(env, purpose):
+        # Mirrors verifySigned's envelope checks: exact 3-key envelope,
+        # exact 4-key protected header, purpose and suite binding, then
+        # Ed25519 verification over the canonical message.
+        if sorted(env) != ['payload', 'protected', 'signature']: return False
+        if sorted(env['protected']) != ['key_id', 'profile', 'purpose', 'suite']: return False
+        if env['protected']['profile'] != 'IF-CJSON-1' or env['protected']['suite'] != 'Ed25519' or env['protected']['purpose'] != purpose: return False
+        sig = env['signature']
+        if not isinstance(sig, str) or not re.fullmatch(r'[A-Za-z0-9_-]{86}', sig): return False
+        if base64.urlsafe_b64encode(b64url(sig)).rstrip(b'=').decode() != sig: return False
         message = canon({'protected': env['protected'], 'payload': env['payload']}).encode()
         pub = serialization.load_pem_public_key(v['public_key'].encode())
         try:
-            Ed25519PublicKey.from_public_bytes(pub.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)).verify(b64url(env['signature']), message)
+            Ed25519PublicKey.from_public_bytes(pub.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)).verify(b64url(sig), message)
+            return True
         except InvalidSignature:
-            failed += 1; print(f"FAIL signature/{v['name']}")
+            return False
+    for v in ev['vectors']:
+        env = v['envelope']
+        if v.get('expect') == 'reject':
+            if verify_envelope(env, v['purpose']): failed += 1; print(f"FAIL rejection-accepted/{v['name']}")
+            continue
+        if not verify_envelope(env, v['purpose']):
+            failed += 1; print(f"FAIL envelope/{v['name']}"); continue
+        message = canon({'protected': env['protected'], 'payload': env['payload']}).encode()
+        pub = serialization.load_pem_public_key(v['public_key'].encode())
         # Tamper once: any single-bit mutation of the message must reject.
         tampered = bytearray(message); tampered[0] ^= 1
         try:
@@ -101,6 +122,34 @@ def main():
         except InvalidSignature:
             pass
     print(f"python: {len(cv['vectors'])} canonical + {len(ev['vectors'])} envelope vectors, {failed} failures")
+
+    # IF-PARSE-1: strict-parse vectors. Python's json models most of the
+    # grammar via hooks (dup keys, number lexemes, trailing data); vectors
+    # marked impl_only exercise bounds only the shipped parser expresses
+    # (depth, UTF-16 length, pre-parse byte caps).
+    pv = json.load(open('vectors/parse-vectors.json'))
+    def strict_hook(pairs):
+        keys = [k for k, _ in pairs]
+        if len(set(keys)) != len(keys): raise ValueError('dup key')
+        # Key grammar is enforced at parse, not only at canon: escaped and
+        # literal proto-member keys are schema violations (w8-canonical F6).
+        if any(k in FORBIDDEN or not KEY_RE.match(k) for k in keys): raise ValueError('bad key')
+        return dict(pairs)
+    def num_hook(s):
+        if not re.fullmatch(r'-?(0|[1-9][0-9]*)', s) or s == '-0' or abs(int(s)) > 2**53 - 1:
+            raise ValueError('number grammar')
+        return int(s)
+    for v in pv['vectors']:
+        if v.get('impl_only'): continue
+        try:
+            json.loads(v['text'], object_pairs_hook=strict_hook, parse_int=num_hook, parse_float=num_hook,
+                       parse_constant=lambda s: (_ for _ in ()).throw(ValueError('literal')))
+            ok = v['expect'] == 'accept'
+        except Exception:
+            ok = v['expect'] == 'reject'
+        if not ok:
+            failed += 1; print(f"FAIL parse/{v['name']}")
+    print(f"python: {len([v for v in pv['vectors'] if not v.get('impl_only')])} parse vectors checked, {failed} total failures")
 
     ev2 = json.load(open('vectors/envelope-es256-vectors.json'))
     for v in ev2['vectors']:

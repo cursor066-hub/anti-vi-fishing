@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { canonical, parseStrict } from '../src/canonical.mjs';
 import { verifySigned } from '../src/crypto.mjs';
+import { hasCode } from './helpers.mjs';
 
 const cv = JSON.parse(readFileSync('vectors/canonical-vectors.json', 'utf8'));
 const ev = JSON.parse(readFileSync('vectors/envelope-vectors.json', 'utf8'));
@@ -14,9 +15,15 @@ test('IF-CJSON-1: every recorded vector produces the recorded output', () => {
   }
 });
 
-test('IF-ENVELOPE-1: recorded envelopes verify under node:crypto', () => {
+test('IF-ENVELOPE-1: recorded envelopes verify under node:crypto — and the recorded rejections fail', () => {
   for (const v of ev.vectors) {
     const env = v.envelope;
+    if (v.expect === 'reject') {
+      // Negative vectors: malformed envelopes must reject for the documented
+      // reason, never verify (w8-canonical F7).
+      assert.throws(() => verifySigned(env, { [v.key_id]: { public_key: v.public_key } }, v.purpose), hasCode(v.expect_code ?? 'INV-401-SIGNATURE'), v.name);
+      continue;
+    }
     const payload = verifySigned(env, { [v.key_id]: { public_key: v.public_key } }, v.purpose);
     assert.deepEqual(payload, env.payload);
   }

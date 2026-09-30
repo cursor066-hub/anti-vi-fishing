@@ -53,7 +53,10 @@ try {
     requireThat(keyPath && inputPath && outputPath, 'INV-400-SCHEMA', 'sign requires --key, --input and --output');
     requireThat(['action-approval', 'evidence', 'root-policy', 'capsule-intent', 'ceremony-acknowledgement'].includes(purpose), 'INV-400-SCHEMA', 'Unsupported signing purpose');
     requireThat((statSync(keyPath).mode & 0o077) === 0, 'INV-503-CONFIG', 'Signing key file permissions must be 0600', 503);
-    const payload = parseStrict(readFileSync(inputPath, 'utf8')), key = parseStrict(readFileSync(keyPath, 'utf8'));
+    // Fatal UTF-8 — the signed bytes must be exactly the file's bytes
+    // (w8-canonical F9).
+    const utf8 = new TextDecoder('utf-8', { fatal: true });
+    const payload = parseStrict(utf8.decode(readFileSync(inputPath))), key = parseStrict(utf8.decode(readFileSync(keyPath)));
     // Keyfile self-consistency: the private key must derive the declared
     // public_key, and key_id must derive from that public_key — a mislabeled
     // file cannot sign under another key's identity (w8-tooling F7).

@@ -13,7 +13,12 @@ import { webcrypto } from 'node:crypto';
 
 // ---- independent IF-CJSON-1 canonicalizer (no src/ imports) ----
 const KEY_RE = /^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}$/;
-const FORBIDDEN = new Set(['__proto__', 'prototype', 'constructor']);
+// Parity with src/canonical.mjs: every Object.prototype member name is a
+// forbidden key (w8-canonical F6).
+const FORBIDDEN = new Set(['__proto__', 'prototype', 'constructor', 'toString',
+  'toLocaleString', 'valueOf', 'hasOwnProperty', 'isPrototypeOf',
+  'propertyIsEnumerable', '__defineGetter__', '__defineSetter__',
+  '__lookupGetter__', '__lookupSetter__', 'watch', 'unwatch']);
 class CanonError extends Error {}
 function escString(s) {
   let out = '"';
@@ -37,7 +42,8 @@ function canon(value, depth = 0) {
   if (value === null) return 'null';
   if (value === true || value === false) return value ? 'true' : 'false';
   if (typeof value === 'number') {
-    if (!Number.isSafeInteger(value)) throw new CanonError('non-integer');
+    // '-0' is not a canonical integer (w8-canonical F7).
+    if (!Number.isSafeInteger(value) || Object.is(value, -0)) throw new CanonError('non-integer');
     return String(value);
   }
   if (typeof value === 'string') {
@@ -77,11 +83,28 @@ for (const v of cv.vectors) {
   try { const got = canon(v.input); if (got !== v.canonical || v.canonical === null) { failed++; console.log(`FAIL canonical/${v.name}`); } }
   catch { if (v.canonical !== null) { failed++; console.log(`FAIL canonical/${v.name} (threw)`); } }
 }
+async function verifyEnvelope(env, purpose, public_key) {
+  // Mirrors verifySigned: exact 3-key envelope, exact 4-key protected
+  // header, purpose binding, canonical base64url signature encoding.
+  if (!env || Object.keys(env).sort().join() !== 'payload,protected,signature') return false;
+  const h = env.protected;
+  if (!h || Object.keys(h).sort().join() !== 'key_id,profile,purpose,suite') return false;
+  if (h.profile !== 'IF-CJSON-1' || h.suite !== 'Ed25519' || h.purpose !== purpose) return false;
+  if (typeof env.signature !== 'string' || !/^[A-Za-z0-9_-]{86}$/.test(env.signature)) return false;
+  if (Buffer.from(env.signature, 'base64url').toString('base64url') !== env.signature) return false;
+  const message = Buffer.from(canon({ protected: h, payload: env.payload }));
+  const key = await subtle.importKey('spki', spki(public_key), { name: 'Ed25519' }, false, ['verify']);
+  return subtle.verify({ name: 'Ed25519' }, key, b64url(env.signature), message);
+}
 for (const v of ev.vectors) {
-  const env = v.envelope, message = Buffer.from(canon({ protected: env.protected, payload: env.payload }));
+  const env = v.envelope;
+  if (v.expect === 'reject') {
+    if (await verifyEnvelope(env, v.purpose, v.public_key)) { failed++; console.log(`FAIL webcrypto-rejection/${v.name}`); }
+    continue;
+  }
+  if (!await verifyEnvelope(env, v.purpose, v.public_key)) { failed++; console.log(`FAIL webcrypto-signature/${v.name}`); continue; }
+  const message = Buffer.from(canon({ protected: env.protected, payload: env.payload }));
   const key = await subtle.importKey('spki', spki(v.public_key), { name: 'Ed25519' }, false, ['verify']);
-  const ok = await subtle.verify({ name: 'Ed25519' }, key, b64url(env.signature), message);
-  if (!ok) { failed++; console.log(`FAIL webcrypto-signature/${v.name}`); }
   const tampered = Buffer.from(message); tampered[0] ^= 1;
   if (await subtle.verify({ name: 'Ed25519' }, key, b64url(env.signature), tampered)) { failed++; console.log(`FAIL webcrypto-tamper/${v.name}`); }
 }
