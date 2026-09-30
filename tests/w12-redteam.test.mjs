@@ -189,3 +189,34 @@ test('w12: unauthorized calls are denial-audited', t => {
   const denied = h.f.store.auditPage('acme', { after: 0, limit: 5000 }).entries.filter(e => e.envelope.payload.type === 'AUTHORIZATION_DENIED' || e.envelope.payload.type === 'SECURITY_OPERATION_REJECTED');
   assert.ok(denied.length > 0, 'a denial lane event must be on the chain');
 });
+
+// R19: the seq trigger only checks position, not authenticity — a forged
+// audit row whose hash and `previous` link are self-consistent can never
+// become an anchor: the index verifies every consumed envelope against the
+// tenant's audit keys.
+test('w12 R19: a self-consistent forged audit row can never anchor anything', t => {
+  const h = fixture(t);
+  // Insider tampers the live policy row AND plants a POLICY_ACTIVATED row
+  // vouching for it — hash and previous links check out, the signature cannot.
+  const tampered = h.clone(h.f.policy('acme')); tampered.runtime.windows[0].limit = 999;
+  const head = h.f.store.db.prepare('SELECT seq,hash FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1').get('acme');
+  const forged = { protected: { key_id: h.setup.config.tenants.acme.keys.audit.key_id, purpose: 'audit' }, payload: { tenant_id: 'acme', sequence: head.seq + 1, previous: head.hash, type: 'POLICY_ACTIVATED', actor: 'mallory', reference: 'policy:active', metadata: { policy_digest: digest(tampered) }, time: h.now() + 1 }, signature: 'AAAA' };
+  h.f.store.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run('acme', head.seq + 1, head.hash, digest(forged.payload), JSON.stringify(forged));
+  h.f.store.put('acme', 'policy', 'active', tampered, h.now());
+  assert.throws(() => h.f.policy('acme'), hasCode('INV-409-INTEGRITY'));
+  // The forged row also wedges every other chain-derived read.
+  assert.throws(() => h.f.revoked('acme', 'device', 'anything'), hasCode('INV-409-INTEGRITY'));
+  // And the auditor's read surface flags the tamper rather than serving it.
+  assert.throws(() => h.f.auditPageScoped(h.p('auditor'), { limit: 500 }), hasCode('INV-409-INTEGRITY'));
+});
+
+// R20: a real vault-signed envelope re-inserted at the tail is a replay —
+// the stored row's payload.sequence and `previous` link can never match the
+// tail position, so the read-side integrity layer refuses it outright.
+test('w12 R20: replaying a real audit envelope is refused by the index', t => {
+  const h = fixture(t);
+  const earlier = h.f.store.db.prepare('SELECT seq,envelope FROM audit WHERE tenant=? ORDER BY seq LIMIT 1').get('acme');
+  const head = h.f.store.db.prepare('SELECT seq,hash FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1').get('acme');
+  h.f.store.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run('acme', head.seq + 1, head.hash, digest(JSON.parse(earlier.envelope).payload), earlier.envelope);
+  assert.throws(() => h.f.revoked('acme', 'device', 'x'), hasCode('INV-409-AUDIT-TAMPER'));
+});

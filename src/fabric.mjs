@@ -524,10 +524,24 @@ export class Fabric {
   _auditIndex(t) {
     const maxSeq = this.store.db.prepare('SELECT COALESCE(MAX(seq),0) m FROM audit WHERE tenant=?').get(t).m;
     let idx = this._auditIdx?.get(t);
-    if (!idx) { idx = { maxSeq: 0, revoked: new Set(), attached: new Map(), proposedNonce: new Set(), proposedAt: new Map(), issued: new Set(), grants: new Map(), policyAnchors: [], dataAccess: [], perceptionNonce: new Set() }; this._auditIdx ??= new Map(); }
-    if (idx.maxSeq === maxSeq) { this._auditIdx.set(t, idx); return idx; }
-    for (const e of this.store.auditPage(t, { after: idx.maxSeq, limit: 2_000_000 }).entries) {
-      const pl = e.envelope?.payload; if (!pl) { idx.maxSeq = e.sequence ?? idx.maxSeq; continue; }
+    if (!idx) { idx = { maxSeq: 0, building: false, revoked: new Set(), attached: new Map(), proposedNonce: new Set(), proposedAt: new Map(), issued: new Set(), grants: new Map(), policyAnchors: [], dataAccess: [], perceptionNonce: new Set() }; this._auditIdx ??= new Map(); this._auditIdx.set(t, idx); }
+    // Re-entrancy: auditPublicKeys -> revoked -> _auditIndex would recurse
+    // forever mid-build, so nested readers see the partial projection.
+    if (idx.maxSeq === maxSeq || idx.building) return idx;
+    // Signature-trust boundary: the seq trigger lets an in-process writer
+    // append a self-consistent row whose hash and `previous` link are forged
+    // but whose envelope cannot be vault-signed. Every consumed event must
+    // verify against the tenant's audit keys (retired ones stay verifiable —
+    // w12 red-team) and carry this tenant's id. Replay needs no separate
+    // check: a re-inserted envelope can never satisfy the stored-row binding
+    // (payload.sequence/previous) that auditPage already enforces, and
+    // chain time may legitimately regress across racing writers.
+    idx.building = true;
+    const keys = this.auditPublicKeys(t);
+    try {
+      for (const e of this.store.auditPage(t, { after: idx.maxSeq, limit: 2_000_000 }).entries) {
+      let pl; try { pl = e.envelope ? verifySigned(e.envelope, keys, 'audit') : null; } catch { pl = null; }
+      requireThat(pl && pl.tenant_id === t, 'INV-409-INTEGRITY', 'Audit row fails ledger signature verification', 409);
       const meta = pl.metadata ?? {};
       switch (pl.type) {
         case 'AUTHORITY_REVOKED': idx.revoked.add(pl.reference); break;
@@ -540,10 +554,10 @@ export class Fabric {
         case 'PERCEPTION_SESSION': if (meta.nonce) idx.perceptionNonce.add(meta.nonce); break;
         case 'DATA_ACCESSED': idx.dataAccess.push({ subject: pl.reference, dataset: meta.dataset, row_ids: meta.row_ids ?? [], columns: meta.columns ?? [], at: meta.at ?? pl.time }); break;
       }
-      idx.maxSeq = Math.max(idx.maxSeq, e.sequence ?? 0);
-    }
-    idx.maxSeq = maxSeq;
-    this._auditIdx.set(t, idx);
+        idx.maxSeq = Math.max(idx.maxSeq, e.sequence ?? 0);
+      }
+      idx.maxSeq = maxSeq;
+    } finally { idx.building = false; }
     return idx;
   }
   revoked(tenant, kind, id) { return this._auditIndex(tenant).revoked.has(`${kind}:${id}`); }
@@ -1841,6 +1855,15 @@ export class Fabric {
   auditPageScoped(p, options = {}) {
     this.authorize(p, ['operator', 'security', 'auditor', 'policy_admin']);
     const page = this.store.auditPage(p.tenant_id, options);
+    // The audit READ surface is evidence: every served row must be a real
+    // vault-signed entry, not an in-process forgery appended under the seq
+    // trigger (w12 red-team). A row that fails signature verification flags
+    // loudly rather than blending into history.
+    const keys = this.auditPublicKeys(p.tenant_id);
+    for (const e of page.entries) {
+      let ok = false; try { ok = e.envelope ? verifySigned(e.envelope, keys, 'audit').tenant_id === p.tenant_id : false; } catch { ok = false; }
+      requireThat(ok, 'INV-409-INTEGRITY', 'Audit page contains a row whose ledger signature does not verify', 409);
+    }
     // AUD-010: named domain projections filter the verified page. Integrity
     // verification runs on the unfiltered page before projection.
     if (options.view !== undefined) {
