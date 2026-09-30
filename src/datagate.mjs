@@ -91,14 +91,19 @@ export function watermark(rows, ctx) {
 // DAT-009: cumulative reconstruction control. Counts distinct rows and
 // columns a subject has touched per dataset inside the window; crossing the
 // configured coverage threshold produces a budget denial plus an audit signal.
-export function reconstructionCheck(touchDb, catalogDb, { tenant, subject, dataset, rows, columns, now, policy, record = true }) {
+export function reconstructionCheck(touchDb, catalogDb, { tenant, subject, dataset, rows, columns, now, policy, record = true, access = null }) {
   // Touch records live on the fabric store's transaction so a rolled-back
   // consume cannot leave phantom access rows (cross-DB atomicity, M2).
   // Counts are computed PROSPECTIVELY before writing: a denied attempt
   // records nothing — the ledger measures disclosure, not probing, and a
   // rejection must not ratchet coverage toward self-DoS (w6-fix F6).
   const window = policy.window_ms ?? 86400000;
-  const touched = touchDb.prepare('SELECT row_id, column_name FROM data_access WHERE tenant=? AND subject=? AND dataset=? AND at>?').all(tenant, subject, dataset, now - window);
+  // When a ledger-derived access view is supplied it is the authority —
+  // wiping the data_access table cannot reset what the signed chain already
+  // attests (w11-redteam R9). The table remains as a fast mirror only.
+  const touched = access
+    ? access.filter(e => e.subject === subject && e.dataset === dataset && e.at > now - window).flatMap(e => e.row_ids.flatMap(r => e.columns.map(c => ({ row_id: r, column_name: c }))))
+    : touchDb.prepare('SELECT row_id, column_name FROM data_access WHERE tenant=? AND subject=? AND dataset=? AND at>?').all(tenant, subject, dataset, now - window);
   const rowSet = new Set(touched.map(x => x.row_id));
   const colSet = new Set(touched.map(x => x.column_name));
   for (const r of rows) rowSet.add(r);
@@ -109,7 +114,9 @@ export function reconstructionCheck(touchDb, catalogDb, { tenant, subject, datas
   // Coverage is also bounded dataset-wide: a second identity minted by
   // jit.grant (or any peer subject) must not let the combined disclosure
   // of a dataset exceed the same window ceiling (w10-datagate F2).
-  const datasetTouched = new Set(touchDb.prepare('SELECT DISTINCT row_id FROM data_access WHERE tenant=? AND dataset=? AND at>?').all(tenant, dataset, now - window).map(x => x.row_id));
+  const datasetTouched = access
+    ? new Set(access.filter(e => e.dataset === dataset && e.at > now - window).flatMap(e => e.row_ids))
+    : new Set(touchDb.prepare('SELECT DISTINCT row_id FROM data_access WHERE tenant=? AND dataset=? AND at>?').all(tenant, dataset, now - window).map(x => x.row_id));
   for (const r of rows) datasetTouched.add(r);
   const datasetCoverage = totalRows ? Math.floor((datasetTouched.size * 100) / totalRows) : 0;
   const limits = policy ?? { max_distinct_rows: 100000, max_distinct_columns: 100000, max_coverage_percent: 100 };

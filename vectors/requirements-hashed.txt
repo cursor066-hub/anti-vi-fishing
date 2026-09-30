@@ -1,0 +1,13 @@
+# Hash-pinned verification toolchain for CI (pip install --require-hashes).
+# A version pin alone is satisfied by a poisoned/mirrored wheel; the hashes
+# bind the exact artifacts the independent Python verifier runs on
+# (w11-supply SC-04). Regenerate: pip download each dist for the CI image
+# (ubuntu x86_64, CPython 3.12, manylinux2014) and sha256sum the wheels.
+cryptography==46.0.7 \
+    --hash=sha256:5ad9ef796328c5e3c4ceed237a183f5d41d21150f972455a9d926593a1dcb308
+cffi==2.1.1 \
+    --hash=sha256:c1453022f490d2459a11819d83ad1d586e9ff65a12ac3e705ffebd46d3685dcf
+pycparser==3.0 \
+    --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
+typing_extensions==4.16.0 \
+    --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID, createHmac } from 'node:crypto';
-import { fixture, hasCode, runtimeInput, runtimeRequest } from './helpers.mjs';
+import { fixture, hasCode, setTenant, runtimeInput, runtimeRequest } from './helpers.mjs';
 import { TRANSFORMS } from '../src/datagate.mjs';
 import { canonical, digest } from '../src/canonical.mjs';
 import { signed } from '../src/crypto.mjs';
@@ -121,7 +121,7 @@ test('w10-dg F9: the declared aggregate transform is admissible and applies', t 
 // to the row-encryption key.
 test('w10-dg F10: a tenant without a watermark key cannot serve watermarked rows', t => {
   const h = fixture(t);
-  delete h.setup.config.tenants.acme.watermark_key;
+  setTenant(h, 'acme', tn => { delete tn.watermark_key; });
   const cap = h.f.runtime.issue(h.p(), runtimeInput());
   assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap)), hasCode('INV-503-CONFIG'));
 });

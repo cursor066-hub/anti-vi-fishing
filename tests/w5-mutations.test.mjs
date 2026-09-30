@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { fixture, hasCode, runtimeInput, runtimeRequest } from './helpers.mjs';
+import { fixture, hasCode, installPolicy, setTenant, runtimeInput, runtimeRequest } from './helpers.mjs';
 import { proposal } from '../src/schema.mjs';
 import { generateKey, signed } from '../src/crypto.mjs';
 import { digest } from '../src/canonical.mjs';
@@ -23,7 +23,7 @@ test('E1: two custodians sharing one failure domain cannot satisfy the independe
   const r = h.proposed(); h.evidence(r); h.evidence(r, { issuer: 'registry' });
   // Register a real custodian that colludes with custodian-1 — same blast zone.
   const colluder = generateKey();
-  h.f.tenant('acme').identities[colluder.key_id] = { public_key: colluder.public_key, subject_id: 'custodian-x', identity_class: 'workforce', roles: ['custodian', 'approver'], device_id: 'custodian-x-device', failure_domain: 'acme-custodian-1', hardware_backed: false, health_expires_at: h.now() + 86400000, grants: { resources: [], actions: [], destinations: [], columns: [], row_ids: [] } };
+  setTenant(h, 'acme', tn => { tn.identities[colluder.key_id] = { public_key: colluder.public_key, subject_id: 'custodian-x', identity_class: 'workforce', roles: ['custodian', 'approver'], device_id: 'custodian-x-device', failure_domain: 'acme-custodian-1', hardware_backed: false, health_expires_at: h.now() + 86400000, grants: { resources: [], actions: [], destinations: [], columns: [], row_ids: [] } }; });
   const record = h.f.getCapsule(h.p(), r.capsule.capsule_id);
   const envelope = signed({ tenant_id: 'acme', capsule_id: r.capsule.capsule_id, capsule_digest: r.capsule_digest, evidence_graph_digest: h.f.graph('acme', record).digest, policy_digest: digest(h.f.policy('acme')), signer_id: colluder.key_id, approved_at: h.now(), expires_at: Math.min(h.now() + 300000, r.capsule.expires_at) }, colluder, 'action-approval');
   h.f.approve(h.p('custodian-x'), envelope); // signature and role are valid — the approval is accepted
@@ -115,9 +115,10 @@ test('M-policy-digest: an approval bound to a stale policy digest is refused', t
   const h = fixture(t); const r = h.proposed(); h.evidence(r); h.evidence(r, { issuer: 'registry' });
   const stale = h.approvalEnvelope(r, 'custodian-1', { policy_digest: '0'.repeat(64) });
   assert.throws(() => h.f.approve(h.p('custodian-1'), stale), hasCode('INV-409-STATE'));
-  // And the same check fires when the policy moved after signing.
+  // And the same check fires when the policy moved after signing — a real
+  // governed amendment leaves the envelope bound to the superseded digest.
   const signedNow = h.approvalEnvelope(r, 'custodian-1');
-  h.f.store.put('acme', 'policy', 'active', { ...h.f.policy('acme'), version: 99 }, h.now());
+  installPolicy(h, p => { p.max_capsule_ttl_ms += 1; });
   assert.throws(() => h.f.approve(h.p('custodian-1'), signedNow), hasCode('INV-409-STATE'));
 });
 
@@ -177,14 +178,11 @@ test('M-ghost-change: bank.change on a nonexistent resource is a FAILED outcome'
 
 test('D5/E-fanout: consuming a capability on a fifth distinct resource trips the fan-out ceiling', t => {
   const h = fixture(t);
-  const policy = h.f.policy('acme');
-  policy.runtime.services = ['erp-service', 'svc-2', 'svc-3', 'svc-4', 'svc-5'];
-  policy.runtime.destinations = [...new Set([...policy.runtime.destinations, ...policy.runtime.services])];
-  h.f.store.put('acme', 'policy', 'active', policy, h.now());
-  const [keyId, identity] = Object.entries(h.f.tenant('acme').identities).find(([, v]) => v.subject_id === 'operator');
-  identity.grants.resources = [...new Set([...identity.grants.resources, ...policy.runtime.services])];
-  identity.grants.destinations = [...new Set([...identity.grants.destinations, ...policy.runtime.services])];
-  for (const service of policy.runtime.services.slice(0, 4)) {
+  const services = ['erp-service', 'svc-2', 'svc-3', 'svc-4', 'svc-5'];
+  installPolicy(h, p => { p.runtime.services = services; p.runtime.destinations = [...new Set([...p.runtime.destinations, ...services])]; });
+  const [keyId] = Object.entries(h.f.tenant('acme').identities).find(([, v]) => v.subject_id === 'operator');
+  setTenant(h, 'acme', tn => { const g = tn.identities[keyId].grants; g.resources = [...new Set([...g.resources, ...services])]; g.destinations = [...new Set([...g.destinations, ...services])]; });
+  for (const service of services.slice(0, 4)) {
     const cap = h.f.runtime.issue(h.p(), runtimeInput({ action: 'service.connect', resource: service, destination: service, columns: [], row_ids: [] }));
     h.f.runtime.consume(h.p(), runtimeRequest(cap, { columns: [], row_ids: [] }));
   }

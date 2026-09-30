@@ -38,7 +38,9 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24.19.0'
-      - run: pip install 'cryptography==46.0.7'
+      # Hash-pinned install — a version pin alone is satisfied by a poisoned
+      # wheel; --require-hashes binds the exact artifacts (w11-supply SC-04).
+      - run: pip install --require-hashes -r vectors/requirements-hashed.txt
       - name: Static source checks
         run: node scripts/check.mjs
       # NFR-SEC-007: the release-attestation pipeline signs provenance with
@@ -48,10 +50,16 @@ jobs:
       # the later test/simulation steps legitimately rewrite tracked reports
       # (supply-chain M5).
       - name: Release attestation sign/verify roundtrip
+        env:
+          # Test-only overrides (fixture keys, anchor emission) are gated on
+          # this env — set ONLY here, never in a release job (w11-supply
+          # SC-09). The GITHUB_* env already present binds the run into the
+          # signed provenance (SC-07).
+          IF_TEST_ANCHORS: '1'
         run: |
           node scripts/release-sign.mjs --generate-fixture-key var/relkeys
           node scripts/release-sign.mjs --key var/relkeys/release-key.pem --public-key var/relkeys/release-key.pub --out var/release-attestation.json --test-anchors-out var/relkeys/anchors.json
-          node scripts/verify-release.mjs var/release-attestation.json var/relkeys/anchors.json
+          node scripts/verify-release.mjs var/release-attestation.json var/relkeys/anchors.json --require-ci
       - name: Test suite
         run: npm test
       - name: Simulation harness

@@ -121,7 +121,7 @@ export class RuntimeGate {
         const dataset = this.f.target.state(t, cap.resource).material_fields;
         requireThat(dataset.classification === cap.classification && dataset.jurisdiction === cap.jurisdiction, 'INV-409-STATE', 'Dataset classification or jurisdiction changed', 409);
         // DAT-009: cumulative overlap/reconstruction check BEFORE release.
-        recon = reconstructionCheck(this.f.store.db, this.f.target.db, { tenant: t, subject: cap.subject_id, dataset: cap.resource, rows: input.row_ids, columns: input.columns, now, policy: r.reconstruction });
+        recon = reconstructionCheck(this.f.store.db, this.f.target.db, { tenant: t, subject: cap.subject_id, dataset: cap.resource, rows: input.row_ids, columns: input.columns, now, policy: r.reconstruction, access: this.f._auditIndex(t).dataAccess });
         requireThat(recon.allowed, 'INV-429-BUDGET', `Reconstruction limit reached (${recon.coverage_percent}% of dataset rows touched)`, 429, { row_count: recon.row_count, column_count: recon.column_count, coverage_percent: recon.coverage_percent });
         rows = this.f.target.readDataset(t, cap.resource, input.columns, input.row_ids, input.row_ids.length);
         if (cap.transforms) rows = applyTransforms(rows, cap.transforms, { tenant: t, dataset: cap.resource, tenantKey: this.f.target.key(t).toString('base64url') });
@@ -135,6 +135,9 @@ export class RuntimeGate {
         watermarks = watermark(rows, { tenant: t, dataset: cap.resource, subject: cap.subject_id, capabilityId: cap.capability_id, requestId: input.request_id, tenantWatermarkKey: watermarkKey }).watermarks;
       }
       this.f.store.db.prepare('INSERT INTO usage VALUES(?,?,?,?,?,?,?)').run(t, cap.subject_id, cap.resource, now, cost, cap.capability_id, input.request_id);
+      // The disclosure is attested on the signed chain — the data_access
+      // table is only a mirror of this event (w11-redteam R9).
+      if (cap.action === 'data.read') this.f.store.audit(t, 'DATA_ACCESSED', cap.subject_id, cap.subject_id, { dataset: cap.resource, row_ids: input.row_ids, columns: input.columns, at: now }, now);
       this.f.store.audit(t, 'RUNTIME_ALLOWED', principal.subject_id, cap.capability_id, { cost, resource: cap.resource, selection_digest: digest({ columns: input.columns, rows: input.row_ids }), request_id: input.request_id, watermarked: cap.action === 'data.read' }, now);
       return { decision: 'ALLOW', cost, remaining_capability_cost: cap.max_cost - used - cost, rows, watermarks, reconstruction: recon && { row_count: recon.row_count, coverage_percent: recon.coverage_percent }, attribution: { tenant_id: t, subject_id: principal.subject_id, request_id: input.request_id }, simulation: true, limitation: cap.action === 'service.connect' ? 'Software decision only; no packet or socket enforcement is provided.' : 'Reads the isolated synthetic dataset only.' };
       });

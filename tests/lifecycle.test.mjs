@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fixture, hasCode } from './helpers.mjs';
+import { fixture, hasCode, installPolicy } from './helpers.mjs';
 import { clone, digest } from '../src/canonical.mjs';
 import { signed } from '../src/crypto.mjs';
 import { proposal } from '../src/schema.mjs';
@@ -54,7 +54,7 @@ test('COM-012: post-commit timeout becomes UNCERTAIN; reconciliation finds one d
 test('COM-005 COM-012: target failure before commit rolls back and stays uncertain without blind retry', t => {
   const h = fixture(t), { record, certificate } = h.ready(); assert.equal(h.f.execute(h.p(), certificate, { fault: 'before-commit' }).payload.status, 'UNCERTAIN'); assert.equal(h.f.target.state('acme', record.capsule.action.target_resource).version, 0); assert.equal(h.f.reconcile(h.p(), certificate.payload.certificate_id).payload.status, 'UNCERTAIN');
 });
-for (const fault of ['malformed-response', 'altered-response']) test(`CON-004 COM-009: ${fault} cannot produce false success`, t => { const h = fixture(t), { certificate } = h.ready(); assert.equal(h.f.execute(h.p(), certificate, { fault }).payload.status, 'UNCERTAIN'); assert.equal(h.f.reconcile(h.p(), certificate.payload.certificate_id).payload.status, 'VERIFIED'); });
+for (const fault of ['malformed-response', 'altered-response']) test(`CON-004 COM-009: ${fault} cannot produce false success`, t => { const h = fixture(t), { certificate } = h.ready(); assert.throws(() => h.f.execute(h.p(), certificate, { fault }), hasCode('INV-409-INTEGRITY')); assert.equal(h.f.reconcile(h.p(), certificate.payload.certificate_id).payload.status, 'VERIFIED'); });
 test('COM-005 COM-012: process crash reservation survives restart and prevents replay', t => {
   const h = fixture(t), { certificate } = h.ready(); assert.throws(() => h.f.execute(h.p(), certificate, { fault: 'process-crash' })); h.close();
   const restarted = new Fabric(h.setup.config, h.directory, h.now); t.after(() => restarted.close());
@@ -99,7 +99,7 @@ test('EVD-003: tampered issuer signature and wrong tenant evidence are rejected'
   assert.throws(() => h.f.attachEvidence(h.p('operator', 'globex'), r.capsule.capsule_id, env), hasCode('INV-404-NOT-FOUND'));
 });
 test('IDN-001: software signature cannot satisfy hardware-required policy', t => {
-  const h = fixture(t), policy = h.f.policy('acme'); policy.rules['finance.beneficiary.create'].require_hardware = true; h.f.store.put('acme', 'policy', 'active', policy, h.now());
+  const h = fixture(t); installPolicy(h, p => { p.rules['finance.beneficiary.create'].require_hardware = true; });
   const r = h.proposed(); h.evidence(r); h.evidence(r, { issuer: 'registry' }); h.approve(r); const d = h.f.evaluate(h.p(), r.capsule.capsule_id); assert.equal(d.decision, 'ESCROW'); assert.ok(d.reasons.some(r => r.code === 'HARDWARE_APPROVAL_REQUIRED'));
 });
 test('POL-011: duplicate signer cannot satisfy threshold', t => { const h = fixture(t), r = h.proposed(); h.evidence(r); h.evidence(r, { issuer: 'registry' }); h.approve(r, 1); assert.throws(() => h.approve(r, 1), hasCode('INV-409-REPLAY')); assert.throws(() => h.f.certificate(h.p(), r.capsule.capsule_id), hasCode('INV-412-EVIDENCE')); });
@@ -123,7 +123,9 @@ test('UC-02: exact first payment enforces beneficiary amount and cannot repeat',
 test('COM-009: self-consistent but unauthorised observed state must not pass reconciliation', t => {
   const h = fixture(t), { certificate } = h.ready(), original = h.f.target.execute.bind(h.f.target);
   h.f.target.execute = (...args) => { const raw = original(...args); raw.observed_state.bank_account = 'ATTACKBANK9999'; raw.observed_state_digest = digest(raw.observed_state); return raw; };
-  assert.equal(h.f.execute(h.p(), certificate).payload.status, 'UNCERTAIN');
+  // A post-journal forgery is an integrity failure — the claimed VERIFIED
+  // can never match the durable dispatch journal (w12 red-team).
+  assert.throws(() => h.f.execute(h.p(), certificate), hasCode('INV-409-INTEGRITY'));
 });
 test('POL-010: exact candidate simulation required before policy certificate', t => {
   const h = fixture(t), next = clone(h.f.policy('acme')); next.version = 2;

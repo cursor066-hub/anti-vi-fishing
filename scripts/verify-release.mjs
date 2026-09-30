@@ -55,4 +55,16 @@ if (head.status === 0 && tracked.status === 0) {
 } else {
   skipped.push('source_commit', 'tracked_file_count', 'inventory_digest');
 }
-console.log(JSON.stringify({ valid: true, key_id: attestation.protected.key_id, commit: payload.invocation.source_commit, manifest_sha256: manifestSha, timestamp: payload.timestamp, ...(skipped.length ? { skipped_checks: skipped } : {}) }));
+// A consumer keying on `valid` must not be told a release verified when its
+// provenance checks were skipped — skipped means NOT proven, not OK
+// (w11-supply SC-11). --allow-skips restores the disclose-only mode for
+// tarball consumers who accept per-file-hash coverage alone.
+const allowSkips = process.argv.includes('--allow-skips');
+if (skipped.length && !allowSkips) fail('INV-412-PROVENANCE', `provenance checks skipped without --allow-skips: ${skipped.join(', ')}`);
+// --require-ci asserts the attestation binds a CI run (w11-supply SC-07):
+// run identity fields must be present and non-empty.
+if (process.argv.includes('--require-ci')) {
+  const ci = payload.invocation?.ci;
+  if (!ci?.run_id || !ci?.repository || !ci?.sha) fail('INV-412-PROVENANCE', 'attestation does not bind a CI run (--require-ci)');
+}
+console.log(JSON.stringify({ valid: true, key_id: attestation.protected.key_id, commit: payload.invocation.source_commit, manifest_sha256: manifestSha, timestamp: payload.timestamp, ...(payload.invocation?.ci ? { ci: payload.invocation.ci } : {}), ...(skipped.length ? { skipped_checks: skipped } : {}) }));

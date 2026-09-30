@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { fixture, hasCode } from './helpers.mjs';
+import { fixture, hasCode, setTenant } from './helpers.mjs';
 import { signAcknowledgement } from '../src/ceremony.mjs';
 import { generateKey } from '../src/crypto.mjs';
 import { validatePolicy } from '../src/policy.mjs';
@@ -90,16 +90,19 @@ test('w11 F3: a non-member custodian cannot deal shares for the ceremony', t => 
 test('w11 F4: quorum counts the signing key domain, not a sibling identity', t => {
   const h = fixture(t);
   const { ceremony, split } = committedCeremony(h, 'cer-dom', ['custodian-1', 'custodian-2'], 2);
-  const ids = h.setup.config.tenants.acme.identities;
+  const ids = h.f.tenant('acme').identities;
   const [c1key] = Object.entries(ids).find(([, v]) => v.subject_id === 'custodian-1');
   const [c2key] = Object.entries(ids).find(([, v]) => v.subject_id === 'custodian-2');
   // After creation (which verified distinct domains), both signing keys end
   // up in acme-SHARED and custodian-1 picks up a second registered identity
-  // carrying a distinct domain label — e.g. mid-rollover.
-  ids[c1key].failure_domain = 'acme-SHARED';
-  ids[c2key].failure_domain = 'acme-SHARED';
+  // carrying a distinct domain label — e.g. mid-rollover. Frozen config:
+  // legitimate edits take the sanctioned clone-and-swap path.
   const key = generateKey();
-  ids[key.key_id] = { public_key: key.public_key, subject_id: 'custodian-1', identity_class: 'workforce', roles: ['custodian'], device_id: 'custodian-1-device', failure_domain: 'acme-DOMAIN-B', hardware_backed: false, health_expires_at: h.now() + 86400000, grants: { resources: [], actions: [], destinations: [], columns: [], row_ids: [] } };
+  setTenant(h, 'acme', tn => {
+    tn.identities[c1key].failure_domain = 'acme-SHARED';
+    tn.identities[c2key].failure_domain = 'acme-SHARED';
+    tn.identities[key.key_id] = { public_key: key.public_key, subject_id: 'custodian-1', identity_class: 'workforce', roles: ['custodian'], device_id: 'custodian-1-device', failure_domain: 'acme-DOMAIN-B', hardware_backed: false, health_expires_at: h.now() + 86400000, grants: { resources: [], actions: [], destinations: [], columns: [], row_ids: [] } };
+  });
   ack(h, ceremony, 'custodian-1'); // signed by c1key — the SHARED domain
   ack(h, ceremony, 'custodian-2'); // also SHARED
   const q = h.f.custodianQuorum('acme', h.f.store.must('acme', 'ceremony', ceremony.ceremony_id));

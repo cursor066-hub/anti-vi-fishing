@@ -1,5 +1,5 @@
 {
   "verifier": "scripts/verify-vectors.py (Python cryptography)",
-  "exit": 0,
-  "output": "python: 18 canonical + 11 envelope vectors, 0 failures\npython: 17 parse vectors checked, 0 total failures\npython: 2 ES256 envelope vectors, 0 total failures"
+  "exit": 1,
+  "output": "python: 18 canonical + 11 envelope vectors, 0 failures\npython: 17 parse vectors checked, 0 total failures\npython: 2 ES256 envelope vectors, 0 total failures\nFAIL python-corpus: truncated vector sets (canonical=18, envelope=11, parse=21, es256=2)"
 }

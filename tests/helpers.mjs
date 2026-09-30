@@ -22,7 +22,7 @@ export function fixture(t, tenants = ['acme', 'globex']) {
     const resource = overrides.action?.target_resource ?? `new-${randomUUID()}`;
     const action = { type, target_resource: resource, purpose: 'Synthetic verification' };
     const state = type === 'secret.use' ? f.target.secretState(principal.tenant_id, requested.secret_id) : f.target.state(principal.tenant_id, resource);
-    const input = proposal(type, actor(principal.subject_id), state, requested, time, { action, ...overrides });
+    const input = proposal(type, actor(principal.subject_id), state, requested, time, { action, policy_version: f.policy(principal.tenant_id).version, ...overrides });
     // ACT-005: request intent is signed by the actor's identity key.
     const intent = signed(input, setup.identityKeys[principal.tenant_id][principal.subject_id], 'capsule-intent');
     return f.propose(principal, input, randomUUID(), intent);
@@ -69,5 +69,22 @@ export function fixture(t, tenants = ['acme', 'globex']) {
   return { f, setup, directory, p, actor, proposed, evidence, approve, approvalEnvelope, ready, close, now: () => time, advance: ms => { time += ms; }, set: t => { time = t; }, clone };
 }
 export const hasCode = code => e => e?.code === code;
+// A live constitution can only change through the governed policy.change
+// pipeline — the active row is anchored to its ledger-signed activation
+// (w12 red-team), so tests that need a different policy must certify one.
+// The weakening flag is declared so any dimension may move; the declared
+// surcharge raises the approval floor to threshold + emergency_extra (4).
+export function installPolicy(h, mutate, { approvals = 4, tenant = 'acme' } = {}) {
+  const next = clone(h.f.policy(tenant)); next.version += 1; next.allow_weakening = true; mutate?.(next);
+  const r = h.proposed('policy.change', { policy: next }, { action: { type: 'policy.change', target_resource: 'policy-root', purpose: 'Amend constitution' } }, h.p('operator', tenant));
+  h.f.simulate(h.p('policy-admin', tenant), next); h.advance(120001);
+  h.evidence(r, { kind: 'governance_review' }); h.evidence(r, { kind: 'governance_review', issuer: 'audit-committee' }); h.approve(r, approvals);
+  const outcome = h.f.execute(h.p('operator', tenant), h.f.certificate(h.p('operator', tenant), r.capsule.capsule_id));
+  if (outcome.payload.status !== 'VERIFIED') throw new Error(`installPolicy dispatch failed: ${JSON.stringify(outcome.payload)}`);
+  return next;
+}
+// Tenant configuration is deep-frozen at open — legitimate edits go through
+// the same clone-and-swap path the fabric uses for key rotation.
+export function setTenant(h, tenant, mutate) { const tn = clone(h.f.tenant(tenant)); mutate?.(tn); h.f._setTenant(tenant, tn); }
 export function runtimeInput(overrides = {}) { return { device_id: 'operator-device', resource: 'dataset-1', destination: 'customer-vault', action: 'data.read', purpose: 'operations', columns: ['id', 'name'], row_ids: ['row-1'], classification: 'internal', jurisdiction: 'EU', max_cost: 1000, ttl_ms: 60000, ...overrides }; }
 export function runtimeRequest(capability, overrides = {}) { const c = capability.payload; return { capability, device_id: c.device_id, resource: c.resource, destination: c.destination, action: c.action, purpose: c.purpose, columns: c.columns, row_ids: c.row_ids, request_id: randomUUID(), protocol: 'https', port: 443, ...overrides }; }

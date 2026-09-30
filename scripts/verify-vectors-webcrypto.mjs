@@ -120,4 +120,7 @@ for (const v of ev2.vectors) {
   if (await subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, key, b64url(env.signature), tampered)) { failed++; console.log(`FAIL webcrypto-es256-tamper/${v.name}`); }
 }
 console.log(`webcrypto: ${ev2.vectors.length} ES256 envelope vectors, ${failed} total failures`);
+// A truncated corpus must not pass: per-vector asserts alone would let a
+// commit halve coverage undetected (w11-supply SC-10).
+if (cv.vectors.length < 18 || ev.vectors.length < 11 || ev2.vectors.length < 2) { console.error(`FAIL webcrypto-corpus: truncated vector sets (canonical=${cv.vectors.length}, envelope=${ev.vectors.length}, es256=${ev2.vectors.length})`); process.exit(1); }
 process.exitCode = failed ? 1 : 0;

@@ -11,7 +11,7 @@ import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fixture, hasCode } from './helpers.mjs';
+import { fixture, hasCode, installPolicy, setTenant } from './helpers.mjs';
 import { InvariantError } from '../src/errors.mjs';
 import { createConfiguration } from '../src/bootstrap.mjs';
 import { proposal } from '../src/schema.mjs';
@@ -240,8 +240,7 @@ test('AIG-003: extraction preserves provenance (span, confidence, model, documen
 
 test('AIG-009: disabling the advisory plane preserves enforcement (no degradation)', t => {
   const h = fixture(t);
-  const policy = clone(h.f.policy('acme')); policy.mode = 'disabled';
-  h.f.store.put('acme', 'policy', 'active', policy, h.now());
+  installPolicy(h, p => { p.mode = 'disabled'; });
   assert.throws(() => h.f.advise(h.p(), { operation: 'explain', capsule_id: 'none' }), hasCode('INV-451-POLICY'));
   const r = h.ready(); // enforcement path unaffected by advisory plane being off
   assert.equal(h.f.execute(h.p(), r.certificate).payload.status, 'VERIFIED');
@@ -343,7 +342,7 @@ test('L3: secure-perception release binds capsule_id and evidence_ref into the s
 test('L4: evidence signed under a retired suite is rejected policy-wide', t => {
   const h = fixture(t), r = h.proposed('finance.beneficiary.create', { vendor_id: 'v', bank_account: 'TESTBANK000001', currency: 'EUR' });
   const esKey = generateKey('ES256');
-  h.f.tenant('acme').issuers[esKey.key_id] = { public_key: esKey.public_key, name: 'es-issuer', issuer_id: 'es-issuer', channel: 'authoritative', kinds: ['ownership'], failure_domain: 'acme-es', version: '1.0.0' };
+  setTenant(h, 'acme', tn => { tn.issuers[esKey.key_id] = { public_key: esKey.public_key, name: 'es-issuer', issuer_id: 'es-issuer', channel: 'authoritative', kinds: ['ownership'], failure_domain: 'acme-es', version: '1.0.0' }; });
   const env = signed({ evidence_id: 'ev-es-1', tenant_id: 'acme', capsule_digest: r.capsule.capsule_id, kind: 'ownership', content_digest: digest({ x: 1 }), acquired_at: h.now(), expires_at: h.now() + 60000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'x', retention_until: h.now() + 120000 }, esKey, 'evidence');
   // Default constitution allows Ed25519 only — a valid ES256 envelope must fail policy, not crypto.
   assert.throws(() => h.f.attachEvidence(h.p(), r.capsule.capsule_id, env), hasCode('INV-451-POLICY'));
@@ -426,8 +425,8 @@ test('R2-1: a grant narrowed since issuance cannot ride a signed capability', t 
   const h = fixture(t);
   const cap = h.f.runtime.issue(h.p(), runtimeInput({ columns: ['id', 'name'] }));
   assert.equal(h.f.runtime.consume(h.p(), runtimeRequest(cap, { columns: ['id', 'name'] })).decision, 'ALLOW');
-  const ident = Object.values(h.f.tenant('acme').identities).find(i => i.subject_id === 'operator');
-  ident.grants = { ...ident.grants, columns: ['id'] };
+  const [opKey] = Object.entries(h.f.tenant('acme').identities).find(([, i]) => i.subject_id === 'operator');
+  setTenant(h, 'acme', tn => { tn.identities[opKey].grants = { ...tn.identities[opKey].grants, columns: ['id'] }; });
   assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap, { columns: ['id', 'name'] })), hasCode('INV-403-SCOPE'));
 });
 
@@ -436,9 +435,7 @@ test('R2-2: transform policy binds capabilities; row key is never transformable'
   assert.throws(() => h.f.runtime.issue(h.p(), runtimeInput({ transforms: { id: { op: 'drop' } } })), hasCode('INV-403-SCOPE'));
   assert.throws(() => h.f.runtime.issue(h.p(), runtimeInput({ resource: 'dataset-9' })), hasCode('INV-403-SCOPE'));
   assert.throws(() => h.f.runtime.issue(h.p(), runtimeInput({ columns: ['id', 'salary'] })), hasCode('INV-403-SCOPE'));
-  const active = h.f.policy('acme'), next = clone(active);
-  next.runtime.allowed_transforms = ['mask', 'drop', 'constant'];
-  h.f.store.put('acme', 'policy', 'active', next, h.now());
+  installPolicy(h, p => { p.runtime.allowed_transforms = ['mask', 'drop', 'constant']; });
   assert.throws(() => h.f.runtime.issue(h.p(), runtimeInput({ transforms: { name: { op: 'tokenise' } } })), hasCode('INV-403-SCOPE'));
 });
 
@@ -452,12 +449,12 @@ test('R2-3: deterministic target refusals record FAILED, not UNCERTAIN', t => {
 
 test('RUN-005 R2-4: constrained fail mode allows stale reads at half budget only', t => {
   const h = fixture(t);
-  const cap = h.f.runtime.issue(h.p(), runtimeInput({ max_cost: 10, columns: ['id', 'name'], row_ids: ['row-1', 'row-2'] }));
-  const serviceCap = h.f.runtime.issue(h.p(), runtimeInput({ action: 'service.connect', resource: 'erp-service', destination: 'erp-service', columns: [], row_ids: [] }));
-  const next = clone(h.f.policy('acme'));
-  next.fail_modes = { ...next.fail_modes, 'data.read': 'constrained', 'service.connect': 'constrained' };
-  next.version += 1;
-  h.f.store.put('acme', 'policy', 'active', next, h.now());
+  // Governed policy moves cost ~120s > the 60s capability TTL, so the stale
+  // capabilities are minted under a long-TTL constitution first.
+  installPolicy(h, p => { p.capability_ttl_ms = 300000; });
+  const cap = h.f.runtime.issue(h.p(), runtimeInput({ max_cost: 10, columns: ['id', 'name'], row_ids: ['row-1', 'row-2'], ttl_ms: 300000 }));
+  const serviceCap = h.f.runtime.issue(h.p(), runtimeInput({ action: 'service.connect', resource: 'erp-service', destination: 'erp-service', columns: [], row_ids: [], ttl_ms: 300000 }));
+  installPolicy(h, p => { p.fail_modes = { ...p.fail_modes, 'data.read': 'constrained', 'service.connect': 'constrained' }; });
   const first = h.f.runtime.consume(h.p(), runtimeRequest(cap));
   assert.equal(first.decision, 'ALLOW');
   assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap)), hasCode('INV-429-BUDGET'));
@@ -896,8 +893,7 @@ test('CON-002 CON-007 R2-37: issuer evidence stays purpose-bound and customer-ho
 test('NET-001 NET-002 NET-003 NET-010 R2-38: segmentation is identity-bound, envelope-bound and reconstructable', t => {
   const h = fixture(t);
   // Workstation peers are never service destinations.
-  const cfg = h.f.policy('acme'); cfg.runtime.network = { deny_workstation_peers: true, allowed_protocols: ['https'], allowed_ports: [443] };
-  h.f.store.put('acme', 'policy', 'active', cfg, h.now());
+  installPolicy(h, p => { p.runtime.network = { deny_workstation_peers: true, allowed_protocols: ['https'], allowed_ports: [443] }; });
   const cap = h.f.runtime.issue(h.p(), runtimeInput());
   const ws = runtimeRequest(cap); ws.resource = 'ws-janedoe';
   assert.throws(() => h.f.runtime.consume(h.p(), ws), e => /^INV-/.test(e.code));

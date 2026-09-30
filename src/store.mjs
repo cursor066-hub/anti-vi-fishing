@@ -71,6 +71,18 @@ export class Store {
       CREATE INDEX IF NOT EXISTS data_access_ix ON data_access(tenant,subject,dataset,at);
       PRAGMA user_version=1;
     `);
+    // A DB file whose append-only/seq triggers were weakened out-of-band is a
+    // tampered ledger — refuse to open rather than silently audit into a
+    // writable chain (w11-redteam R18). A plain DROP is healed by the CREATE
+    // statements above; what survives is a same-name trigger whose body no
+    // longer aborts, so the check binds the trigger text, not just the name.
+    const triggers = new Map(this.db.prepare("SELECT name, sql FROM sqlite_master WHERE type='trigger'").all().map(x => [x.name, x.sql ?? '']));
+    for (const name of ['no_audit_update', 'no_audit_delete', 'audit_seq_guard'])
+      if (!triggers.get(name)?.includes('RAISE(ABORT')) throw new Error(`audit integrity trigger missing or weakened: ${name}`);
+    // The append-only pair must fire unconditionally — a WHEN-gated or
+    // re-tabled same-name trigger is a smuggled no-op.
+    for (const name of ['no_audit_update', 'no_audit_delete'])
+      if (/WHEN/i.test(triggers.get(name)) || !triggers.get(name).includes('ON audit')) throw new Error(`audit integrity trigger weakened: ${name}`);
   }
   close() { this.db.close(); }
   tx(fn) {

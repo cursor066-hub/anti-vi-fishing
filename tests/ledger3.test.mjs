@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { fixture, hasCode, runtimeInput, runtimeRequest } from './helpers.mjs';
+import { fixture, hasCode, installPolicy, setTenant, runtimeInput, runtimeRequest } from './helpers.mjs';
 import { generateKey, signed, verifySigned } from '../src/crypto.mjs';
 import { digest } from '../src/canonical.mjs';
 // Wave-4 promotions: each test exercises the engineering-profile acceptance of
@@ -153,18 +153,15 @@ test('NFR-SEC-006: crypto agility is configurable and both suites sign/verify', 
   assert.ok(algs.allowed_suites.includes('Ed25519') && Array.isArray(algs.deprecation));
   assert.ok(existsSync('scripts/check.mjs'), 'source scanner present');
   // A suite added by policy is usable end-to-end (full rotation e2e: KEY-005).
-  const policy = h.f.policy('acme');
-  policy.algorithms.allowed_suites = ['Ed25519', 'ES256'];
-  h.f.store.put('acme', 'policy', 'active', policy, h.now());
+  installPolicy(h, p => { p.algorithms.allowed_suites = ['Ed25519', 'ES256']; });
   const es = generateKey('ES256');
   // Register the suite key as a scoped issuer for this tenant only.
-  h.f.tenant('acme').issuers[es.key_id] = { public_key: es.public_key, name: 'es-agility-probe', channel: 'authoritative', kinds: ['ownership'], failure_domain: 'acme-es' };
+  setTenant(h, 'acme', tn => { tn.issuers[es.key_id] = { public_key: es.public_key, name: 'es-agility-probe', channel: 'authoritative', kinds: ['ownership'], failure_domain: 'acme-es' }; });
   const env = signed({ evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: digest({ a: 1 }), kind: 'ownership', content_digest: digest({ b: 2 }), acquired_at: h.now(), expires_at: h.now() + 60000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'agility probe', retention_until: h.now() + 120000 }, es, 'evidence');
   const out = h.f.verifyEvidenceEnvelope('acme', env);
   assert.equal(out.kind, 'ownership');
   // And a retired suite is refused: removing ES256 makes the same envelope fail.
-  policy.algorithms.allowed_suites = ['Ed25519'];
-  h.f.store.put('acme', 'policy', 'active', policy, h.now());
+  installPolicy(h, p => { p.algorithms.allowed_suites = ['Ed25519']; });
   assert.throws(() => h.f.verifyEvidenceEnvelope('acme', env), hasCode('INV-451-POLICY'));
 });
 
@@ -211,11 +208,9 @@ test('NFR-AVL-002: connector unavailability does not remove already-issued local
 
 test('NFR-PRV-002: retention policy is configurable per evidence kind', t => {
   const h = fixture(t);
-  const policy = h.f.policy('acme');
-  assert.ok(Number.isSafeInteger(policy.retention.default_ms));
+  assert.ok(Number.isSafeInteger(h.f.policy('acme').retention.default_ms));
   // Tighten the ceiling for one kind only.
-  policy.retention.per_kind.ownership = 60000;
-  h.f.store.put('acme', 'policy', 'active', policy, h.now());
+  installPolicy(h, p => { p.retention.per_kind.ownership = 60000; });
   const rec = h.proposed();
   // A support envelope holding a 2-day retention exceeds the new kind ceiling.
   const env = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: rec.capsule_digest, kind: 'ownership', content_digest: digest({ x: 1 }), acquired_at: h.now(), expires_at: h.now() + 1000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'test', retention_until: h.now() + 172800000, claims: { account: 'TESTBANK000002', owner_id: rec.capsule.action.target_resource } };

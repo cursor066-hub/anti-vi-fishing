@@ -55,8 +55,18 @@ write('reports/verification-python.json', JSON.stringify({ verifier: 'scripts/ve
 const writeVolatile = (path, content) => { if (!checkOnly) writeFileSync(path, content); };
 const check = run(process.execPath, ['scripts/check.mjs']);
 const checkOut = (check.stdout ?? '').trim().split('\n').at(-1);
-writeVolatile('reports/source-check.json', checkOut + '\n');
-writeVolatile('reports/artifact-audit.json', JSON.stringify({ check_exit: check.status, report: JSON.parse(checkOut), generated_at: 'scripts/report.mjs' }, null, 2) + '\n');
+// Volatile artifacts carry their provenance explicitly: which commit and
+// which cleanliness state they describe — a snapshot that cannot be checked
+// for freshness must at least be honest about what it saw (w11-supply SC-08).
+const treeState = () => {
+  const head = run('git', ['rev-parse', 'HEAD']);
+  const status = run('git', ['status', '--porcelain']);
+  return { commit: head.status === 0 ? head.stdout.trim() : null, clean: status.status === 0 ? !status.stdout.trim() : null };
+};
+const described = treeState();
+const volatileReport = (report) => JSON.stringify({ described_tree: described, note: 'volatile evidence: describes the tree at generation time — freshness is proven by the live CI step, not by this snapshot (w11-supply SC-08)', report }, null, 2) + '\n';
+writeVolatile('reports/source-check.json', volatileReport(JSON.parse(checkOut)));
+writeVolatile('reports/artifact-audit.json', volatileReport({ check_exit: check.status, report: JSON.parse(checkOut) }));
 const gate = run(process.execPath, ['scripts/release-check.mjs']);
 write('reports/production-gate.json', JSON.stringify({ verifier: 'scripts/release-check.mjs', exit: gate.status, expected_exit: 1, output: (gate.stdout ?? '').trim() }, null, 2) + '\n');
 

@@ -154,7 +154,7 @@ test('w8 F11/F13: re-declare preserves validation; UNCOVERED cannot self-promote
 // an unreachable issuer stales its dependent paths.
 test('w8 F10/F12/F14: unreachable issuer stales paths; same-ms replays keep write order; re-drift never throws', async t => {
   const h = fixture(t, ['acme']);
-  const [bankKeyId, bank] = Object.entries(h.setup.config.tenants.acme.issuers).find(([, v]) => v.name === 'bank');
+  const [bankKeyId, bank] = Object.entries(h.f.tenant('acme').issuers).find(([, v]) => v.name === 'bank');
   const dir = mkdtempSync(join(tmpdir(), 'if-unreach-')); t.after(() => rmSync(dir, { recursive: true }));
   writeIssuer(dir, { issuer: 'bank', tenant: 'acme', channel: 'authoritative', version: '1.0.0', key: h.setup.issuerKeys.acme['bank'], kinds: ISSUER_RULES.bank, records: {}, issue_token: bank.issue_token, read_token: bank.read_token });
   const srv = createIssuerServer(loadIssuers(dir), { port: 0, host: '127.0.0.1', clock: () => h.now() });

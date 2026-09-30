@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fixture, hasCode, runtimeInput, runtimeRequest } from './helpers.mjs';
+import { fixture, hasCode, installPolicy, runtimeInput, runtimeRequest } from './helpers.mjs';
 import { verifyAudit } from '../src/store.mjs';
 import { clone, digest } from '../src/canonical.mjs';
 import { signed } from '../src/crypto.mjs';
@@ -14,10 +14,10 @@ test('DAT-002 DAT-009: low-and-slow extraction accumulates across newly minted c
   const cap = h.f.runtime.issue(h.p(), runtimeInput()); assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap)), hasCode('INV-429-BUDGET'));
 });
 test('DAT-002: rolling budget recovers after bounded window expires', t => {
-  const h = fixture(t), policy = h.f.policy('acme'); policy.runtime.windows[0].limit = 2; h.f.store.put('acme', 'policy', 'active', policy, h.now()); let cap = h.f.runtime.issue(h.p(), runtimeInput()); h.f.runtime.consume(h.p(), runtimeRequest(cap)); assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap)), hasCode('INV-429-BUDGET')); h.advance(60001); cap = h.f.runtime.issue(h.p(), runtimeInput()); assert.equal(h.f.runtime.consume(h.p(), runtimeRequest(cap)).decision, 'ALLOW');
+  const h = fixture(t); installPolicy(h, p => { p.runtime.windows[0].limit = 2; }); let cap = h.f.runtime.issue(h.p(), runtimeInput()); h.f.runtime.consume(h.p(), runtimeRequest(cap)); assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap)), hasCode('INV-429-BUDGET')); h.advance(60001); cap = h.f.runtime.issue(h.p(), runtimeInput()); assert.equal(h.f.runtime.consume(h.p(), runtimeRequest(cap)).decision, 'ALLOW');
 });
 test('DAT-003: server-controlled sensitivity weight increases information charge', t => {
-  const h = fixture(t), policy = h.f.policy('acme'); policy.runtime.classifications.push('confidential'); h.f.store.put('acme', 'policy', 'active', policy, h.now()); const ds = h.f.target.state('acme', 'dataset-1').material_fields; ds.classification = 'confidential'; h.f.target.seed('acme', 'dataset-1', ds);
+  const h = fixture(t); installPolicy(h, p => { p.runtime.classifications.push('confidential'); }); const ds = h.f.target.state('acme', 'dataset-1').material_fields; ds.classification = 'confidential'; h.f.target.seed('acme', 'dataset-1', ds);
   const cap = h.f.runtime.issue(h.p(), runtimeInput({ classification: 'confidential' })); assert.equal(h.f.runtime.consume(h.p(), runtimeRequest(cap)).cost, 10);
 });
 for (const [field, value] of [['destination', 'evil-vault'], ['device_id', 'stolen-device'], ['resource', 'dataset-2'], ['purpose', 'marketing']]) test(`RUN-002 DAT-004: ${field} binding cannot be broadened`, t => { const h = fixture(t), cap = h.f.runtime.issue(h.p(), runtimeInput()); assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap, { [field]: value }))); });

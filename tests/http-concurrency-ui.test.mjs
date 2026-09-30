@@ -2,7 +2,7 @@ import test from 'node:test';
 import http from 'node:http';
 import assert from 'node:assert/strict';
 import { createServer, ROUTE_METHODS } from '../src/server.mjs';
-import { fixture, runtimeInput, runtimeRequest, hasCode } from './helpers.mjs';
+import { fixture, installPolicy, runtimeInput, runtimeRequest, hasCode } from './helpers.mjs';
 import { Worker } from 'node:worker_threads';
 import { actionAvailability, typedValue, csvSelection, nextAction } from '../web/app.js';
 import { bootstrap, loadConfiguration } from '../src/bootstrap.mjs';
@@ -81,7 +81,7 @@ test('PER-007 PER-009: Secure Perception is dev-attested: forged attestations fa
   assert.ok(!release.data.ciphertext.includes('sensitive-value-123'), 'ciphertext must not contain plaintext');
   const opened = openRelease({ ...component, _ecdh_private: component.ecdh_private }, release.data);
   assert.equal(opened.data.secret_field, 'sensitive-value-123');
-  const policy = h.f.policy('acme'); policy.secure_perception.fallback = 'denied'; h.f.store.put('acme', 'policy', 'active', policy, h.now());
+  installPolicy(h, p => { p.secure_perception.fallback = 'denied'; });
   const denied = await h.request('/v1/secure-perception/fallback', { method: 'POST', body: { fields: { x: 'y' }, purpose: 'review' } });
   assert.equal(denied.status, 451);
 });
@@ -91,7 +91,7 @@ test('COM-003 NFR-TST-002: eight independent gate workers race; exactly one cert
   const results = await Promise.all(Array.from({ length: 8 }, () => runWorker(data))); assert.equal(results.filter(r => r.success).length, 1, JSON.stringify(results)); assert.ok(results.filter(r => !r.success).every(r => r.code === 'INV-409-REPLAY')); assert.equal(h.f.target.state('acme', record.capsule.action.target_resource).version, 1);
 });
 test('DAT-002: concurrent gates cannot overspend shared rolling budget', async t => {
-  const h = fixture(t), policy = h.f.policy('acme'); policy.runtime.windows[0].limit = 2; h.f.store.put('acme', 'policy', 'active', policy, h.now()); const cap = h.f.runtime.issue(h.p(), runtimeInput());
+  const h = fixture(t); installPolicy(h, p => { p.runtime.windows[0].limit = 2; }); const cap = h.f.runtime.issue(h.p(), runtimeInput());
   const results = await Promise.all(Array.from({ length: 8 }, () => runWorker({ config: h.setup.config, directory: h.directory, now: h.now(), principal: h.p(), runtime: runtimeRequest(cap) })));
   assert.equal(results.filter(r => r.success).length, 1, JSON.stringify(results)); assert.ok(results.filter(r => !r.success).every(r => r.code === 'INV-429-BUDGET'));
 });

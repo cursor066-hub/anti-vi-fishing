@@ -82,10 +82,12 @@ export function releaseFields(session, release, policy, now) {
   const key = deriveKey(session); const nonce = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', key, nonce);
   const ciphertext = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  key.fill(0); // the session AES key does not outlive its cipher use (w11-timing NEW-LOW-2)
   return {
     mode: 'secure-perception', assurance: session.assurance, production: false, binding,
     ephemeral_public: session.server_ephemeral, nonce: nonce.toString('base64url'),
-    ciphertext: ciphertext.toString('base64url'), tag: cipher.getAuthTag().toString('base64url')
+    ciphertext: ciphertext.toString('base64url'), tag: tag.toString('base64url')
   };
 }
 
@@ -98,7 +100,9 @@ export function openRelease(component, release) {
   shared.fill(0); // transient ECDH secret does not outlive key derivation
   const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(release.nonce, 'base64url'));
   decipher.setAuthTag(Buffer.from(release.tag, 'base64url'));
-  const plaintext = Buffer.concat([decipher.update(Buffer.from(release.ciphertext, 'base64url')), decipher.final()]).toString('utf8');
+  let plaintext;
+  try { plaintext = Buffer.concat([decipher.update(Buffer.from(release.ciphertext, 'base64url')), decipher.final()]).toString('utf8'); }
+  finally { key.fill(0); } // session AES key zeroed even on tag failure (w11-timing NEW-LOW-2)
   const inner = parseStrict(plaintext);
   // The outer binding is unauthenticated metadata — the authenticated copy
   // inside the ciphertext must agree with it, or the release was tampered.

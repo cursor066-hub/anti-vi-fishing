@@ -17,7 +17,7 @@ const declareBankPath = (h, id = 'path-bank-1') => h.f.declareCoverage(h.p('secu
   max_age_ms: 600000, configuration_digest: 'a'.repeat(64)
 });
 
-const bankEntry = h => Object.entries(h.setup.config.tenants.acme.issuers).find(([, v]) => v.name === 'bank');
+const bankEntry = h => Object.entries(h.f.tenant('acme').issuers).find(([, v]) => v.name === 'bank');
 
 const serve = async (t, spec, clock) => {
   const dir = mkdtempSync(join(tmpdir(), 'if-issuerdrift-')); t.after(() => rmSync(dir, { recursive: true }));

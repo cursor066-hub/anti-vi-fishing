@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { fixture, hasCode } from './helpers.mjs';
+import { fixture, hasCode, setTenant } from './helpers.mjs';
 import { createServer } from '../src/server.mjs';
 import { answerQuery } from '../src/issuerd.mjs';
 import { generateKey, signed } from '../src/crypto.mjs';
@@ -123,7 +123,7 @@ test('w6-fix F5: legacy untagged vault keys resolve through tenant bindings', t 
   const h = fixture(t);
   const legacy = h.f.vault.generate('audit', { key_id: 'legacy-audit-1' });
   const orphan = h.f.vault.generate('audit', { key_id: 'orphan-1' });
-  h.f.tenant('acme').keys.legacy_class = { key_id: legacy.key_id, public_key: legacy.public_key };
+  setTenant(h, 'acme', tn => { tn.keys.legacy_class = { key_id: legacy.key_id, public_key: legacy.public_key }; });
   h.f.revoke(h.p('security'), { kind: 'key', id: legacy.key_id, reason: 'retire legacy' });
   assert.ok(h.f.revoked('acme', 'key', legacy.key_id));
   assert.throws(() => h.f.revoke(h.p('security'), { kind: 'key', id: orphan.key_id, reason: 'probe' }), hasCode('INV-404-NOT-FOUND'));

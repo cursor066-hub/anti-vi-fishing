@@ -9,6 +9,10 @@ python3 -c 'import cryptography' 2>/dev/null || { printf '%s\n' "python3 'crypto
 node scripts/check.mjs
 # Attestation roundtrip on the clean tree — mirrors CI ordering exactly
 # (supply-chain M6): it must precede steps that regenerate tracked reports.
+# IF_TEST_ANCHORS is required for the fixture-key/test-anchors overrides
+# and is set ONLY for this test invocation (w11-supply SC-09).
+IF_TEST_ANCHORS=1
+export IF_TEST_ANCHORS
 node scripts/release-sign.mjs --generate-fixture-key var/relkeys
 node scripts/release-sign.mjs --key var/relkeys/release-key.pem --public-key var/relkeys/release-key.pub --out var/release-attestation.json --test-anchors-out var/relkeys/anchors.json
 node scripts/verify-release.mjs var/release-attestation.json var/relkeys/anchors.json

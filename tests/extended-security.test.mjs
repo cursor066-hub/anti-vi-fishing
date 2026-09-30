@@ -21,7 +21,9 @@ test('COM-002: all independently signed certificate binding mutations still fail
   // while the stored/live state it binds to moves out from under it.
   const { certificate: c2 } = h.ready();
   h.f.store.put('acme', 'policy', 'active', { ...h.f.policy('acme'), version: 99 }, h.now());
-  assert.throws(() => h.f.execute(h.p(), c2), hasCode('INV-409-STATE'), 'policy digest drift kills execution');
+  // A store-level policy rewrite is caught even earlier than drift: the
+  // active row must hash to its ledger-anchored activation (w12 red-team).
+  assert.throws(() => h.f.execute(h.p(), c2), hasCode('INV-409-INTEGRITY'), 'policy row tamper kills execution');
 });
 test('COM-002: expiry, revocation and live re-evaluation each kill execution independently', t => {
   const h = fixture(t);
@@ -47,13 +49,17 @@ test('DAT-001 COM-009: exact data export cannot return extra columns from downst
   const r = h.proposed('data.export', input, { action: { type: 'data.export', target_resource: 'dataset-1', purpose: 'Operations' }, destination: 'customer-vault' });
   h.evidence(r, { kind: 'dataset_authority' }); h.approve(r, 1); const cert = h.f.certificate(h.p(), r.capsule.capsule_id), original = h.f.target.execute.bind(h.f.target);
   h.f.target.execute = (...args) => { const output = original(...args); output.output[0].passport = 'SYNTHETIC-EXFILTRATION'; return output; };
-  assert.equal(h.f.execute(h.p(), cert).payload.status, 'UNCERTAIN');
+  // A dispatch result forged after the journal committed is an integrity
+  // failure — the claimed VERIFIED can never match the durable journal (w12).
+  assert.throws(() => h.f.execute(h.p(), cert), hasCode('INV-409-INTEGRITY'));
 });
 test('DAT-001: caller cannot mislabel dataset jurisdiction or sensitivity', t => {
   const h = fixture(t), r = h.proposed('data.export', { dataset: 'dataset-1', columns: ['name'], row_ids: ['row-1'], max_rows: 1, classification: 'internal', jurisdiction: 'US' }, { action: { type: 'data.export', target_resource: 'dataset-1', purpose: 'Operations' }, destination: 'customer-vault' }); assert.equal(h.f.evaluate(h.p(), r.capsule.capsule_id).decision, 'DENY');
 });
 test('IDN-001 POL-011: an initiator cannot approve their own protected action even with an eligible signing key', t => {
-  const h = fixture(t); const [keyId, identity] = Object.entries(h.setup.config.tenants.acme.identities).find(([, x]) => x.subject_id === 'custodian-1'); identity.roles.push('operator');
+  const h = fixture(t); const [keyId] = Object.entries(h.f.tenant('acme').identities).find(([, x]) => x.subject_id === 'custodian-1');
+  // Frozen tenant config: eligible-role edits take the sanctioned swap path.
+  const tn = clone(h.f.tenant('acme')); tn.identities[keyId].roles.push('operator'); h.f._setTenant('acme', tn);
   const p = h.p('custodian-1'), r = h.proposed(undefined, undefined, {}, p), challenge = h.f.approvalChallenge(p, r.capsule.capsule_id);
   assert.throws(() => h.f.approve(p, signed(challenge, h.setup.custodianKeys.acme['custodian-1'], 'action-approval')), hasCode('INV-403-SEPARATION')); assert.ok(keyId);
 });
@@ -91,10 +97,12 @@ test('CON-004 COM-012: missing data-output fields return UNCERTAIN rather than a
   const h = fixture(t), r = h.proposed('data.export', { dataset: 'dataset-1', columns: ['id'], row_ids: ['row-1'], max_rows: 1, classification: 'internal', jurisdiction: 'EU' }, { action: { type: 'data.export', target_resource: 'dataset-1', purpose: 'Operations' }, destination: 'customer-vault' });
   h.evidence(r, { kind: 'dataset_authority' }); h.approve(r, 1); const certificate = h.f.certificate(h.p(), r.capsule.capsule_id), original = h.f.target.execute.bind(h.f.target);
   h.f.target.execute = (...args) => { const raw = original(...args); delete raw.output; return raw; };
-  assert.equal(h.f.execute(h.p(), certificate).payload.status, 'UNCERTAIN');
+  // A VERIFIED claim that diverges from the journaled dispatch is an
+  // integrity failure — malformed-UNCERTAIN survives only for outcomes the
+  // journal itself recorded (w12 red-team journal binding).
+  assert.throws(() => h.f.execute(h.p(), certificate), hasCode('INV-409-INTEGRITY'));
   const cert = certificate.payload;
   const authoritative = h.f.target.outcome('acme', cert.certificate_id);
-  assert.equal(h.f.finish(h.p(), cert, { ...authoritative, output: null }, 'VERIFIED', 'MALFORMED_NULL').payload.status, 'UNCERTAIN');
-  assert.equal(h.f.finish(h.p(), cert, { ...authoritative, output: [undefined] }, 'VERIFIED', 'MALFORMED_VALUE').payload.status, 'UNCERTAIN');
+  assert.throws(() => h.f.finish(h.p(), cert, { ...authoritative, output: null }, 'VERIFIED', 'MALFORMED_NULL'), hasCode('INV-409-INTEGRITY'));
   assert.equal(h.f.reconcile(h.p(), cert.certificate_id).payload.status, 'VERIFIED');
 });
