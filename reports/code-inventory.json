@@ -131,7 +131,7 @@
     },
     "scripts/report.mjs": {
       "lines": 110,
-      "bytes": 8262
+      "bytes": 8304
     },
     "scripts/restore-check.mjs": {
       "lines": 72,
@@ -147,7 +147,7 @@
     },
     "scripts/traceability.py": {
       "lines": 54,
-      "bytes": 12652
+      "bytes": 12676
     },
     "scripts/verify-export-webcrypto.mjs": {
       "lines": 61,

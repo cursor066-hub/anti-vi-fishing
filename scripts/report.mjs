@@ -14,7 +14,7 @@ const write = (path, content) => writeFileSync(path, content);
 const tap = run(process.execPath, ['--test', '--test-concurrency=1', '--test-reporter=tap', 'tests/**/*.test.mjs']);
 const tapText = (tap.stdout ?? '') + (tap.stderr ?? '');
 // Strip per-test durations so the committed TAP is byte-stable.
-const stableTap = tapText.replace(/ \([\d.]+ms\)/g, '').replace(/(duration_ms: )[\d.]+/g, '$10');
+const stableTap = tapText.replace(/ \([\d.]+ms\)/g, '').replace(/(duration_ms: )[\d.]+/g, '$10').replace(/(# duration_ms )[\d.]+/g, '$10');
 const num = (re, s) => { const m = s.match(re); return m ? Number(m[1]) : 0; };
 const counts = { pass: num(/# pass (\d+)/, tapText), fail: num(/# fail (\d+)/, tapText) + (tapText.match(/^not ok /gm) ?? []).length };
 write('reports/tests.tap', stableTap);

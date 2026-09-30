@@ -20,7 +20,7 @@
     {
       "type": "library",
       "name": "node",
-      "version": "v24.16.0",
+      "version": "v24.19.0",
       "scope": "required"
     },
     {
@@ -40,28 +40,28 @@
     {
       "type": "library",
       "name": "openssl",
-      "version": "3.5.6",
+      "version": "3.5.7",
       "scope": "required",
       "description": "node vendored component"
     },
     {
       "type": "library",
       "name": "sqlite",
-      "version": "3.53.0",
+      "version": "3.53.3",
       "scope": "required",
       "description": "node vendored component"
     },
     {
       "type": "library",
       "name": "v8",
-      "version": "13.6.233.17-node.49",
+      "version": "13.6.233.17-node.51",
       "scope": "required",
       "description": "node vendored component"
     },
     {
       "type": "library",
       "name": "zlib",
-      "version": "1.3.1-e00f703",
+      "version": "1.3.2.1-motley-3246f1b",
       "scope": "required",
       "description": "node vendored component"
     },

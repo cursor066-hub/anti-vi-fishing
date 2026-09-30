@@ -1561,4 +1561,4 @@ ok 259 - NFR-SEC-004 KEY-002: bootstrap writes vault + master key; config has no
 # cancelled 0
 # skipped 0
 # todo 0
-# duration_ms 11422.265181
+# duration_ms 0
