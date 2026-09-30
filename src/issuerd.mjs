@@ -22,7 +22,13 @@ export function loadIssuers(directory) {
     fields(spec, ['issuer', 'key', 'channel', 'kinds', 'records', 'version']);
     identifier(spec.issuer); text(spec.version, 'issuer version', 32);
     requireThat(['authoritative', 'communication', 'device', 'counterparty'].includes(spec.channel), 'INV-400-SCHEMA', 'Unsupported issuer channel');
-    issuers[spec.issuer] = spec;
+    // Registry key: '<tenant>:<issuer>' when the spec carries a tenant, so
+    // two tenants can run same-named issuers with independent keys/records.
+    // A bare '<issuer>' alias is registered only when unambiguous.
+    const key = spec.tenant ? `${spec.tenant}:${spec.issuer}` : spec.issuer;
+    requireThat(!issuers[key], 'INV-409-CONFLICT', `Duplicate issuer ${key}`, 409);
+    issuers[key] = spec;
+    if (!issuers[spec.issuer]) issuers[spec.issuer] = spec; else if (issuers[spec.issuer] !== spec) issuers[spec.issuer] = { ambiguous: true };
   }
   requireThat(Object.keys(issuers).length > 0, 'INV-503-CONFIG', 'No issuers configured', 503);
   return issuers;
@@ -82,11 +88,16 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
     try {
       const url = new URL(req.url, `http://${host}:${port}`);
       if (req.method === 'GET' && url.pathname === '/v1/issuers') {
-        return send(200, Object.fromEntries(Object.values(issuers).map(i => [i.issuer, { channel: i.channel, version: i.version, kinds: Object.keys(i.kinds), key_id: i.key.key_id, public_key: i.key.public_key }])));
+        const out = {};
+        for (const [k, i] of Object.entries(issuers)) if (!i.ambiguous && i.issuer) out[k] = { issuer: i.issuer, tenant: i.tenant ?? null, channel: i.channel, version: i.version, kinds: Object.keys(i.kinds), key_id: i.key.key_id, public_key: i.key.public_key };
+        return send(200, out);
       }
+      // Tenant-aware resolution: '<tenant>:<issuer>' wins; a bare name
+      // resolves only when it is not ambiguous across tenants.
+      const resolveIssuer = (name, tenant) => (tenant && issuers[`${tenant}:${name}`]) || (issuers[name] && !issuers[name].ambiguous ? issuers[name] : (issuers[`${tenant}:${name}`] ?? null));
       let m;
       if (req.method === 'GET' && (m = /^\/v1\/issuers\/([A-Za-z0-9_-]+)\/manifest$/.exec(url.pathname))) {
-        const issuer = issuers[m[1]];
+        const issuer = resolveIssuer(m[1], url.searchParams.get('tenant'));
         requireThat(issuer, 'INV-404-NOT-FOUND', 'Issuer not found', 404);
         return send(200, signed({
           connector_id: `issuer:${issuer.issuer}`, version: issuer.version, domain: issuer.channel,
@@ -97,14 +108,14 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
         }, issuer.key, 'connector-manifest'));
       }
       if (req.method === 'POST' && (m = /^\/v1\/issuers\/([A-Za-z0-9_-]+)\/issue$/.exec(url.pathname))) {
-        const issuer = issuers[m[1]];
-        requireThat(issuer, 'INV-404-NOT-FOUND', 'Issuer not found', 404);
         const chunks = []; let size = 0;
         for await (const c of req) { size += c.length; requireThat(size <= 262144, 'INV-413-BODY', 'Request too large', 413); chunks.push(c); }
         const request = parseStrict(Buffer.concat(chunks).toString('utf8'));
         fields(request, ['tenant_id', 'capsule_digest', 'kind', 'subject_id', 'claims'], ['dependencies']);
         identifier(request.tenant_id, 'tenant'); identifier(request.subject_id, 'subject'); text(request.kind, 'kind', 64);
         requireThat(/^[a-f0-9]{64}$/.test(request.capsule_digest), 'INV-400-SCHEMA', 'capsule_digest must be a digest');
+        const issuer = resolveIssuer(m[1], request.tenant_id);
+        requireThat(issuer, 'INV-404-NOT-FOUND', 'Issuer not found', 404);
         try {
           const envelope = answerQuery(issuer, request, clock());
           issuanceLog({ issuer: issuer.issuer, request_digest: digest(request), evidence_id: envelope.payload.evidence_id, claim: envelope.payload.claim });
@@ -115,7 +126,7 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
         }
       }
       if (req.method === 'GET' && (m = /^\/v1\/issuers\/([A-Za-z0-9_-]+)\/health$/.exec(url.pathname))) {
-        const issuer = issuers[m[1]];
+        const issuer = resolveIssuer(m[1], url.searchParams.get('tenant'));
         requireThat(issuer, 'INV-404-NOT-FOUND', 'Issuer not found', 404);
         return send(200, { status: 'ok', issuer: issuer.issuer, version: issuer.version, records: Object.keys(issuer.records).length, uptime_ms: process.uptime() * 1000 | 0 });
       }

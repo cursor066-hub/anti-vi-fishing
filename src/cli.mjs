@@ -25,6 +25,16 @@ try {
     let closing = false;
     const close = async () => { if (closing) return; closing = true; await app.close(); fabric.close(); process.exitCode = 0; };
     process.on('SIGINT', close); process.on('SIGTERM', close);
+  } else if (command === 'issuerd') {
+    const { loadIssuers, createIssuerServer } = await import('./issuerd.mjs');
+    const directory = resolve(option('dir', './var/local/issuers')), port = Number(option('port', '8090'));
+    requireThat(Number.isInteger(port) && port >= 1024 && port <= 65535, 'INV-400-SCHEMA', 'Port must be in 1024–65535');
+    const issuers = loadIssuers(directory);
+    const app = createIssuerServer(issuers, { port, logPath: join(directory, 'issuance-log.jsonl') }); await app.listen();
+    console.log(`Invariant evidence issuers on http://127.0.0.1:${port} serving: ${[...new Set(Object.values(issuers).filter(i => i.issuer).map(i => i.issuer))].join(', ')}`);
+    let closing = false;
+    const close = async () => { if (closing) return; closing = true; await app.close(); process.exitCode = 0; };
+    process.on('SIGINT', close); process.on('SIGTERM', close);
   } else if (command === 'sign') {
     const keyPath = option('key'), inputPath = option('input'), outputPath = option('output'), purpose = option('purpose', 'action-approval');
     requireThat(keyPath && inputPath && outputPath, 'INV-400-SCHEMA', 'sign requires --key, --input and --output');
@@ -34,7 +44,7 @@ try {
     writeFileSync(outputPath, canonical(signed(payload, key, purpose)) + '\n', { flag: 'wx', mode: 0o600 });
     console.log(`Signed ${purpose} to ${resolve(outputPath)}. Software signature only; not trusted-display or WebAuthn confirmation.`);
   } else {
-    console.log('Usage:\n  node src/cli.mjs init --dir ./var/local [--tenants acme,globex]\n  node src/cli.mjs serve --dir ./var/local [--port 8080] [--origin http://127.0.0.1:8080]\n  node src/cli.mjs sign --key PATH --input PATH --output PATH [--purpose action-approval|evidence|root-policy]');
+    console.log('Usage:\n  node src/cli.mjs init --dir ./var/local [--tenants acme,globex]\n  node src/cli.mjs issuerd --dir ./var/local/issuers [--port 8090]\n  node src/cli.mjs serve --dir ./var/local [--port 8080] [--origin http://127.0.0.1:8080]\n  node src/cli.mjs sign --key PATH --input PATH --output PATH [--purpose action-approval|evidence|root-policy]');
     if (command) process.exitCode = 2;
   }
 } catch (e) { console.error(JSON.stringify({ error: e.code ?? 'INV-500-CLI', message: e.code ? e.message : 'Command failed; verify local paths and file permissions. No secret values were printed.' })); process.exitCode = 1; }

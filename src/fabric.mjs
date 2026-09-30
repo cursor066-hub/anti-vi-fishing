@@ -242,7 +242,7 @@ export class Fabric {
     const issuer = this.tenant(p.tenant_id).issuers[key_id];
     requireThat(issuer?.endpoint, 'INV-404-NOT-FOUND', 'Issuer endpoint not found', 404);
     let observed;
-    try { observed = await httpJson(`${issuer.endpoint}/v1/issuers/${issuer.name}/manifest`, { method: 'GET', timeout_ms: 10000 }); } catch (e) {
+    try { const res = await httpJson(`${issuer.endpoint}/v1/issuers/${issuer.name}/manifest?tenant=${p.tenant_id}`, { method: 'GET', timeout_ms: 10000 }); requireThat(res.status === 200, 'INV-503-CONNECTOR', `Manifest fetch refused (${res.status})`, 503); observed = res.data; } catch (e) {
       return this.transaction(p, now => { this.store.audit(p.tenant_id, 'CONNECTOR_DRIFT', p.subject_id, key_id, { drifted: 'unreachable', code: e.code ?? 'transport' }, now); return { drifted: true, changes: [{ field: 'endpoint', detail: 'unreachable' }], checked_at: now }; });
     }
     const registered = { version: issuer.version ?? '1.0.0', kinds: issuer.kinds, channel: issuer.channel, key_id };

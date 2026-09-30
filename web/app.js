@@ -73,7 +73,8 @@ if (typeof document !== 'undefined') {
     $('identity').textContent = `${state.me.tenant_id} / ${state.me.subject_id}`; $('logout').hidden = false; $('login-panel').hidden = true; $('workspace').hidden = false;
     state.schemas = await api('/v1/schemas'); $('action-type').replaceChildren(new Option('Choose action type', '')); for (const s of state.schemas.filter(s => s.type.startsWith('finance.'))) $('action-type').append(new Option(s.type, s.type));
     const canActions = state.me.roles.some(r => ['operator', 'approver', 'custodian', 'security', 'policy_admin'].includes(r));
-    const access = { actions: canActions, propose: state.me.roles.includes('operator'), coverage: true, policy: state.me.roles.some(r => ['policy_admin', 'security'].includes(r)), runtime: state.me.roles.includes('operator'), audit: state.me.roles.some(r => ['auditor', 'security'].includes(r)) };
+    const admin = state.me.roles.some(r => ['security', 'policy_admin', 'custodian'].includes(r));
+    const access = { actions: canActions, propose: state.me.roles.includes('operator'), coverage: true, policy: state.me.roles.some(r => ['policy_admin', 'security'].includes(r)), runtime: state.me.roles.includes('operator'), audit: state.me.roles.some(r => ['auditor', 'security'].includes(r)), keys: state.me.roles.some(r => ['security', 'policy_admin', 'auditor'].includes(r)), ceremonies: admin, connectors: canActions || state.me.roles.includes('auditor'), proofs: canActions || state.me.roles.includes('auditor'), perception: state.me.roles.includes('operator'), grants: canActions || state.me.roles.includes('auditor') };
     document.querySelectorAll('nav button').forEach(b => { b.hidden = !access[b.dataset.view]; });
     if (canActions) { show('actions'); await loadList(); } else { show('audit'); }
     notify('Connected to the isolated engineering workspace. Targets and evidence issuers are synthetic.');
@@ -111,4 +112,56 @@ if (typeof document !== 'undefined') {
   });
   handle('runtime-read', 'click', async () => { const c = state.runtime.payload; $('runtime-result').textContent = JSON.stringify(await api('/gate/v1/runtime', { method: 'POST', body: { capability: state.runtime, device_id: c.device_id, resource: c.resource, destination: c.destination, action: c.action, purpose: c.purpose, columns: c.columns, row_ids: c.row_ids, request_id: crypto.randomUUID(), protocol: 'https', port: 443 } }), null, 2); });
   handle('audit-form', 'submit', async () => { const bundle = await api('/v1/audit-exports', { method: 'POST', body: { purpose: $('audit-purpose').value } }); download(bundle, `invariant-audit-${state.me.tenant_id}.json`); notify(`Exported ${bundle.entries.length} linked records. Verify with an independently pinned trust key.`); });
+  async function loadKeys() {
+    const data = await api('/v1/keys'); $('key-rows').replaceChildren();
+    for (const k of data.keys) {
+      const tr = node('tr'), title = node('td', `${k.key_id.slice(0, 12)}… ${k.purpose}`); title.append(node('span', `${k.suite} · ${k.exportable ? 'exportable' : 'non-exportable'}`, 'resource'));
+      const status = node('td', k.revoked ? 'revoked' : k.pending ? 'pending' : 'active');
+      const cell = node('td'), button = node('button', 'Attest', 'secondary');
+      button.addEventListener('click', async () => { $('attest-result').textContent = JSON.stringify(await api(`/v1/keys/${k.key_id}/attest`), null, 2); });
+      cell.append(button); tr.append(title, status, cell); $('key-rows').append(tr);
+    }
+  }
+  handle('refresh-keys', 'click', loadKeys);
+  handle('rotate-form', 'submit', async () => { const out = await api('/v1/keys/rotate-prepare', { method: 'POST', body: { key_class: $('rotate-class').value } }); $('rotate-result').textContent = JSON.stringify(out, null, 2); await loadKeys(); notify('Pending key created inside the vault. Activate it via a verified key.rotate action.'); });
+  let selectedCeremony = null;
+  async function loadCeremonies() {
+    const data = await api('/v1/ceremonies'); $('ceremony-rows').replaceChildren();
+    for (const c of data.items) {
+      const tr = node('tr'), title = node('td', c.ceremony_id); title.append(node('span', c.purpose, 'resource'));
+      const cell = node('td'), button = node('button', 'Open', 'secondary'); button.addEventListener('click', () => selectCeremony(c)); cell.append(button);
+      tr.append(title, node('td', c.status), cell); $('ceremony-rows').append(tr);
+    }
+  }
+  function selectCeremony(c) { selectedCeremony = c; $('ceremony-title').textContent = c.ceremony_id; $('ceremony-detail').textContent = JSON.stringify(c, null, 2); }
+  handle('refresh-ceremonies', 'click', loadCeremonies);
+  handle('ceremony-form', 'submit', async () => {
+    const body = { ceremony_id: $('cer-id').value, purpose: $('cer-purpose').value, threshold: typedValue($('cer-threshold').value, 'positive'), custodians: csvSelection($('cer-custodians').value), valid_until: Date.now() + typedValue($('cer-ttl').value, 'positive') * 60000 };
+    const c = await api('/v1/ceremonies', { method: 'POST', body }); await loadCeremonies(); selectCeremony(c); notify('Ceremony created. Custodians acknowledge offline.');
+  });
+  handle('ack-form', 'submit', async () => { if (!selectedCeremony) throw new Error('Select a ceremony first.'); await api(`/v1/ceremonies/${selectedCeremony.ceremony_id}/acknowledge`, { method: 'POST', body: JSON.parse($('ack-json').value) }); $('ack-json').value = ''; await loadCeremonies(); notify('Custodian acknowledgement recorded.'); });
+  handle('split-form', 'submit', async () => { if (!selectedCeremony) throw new Error('Select a ceremony first.'); const out = await api(`/v1/ceremonies/${selectedCeremony.ceremony_id}/split`, { method: 'POST', body: { secret: $('split-secret').value.trim() } }); $('ceremony-result').textContent = JSON.stringify(out, null, 2); download(out, `shares-${selectedCeremony.ceremony_id}.json`); notify('Shares split. Distribute each share to its named custodian.'); });
+  handle('reconstruct-form', 'submit', async () => { if (!selectedCeremony) throw new Error('Select a ceremony first.'); const shares = $('reconstruct-shares').value.split('\n').map(s => s.trim()).filter(Boolean); const out = await api(`/v1/ceremonies/${selectedCeremony.ceremony_id}/reconstruct`, { method: 'POST', body: { shares } }); $('ceremony-result').textContent = JSON.stringify(out, null, 2); });
+  async function loadConnectors() {
+    const data = await api('/v1/connectors/status'); $('connector-rows').replaceChildren();
+    for (const i of data.issuers) {
+      const tr = node('tr'), title = node('td', i.name ?? i.key_id.slice(0, 12)); title.append(node('span', i.key_id.slice(0, 12), 'resource'));
+      const cell = node('td'), button = node('button', 'Drift check', 'secondary');
+      if (!i.endpoint) { button.disabled = true; button.title = 'No live endpoint registered'; }
+      button.addEventListener('click', async () => { $('drift-result').textContent = JSON.stringify(await api(`/v1/connectors/${i.key_id}/drift-check`, { method: 'POST', body: {} }), null, 2); });
+      cell.append(button); tr.append(title, node('td', `${i.channel} / ${i.failure_domain}`), node('td', i.endpoint ?? 'offline envelope only'), node('td', i.revoked ? 'revoked' : 'trusted'), cell); $('connector-rows').append(tr);
+    }
+  }
+  handle('refresh-connectors', 'click', loadConnectors);
+  let lastProof = null;
+  handle('proof-form', 'submit', async () => { lastProof = await api(`/v1/audit/proofs/${$('proof-seq').value}`); $('proof-result').textContent = JSON.stringify(lastProof, null, 2); $('verify-proof').disabled = false; });
+  handle('verify-proof', 'click', async () => { if (!lastProof) return; const out = await api('/v1/audit/verify-proof', { method: 'POST', body: { proof: lastProof } }); notify(out.valid ? 'Inclusion proof verifies against the exported tree head.' : 'Proof failed to verify.', !out.valid); });
+  handle('consistency-form', 'submit', async () => { $('proof-result').textContent = JSON.stringify(await api(`/v1/audit/consistency?first=${$('consistency-first').value}`), null, 2); });
+  handle('perception-form', 'submit', async () => { const session = await api('/v1/secure-perception/sessions', { method: 'POST', body: { attestation: JSON.parse($('attestation-json').value) } }); $('release-session').value = session.session_id; $('perception-result').textContent = JSON.stringify(session, null, 2); notify('Dev-attested session opened. This is software attestation, not a trusted display.'); });
+  handle('release-form', 'submit', async () => { const body = { session_id: $('release-session').value.trim(), fields: csvSelection($('release-fields').value), purpose: $('release-purpose').value }; $('perception-result').textContent = JSON.stringify(await api('/v1/secure-perception/release', { method: 'POST', body }), null, 2); });
+  handle('fallback-form', 'submit', async () => { $('perception-result').textContent = JSON.stringify(await api('/v1/secure-perception/fallback', { method: 'POST', body: { reason: $('fallback-reason').value } }), null, 2); });
+  handle('grants-form', 'submit', async () => { const subject = $('grants-subject').value.trim(); $('grants-result').textContent = JSON.stringify(await api(`/v1/grants${subject ? `?subject=${encodeURIComponent(subject)}` : ''}`), null, 2); });
+  handle('refresh-grants', 'click', async () => { $('grants-result').textContent = JSON.stringify(await api('/v1/grants'), null, 2); });
+  const loaders = { keys: loadKeys, ceremonies: loadCeremonies, connectors: loadConnectors, grants: async () => {} };
+  document.querySelectorAll('nav button').forEach(b => { const fn = loaders[b.dataset.view]; if (fn) b.addEventListener('click', async () => { try { await fn(); } catch (e) { notify(e.message, true); } }); });
 }
