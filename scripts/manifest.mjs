@@ -6,6 +6,10 @@ import { join, relative } from 'node:path';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 
+// Anchor at the repository root — run from a subdirectory and the manifest
+// would describe only that subtree (w8-tooling F3).
+process.chdir(new URL('..', import.meta.url).pathname);
+
 const EXCLUDE_DIRS = new Set(['node_modules', '.git', 'var', '.devin-files']);
 const EXCLUDE_FILES = new Set(['MANIFEST.sha256']);
 function* walk(dir) {

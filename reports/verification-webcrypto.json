@@ -1,5 +1,5 @@
 {
   "verifier": "scripts/verify-export-webcrypto.mjs (bun WebCrypto)",
   "exit": 0,
-  "output": "{\"valid\":true,\"entries\":156,\"head\":\"181df99a79c3a5485f7e6f5e40e39ea3886065faf7f4638eb88531f02c605c61\",\"tenant_id\":\"acme\",\"verifier\":\"independent-webcrypto\"}"
+  "output": "{\"valid\":true,\"entries\":156,\"head\":\"52fd84ba80431179af52a630d0837a5ecc0f54159fe700da9154d96698649069\",\"tenant_id\":\"acme\",\"verifier\":\"independent-webcrypto\"}"
 }

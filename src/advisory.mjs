@@ -82,7 +82,9 @@ const INTENT_WORDS = [
   [/contract/i, 'legal.contract.execute'], [/investigat/i, 'security.case.investigate'], [/model/i, 'ai.model.deploy']
 ];
 export function classifyIntent(textIn, model = 'intent-v1') {
-  text(textIn, 'request text', 100000);
+  // Same ceiling as extract() — both feed the canonical digest path
+  // (w8-fixverify F9).
+  text(textIn, 'request text', 65536);
   const m = MODELS[model]; requireThat(m && m.kind === 'intent-classification', 'INV-400-SCHEMA', 'Unknown intent model');
   const matches = INTENT_WORDS.filter(([re]) => re.test(textIn)).map(([, type]) => type);
   const uniq = [...new Set(matches)];

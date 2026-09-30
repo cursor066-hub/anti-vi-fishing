@@ -2,17 +2,23 @@ import { readdirSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
+// Run from the repository root regardless of the caller's cwd — a gate that
+// follows the invoking directory verifies whatever tree the caller chose
+// (w8-tooling F3).
+process.chdir(new URL('..', import.meta.url).pathname);
+
 // Scan every code file in the tracked tree — not a directory allowlist —
 // so a committed syntactically-invalid file anywhere fails the gate
 // (release-audit H4). node_modules/, .git/ and runtime state (var/) are
-// excluded; everything else with a script extension is parsed.
-const SKIP = new Set(['node_modules', '.git', 'var', '.nyc_output', 'coverage']);
+// excluded; everything else with a script extension is parsed. Dot-directories
+// are scanned too — a hidden dir cannot shelter hostile code (w8-tooling F6).
+const SKIP = new Set(['node_modules', '.git', 'var', '.nyc_output', 'coverage', '.devin-files']);
 const CODE_EXT = /\.(mjs|js|cjs)$/;
 const ANY_EXT = /\.(mjs|js|cjs|ts)$/;
 const files = [];
 function walk(dir) {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (entry.isDirectory() && (SKIP.has(entry.name) || entry.name.startsWith('.'))) continue;
+    if (entry.isDirectory() && SKIP.has(entry.name)) continue;
     const p = join(dir, entry.name).replaceAll('\\', '/');
     if (entry.isDirectory()) walk(p); else if (ANY_EXT.test(p)) files.push(p);
   }

@@ -153,9 +153,13 @@ export class Fabric {
   // embedded-custody dev profile falls back to the plaintext fields
   // (DEK-audit F2).
   dataKey(t, kind) {
-    const row = this.tenant(t), wrapped = row[`${kind}_key_wrapped`];
-    if (wrapped) return decrypt(wrapped, this.vault.masterKey, `data-key/${t}/${kind}`);
-    return row[`${kind}_key`];
+    const row = this.tenant(t), wrapped = row[`${kind}_key_wrapped`], plain = row[`${kind}_key`];
+    // Ambiguous custody is refused, not silently resolved: a config carrying
+    // both a wrapped and a plaintext twin for the same key is a defect an
+    // operator must fix (w8-fixverify F6).
+    requireThat(!(wrapped && plain), 'INV-503-CONFIG', `Tenant ${t} has both wrapped and plaintext ${kind} key material`, 503);
+    if (wrapped) try { return decrypt(wrapped, this.vault.masterKey, `data-key/${t}/${kind}`); } catch { throw new InvariantError('INV-503-CONFIG', `Wrapped ${kind} data key for ${t} is malformed`, 503); }
+    return plain;
   }
   keys(t) { return this.tenant(t).keys; }
   // Verification keys for execution signatures: current plus retired keys so
@@ -968,7 +972,9 @@ export class Fabric {
       const weight = this.policy(t).runtime.sensitivity_weights[dataset.classification] ?? 1;
       const cost = requested.row_ids.length * requested.columns.length * weight;
       this.store.db.prepare('INSERT INTO usage VALUES(?,?,?,?,?,?,?)').run(t, subject, requested.dataset, now, cost, `cert:${cert.certificate_id}`, cert.certificate_id);
-      return { watermarks: watermark(raw.output ?? [], { tenant: t, dataset: requested.dataset, subject, requestId: cert.certificate_id, tenantWatermarkKey: this.dataKey(t, 'watermark') ?? this.dataKey(t, 'encryption') }).watermarks };
+      let tenantWatermarkKey;
+      try { tenantWatermarkKey = this.dataKey(t, 'watermark'); } catch { tenantWatermarkKey = null; }
+      return { watermarks: watermark(raw.output ?? [], { tenant: t, dataset: requested.dataset, subject, requestId: cert.certificate_id, tenantWatermarkKey: tenantWatermarkKey ?? this.dataKey(t, 'encryption') }).watermarks };
     }
     return null;
   }
@@ -1321,27 +1327,34 @@ export class Fabric {
       // Enumerate by id and load each record individually: a single
       // undecryptable evidence/capsule row is reported, not a sweep-wedging
       // exception (store-audit MED-3). Any residue is honestly flagged.
-      const evidenceIds = this.store.ids(p.tenant_id, 'evidence', 20000), capsuleIds = this.store.ids(p.tenant_id, 'capsule', 20000);
-      const items = [], records = [], corrupt = [];
+      const evidenceIds = this.store.ids(p.tenant_id, 'evidence', 20000), capsuleIds = this.store.ids(p.tenant_id, 'capsule', 20000), coverageIdsList = this.store.ids(p.tenant_id, 'coverage', 10000);
+      const items = [], records = [], corrupt = [], citedEvidence = new Set();
       for (const id of evidenceIds) { try { items.push(this.store.must(p.tenant_id, 'evidence', id)); } catch { corrupt.push(['evidence', id]); } }
       for (const id of capsuleIds) { try { records.push(this.store.must(p.tenant_id, 'capsule', id)); } catch { corrupt.push(['capsule', id]); } }
+      // Coverage rows join the reference scan per-id: one corrupt coverage
+      // record must not wedge the whole sweep (w8-fixverify F5).
+      for (const id of coverageIdsList) { try { const c = this.store.must(p.tenant_id, 'coverage', id); if (c.technical_validation?.evidence_id) citedEvidence.add(c.technical_validation.evidence_id); } catch { corrupt.push(['coverage', id]); } }
       // Undecryptable residue is itself erased — a corrupt row can never
       // become readable again, so keeping it only leaks ciphertext
       // indefinitely (DEK-audit F5).
       for (const [kind, id] of corrupt) this.store.shred(p.tenant_id, kind, id);
-      const truncated = evidenceIds.length === 20000 || capsuleIds.length === 20000;
+      const truncated = evidenceIds.length === 20000 || capsuleIds.length === 20000 || coverageIdsList.length === 10000;
       let deleted = 0, held = 0;
       // Conservative batch boundary: do not erase if a reference could be outside this scan.
       if (truncated) return { deleted: 0, held: items.length, corrupt: corrupt.length, reason: 'Reference scan limit reached; no deletion performed', complete_payload_erasure: false, truncated: true };
       for (const e of items) {
         if (e.payload.retention_until > now) continue;
-        const activeReference = records.some(r => r.evidence.includes(e.payload.evidence_id) && !['VERIFIED', 'FAILED', 'DENY', 'CANCELLED', 'COMPENSATED'].includes(r.status)) || this.store.list(p.tenant_id, 'coverage', 10000, 0).some(c => c.technical_validation?.evidence_id === e.payload.evidence_id);
+        const activeReference = records.some(r => Array.isArray(r.evidence) && r.evidence.includes(e.payload.evidence_id) && !['VERIFIED', 'FAILED', 'DENY', 'CANCELLED', 'COMPENSATED'].includes(r.status)) || citedEvidence.has(e.payload.evidence_id);
         if (e.legal_hold || activeReference) { held++; continue; }
         const original_digest = digest(e.envelope);
         // put(), not insert(): an issuer may legitimately re-mint a shredded
         // evidence_id — a stale tombstone must then be overwritten, or the
         // sweep wedges permanently on INV-409-CONFLICT (DEK-audit F1).
-        this.store.put(p.tenant_id, 'evidence-tombstone', e.payload.evidence_id, { evidence_id: e.payload.evidence_id, original_digest, deleted_at: now }, now);
+        // Re-minted evidence ids overwrite the tombstone but never erase the
+        // receipt history — earlier erasures stay provable (w8-fixverify F7).
+        const priorTomb = this.store.get(p.tenant_id, 'evidence-tombstone', e.payload.evidence_id);
+        const superseded = priorTomb ? [...(priorTomb.superseded ?? []), { original_digest: priorTomb.original_digest, deleted_at: priorTomb.deleted_at }] : [];
+        this.store.put(p.tenant_id, 'evidence-tombstone', e.payload.evidence_id, { evidence_id: e.payload.evidence_id, original_digest, deleted_at: now, superseded }, now);
         this.store.shred(p.tenant_id, 'evidence', e.payload.evidence_id); deleted++;
         this.store.audit(p.tenant_id, 'RETENTION_DELETED', p.subject_id, e.payload.evidence_id, { original_digest, crypto_shred: true }, now);
       }
@@ -1495,7 +1508,7 @@ export class Fabric {
       text(release.purpose, 'purpose', 512);
       this._releaseCitation(t, release, p, now);
       const result = releaseFields(session, release, this.policy(t), now);
-      this.store.audit(t, 'PERCEPTION_RELEASE', p.subject_id, session_id, { fields: result.binding.fields, assurance: result.assurance, capsule_id: release.capsule_id ?? null }, now);
+      this.store.audit(t, 'PERCEPTION_RELEASE', p.subject_id, session_id, { fields: result.binding.fields, assurance: result.assurance, capsule_id: release.capsule_id ?? null, evidence_ref: release.evidence_ref ?? null }, now);
       return result;
     });
   }
@@ -1505,16 +1518,29 @@ export class Fabric {
   // the sealed release and the labeled fallback so neither path can mint a
   // free-floating citation (w6-perception P-8).
   _releaseCitation(t, release, p, now) {
+    // A citation means "this release draws on provenance that already passed
+    // evaluation" — an undecided, expired, advisory or foreign capsule/
+    // evidence can never launder sealed fields (w8-fixverify F4).
+    const checkCapsule = record => {
+      requireThat(record && record.capsule.expires_at > now, 'INV-404-NOT-FOUND', 'Release cites no live capsule', 404);
+      requireThat(record.capsule.actor.subject_id === p.subject_id, 'INV-403-SCOPE', 'Release cites a capsule belonging to another actor', 403);
+      requireThat(record.decision, 'INV-409-STATE', 'Release cites an undecided capsule', 409);
+      return record;
+    };
     let cited = null;
-    if (release.capsule_id !== undefined) {
-      cited = this.store.get(t, 'capsule', identifier(release.capsule_id, 'capsule'));
-      requireThat(cited && cited.capsule.expires_at > now, 'INV-404-NOT-FOUND', 'Release cites no live capsule', 404);
-      requireThat(cited.capsule.actor.subject_id === p.subject_id, 'INV-403-SCOPE', 'Release cites a capsule belonging to another actor', 403);
-    }
+    if (release.capsule_id !== undefined)
+      cited = checkCapsule(this.store.get(t, 'capsule', identifier(release.capsule_id, 'capsule')));
     if (release.evidence_ref !== undefined) {
       const ev = this.store.get(t, 'evidence', identifier(release.evidence_ref, 'evidence'));
-      requireThat(ev, 'INV-404-NOT-FOUND', 'Release cites nonexistent evidence', 404);
-      if (cited) requireThat(ev.envelope?.payload?.capsule_digest === cited.capsule_digest, 'INV-403-SCOPE', 'Evidence does not support the cited capsule', 403);
+      const payload = ev?.envelope?.payload;
+      requireThat(payload, 'INV-404-NOT-FOUND', 'Release cites nonexistent evidence', 404);
+      requireThat(payload.expires_at > now, 'INV-412-EVIDENCE', 'Release cites expired evidence', 412);
+      requireThat(payload.advisory !== true, 'INV-412-EVIDENCE', 'Advisory evidence cannot be cited as authority', 412);
+      // An evidence-only citation still binds the capsule it supports — the
+      // citation can never float free of its evaluated context.
+      const backing = cited ?? checkCapsule(this.store.list(t, 'capsule', 10000).find(r => r.capsule_digest === payload.capsule_digest));
+      if (cited) requireThat(payload.capsule_digest === cited.capsule_digest, 'INV-403-SCOPE', 'Evidence does not support the cited capsule', 403);
+      else cited = backing;
     }
     return cited;
   }
@@ -1527,7 +1553,7 @@ export class Fabric {
       this.assertHealthy(p.tenant_id, p.subject_id, this.identity(p).device_id, now);
       this._releaseCitation(p.tenant_id, release, p, now);
       const result = workspaceFallback(release, this.policy(p.tenant_id), now);
-      this.store.audit(p.tenant_id, 'PERCEPTION_FALLBACK', p.subject_id, 'workspace', { fields: result.binding.fields, assurance: result.assurance }, now);
+      this.store.audit(p.tenant_id, 'PERCEPTION_FALLBACK', p.subject_id, 'workspace', { fields: result.binding.fields, assurance: result.assurance, capsule_id: release.capsule_id ?? null, evidence_ref: release.evidence_ref ?? null }, now);
       return result;
     });
   }

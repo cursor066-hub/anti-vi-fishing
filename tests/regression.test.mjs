@@ -331,6 +331,8 @@ test('L3: secure-perception release binds capsule_id and evidence_ref into the s
   const session = h.f.perceptionSession(h.p(), component.attest('b'.repeat(64), h.now() + 300000));
   const r = h.proposed();
   const evidence = h.evidence(r);
+  // Citations point at decided authority — evaluate first (w8-fixverify F4).
+  h.f.evaluate(h.p(), r.capsule.capsule_id);
   const released = h.f.perceptionRelease(h.p(), session.session_id, { fields: { vendor: 'v1' }, purpose: 'verify', capsule_id: r.capsule.capsule_id, evidence_ref: evidence.payload.evidence_id });
   assert.equal(released.binding.capsule_id, r.capsule.capsule_id);
   assert.equal(released.binding.evidence_ref, evidence.payload.evidence_id);

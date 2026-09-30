@@ -7,8 +7,16 @@ import { writeFileSync, readFileSync, readdirSync, statSync, existsSync } from '
 import { join } from 'node:path';
 
 const now = new Date().toISOString();
+// --check-only verifies committed reports match a fresh regeneration
+// without writing — the read-only sibling of this generator
+// (w8-tooling F10).
+const checkOnly = process.argv.includes('--check-only');
+const stale = [];
 const run = (cmd, args, opts = {}) => spawnSync(cmd, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, ...opts });
-const write = (path, content) => writeFileSync(path, content);
+const write = (path, content) => {
+  if (checkOnly) { if (!existsSync(path) || readFileSync(path, 'utf8') !== content) stale.push(path); return; }
+  writeFileSync(path, content);
+};
 
 // ---- 1. Full test suite → tests.tap / final-regression.tap + summaries ----
 const tap = run(process.execPath, ['--test', '--test-concurrency=1', '--test-reporter=tap', 'tests/**/*.test.mjs']);
@@ -105,5 +113,6 @@ VERIFIED_IN_ENGINEERING_PROFILE means directly exercised in the declared enginee
 
 Independent verification: node:crypto export verifier, WebCrypto/bun export verifier, Python cryptography vector verifier — see reports/verification-*.json.
 `);
-console.log(JSON.stringify({ regenerated: true, tests: counts, sims, ledger: statusCounts }));
+console.log(JSON.stringify(checkOnly ? { check_only: true, stale } : { regenerated: true, tests: counts, sims, ledger: statusCounts }));
+if (stale.length) { console.error(`stale committed reports: ${stale.join(', ')} — run node scripts/report.mjs and commit`); process.exitCode = 1; }
 if (counts.fail > 0 || tap.status !== 0) process.exitCode = 1;

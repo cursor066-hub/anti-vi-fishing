@@ -22,6 +22,10 @@ export class SimulatedTarget {
       CREATE TABLE IF NOT EXISTS secrets_registry(tenant TEXT, secret_id TEXT, version INTEGER, value TEXT, PRIMARY KEY(tenant,secret_id));
       CREATE TABLE IF NOT EXISTS grants(tenant TEXT, grant_id TEXT, value TEXT, PRIMARY KEY(tenant,grant_id));
       CREATE INDEX IF NOT EXISTS grants_subject ON grants(tenant);`);
+    // Crash residue: a post-delete checkpoint that never ran leaves superseded
+    // ciphertext in the WAL — truncate at open like the ledger store does
+    // (w8-fixverify F3).
+    this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
   }
   close() { this.db.close(); }
   tx(fn) {
@@ -30,8 +34,11 @@ export class SimulatedTarget {
     try {
       const r = fn(); this.db.exec('COMMIT');
       // Deleted ciphertext must not linger in the WAL — any armed delete
-      // truncates the log right at the commit boundary (DEK-audit F4).
-      if (this._deleted) { this._deleted = false; this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); }
+      // truncates the log right at the commit boundary (DEK-audit F4). A
+      // contended checkpoint throws SQLITE_LOCKED after the COMMIT: the write
+      // is durable, so the flag stays armed for the next tx instead of
+      // failing committed work (w8-fixverify F2).
+      if (this._deleted) try { this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); this._deleted = false; } catch { /* retry next tx */ }
       return r;
     }
     catch (e) { this.db.exec('ROLLBACK'); throw e; }
@@ -68,9 +75,9 @@ export class SimulatedTarget {
     const { rows, ...meta } = fields;
     return this.tx(() => {
       const state = this._readResource(tenant, id);
+      this._deleted = true; // upsert supersedes ciphertext — truncate at commit (w8-fixverify F3)
       this.db.prepare('INSERT INTO resources VALUES(?,?,?,?) ON CONFLICT(tenant,id) DO UPDATE SET version=excluded.version,value=excluded.value').run(tenant, id, state.version + 1, encrypt(meta, this.key(tenant), `${tenant}/resource/${id}`));
       if (Array.isArray(rows)) {
-        this._deleted = true;
         this.db.prepare('DELETE FROM dataset_rows WHERE tenant=? AND dataset=?').run(tenant, id);
         for (const row of rows) {
           const { id: row_id, ...data } = row;
@@ -97,9 +104,11 @@ export class SimulatedTarget {
     return { version: row?.version ?? 0, digest: digest(material_fields), material_fields };
   }
   _writeSecret(tenant, secret_id, version, fields) {
+    this._deleted = true; // secret upsert supersedes ciphertext (w8-fixverify F3)
     this.db.prepare('INSERT INTO secrets_registry VALUES(?,?,?,?) ON CONFLICT(tenant,secret_id) DO UPDATE SET version=excluded.version,value=excluded.value').run(tenant, secret_id, version, encrypt(fields, this.key(tenant), `${tenant}/secret/${secret_id}`));
   }
   grant(tenant, grant_id, value) {
+    this._deleted = true; // grant upsert supersedes ciphertext (w8-fixverify F3)
     this.db.prepare('INSERT INTO grants VALUES(?,?,?) ON CONFLICT(tenant,grant_id) DO UPDATE SET value=excluded.value').run(tenant, grant_id, encrypt(value, this.key(tenant), `${tenant}/grant/${grant_id}`));
   }
   grants(tenant, subject_id, now) {
@@ -116,6 +125,7 @@ export class SimulatedTarget {
     requireThat(row, 'INV-404-NOT-FOUND', 'Grant not found', 404);
     const value = decrypt(row.value, this.key(tenant), `${tenant}/grant/${grant_id}`);
     value.revoked = true;
+    this._deleted = true; // revoke supersedes ciphertext (w8-fixverify F3)
     this.db.prepare('UPDATE grants SET value=? WHERE tenant=? AND grant_id=?').run(encrypt(value, this.key(tenant), `${tenant}/grant/${grant_id}`), tenant, grant_id);
     return value;
   }
@@ -177,10 +187,13 @@ export class SimulatedTarget {
       }
       if (fault === 'before-commit') throw new Error('Simulated target transaction failure');
       if (type === 'secret.use') this._writeSecret(tenant, requested.secret_id, state.version + 1, next);
-      else if (type !== 'data.export') this.db.prepare('INSERT INTO resources VALUES(?,?,?,?) ON CONFLICT(tenant,id) DO UPDATE SET version=excluded.version,value=excluded.value').run(tenant, id, state.version + 1, encrypt(next, this.key(tenant), `${tenant}/resource/${id}`));
+      else if (type !== 'data.export') { this._deleted = true; this.db.prepare('INSERT INTO resources VALUES(?,?,?,?) ON CONFLICT(tenant,id) DO UPDATE SET version=excluded.version,value=excluded.value').run(tenant, id, state.version + 1, encrypt(next, this.key(tenant), `${tenant}/resource/${id}`)); }
       outcome = { target_transaction_id: transactionId, capsule_digest: digest(capsule), authorised_requested_digest: digest(requested), observed_state_digest: digest(next), observed_state: next, output, status: 'VERIFIED', execution_time: now, simulation: true };
       this.db.prepare('INSERT INTO transactions VALUES(?,?,?)').run(tenant, transactionId, encrypt(outcome, this.key(tenant), `${tenant}/transaction/${transactionId}`));
       this.db.exec('COMMIT');
+      // Same commit-boundary truncation as tx() — durable on success, armed
+      // for a later retry when the log is contended (w8-fixverify F2/F3).
+      if (this._deleted) try { this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); this._deleted = false; } catch { /* retry later */ }
     } catch (e) {
       this.db.exec('ROLLBACK');
       // Two processes racing the same transactionId hit the PK constraint
@@ -211,6 +224,7 @@ export class SimulatedTarget {
     // cannot lose-update the version counter (concurrency-audit L3).
     return this.tx(() => {
       const state = this.state(tenant, id);
+      this._deleted = true; // restoration supersedes ciphertext (w8-fixverify F3)
       this.db.prepare('UPDATE resources SET version=?, value=? WHERE tenant=? AND id=?').run(state.version + 1, encrypt({ ...priorState, compensated_at: now, compensation_of: digest(capsule) }, this.key(tenant), `${tenant}/resource/${id}`), tenant, id);
       return { compensated: true, restored_version: state.version + 1 };
     });

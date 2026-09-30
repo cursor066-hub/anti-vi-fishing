@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import http from 'node:http';
-import { readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, existsSync, statSync, lstatSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomUUID, randomBytes, timingSafeEqual } from 'node:crypto';
 import { canonical, digest, hashBytes, parseStrict } from './canonical.mjs';
@@ -20,6 +20,10 @@ export function loadIssuers(directory) {
   const issuers = Object.create(null);
   for (const file of readdirSync(directory)) {
     if (!file.endsWith('.issuer.json')) continue;
+    // These files carry private signing keys — group/world-readable specs
+    // refuse to serve, matching the `sign` and `serve` custody bars
+    // (w8-tooling F8).
+    requireThat((statSync(join(directory, file)).mode & 0o077) === 0, 'INV-503-CONFIG', `Issuer file ${file} must not be readable by group or other users`, 503);
     const spec = JSON.parse(readFileSync(join(directory, file), 'utf8'));
     fields(spec, ['issuer', 'key', 'channel', 'kinds', 'records', 'version'], ['tenant', 'issue_token', 'read_token', 'token_expires_at']);
     identifier(spec.issuer); text(spec.version, 'issuer version', 32);
@@ -138,6 +142,10 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
     const record = { sequence: sequence.n, previous: sequence.previous, ...entry, time: clock() };
     sequence.previous = digest(record);
     mkdirSync(resolve(logPath, '..'), { recursive: true });
+    // Refuse symlinked log paths — appending through a planted link would
+    // write signed issuance records into an attacker-chosen file
+    // (w8-tooling F8).
+    if (existsSync(logPath)) requireThat(!lstatSync(logPath).isSymbolicLink(), 'INV-503-CONFIG', 'Issuance log path must not be a symlink', 503);
     appendFileSync(logPath, canonical({ ...record, digest: sequence.previous }) + '\n', { mode: 0o600 });
   }
   for (const i of Object.values(issuers)) i.metrics ??= { requests: 0, errors: 0, issued: 0, refused: 0, latencies: [] };

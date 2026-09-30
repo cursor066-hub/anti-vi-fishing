@@ -2147,28 +2147,70 @@ ok 358 - w7-seam F9: wedged composite reconciles composite-aware
   duration_ms: 0
   type: 'test'
   ...
+# Subtest: F1: pre-AAD-upgrade rows decrypt via the legacy fallback
+ok 359 - F1: pre-AAD-upgrade rows decrypt via the legacy fallback
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: F2: a contended WAL checkpoint keeps committed work green and the flag armed
+ok 360 - F2: a contended WAL checkpoint keeps committed work green and the flag armed
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: F3: superseding target writes truncate the WAL at commit
+ok 361 - F3: superseding target writes truncate the WAL at commit
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
 # Subtest: COV-004: a live manifest drift drops the dependent path to UNKNOWN and opens an owner task
-ok 359 - COV-004: a live manifest drift drops the dependent path to UNKNOWN and opens an owner task
+ok 362 - COV-004: a live manifest drift drops the dependent path to UNKNOWN and opens an owner task
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: COV-005: stale evidence transitions to UNKNOWN at read time with event and owner task
-ok 360 - COV-005: stale evidence transitions to UNKNOWN at read time with event and owner task
+ok 363 - COV-005: stale evidence transitions to UNKNOWN at read time with event and owner task
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: COV-005: a fresh MONITORED path produces no expiry task or event
-ok 361 - COV-005: a fresh MONITORED path produces no expiry task or event
+ok 364 - COV-005: a fresh MONITORED path produces no expiry task or event
   ---
   duration_ms: 0
   type: 'test'
   ...
-1..361
-# tests 361
+# Subtest: W8-TOOLING restore-check: execution keys never join the audit trust anchor (F1)
+ok 365 - W8-TOOLING restore-check: execution keys never join the audit trust anchor (F1)
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: W8-TOOLING restore-check: db carrying audit table without committed heads fails (F5)
+ok 366 - W8-TOOLING restore-check: db carrying audit table without committed heads fails (F5)
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: W8-TOOLING cli sign: keyfile consistency + option parse errors (F7)
+ok 367 - W8-TOOLING cli sign: keyfile consistency + option parse errors (F7)
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: W8-TOOLING cli init: duplicated tenants dedupe instead of half-writing (F9)
+ok 368 - W8-TOOLING cli init: duplicated tenants dedupe instead of half-writing (F9)
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+1..368
+# tests 368
 # suites 0
-# pass 361
+# pass 368
 # fail 0
 # cancelled 0
 # skipped 0

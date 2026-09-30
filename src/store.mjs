@@ -13,6 +13,15 @@ import { requireThat, InvariantError } from './errors.mjs';
 // (kind='x/a',id='b').
 const recAad = (tenant, kind, id) => canonical({ tenant, kind, id });
 const dekAad = (tenant, kind, id) => canonical({ tenant, kind, id, dek: true });
+// Rows sealed before the canonical-tuple AAD change carry '/`-joined AADs.
+// Reads fall back to the legacy form so an upgraded store never strands (or,
+// worse, shreds) live ciphertext; every put() re-seals under the tuple form
+// (w8-fixverify F1).
+const legacyAad = (tenant, kind, id) => `${tenant}/${kind}/${id}`;
+const legacyDekAad = (tenant, kind, id) => `${tenant}/${kind}/${id}/dek`;
+const decryptEither = (wrapped, key, aad, legacy) => {
+  try { return decrypt(wrapped, key, aad); } catch { return decrypt(wrapped, key, legacy); }
+};
 
 export class Store {
   constructor(path, tenantKeys, auditSigners) {
@@ -100,18 +109,21 @@ export class Store {
   }
   dek(tenant, kind, id) {
     const row = this.db.prepare('SELECT wrapped FROM deks WHERE tenant=? AND kind=? AND id=?').get(tenant, kind, id);
-    return row ? Buffer.from(decrypt(row.wrapped, this.key(tenant), dekAad(tenant, kind, id)), 'base64url') : null;
+    return row ? Buffer.from(decryptEither(row.wrapped, this.key(tenant), dekAad(tenant, kind, id), legacyDekAad(tenant, kind, id)), 'base64url') : null;
   }
   get(tenant, kind, id) {
     const row = this.db.prepare('SELECT value FROM records WHERE tenant=? AND kind=? AND id=?').get(tenant, kind, id);
     if (!row) return null;
     // Records written before per-record DEKs fall back to the tenant key.
-    return decrypt(row.value, this.dek(tenant, kind, id) ?? this.key(tenant), recAad(tenant, kind, id));
+    return this.readValue(tenant, kind, id, row.value);
   }
   must(tenant, kind, id) {
     const row = this.get(tenant, kind, id); requireThat(row, 'INV-404-NOT-FOUND', 'Resource not found', 404); return row;
   }
   put(tenant, kind, id, value, at) {
+    // Non-string addressing would coerce into a different AAD than callers
+    // compute — born-corrupt rows (w8-fixverify F8).
+    requireThat(typeof tenant === 'string' && typeof kind === 'string' && typeof id === 'string', 'INV-400-SCHEMA', 'Store keys must be strings', 400);
     // An overwrite supersedes the previous ciphertext and wrapped DEK — arm
     // the WAL checkpoint so the old material is truncated at commit instead
     // of lingering in the log until a shred (DEK-audit F3).
@@ -127,7 +139,7 @@ export class Store {
   }
   list(tenant, kind, limit = 500, offset = 0) {
     return this.db.prepare('SELECT id,value FROM records WHERE tenant=? AND kind=? ORDER BY created DESC,id LIMIT ? OFFSET ?').all(tenant, kind, limit, offset)
-      .map(row => decrypt(row.value, this.dek(tenant, kind, row.id) ?? this.key(tenant), recAad(tenant, kind, row.id)));
+      .map(row => this.readValue(tenant, kind, row.id, row.value));
   }
   // Id-only enumeration: sweeps must not let one undecryptable row wedge the
   // whole pass (store-audit MED-3) — callers isolate failures per id.
@@ -139,6 +151,10 @@ export class Store {
     this.db.prepare('DELETE FROM deks WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id);
     this.db.prepare('DELETE FROM records WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id);
     if (!this.db.isTransaction) this.checkpoint(); // non-tx paths must not leave the DEK in the WAL (store-audit LOW)
+  }
+  readValue(tenant, kind, id, wrapped) {
+    const key = this.dek(tenant, kind, id) ?? this.key(tenant);
+    return decryptEither(wrapped, key, recAad(tenant, kind, id), legacyAad(tenant, kind, id));
   }
   shred(tenant, kind, id) {
     // Crypto-shredding: destroy the record DEK (secure_delete zeroes its
@@ -157,8 +173,13 @@ export class Store {
   // flag armed so the next commit retries (store-audit HIGH-1).
   checkpoint() {
     if (!this._shredded) return;
-    const r = this.db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
-    if (!r.busy && r.checkpointed >= r.log) this._shredded = false;
+    // SQLITE_LOCKED (contended reader/writer) surfaces as a throw, not
+    // busy=1 — a committed write must still report success, with the shred
+    // flag left armed for the next commit to retry (w8-fixverify F2).
+    try {
+      const r = this.db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+      if (!r.busy && r.checkpointed >= r.log) this._shredded = false;
+    } catch { /* contention: flag stays armed */ }
   }
   clock(now, { recovery = false } = {}) {
     requireThat(Number.isSafeInteger(now) && now > 0, 'INV-503-TIME', 'Clock unavailable', 503);
@@ -215,7 +236,7 @@ export class Store {
     // pinned anchor requires an external copy of a checkpoint, which
     // verifyAudit(priorCheckpoint) accepts; this closes the common case.
     const priorRow = this.db.prepare("SELECT id,value FROM records WHERE tenant=? AND kind='audit-checkpoint' ORDER BY created DESC LIMIT 1").get(tenant);
-    const prior_checkpoint = priorRow ? decrypt(priorRow.value, this.dek(tenant, 'audit-checkpoint', priorRow.id) ?? this.key(tenant), recAad(tenant, 'audit-checkpoint', priorRow.id)) : null;
+    const prior_checkpoint = priorRow ? this.readValue(tenant, 'audit-checkpoint', priorRow.id, priorRow.value) : null;
     if (now !== null) this.put(tenant, 'audit-checkpoint', `cp-${checkpoint.payload.size}`, checkpoint, now);
     return { format: 'IF-AUDIT-1', public_keys, prior_checkpoint, checkpoint, entries: rows };
   }
