@@ -1566,25 +1566,10 @@ ok 261 - AIG-001 AIG-006: advisory extract/explain/intent are deterministic and 
   type: 'test'
   ...
 # Subtest: CON-001 CON-003: connector manifests verify and drift is detected
-not ok 262 - CON-001 CON-003: connector manifests verify and drift is detected
+ok 262 - CON-001 CON-003: connector manifests verify and drift is detected
   ---
   duration_ms: 0
   type: 'test'
-  location: '/home/ubuntu/repos/anti-vi-fishing/tests/v2-features.test.mjs:303:1'
-  failureType: 'testCodeFailure'
-  error: "Cannot read properties of undefined (reading 'superseded_by')"
-  code: 'ERR_TEST_FAILURE'
-  name: 'TypeError'
-  stack: |-
-    verifyManifest (file:///home/ubuntu/repos/anti-vi-fishing/src/connectors.mjs:37:152)
-    TestContext.<anonymous> (file:///home/ubuntu/repos/anti-vi-fishing/tests/v2-features.test.mjs:307:20)
-    Test.runInAsyncScope (node:async_hooks:227:14)
-    Test.run (node:internal/test_runner/test:1382:25)
-    Test.processPendingSubtests (node:internal/test_runner/test:960:18)
-    Test.postRun (node:internal/test_runner/test:1522:19)
-    Test.run (node:internal/test_runner/test:1447:12)
-    process.processTicksAndRejections (node:internal/process/task_queues:104:5)
-    async Test.processPendingSubtests (node:internal/test_runner/test:960:7)
   ...
 # Subtest: DAT-009 DAT-011: reconstruction budget and watermarks on released rows
 ok 263 - DAT-009 DAT-011: reconstruction budget and watermarks on released rows
@@ -1601,8 +1586,8 @@ ok 264 - NFR-SEC-004 KEY-002: bootstrap writes vault + master key; config has no
 1..264
 # tests 264
 # suites 0
-# pass 263
-# fail 1
+# pass 264
+# fail 0
 # cancelled 0
 # skipped 0
 # todo 0

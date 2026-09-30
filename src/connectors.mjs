@@ -34,7 +34,7 @@ export function verifyManifest(envelope, issuers, now) {
   const m = verifySigned(envelope, issuers, 'connector-manifest');
   fields(m, ['connector_id', 'version', 'domain', 'actions', 'permissions', 'limitations', 'idempotency', 'coverage_implications', 'issued_at', 'expires_at'], ['lifecycle']);
   requireThat(m.expires_at > now, 'INV-401-CONNECTOR', 'Connector manifest expired', 401);
-  requireThat(!(m.lifecycle && m.lifecycle.end_of_support_at <= now), 'INV-410-CONNECTOR', `Connector end of support reached; migrate to ${m.lifecycle.superseded_by}`, 410);
+  if (m.lifecycle) requireThat(m.lifecycle.end_of_support_at > now, 'INV-410-CONNECTOR', `Connector end of support reached; migrate to ${m.lifecycle.superseded_by}`, 410);
   integer(m.issued_at, 'issued', 1, now + 300000);
   return m;
 }
