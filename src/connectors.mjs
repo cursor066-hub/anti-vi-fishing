@@ -11,7 +11,11 @@ import { requireThat, InvariantError } from './errors.mjs';
 // reads (CON-005).
 
 export function createManifest(input) {
-  fields(input, ['connector_id', 'version', 'domain', 'actions', 'permissions', 'limitations', 'idempotency', 'coverage_implications', 'issued_at', 'expires_at']);
+  fields(input, ['connector_id', 'version', 'domain', 'actions', 'permissions', 'limitations', 'idempotency', 'coverage_implications', 'issued_at', 'expires_at'], ['lifecycle']);
+  if (input.lifecycle !== undefined) {
+    fields(input.lifecycle, ['deprecated_at', 'end_of_support_at', 'superseded_by']);
+    integer(input.lifecycle.deprecated_at, 'deprecation', 1); integer(input.lifecycle.end_of_support_at, 'end of support', input.lifecycle.deprecated_at + 1); identifier(input.lifecycle.superseded_by, 'superseded by');
+  }
   identifier(input.connector_id, 'connector'); text(input.version, 'version', 32); text(input.domain, 'domain', 128);
   uniqueStrings(input.actions, 'actions', 32); uniqueStrings(input.permissions, 'permissions', 32); uniqueStrings(input.limitations, 'limitations', 32);
   uniqueStrings(input.coverage_implications, 'coverage implications', 16);
@@ -28,8 +32,9 @@ export function signedManifest(input, key) {
 
 export function verifyManifest(envelope, issuers, now) {
   const m = verifySigned(envelope, issuers, 'connector-manifest');
-  fields(m, ['connector_id', 'version', 'domain', 'actions', 'permissions', 'limitations', 'idempotency', 'coverage_implications', 'issued_at', 'expires_at']);
+  fields(m, ['connector_id', 'version', 'domain', 'actions', 'permissions', 'limitations', 'idempotency', 'coverage_implications', 'issued_at', 'expires_at'], ['lifecycle']);
   requireThat(m.expires_at > now, 'INV-401-CONNECTOR', 'Connector manifest expired', 401);
+  requireThat(!(m.lifecycle && m.lifecycle.end_of_support_at <= now), 'INV-410-CONNECTOR', `Connector end of support reached; migrate to ${m.lifecycle.superseded_by}`, 410);
   integer(m.issued_at, 'issued', 1, now + 300000);
   return m;
 }

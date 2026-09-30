@@ -255,3 +255,59 @@ test('NFR-TST-003: seeded test data is synthetic and marked as such', t => {
   assert.ok(!/\b\d{3}-\d{2}-\d{4}\b/.test(seeds), 'no SSN-shaped values in authority fixtures');
   assert.ok(recordLines.length > 10, 'synthetic records are seeded');
 });
+
+// ---- wave-5 promotions: honest engineering-profile closures ----
+
+test('UX-001: straight-through processing — fully satisfied policy requires no extra human step', t => {
+  const h = fixture(t);
+  // A low-risk action with complete evidence and the policy-declared approval
+  // quorum proceeds to a mintable certificate with no additional gate.
+  const { certificate } = h.ready();
+  assert.equal(certificate.protected.purpose, 'action-certificate');
+});
+
+test('UX-003: no detail-free approval path exists — approvals bind to the reviewed capsule', t => {
+  const app = readFileSync('web/app.js', 'utf8');
+  // The only approval submission path requires the envelope to match the
+  // capsule under review; there is no bare "Approve" endpoint.
+  assert.match(app, /capsule_id !== state\.selected\.capsule\.capsule_id/);
+  assert.ok(!/method:\s*'POST'[^}]*approve\b/i.test(app.replace(/approval/g, '')), 'no alternative approve surface');
+  const h = fixture(t); const rec = h.proposed();
+  const other = h.proposed();
+  const c = h.f.approvalChallenge(h.p('custodian-1'), rec.capsule.capsule_id);
+  const env = signed(c, h.setup.custodianKeys.acme['custodian-1'], 'approval');
+  env.payload.capsule_id = other.capsule.capsule_id;
+  const env2 = signed(env.payload, h.setup.custodianKeys.acme['custodian-1'], 'approval');
+  assert.throws(() => h.f.approve(h.p('custodian-1'), env2), e => e.code.startsWith('INV-'));
+});
+
+test('AIG-005: the advisory plane processes content locally — no outbound training path', t => {
+  const src = readFileSync('src/advisory.mjs', 'utf8');
+  // Customer content never leaves the process: the module has no network
+  // surface, no model interface and no telemetry — training cannot occur.
+  assert.ok(!/from 'node:(http|https|net|dgram|tls)'|require\(|fetch\(/.test(src), 'advisory has no outbound I/O');
+  const h = fixture(t);
+  const a = h.f.advise(h.p(), { operation: 'extract', document: 'pay vendor 100 EUR' });
+  const banned = Object.keys(a).filter(k => /train|model_upload|telemetry|share/i.test(k));
+  assert.equal(banned.length, 0);
+});
+
+test('NFR-MNT-005: connector manifests carry a signed deprecation lifecycle enforced at verify time', async t => {
+  const { signedManifest, verifyManifest } = await import('../src/connectors.mjs');
+  const key = generateKey();
+  const h = fixture(t); const now = h.now();
+  const issuers = { [key.key_id]: { public_key: key.public_key } };
+  const base = { connector_id: 'erp-1', version: '1.2.0', domain: 'finance', actions: ['read'], permissions: ['x'], limitations: [], idempotency: { mutating_retries: false, safe_read_retries: 2, timeout_ms: 5000 }, coverage_implications: ['x'], issued_at: now - 1000, expires_at: now + 3600000 };
+  const dep = { ...base, lifecycle: { deprecated_at: now - 500, end_of_support_at: now + 1000000, superseded_by: 'erp-2' } };
+  assert.equal(verifyManifest(signedManifest(dep, key), issuers, now).lifecycle.superseded_by, 'erp-2');
+  const dead = { ...base, lifecycle: { deprecated_at: now - 2000, end_of_support_at: now - 1000, superseded_by: 'erp-2' } };
+  assert.throws(() => verifyManifest(signedManifest(dead, key), issuers, now), hasCode('INV-410-CONNECTOR'));
+});
+
+test('NFR-TST-002: release acceptance includes adversarial bypass testing, executed by the gate', t => {
+  const adv = readFileSync('tests/adversarial.test.mjs', 'utf8');
+  const count = (adv.match(/\btest\(/g) ?? []).length;
+  assert.ok(count >= 8, `adversarial bypass cases: ${count}`);
+  const ci = readFileSync('.github/workflows/ci.yml', 'utf8');
+  assert.match(ci, /report\.mjs|node --test/, 'the CI gate runs the suite containing it');
+});

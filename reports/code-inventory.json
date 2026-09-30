@@ -22,8 +22,8 @@
       "bytes": 4500
     },
     "src/connectors.mjs": {
-      "lines": 115,
-      "bytes": 7097
+      "lines": 120,
+      "bytes": 7649
     },
     "src/coverage.mjs": {
       "lines": 63,
@@ -147,7 +147,7 @@
     },
     "scripts/traceability.py": {
       "lines": 54,
-      "bytes": 12676
+      "bytes": 12722
     },
     "scripts/verify-export-webcrypto.mjs": {
       "lines": 61,
@@ -202,8 +202,8 @@
       "bytes": 26608
     },
     "tests/ledger3.test.mjs": {
-      "lines": 258,
-      "bytes": 16448
+      "lines": 314,
+      "bytes": 20099
     },
     "tests/lifecycle.test.mjs": {
       "lines": 102,
@@ -227,5 +227,5 @@
     }
   },
   "total_files": 56,
-  "total_lines": 8070
+  "total_lines": 8131
 }
