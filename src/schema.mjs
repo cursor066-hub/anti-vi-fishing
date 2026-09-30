@@ -28,7 +28,14 @@ const types = {
   'code.release': { source_commit: 'hash', artifact_digest: 'hash', provenance_digest: 'hash', test_digest: 'hash', deployment_target: 'id' },
   'secret.use': { secret_id: 'id', operation: 'text', workload_id: 'id' },
   'backup.delete': { backup_id: 'id', recovery_set: 'id' },
-  'policy.change': { policy: 'object' }
+  'policy.change': { policy: 'object' },
+  'identity.jit.grant': { subject_id: 'id', resources: 'strings', actions: 'strings', destinations: 'strings', columns: 'strings', row_ids: 'strings', ttl_ms: 'positive', reason: 'text' },
+  'key.rotate': { key_class: 'text', new_key_id: 'id', new_public_key: 'text', ceremony_id: 'id', revoke_old: 'boolean' },
+  'key.ceremony': { ceremony_id: 'id', purpose: 'text', threshold: 'positive', custodians: 'strings' },
+  'action.composite': { children: 'strings' },
+  'ai.model.deploy': { model_id: 'id', model_version: 'text', eval_report_digest: 'hash' },
+  'legal.contract.execute': { contract_id: 'id', counterparty: 'id', amount_minor: 'positive', currency: 'currency' },
+  'security.case.investigate': { case_id: 'id', scope: 'strings' }
 };
 export const SCHEMAS = Object.fromEntries(Object.entries(types).map(([type, requested]) => [type, { id: `if:${type}:1`, version: 1, type, requested, validation_profile: 'IF-ACTION-1', currency_profile: { codes: SUPPORTED_CURRENCIES, minor_units_per_major: 100 } }]));
 export function validateRequested(type, requested) {
@@ -39,6 +46,7 @@ export function validateRequested(type, requested) {
     if (rule === 'id') identifier(v, key);
     if (rule === 'positive') integer(v, key, 1, 1_000_000_000_000);
     if (rule === 'strings') uniqueStrings(v, key, 256);
+    if (rule === 'boolean') requireThat(typeof v === 'boolean', 'INV-400-SCHEMA', `${key} must be boolean`);
     if (rule === 'currency') requireThat(SUPPORTED_CURRENCIES.includes(v), 'INV-400-SCHEMA', 'Unsupported currency; this profile supports EUR, USD, GBP, CHF, CAD, AUD, NZD and SGD with two decimal minor units');
     if (rule === 'account') requireThat(typeof v === 'string' && /^[A-Z0-9-]{6,64}$/.test(v), 'INV-400-SCHEMA', 'Account must use exact uppercase canonical characters');
     if (rule === 'hash') requireThat(typeof v === 'string' && /^[a-f0-9]{64}$/.test(v), 'INV-400-SCHEMA', `${key} must be a SHA-256 digest`);
@@ -46,6 +54,9 @@ export function validateRequested(type, requested) {
   }
   if (type === 'data.export') requireThat(requested.columns.length && requested.row_ids.length && requested.max_rows >= requested.row_ids.length, 'INV-400-SCHEMA', 'Export requires explicit nonempty fields and rows within ceiling');
   if (type === 'cloud.firewall.change') { integer(requested.port, 'port', 1, 65535); oneOf(requested.protocol, ['tcp', 'udp'], 'protocol'); }
+  if (type === 'action.composite') requireThat(requested.children.length >= 2 && requested.children.length <= 16, 'INV-400-SCHEMA', 'Composite requires 2-16 child capsules');
+  if (type === 'key.rotate') requireThat(['execution', 'audit'].includes(requested.key_class), 'INV-400-SCHEMA', 'key_class must be execution or audit');
+  if (type === 'identity.jit.grant') requireThat(requested.ttl_ms <= 86400000 && requested.row_ids.length <= 4096, 'INV-400-SCHEMA', 'JIT grant TTL or rows exceed bounds');
 }
 export function validateProposal(input) {
   fields(input, ['schema_id', 'schema_digest', 'actor', 'action', 'current_state', 'requested_state', 'destination', 'quantity', 'exclusions', 'evidence_refs', 'policy_version', 'nonce', 'created_at', 'expires_at', 'rollback_or_compensation', 'privacy_classification']);

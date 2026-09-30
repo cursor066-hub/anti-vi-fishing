@@ -1,15 +1,19 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { encrypt, decrypt, signed, verifySigned } from './crypto.mjs';
+import { encrypt, decrypt, verifySigned } from './crypto.mjs';
+import { merkleRoot } from './merkle.mjs';
 import { canonical, digest } from './canonical.mjs';
 import { requireThat } from './errors.mjs';
 
 export class Store {
-  constructor(path, tenantKeys, auditKeys) {
+  constructor(path, tenantKeys, auditSigners) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(path); chmodSync(path, 0o600);
-    this.tenantKeys = tenantKeys; this.auditKeys = auditKeys;
+    this.tenantKeys = tenantKeys;
+    // auditSigners[tenant] = {key_id, public_key, sign(payload) -> envelope}.
+    // Signing runs inside the keystore; the store never sees private material.
+    this.auditSigners = auditSigners;
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
     const version = this.db.prepare('PRAGMA user_version').get().user_version;
     requireThat(version <= 1, 'INV-503-STORAGE', 'Database schema is newer than this application', 503);
@@ -70,14 +74,17 @@ export class Store {
   audit(tenant, type, actor, reference, metadata, now) {
     const last = this.db.prepare('SELECT seq,hash FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1').get(tenant);
     const entry = { tenant_id: tenant, sequence: (last?.seq ?? 0) + 1, previous: last?.hash ?? '0'.repeat(64), type, actor, reference, metadata, time: now };
-    const hash = digest(entry), envelope = signed(entry, this.auditKeys[tenant], 'audit');
+    const hash = digest(entry), envelope = this.auditSigners[tenant].sign(entry);
     this.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run(tenant, entry.sequence, entry.previous, hash, canonical(envelope));
     return { hash, envelope };
   }
+  auditHashes(tenant) {
+    return this.db.prepare('SELECT hash FROM audit WHERE tenant=? ORDER BY seq').all(tenant).map(r => r.hash);
+  }
   auditExport(tenant) {
     const rows = this.db.prepare('SELECT hash,envelope FROM audit WHERE tenant=? ORDER BY seq').all(tenant).map(r => ({ hash: r.hash, envelope: JSON.parse(r.envelope) }));
-    const key = this.auditKeys[tenant], public_keys = { [key.key_id]: { public_key: key.public_key } };
-    const checkpoint = signed({ tenant_id: tenant, size: rows.length, head: rows.at(-1)?.hash ?? '0'.repeat(64) }, key, 'checkpoint');
+    const signer = this.auditSigners[tenant], public_keys = signer.keys ? signer.keys() : { [signer.key_id]: { public_key: signer.public_key } };
+    const checkpoint = signer.sign({ tenant_id: tenant, size: rows.length, head: rows.at(-1)?.hash ?? '0'.repeat(64), tree_head: merkleRoot(rows.map(r => r.hash)) }, 'checkpoint');
     return { format: 'IF-AUDIT-1', public_keys, checkpoint, entries: rows };
   }
   idempotent(tenant, scope, key, requestHash, fn) {

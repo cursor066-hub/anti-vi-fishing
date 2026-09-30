@@ -1,0 +1,99 @@
+import http from 'node:http';
+import { digest, canonical, parseStrict } from './canonical.mjs';
+import { fields, text, identifier, integer, uniqueStrings, oneOf } from './schema.mjs';
+import { signed, verifySigned } from './crypto.mjs';
+import { requireThat, InvariantError } from './errors.mjs';
+
+// IF-CON-1: connector framework. Every connector publishes a signed manifest
+// declaring supported actions, required permissions, target limitations,
+// idempotency behaviour and coverage implications (CON-001). Responses are
+// schema-validated before use (CON-004); bounded retries apply only to safe
+// reads (CON-005).
+
+export function createManifest(input) {
+  fields(input, ['connector_id', 'version', 'domain', 'actions', 'permissions', 'limitations', 'idempotency', 'coverage_implications', 'issued_at', 'expires_at']);
+  identifier(input.connector_id, 'connector'); text(input.version, 'version', 32); text(input.domain, 'domain', 128);
+  uniqueStrings(input.actions, 'actions', 32); uniqueStrings(input.permissions, 'permissions', 32); uniqueStrings(input.limitations, 'limitations', 32);
+  uniqueStrings(input.coverage_implications, 'coverage implications', 16);
+  fields(input.idempotency, ['mutating_retries', 'safe_read_retries', 'timeout_ms']);
+  requireThat(input.idempotency.mutating_retries === false, 'INV-400-CONNECTOR', 'Mutating operations must never be retried silently');
+  integer(input.idempotency.safe_read_retries, 'safe read retries', 0, 5); integer(input.idempotency.timeout_ms, 'timeout', 1000, 120000);
+  integer(input.issued_at, 'issued', 1); integer(input.expires_at, 'expiry', input.issued_at + 1);
+  return input;
+}
+
+export function signedManifest(input, key) {
+  return signed(createManifest(input), key, 'connector-manifest');
+}
+
+export function verifyManifest(envelope, issuers, now) {
+  const m = verifySigned(envelope, issuers, 'connector-manifest');
+  fields(m, ['connector_id', 'version', 'domain', 'actions', 'permissions', 'limitations', 'idempotency', 'coverage_implications', 'issued_at', 'expires_at']);
+  requireThat(m.expires_at > now, 'INV-401-CONNECTOR', 'Connector manifest expired', 401);
+  return m;
+}
+
+// Bounded-retry HTTP client. Only idempotent GET-style reads are retried;
+// every request is deadline-bounded and body/schema-checked by the caller.
+export async function httpJson(url, { method = 'GET', body, timeout_ms = 10000, headers = {}, token } = {}) {
+  const attempts = 1;
+  const payload = body === undefined ? undefined : canonical(body);
+  return await new Promise((resolve, reject) => {
+    const target = new URL(url);
+    const req = http.request({
+      hostname: target.hostname, port: target.port, path: target.pathname + target.search, method,
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}), ...(token ? { Authorization: `Bearer ${token}` } : {}), ...headers },
+      timeout: timeout_ms
+    }, res => {
+      const chunks = []; let size = 0;
+      res.on('data', c => { size += c.length; if (size <= 1048576) chunks.push(c); });
+      res.on('end', () => {
+        try {
+          const textBody = Buffer.concat(chunks).toString('utf8');
+          requireThat(size <= 1048576, 'INV-413-CONNECTOR', 'Connector response too large', 413);
+          requireThat((res.headers['content-type'] ?? '').split(';')[0] === 'application/json', 'INV-502-CONNECTOR', 'Connector returned non-JSON', 502);
+          const data = parseStrict(textBody);
+          resolve({ status: res.statusCode, data });
+        } catch (e) { reject(e); }
+      });
+    });
+    req.on('timeout', () => req.destroy(new InvariantError('INV-504-CONNECTOR', 'Connector timeout', 504)));
+    req.on('error', e => reject(e instanceof InvariantError ? e : new InvariantError('INV-502-CONNECTOR', 'Connector unreachable', 502)));
+    req.end(payload);
+  });
+}
+
+export async function readWithRetry(url, options = {}) {
+  const retries = options.retries ?? 2;
+  let last;
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const r = await httpJson(url, { ...options, method: 'GET' });
+      if (r.status >= 200 && r.status < 300) return r;
+      if (r.status < 500) { const e = new InvariantError('INV-412-EVIDENCE', `Connector rejected read (${r.status})`, 412); e.status_code = r.status; throw e; }
+      last = new InvariantError('INV-502-CONNECTOR', `Connector read failed (${r.status})`, 502);
+    } catch (e) {
+      last = e;
+      if (e.status && e.status < 500 && !(e.code === 'INV-504-CONNECTOR' || e.code === 'INV-502-CONNECTOR')) throw e;
+      if (e.status && e.status < 500 && e.status !== 502 && e.status !== 504 && e.status !== 429) throw e;
+    }
+  }
+  throw last;
+}
+
+export async function postOnce(url, body, options = {}) {
+  const r = await httpJson(url, { ...options, method: 'POST', body });
+  requireThat(r.status >= 200 && r.status < 300, 'INV-502-CONNECTOR', `Connector rejected request (${r.status})`, 502);
+  return r;
+}
+
+// Drift / upgrade detector: compares observed connector identity to the
+// registered configuration digest. Any change returns a drift record; the
+// caller maps the affected coverage paths to UNKNOWN (COV-004, CON-006).
+export function driftCheck(registered, observed, now) {
+  const changes = [];
+  for (const k of ['connector_id', 'version']) if (registered[k] !== observed[k]) changes.push({ field: k, was: registered[k] ?? null, now: observed[k] ?? null });
+  const configDigest = digest({ connector_id: observed.connector_id, version: observed.version, actions: observed.actions ?? [], permissions: observed.permissions ?? [] });
+  const drifted = changes.length > 0 || registered.configuration_digest !== configDigest;
+  return { drifted, changes, configuration_digest: configDigest, checked_at: now, action: drifted ? 'coverage->UNKNOWN pending compatibility, security and bypass revalidation' : 'none' };
+}

@@ -11,8 +11,8 @@ export function declarePath(input, now) {
   requireThat(/^[a-f0-9]{64}$/.test(input.configuration_digest), 'INV-400-SCHEMA', 'Configuration digest is required');
   return { ...input, declared_at: now, evidence_at: null, evidence_digest: null, technical_validation: null };
 }
-export function coverageManifest(tenant, paths, now, key) {
+export function coverageManifest(tenant, paths, now, sign) {
   const effective = paths.map(p => ({ ...p, effective_status: p.evidence_at !== null && now - p.evidence_at > p.max_age_ms ? 'UNKNOWN' : p.status, next_action: p.status === 'ENFORCED' ? 'Revalidate before evidence expires; verify all bypass paths.' : 'Attach independently executed technical bypass evidence.' }));
   // This distribution provides a simulator, not target-wide total mediation.
-  return signed({ tenant_id: tenant, issued_at: now, profile: 'software-engineering', guarantee: false, assurance: 'NO_PRODUCTION_ENFORCEMENT_GUARANTEE', reason: 'Real target coverage and independent bypass assessment have not been supplied.', paths: effective, scope_digest: digest(effective) }, key, 'coverage');
+  return sign({ tenant_id: tenant, issued_at: now, profile: 'software-engineering', guarantee: false, assurance: 'NO_PRODUCTION_ENFORCEMENT_GUARANTEE', reason: 'Real target coverage and independent bypass assessment have not been supplied.', paths: effective, scope_digest: digest(effective) }, 'coverage');
 }

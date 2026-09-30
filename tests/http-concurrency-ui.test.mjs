@@ -9,6 +9,7 @@ import { bootstrap, loadConfiguration } from '../src/bootstrap.mjs';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { signed } from '../src/crypto.mjs';
+import { openRelease } from '../src/secureview.mjs';
 import { proposal } from '../src/schema.mjs';
 import { randomUUID } from 'node:crypto';
 
@@ -66,7 +67,23 @@ test('HTTP: full propose -> evidence -> independent signatures -> ALLOW -> certi
   assert.equal((await h.request('/gate/v1/execute', { method: 'POST', body: { certificate: cert.data, dry_run: false } })).status, 409);
   assert.equal((await h.request('/v1/audit-exports', { method: 'POST', token: h.setup.credentials.acme.auditor, body: { purpose: 'Contract validation' } })).status, 200);
 });
-test('PER-007 PER-009: Secure Perception remains explicitly unavailable and fails closed', async t => { const h = await httpFixture(t), result = await h.request('/v1/secure-perception/session', { method: 'POST', body: {} }); assert.equal(result.status, 501); assert.match(result.data.error.message, /no plaintext release/); });
+test('PER-007 PER-009: Secure Perception is dev-attested: forged attestations fail, releases are encrypted envelopes, no plaintext path', async t => {
+  const h = await httpFixture(t);
+  const bogus = await h.request('/v1/secure-perception/sessions', { method: 'POST', body: { attestation: { protected: { profile: 'IF-CJSON-1', suite: 'Ed25519', key_id: 'x', purpose: 'component-attestation' }, payload: { component: 'secure-view-acme', firmware_version: 'if-secureview-dev-1', nonce: 'a'.repeat(64) }, signature: 'x'.repeat(86) } } });
+  assert.equal(bogus.status, 401);
+  const component = h.setup.componentSecrets.acme['secure-view-acme'];
+  const attestation = component.attest('b'.repeat(64));
+  const session = await h.request('/v1/secure-perception/sessions', { method: 'POST', body: { attestation } });
+  assert.equal(session.status, 201, JSON.stringify(session.data)); assert.equal(session.data.assurance, 'dev-attested-software'); assert.equal(session.data.production, false);
+  const release = await h.request('/v1/secure-perception/release', { method: 'POST', body: { session_id: session.data.session_id, fields: { secret_field: 'sensitive-value-123' }, purpose: 'review' } });
+  assert.equal(release.status, 200); assert.equal(release.data.mode, 'secure-perception');
+  assert.ok(!release.data.ciphertext.includes('sensitive-value-123'), 'ciphertext must not contain plaintext');
+  const opened = openRelease({ ...component, _ecdh_private: component.ecdh_private }, release.data);
+  assert.equal(opened.data.secret_field, 'sensitive-value-123');
+  const policy = h.f.policy('acme'); policy.secure_perception.fallback = 'denied'; h.f.store.put('acme', 'policy', 'active', policy, h.now());
+  const denied = await h.request('/v1/secure-perception/fallback', { method: 'POST', body: { fields: { x: 'y' }, purpose: 'review' } });
+  assert.equal(denied.status, 451);
+});
 function runWorker(data) { return new Promise((resolve, reject) => { const worker = new Worker(new URL('./race-worker.mjs', import.meta.url), { workerData: data }); worker.once('message', resolve); worker.once('error', reject); worker.once('exit', code => { if (code) reject(new Error(`Worker exit ${code}`)); }); }); }
 test('COM-003 NFR-TST-002: eight independent gate workers race; exactly one certificate is consumed', async t => {
   const h = fixture(t), { certificate, record } = h.ready(), data = { config: h.setup.config, directory: h.directory, now: h.now(), principal: h.p(), certificate };
