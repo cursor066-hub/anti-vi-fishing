@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import { fixture, runtimeInput, runtimeRequest } from '../tests/helpers.mjs';
 import { writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 import { digest, clone } from '../src/canonical.mjs';
 import { verifyAudit } from '../src/store.mjs';
+import { spawnSync } from 'node:child_process';
 const h = fixture(null, ['acme']), scenarios = [];
 function scenario(name, expected, fn) {
   try { const actual = fn(); scenarios.push({ name, expected, actual, pass: actual === expected }); }
@@ -41,6 +43,12 @@ try {
   writeFileSync('reports/sample-checkpoint.json', JSON.stringify(bundle.checkpoint.payload, null, 2) + '\n');
   const values = [null, true, false, 0, 9007199254740991, -9007199254740991, { b: 2, a: 1 }, { greeting: 'Žižek 🛡 café', nested: [1, { zero: 0 }] }, { '123hash': { x: '\n\t' } }, { alpha: ['é', '🎛'], omega: {} }];
   writeFileSync('examples/canonical-vectors.json', JSON.stringify(values.map((value, i) => ({ name: `vector-${i + 1}`, value, sha256: digest(value) })), null, 2) + '\n');
+  // Backup/restore drill: real CLI backup of the live deployment directory,
+  // then offline manifest verification with the restore-check tool.
+  const drill = spawnSync(process.execPath, ['scripts/backup.mjs', '--dir', h.directory, '--out', join(h.directory, 'drill-backup')], { encoding: 'utf8' });
+  scenario('Engine-native online backup completes', 0, () => drill.status);
+  const check = spawnSync(process.execPath, ['scripts/restore-check.mjs', '--dir', join(h.directory, 'drill-backup')], { encoding: 'utf8' });
+  scenario('Offline restore verification of drill backup', 0, () => check.status);
   console.log(JSON.stringify({ simulations: scenarios.length, passed: scenarios.filter(s => s.pass).length, audit_entries: bundle.entries.length, real_systems_tested: false }));
   if (scenarios.some(s => !s.pass)) process.exitCode = 1;
 } finally { h.close(); rmSync(h.directory, { recursive: true }); }

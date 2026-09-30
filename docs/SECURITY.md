@@ -28,7 +28,7 @@ Software keys are generated using the platform CSPRNG and Ed25519 implementation
 | Secure Perception | Dev-attested software profile; never a trusted display | Supported hardware, trusted display/input and hostile-OS tests |
 | Runtime network | Decisions only | Customer network/endpoint integration and packet-level quarantine/DoS tests |
 | Audit witness | Offline checkpoint comparison | Independent witness publication, monitoring and retention operations |
-| Retention | Logical deletion plus digest tombstones | Per-record crypto-shredding, backup deletion and legal-hold governance |
+| Retention | Per-record DEK crypto-shredding (secure_delete + WAL truncate) plus digest tombstones | Ciphertext surviving in pre-erasure backups; backup-media erasure and legal-hold governance |
 | Availability | Local SQLite WAL | Multi-zone architecture, state-replication correctness, RTO/RPO and recovery exercises |
 | Scale | Bounded engineering UI/query scans | Production-scale audit pagination, storage/rate/cache exhaustion and soak evidence |
 | Secure SDLC | Test suite and focused checks | Human maintainers, code review, current advisories, SAST/DAST/fuzz coverage and independent assessment |

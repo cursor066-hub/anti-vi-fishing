@@ -5,13 +5,13 @@
   {
    "name": "capability-shaped",
    "purpose": "capability",
-   "key_id": "7f52a39eb04a11ca3cdb7f7acba71a75",
-   "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAUcTpla5B3Kem+GgwYdwev/5Eo/XkVA/aciLmYuiUKNQ=\n-----END PUBLIC KEY-----\n",
+   "key_id": "df497f0df790b77f1c609aa33e86a01f",
+   "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAlFWDKWozHsNAmNQDSl1x8/C5U665ti+ISfloIPduVY8=\n-----END PUBLIC KEY-----\n",
    "envelope": {
     "protected": {
      "profile": "IF-CJSON-1",
      "suite": "Ed25519",
-     "key_id": "7f52a39eb04a11ca3cdb7f7acba71a75",
+     "key_id": "df497f0df790b77f1c609aa33e86a01f",
      "purpose": "capability"
     },
     "payload": {
@@ -29,19 +29,19 @@
      "issued_at": 1700000000000,
      "expires_at": 1700000060000
     },
-    "signature": "_WB2JDOXWJeMp3jmSA_FPidoOcOQk5e0ndOp_T7lsknWx0Zb6L4Xt68AFGphMu93WN4_2mV7_ENiGCK9ucvjDw"
+    "signature": "PzFC05wOUsocdIUHgJaVAPZql0RmptHgal11dNDbwUPjWid-Y-cySRPi_YAWcKNGl7q51p_aQWGDPcMqHjkcAA"
    }
   },
   {
    "name": "evidence-shaped",
    "purpose": "evidence",
-   "key_id": "a8487b028fc115093ac74a4dd4c2e0ea",
-   "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAS1wxwDutniIb2gDtDSKwnPd5Gmswy4aSL7zOJYeYqjg=\n-----END PUBLIC KEY-----\n",
+   "key_id": "fddce2148b64a3fcc62e2da482e69424",
+   "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAhcqoFh2S/VZezW/f/Qm5Ewk3+7YFHHNSyu/xDQ7OXp8=\n-----END PUBLIC KEY-----\n",
    "envelope": {
     "protected": {
      "profile": "IF-CJSON-1",
      "suite": "Ed25519",
-     "key_id": "a8487b028fc115093ac74a4dd4c2e0ea",
+     "key_id": "fddce2148b64a3fcc62e2da482e69424",
      "purpose": "evidence"
     },
     "payload": {
@@ -57,19 +57,19 @@
       "verified_at": 1700000000000
      }
     },
-    "signature": "SmUMoYoZHMFLUPhUUu96Yzn_CJXUYMx09fMHtQ7h-32fpNqyTwo0I2YHYEXeYPQvoV_GzhYnIKUOhqZCKQO7AA"
+    "signature": "phdK_FgyfTF3s3fJj-0ZQuKbGlsRT1zANKWIEER7haw45JPycvFQ0L_B-Ltj_qs_sWvhudzmdlRKIUSL_NcBCQ"
    }
   },
   {
    "name": "unicode-payload",
    "purpose": "evidence",
-   "key_id": "7f52a39eb04a11ca3cdb7f7acba71a75",
-   "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAUcTpla5B3Kem+GgwYdwev/5Eo/XkVA/aciLmYuiUKNQ=\n-----END PUBLIC KEY-----\n",
+   "key_id": "df497f0df790b77f1c609aa33e86a01f",
+   "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAlFWDKWozHsNAmNQDSl1x8/C5U665ti+ISfloIPduVY8=\n-----END PUBLIC KEY-----\n",
    "envelope": {
     "protected": {
      "profile": "IF-CJSON-1",
      "suite": "Ed25519",
-     "key_id": "7f52a39eb04a11ca3cdb7f7acba71a75",
+     "key_id": "df497f0df790b77f1c609aa33e86a01f",
      "purpose": "evidence"
     },
     "payload": {
@@ -85,23 +85,23 @@
       ]
      }
     },
-    "signature": "KyVXBBCoHpbT2aoRulGIRqGc6_r83hnzqXGaf82vPYL8nEoigpnPbroASlGyaDtt1g7skTkFlXIrkq1ejRuCAQ"
+    "signature": "c2W1dcnrhsRHXGCoZ_1aOFih56PA8Fd1lWAqcyRWfGz_LqAkYTfmiMSoI6ShmD6LGjKsQjvYcwYLIke5rcpsAQ"
    }
   },
   {
    "name": "empty-payload",
    "purpose": "capability",
-   "key_id": "a8487b028fc115093ac74a4dd4c2e0ea",
-   "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAS1wxwDutniIb2gDtDSKwnPd5Gmswy4aSL7zOJYeYqjg=\n-----END PUBLIC KEY-----\n",
+   "key_id": "fddce2148b64a3fcc62e2da482e69424",
+   "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAhcqoFh2S/VZezW/f/Qm5Ewk3+7YFHHNSyu/xDQ7OXp8=\n-----END PUBLIC KEY-----\n",
    "envelope": {
     "protected": {
      "profile": "IF-CJSON-1",
      "suite": "Ed25519",
-     "key_id": "a8487b028fc115093ac74a4dd4c2e0ea",
+     "key_id": "fddce2148b64a3fcc62e2da482e69424",
      "purpose": "capability"
     },
     "payload": {},
-    "signature": "W8DG1BJJ1tqUzyUHO_NaytHXbgc65DQ7RfnHzr9nXQs_i_NeJhTeQMv7IaVGyCSCPgaoSAEHzNQvFDy4Y30WDQ"
+    "signature": "hIHLcWK1JJyK5EgUtF_B42BjjHpFnqie7ZBN8iBn9eBeqgOuaovQjJ6vHS00SkgcqNe4hb6vtunicJ1OAgO8Cg"
    }
   }
  ]

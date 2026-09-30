@@ -3,10 +3,10 @@
   "functional_requirements": 166,
   "nonfunctional_requirements": 45,
   "status_counts": {
-    "PARTIAL": 109,
-    "VERIFIED_IN_ENGINEERING_PROFILE": 69,
-    "NOT_IMPLEMENTED": 5,
-    "BLOCKED_EXTERNAL": 28
+    "PARTIAL": 108,
+    "VERIFIED_IN_ENGINEERING_PROFILE": 71,
+    "BLOCKED_EXTERNAL": 28,
+    "NOT_IMPLEMENTED": 4
   },
   "production_ready": false,
   "interpretation": "Verified means directly exercised in the declared engineering profile only, not closure of external/production acceptance. Counts are not product completion percentages."

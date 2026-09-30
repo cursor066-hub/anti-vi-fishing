@@ -2,20 +2,38 @@ import { generateKeyPairSync, createPrivateKey, createPublicKey, sign, verify, r
 import { canonical, digest } from './canonical.mjs';
 import { requireThat } from './errors.mjs';
 
-export function generateKey() {
-  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+export const SUITES = {
+  Ed25519: { curve: 'ed25519', namedCurve: null, hash: null, dsaEncoding: null },
+  ES256: { curve: 'ec', namedCurve: 'P-256', hash: 'sha256', dsaEncoding: 'ieee-p1363' }
+};
+function signSuite(suite, message, privatePem) {
+  const s = SUITES[suite];
+  requireThat(s, 'INV-400-SCHEMA', 'Unsupported algorithm suite');
+  const key = s.dsaEncoding ? { key: createPrivateKey(privatePem), dsaEncoding: s.dsaEncoding } : createPrivateKey(privatePem);
+  return sign(s.hash, message, key).toString('base64url');
+}
+function verifySuite(suite, message, publicPem, signature) {
+  const s = SUITES[suite];
+  if (!s) return false;
+  const key = s.dsaEncoding ? { key: createPublicKey(publicPem), dsaEncoding: s.dsaEncoding } : createPublicKey(publicPem);
+  return verify(s.hash, message, key, signature);
+}
+export function generateKey(suite = 'Ed25519') {
+  const s = SUITES[suite];
+  requireThat(s, 'INV-400-SCHEMA', 'Unsupported algorithm suite');
+  const { privateKey, publicKey } = generateKeyPairSync(s.curve, s.namedCurve ? { namedCurve: s.namedCurve } : {});
   const pub = publicKey.export({ type: 'spki', format: 'pem' });
-  return { key_id: digest({ public_key: pub }).slice(0, 32), public_key: pub, private_key: privateKey.export({ type: 'pkcs8', format: 'pem' }) };
+  return { key_id: digest({ public_key: pub }).slice(0, 32), public_key: pub, private_key: privateKey.export({ type: 'pkcs8', format: 'pem' }), suite };
 }
 export function signed(payload, key, purpose) {
-  const protectedHeader = { profile: 'IF-CJSON-1', suite: 'Ed25519', key_id: key.key_id, purpose };
+  const protectedHeader = { profile: 'IF-CJSON-1', suite: key.suite ?? 'Ed25519', key_id: key.key_id, purpose };
   const message = Buffer.from(canonical({ protected: protectedHeader, payload }));
-  return { protected: protectedHeader, payload, signature: sign(null, message, createPrivateKey(key.private_key)).toString('base64url') };
+  return { protected: protectedHeader, payload, signature: signSuite(protectedHeader.suite, message, key.private_key) };
 }
 export function verifySigned(envelope, publicKeys, purpose) {
   requireThat(envelope && Object.keys(envelope).sort().join() === 'payload,protected,signature', 'INV-401-SIGNATURE', 'Invalid signed envelope', 401);
   const h = envelope.protected;
-  requireThat(h && Object.keys(h).sort().join() === 'key_id,profile,purpose,suite' && h.profile === 'IF-CJSON-1' && h.suite === 'Ed25519' && h.purpose === purpose, 'INV-401-SIGNATURE', 'Unsupported signature context', 401);
+  requireThat(h && Object.keys(h).sort().join() === 'key_id,profile,purpose,suite' && h.profile === 'IF-CJSON-1' && SUITES[h.suite] && h.purpose === purpose, 'INV-401-SIGNATURE', 'Unsupported signature context', 401);
   const key = publicKeys[h.key_id];
   requireThat(key && !key.revoked, 'INV-401-SIGNATURE', 'Signer unavailable', 401);
   // Require canonical base64url: mutating unused padding bits must not
@@ -23,7 +41,7 @@ export function verifySigned(envelope, publicKeys, purpose) {
   requireThat(typeof envelope.signature === 'string' && /^[A-Za-z0-9_-]{86}$/.test(envelope.signature)
     && Buffer.from(envelope.signature, 'base64url').toString('base64url') === envelope.signature, 'INV-401-SIGNATURE', 'Invalid signature encoding', 401);
   let ok = false;
-  try { ok = verify(null, Buffer.from(canonical({ protected: h, payload: envelope.payload })), createPublicKey(key.public_key), Buffer.from(envelope.signature, 'base64url')); } catch { ok = false; }
+  try { ok = verifySuite(h.suite, Buffer.from(canonical({ protected: h, payload: envelope.payload })), key.public_key, Buffer.from(envelope.signature, 'base64url')); } catch { ok = false; }
   requireThat(ok, 'INV-401-SIGNATURE', 'Signature verification failed', 401);
   return envelope.payload;
 }

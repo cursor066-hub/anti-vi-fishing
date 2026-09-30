@@ -2,14 +2,19 @@
  "warning": "TEST VECTOR KEYS ONLY — generated solely for cross-implementation conformance vectors; they protect nothing and must never be used operationally",
  "keys": [
   {
-   "key_id": "7f52a39eb04a11ca3cdb7f7acba71a75",
-   "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAUcTpla5B3Kem+GgwYdwev/5Eo/XkVA/aciLmYuiUKNQ=\n-----END PUBLIC KEY-----\n",
-   "private_key": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIB2DP9Nhfcn+3pb4p0rI1eWKo1o7S64EVNCDr5xpiT1i\n-----END PRIVATE KEY-----\n"
+   "key_id": "df497f0df790b77f1c609aa33e86a01f",
+   "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAlFWDKWozHsNAmNQDSl1x8/C5U665ti+ISfloIPduVY8=\n-----END PUBLIC KEY-----\n",
+   "private_key": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIJw+Q8hnptHCCAUw5REdVJ+lVWXRAXvAScyvI73ucFLQ\n-----END PRIVATE KEY-----\n"
   },
   {
-   "key_id": "a8487b028fc115093ac74a4dd4c2e0ea",
-   "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAS1wxwDutniIb2gDtDSKwnPd5Gmswy4aSL7zOJYeYqjg=\n-----END PUBLIC KEY-----\n",
-   "private_key": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIEsygRWDvn0Sz21IyuHyAyoqw5/7mCl6sTeTFVUcgdjY\n-----END PRIVATE KEY-----\n"
+   "key_id": "fddce2148b64a3fcc62e2da482e69424",
+   "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAhcqoFh2S/VZezW/f/Qm5Ewk3+7YFHHNSyu/xDQ7OXp8=\n-----END PUBLIC KEY-----\n",
+   "private_key": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIDoCcPbJNe+LQGEF2s6Ybs3vbDwxvlmJlM3oRLuCZ5Cq\n-----END PRIVATE KEY-----\n"
+  },
+  {
+   "key_id": "663cf3c430029f9e2e48ae223ef376c6",
+   "public_key": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEuKGMEBVEmVjEEOcjzwFfOpFoo2y6\nIUUoVyaUfpLo+TPy4SvP95GWmnpJPUsNEEbjsb/03dHo6xrj/Cz+KZOeOw==\n-----END PUBLIC KEY-----\n",
+   "private_key": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg5NpZ3gypTTIDJca1\n2hlME94rJIvAK0Me8IVxNPfqHlOhRANCAAS4oYwQFUSZWMQQ5yPPAV86kWijbLoh\nRShXJpR+kuj5M/LhK8/3kZaaekk9Sw0QRuOxv/Td0ejrGuP8LP4pk547\n-----END PRIVATE KEY-----\n"
   }
  ]
 }

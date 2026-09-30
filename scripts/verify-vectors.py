@@ -12,6 +12,9 @@ import sys
 import unicodedata
 import base64
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from cryptography.hazmat.primitives.asymmetric.ec import ECDSA
+from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.hazmat.primitives import serialization
 from cryptography.exceptions import InvalidSignature
 
@@ -98,6 +101,29 @@ def main():
         except InvalidSignature:
             pass
     print(f"python: {len(cv['vectors'])} canonical + {len(ev['vectors'])} envelope vectors, {failed} failures")
+
+    ev2 = json.load(open('vectors/envelope-es256-vectors.json'))
+    for v in ev2['vectors']:
+        env = v['envelope']
+        if env['protected']['suite'] != 'ES256':
+            failed += 1; print(f"FAIL es256-header/{v['name']}"); continue
+        message = canon({'protected': env['protected'], 'payload': env['payload']}).encode()
+        pub = serialization.load_pem_public_key(v['public_key'].encode())
+        raw = b64url(env['signature'])
+        if len(raw) != 64:
+            failed += 1; print(f"FAIL es256-length/{v['name']}"); continue
+        der = encode_dss_signature(int.from_bytes(raw[:32], 'big'), int.from_bytes(raw[32:], 'big'))
+        try:
+            pub.verify(der, message, ECDSA(SHA256()))
+        except InvalidSignature:
+            failed += 1; print(f"FAIL es256-signature/{v['name']}")
+        tampered = bytearray(message); tampered[0] ^= 1
+        try:
+            pub.verify(der, bytes(tampered), ECDSA(SHA256()))
+            failed += 1; print(f"FAIL es256-tamper-accepted/{v['name']}")
+        except InvalidSignature:
+            pass
+    print(f"python: {len(ev2['vectors'])} ES256 envelope vectors, {failed} total failures")
     return 1 if failed else 0
 
 if __name__ == '__main__':

@@ -319,9 +319,10 @@ export class Fabric {
       const decision = this.evaluation(t, r, now), policy = this.policy(t);
       requireThat(decision.decision === 'ALLOW', 'INV-412-EVIDENCE', 'Only ALLOW may receive an execution certificate', 412, decision);
       this.assertHealthy(t, r.capsule.actor.subject_id, r.capsule.actor.device_id, now);
-      requireThat(policy.algorithms.allowed_suites.includes('Ed25519'), 'INV-451-POLICY', 'Certificate suite is no longer approved by policy', 451);
+      const suite = this.vault.entry(this.keys(t).execution.key_id).suite ?? 'Ed25519';
+      requireThat(policy.algorithms.allowed_suites.includes(suite), 'INV-451-POLICY', 'Certificate suite is no longer approved by policy', 451);
       const graph = this.graph(t, r), expiry = Math.min(now + policy.certificate_ttl_ms, r.capsule.expires_at, policy.expires_at, ...graph.items.map(e => e.payload.expires_at), ...r.approvals.map(a => a.payload.expires_at));
-      const payload = { certificate_id: randomUUID(), tenant_id: t, capsule_id: id, capsule_digest: r.capsule_digest, evidence_graph_digest: graph.digest, policy_id: policy.policy_id, policy_version: policy.version, policy_digest: digest(policy), decision: 'ALLOW', constraints: { destination: r.capsule.destination, quantity: r.capsule.quantity, requested_digest: digest(r.capsule.requested_state), current_state: r.capsule.current_state, exclusions: r.capsule.exclusions }, target_gate_id: this.config.gate_id, signer_set: decision.eligible_signers, nonce: r.capsule.nonce, issued_at: now, expires_at: expiry, single_use: true, suite: 'Ed25519', revocation_ref: `certificate:${id}` };
+      const payload = { certificate_id: randomUUID(), tenant_id: t, capsule_id: id, capsule_digest: r.capsule_digest, evidence_graph_digest: graph.digest, policy_id: policy.policy_id, policy_version: policy.version, policy_digest: digest(policy), decision: 'ALLOW', constraints: { destination: r.capsule.destination, quantity: r.capsule.quantity, requested_digest: digest(r.capsule.requested_state), current_state: r.capsule.current_state, exclusions: r.capsule.exclusions }, target_gate_id: this.config.gate_id, signer_set: decision.eligible_signers, nonce: r.capsule.nonce, issued_at: now, expires_at: expiry, single_use: true, suite, revocation_ref: `certificate:${id}` };
       requireThat(!this.revoked(t, 'key', this.keys(t).execution.key_id) && this.vault.has(this.keys(t).execution.key_id), 'INV-401-SIGNATURE', 'Execution key revoked', 401);
       const envelope = this.signExecution(t, payload, 'action-certificate');
       this.store.insert(t, 'certificate', payload.certificate_id, { envelope, consumed: false, status: 'CERTIFIED' }, now);
@@ -562,7 +563,8 @@ export class Fabric {
     return this.transaction(p, now => { const e = this.store.must(p.tenant_id, 'evidence', input.evidence_id); e.legal_hold = input.legal_hold; this.store.put(p.tenant_id, 'evidence', input.evidence_id, e, now); this.store.audit(p.tenant_id, 'RETENTION_HOLD_CHANGED', p.subject_id, input.evidence_id, { legal_hold: input.legal_hold }, now); return { evidence_id: input.evidence_id, legal_hold: input.legal_hold }; });
   }
   retentionSweep(p) {
-    this.authorize(p, ['security']); return this.transaction(p, now => {
+    this.authorize(p, ['security']);
+    const result = this.transaction(p, now => {
       const items = this.store.list(p.tenant_id, 'evidence', 10000), records = this.store.list(p.tenant_id, 'capsule', 10000); let deleted = 0, held = 0;
       // Conservative batch boundary: do not erase if a reference could be outside this scan.
       if (records.length === 10000) return { deleted: 0, held: items.length, reason: 'Reference scan limit reached; no deletion performed', complete_payload_erasure: false };
@@ -572,11 +574,13 @@ export class Fabric {
         if (e.legal_hold || activeReference) { held++; continue; }
         const original_digest = digest(e.envelope);
         this.store.insert(p.tenant_id, 'evidence-tombstone', e.payload.evidence_id, { evidence_id: e.payload.evidence_id, original_digest, deleted_at: now }, now);
-        this.store.remove(p.tenant_id, 'evidence', e.payload.evidence_id); deleted++;
-        this.store.audit(p.tenant_id, 'RETENTION_DELETED', p.subject_id, e.payload.evidence_id, { original_digest, logical_deletion_only: true }, now);
+        this.store.shred(p.tenant_id, 'evidence', e.payload.evidence_id); deleted++;
+        this.store.audit(p.tenant_id, 'RETENTION_DELETED', p.subject_id, e.payload.evidence_id, { original_digest, crypto_shred: true }, now);
       }
-      return { deleted, held, complete_payload_erasure: false, limitation: 'Logical deletion does not remove old ciphertext from backups or SQLite free pages; per-record key destruction is not implemented.' };
+      return { deleted, held, complete_payload_erasure: false, limitation: 'Record DEKs are destroyed and the WAL truncated; ciphertext remaining in pre-erasure backups or external copies is not reachable by this operation.' };
     });
+    if (result.deleted) this.store.checkpoint();
+    return result;
   }
   // KEY-004/005: threshold ceremonies manage exportable material (backup roots)
   // and pre-stage vault-resident rotation keys. Private material stays inside

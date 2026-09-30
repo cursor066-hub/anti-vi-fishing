@@ -2,7 +2,7 @@ import { createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify, r
 import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { canonical, digest } from './canonical.mjs';
-import { encrypt, decrypt } from './crypto.mjs';
+import { encrypt, decrypt, SUITES } from './crypto.mjs';
 import { fields, text, identifier, integer } from './schema.mjs';
 import { requireThat, InvariantError } from './errors.mjs';
 
@@ -12,7 +12,7 @@ import { requireThat, InvariantError } from './errors.mjs';
 // attested — honestly labelled generated_inside software, hardware:false.
 // This is NOT a real HSM: the attestation says so (KEY-003 honest profile).
 
-export const SUITES = { Ed25519: { id: 'Ed25519', introduced: 1, status: 'approved' } };
+export { SUITES };
 export const FIRMWARE = 'if-softhsm-1.0.0';
 export const STORE_FORMAT = 'IF-SOFTHSM-STORE-1';
 
@@ -23,17 +23,19 @@ export class KeyVault {
     this.firmware = firmware; this.keys = new Map();
     this.attestor = this._generateRaw();
   }
-  _generateRaw() {
-    const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  _generateRaw(suite = 'Ed25519') {
+    const s = SUITES[suite];
+    requireThat(s, 'INV-400-SCHEMA', 'Unsupported algorithm suite');
+    const { privateKey, publicKey } = generateKeyPairSync(s.curve, s.namedCurve ? { namedCurve: s.namedCurve } : {});
     const public_pem = publicKey.export({ type: 'spki', format: 'pem' });
     return { key_id: digest({ public_key: public_pem }).slice(0, 32), public_key: public_pem, private_key: privateKey.export({ type: 'pkcs8', format: 'pem' }) };
   }
   has(key_id) { return this.keys.has(key_id) && !this.keys.get(key_id).revoked; }
   entry(key_id) { const e = this.keys.get(key_id); requireThat(e && !e.revoked && !e.pending, 'INV-401-SIGNATURE', 'Key unavailable, revoked or pending activation', 401); return e; }
   generate(purpose, { suite = 'Ed25519', exportable = false, key_id = null, pending = false } = {}) {
-    requireThat(SUITES[suite]?.status === 'approved', 'INV-400-SCHEMA', 'Unapproved algorithm suite');
+    requireThat(SUITES[suite], 'INV-400-SCHEMA', 'Unapproved algorithm suite');
     text(purpose, 'key purpose', 64);
-    const raw = this._generateRaw();
+    const raw = this._generateRaw(suite);
     const id = key_id ?? raw.key_id;
     requireThat(!this.keys.has(id), 'INV-409-CONFLICT', 'Key id already exists', 409);
     this.keys.set(id, { key_id: id, public_key: raw.public_key, purpose, suite, exportable, revoked: false, pending, generated_inside: true, wrapped: encrypt(raw.private_key, this.masterKey, `vault/${id}`), created_firmware: this.firmware });
@@ -61,11 +63,17 @@ export class KeyVault {
   sign(key_id, purpose, message) {
     const e = this.entry(key_id);
     requireThat(e.purpose === purpose || e.purpose === 'any', 'INV-403-SCOPE', `Key is bound to purpose ${e.purpose}`, 403);
-    return sign(null, Buffer.isBuffer(message) ? message : Buffer.from(message), createPrivateKey(this._private(key_id))).toString('base64url');
+    const s = SUITES[e.suite] ?? SUITES.Ed25519;
+    const key = s.dsaEncoding ? { key: createPrivateKey(this._private(key_id)), dsaEncoding: s.dsaEncoding } : createPrivateKey(this._private(key_id));
+    return sign(s.hash, Buffer.isBuffer(message) ? message : Buffer.from(message), key).toString('base64url');
   }
   verify(key_id, message, signatureB64) {
     const e = this.entry(key_id);
-    try { return verify(null, Buffer.isBuffer(message) ? message : Buffer.from(message), createPublicKey(e.public_key), Buffer.from(signatureB64, 'base64url')); } catch { return false; }
+    try {
+      const s = SUITES[e.suite] ?? SUITES.Ed25519;
+      const key = s.dsaEncoding ? { key: createPublicKey(e.public_key), dsaEncoding: s.dsaEncoding } : createPublicKey(e.public_key);
+      return verify(s.hash, Buffer.isBuffer(message) ? message : Buffer.from(message), key, Buffer.from(signatureB64, 'base64url'));
+    } catch { return false; }
   }
   publicKey(key_id) { return this.entry(key_id).public_key; }
   // Envelope signing with the IF-CJSON-1 profile; identical wire shape to

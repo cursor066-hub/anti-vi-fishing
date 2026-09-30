@@ -72,7 +72,7 @@ export function validatePolicy(p) {
   integer(p.secure_perception.session_ttl_ms, 'perception ttl', 1000, 3600000);
   if (p.secure_perception.release_fields !== null) uniqueStrings(p.secure_perception.release_fields, 'release fields', 64);
   fields(p.algorithms, ['allowed_suites', 'deprecation']);
-  requireThat(Array.isArray(p.algorithms.allowed_suites) && p.algorithms.allowed_suites.length > 0 && p.algorithms.allowed_suites.every(s => ['Ed25519'].includes(s)), 'INV-400-SCHEMA', 'Unsupported algorithm suite');
+  requireThat(Array.isArray(p.algorithms.allowed_suites) && p.algorithms.allowed_suites.length > 0 && p.algorithms.allowed_suites.every(s => ['Ed25519', 'ES256'].includes(s)), 'INV-400-SCHEMA', 'Unsupported algorithm suite');
   if (p.emergency_of !== undefined) integer(p.emergency_of, 'emergency base version', 1);
   return p;
 }

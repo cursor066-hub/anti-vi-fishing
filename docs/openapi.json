@@ -1324,6 +1324,38 @@
     }
    }
   },
+  "/v1/audit/entries": {
+   "get": {
+    "operationId": "get_v1_audit_entries",
+    "summary": "Cursor-paginated raw audit entries (?cursor=N&limit=M)",
+    "description": "Roles: operator, security, auditor. Returns signed audit envelopes after the given sequence cursor (max 5000 per page) with next_cursor for continuation. Full signed export via POST /v1/audit-exports remains the verification bundle. Engineering profile; all target mutations are simulated.",
+    "tags": [
+     "Control"
+    ],
+    "responses": {
+     "200": {
+      "description": "Successful response; see API.md for exact record contracts",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "Reason-coded rejection",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
   "/v1/audit/verify-proof": {
    "post": {
     "operationId": "post_v1_audit_verify_proof",

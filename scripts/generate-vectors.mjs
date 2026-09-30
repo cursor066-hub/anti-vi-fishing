@@ -45,7 +45,11 @@ const envelopeVectors = payloads.map((v, i) => {
   return { name: v.name, purpose: v.purpose, key_id: key.key_id, public_key: key.public_key, envelope: signed(v.payload, key, v.purpose) };
 });
 
+const es256Key = generateKey('ES256');
+const es256Vectors = payloads.slice(0, 2).map(v => ({ name: `es256-${v.name}`, purpose: v.purpose, key_id: es256Key.key_id, public_key: es256Key.public_key, envelope: signed(v.payload, es256Key, v.purpose) }));
+
 writeFileSync(`${out}/canonical-vectors.json`, JSON.stringify({ format: 'IF-CJSON-1 conformance vectors v1', vectors: canonicalVectors }, null, 1) + '\n');
 writeFileSync(`${out}/envelope-vectors.json`, JSON.stringify({ format: 'IF-ENVELOPE-1 conformance vectors v1', message: 'canonical({protected, payload}) UTF-8', vectors: envelopeVectors }, null, 1) + '\n');
-writeFileSync(`${out}/keys.json`, JSON.stringify({ warning: 'TEST VECTOR KEYS ONLY — generated solely for cross-implementation conformance vectors; they protect nothing and must never be used operationally', keys: keys.map(k => ({ key_id: k.key_id, public_key: k.public_key, private_key: k.private_key })) }, null, 1) + '\n');
+writeFileSync(`${out}/envelope-es256-vectors.json`, JSON.stringify({ format: 'IF-ENVELOPE-1 conformance vectors v1', message: 'canonical({protected, payload}) UTF-8; ECDSA P-256/SHA-256 signatures in IEEE-P1363 form', vectors: es256Vectors }, null, 1) + '\n');
+writeFileSync(`${out}/keys.json`, JSON.stringify({ warning: 'TEST VECTOR KEYS ONLY — generated solely for cross-implementation conformance vectors; they protect nothing and must never be used operationally', keys: [...keys, es256Key].map(k => ({ key_id: k.key_id, public_key: k.public_key, private_key: k.private_key })) }, null, 1) + '\n');
 console.log(`Wrote ${canonicalVectors.length} canonical + ${envelopeVectors.length} envelope vectors`);
