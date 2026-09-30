@@ -86,5 +86,5 @@ export function workspaceFallback(release, policy, now) {
   // honestly labelled — only when policy explicitly permits it.
   const sp = policy.secure_perception ?? {};
   requireThat(sp.fallback === 'controlled-workspace', 'INV-451-POLICY', 'Policy denies unencrypted release fallback', 451);
-  return { mode: 'controlled-workspace', assurance: ASSURANCE.workspace, production: false, binding: { purpose: release.purpose, fields: Object.keys(release.fields).sort(), issued_at: now }, data: release.fields };
+  return { mode: 'controlled-workspace', assurance: ASSURANCE.workspace, production: false, binding: { purpose: release.purpose, fields: Object.keys(release.fields).sort(), reason: release.reason ?? null, issued_at: now }, data: release.fields };
 }

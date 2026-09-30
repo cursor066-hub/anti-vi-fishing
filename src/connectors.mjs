@@ -92,8 +92,14 @@ export async function postOnce(url, body, options = {}) {
 // caller maps the affected coverage paths to UNKNOWN (COV-004, CON-006).
 export function driftCheck(registered, observed, now) {
   const changes = [];
-  for (const k of ['connector_id', 'version']) if (registered[k] !== observed[k]) changes.push({ field: k, was: registered[k] ?? null, now: observed[k] ?? null });
-  const configDigest = digest({ connector_id: observed.connector_id, version: observed.version, actions: observed.actions ?? [], permissions: observed.permissions ?? [] });
-  const drifted = changes.length > 0 || registered.configuration_digest !== configDigest;
+  const cmp = (field, was, is) => { const a = JSON.stringify(was ?? null), b = JSON.stringify(is ?? null); if (a !== b) changes.push({ field, was: was ?? null, now: is ?? null }); };
+  const sorted = a => [...(a ?? [])].sort();
+  cmp('connector_id', registered.connector_id, observed.connector_id);
+  cmp('version', registered.version, observed.version);
+  cmp('actions', sorted(registered.actions), sorted(observed.actions));
+  cmp('channel', registered.channel, observed.channel);
+  cmp('key_id', registered.key_id, observed.key_id);
+  const configDigest = digest({ connector_id: observed.connector_id ?? null, version: observed.version ?? null, actions: observed.actions ?? [], permissions: observed.permissions ?? [] });
+  const drifted = changes.length > 0;
   return { drifted, changes, configuration_digest: configDigest, checked_at: now, action: drifted ? 'coverage->UNKNOWN pending compatibility, security and bypass revalidation' : 'none' };
 }

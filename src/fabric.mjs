@@ -245,9 +245,9 @@ export class Fabric {
     try { const res = await httpJson(`${issuer.endpoint}/v1/issuers/${issuer.name}/manifest?tenant=${p.tenant_id}`, { method: 'GET', timeout_ms: 10000 }); requireThat(res.status === 200, 'INV-503-CONNECTOR', `Manifest fetch refused (${res.status})`, 503); observed = res.data; } catch (e) {
       return this.transaction(p, now => { this.store.audit(p.tenant_id, 'CONNECTOR_DRIFT', p.subject_id, key_id, { drifted: 'unreachable', code: e.code ?? 'transport' }, now); return { drifted: true, changes: [{ field: 'endpoint', detail: 'unreachable' }], checked_at: now }; });
     }
-    const registered = { version: issuer.version ?? '1.0.0', kinds: issuer.kinds, channel: issuer.channel, key_id };
     const observedPayload = verifySigned(observed, { [key_id]: issuer }, 'connector-manifest');
-    const result = driftCheck(registered, { version: observedPayload.version, kinds: observedPayload.actions, channel: observedPayload.domain, key_id: observed.protected.key_id }, this.clock());
+    const registered = { connector_id: `issuer:${issuer.name}`, version: issuer.version ?? '1.0.0', actions: issuer.kinds, channel: issuer.channel, key_id };
+    const result = driftCheck(registered, { connector_id: observedPayload.connector_id, version: observedPayload.version, actions: observedPayload.actions, channel: observedPayload.domain, key_id: observed.protected.key_id }, this.clock());
     return this.transaction(p, now => { if (result.drifted) this.store.audit(p.tenant_id, 'CONNECTOR_DRIFT', p.subject_id, key_id, { changes: result.changes, configuration_digest: result.configuration_digest }, now); return result; });
   }
   approvalChallenge(p, id) {

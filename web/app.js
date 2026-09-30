@@ -11,6 +11,7 @@ export function typedValue(value, rule) {
   if (!value.trim()) throw new Error('Complete all required action fields.'); return value;
 }
 export function csvSelection(value) { const items = value.split(',').map(x => x.trim()).filter(Boolean); if (!items.length || new Set(items).size !== items.length) throw new Error('Provide a nonempty list without duplicates.'); return items; }
+export function fieldsMap(value) { const out = {}; for (const pair of csvSelection(value)) { const i = pair.indexOf('='); if (i <= 0) throw new Error('Enter fields as name=value pairs, comma-separated.'); out[pair.slice(0, i).trim()] = pair.slice(i + 1).trim(); } return out; }
 export function formatQuantity(c) { if (c.action.type === 'finance.payment.first') return `${c.requested_state.currency} ${(c.quantity / 100).toFixed(2)} (${c.quantity} minor units)`; return `${c.quantity} unit${c.quantity === 1 ? '' : 's'}`; }
 
 if (typeof document !== 'undefined') {
@@ -20,14 +21,14 @@ if (typeof document !== 'undefined') {
   async function api(path, { method = 'GET', body, headers = {} } = {}) {
     const response = await fetch(path, { method, credentials: 'same-origin', headers: { ...headers, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(state.csrf ? { 'X-CSRF-Token': state.csrf } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     const value = await response.json();
-    if (!response.ok) { if (response.status === 401) { state.me = null; state.csrf = null; $('login-panel').hidden = false; $('workspace').hidden = true; $('logout').hidden = true; $('identity').textContent = 'Session expired'; } throw new Error(`${value.error?.code ?? response.status}: ${value.error?.message ?? 'Request failed'}`); }
+    if (!response.ok) { if (response.status === 401 && value.error?.code === 'INV-401-AUTH') { state.me = null; state.csrf = null; $('login-panel').hidden = false; $('workspace').hidden = true; $('logout').hidden = true; $('identity').textContent = 'Session expired'; } throw new Error(`${value.error?.code ?? response.status}: ${value.error?.message ?? 'Request failed'}`); }
     return value;
   }
   function handle(id, event, fn) {
     $(id).addEventListener(event, async e => {
-      e.preventDefault(); const buttons = event === 'submit' ? [...e.currentTarget.querySelectorAll('button')] : [e.currentTarget]; const wasDisabled = buttons.map(b => b.disabled); buttons.forEach(b => { b.disabled = true; b.setAttribute('aria-busy', 'true'); });
+      e.preventDefault(); $('notice').hidden = true; const buttons = event === 'submit' ? [...e.currentTarget.querySelectorAll('button')] : [e.currentTarget]; const wasDisabled = buttons.map(b => b.disabled); buttons.forEach(b => { b.disabled = true; b.setAttribute('aria-busy', 'true'); });
       try { await fn(e); } catch (error) { notify(error.message || 'Network unavailable. Retry after checking connection.', true); }
-      finally { buttons.forEach((b, i) => { b.disabled = wasDisabled[i]; b.removeAttribute('aria-busy'); }); if (state.selected) applyAvailability(); $('previous').disabled = state.offset === 0; $('next').disabled = state.pageCount < 25; }
+      finally { buttons.forEach((b, i) => { if (b.disabled) b.disabled = wasDisabled[i]; b.removeAttribute('aria-busy'); }); if (state.selected) applyAvailability(); $('previous').disabled = state.offset === 0; $('next').disabled = state.pageCount < 25; }
     });
   }
   function node(tag, value, className) { const n = document.createElement(tag); if (value !== undefined) n.textContent = value; if (className) n.className = className; return n; }
@@ -148,7 +149,7 @@ if (typeof document !== 'undefined') {
       const tr = node('tr'), title = node('td', i.name ?? i.key_id.slice(0, 12)); title.append(node('span', i.key_id.slice(0, 12), 'resource'));
       const cell = node('td'), button = node('button', 'Drift check', 'secondary');
       if (!i.endpoint) { button.disabled = true; button.title = 'No live endpoint registered'; }
-      button.addEventListener('click', async () => { $('drift-result').textContent = JSON.stringify(await api(`/v1/connectors/${i.key_id}/drift-check`, { method: 'POST', body: {} }), null, 2); });
+      button.addEventListener('click', async () => { try { $('drift-result').textContent = JSON.stringify(await api(`/v1/connectors/${i.key_id}/drift-check`, { method: 'POST', body: {} }), null, 2); } catch (error) { notify(error.message || 'Drift check failed.', true); } });
       cell.append(button); tr.append(title, node('td', `${i.channel} / ${i.failure_domain}`), node('td', i.endpoint ?? 'offline envelope only'), node('td', i.revoked ? 'revoked' : 'trusted'), cell); $('connector-rows').append(tr);
     }
   }
@@ -158,8 +159,8 @@ if (typeof document !== 'undefined') {
   handle('verify-proof', 'click', async () => { if (!lastProof) return; const out = await api('/v1/audit/verify-proof', { method: 'POST', body: { proof: lastProof } }); notify(out.valid ? 'Inclusion proof verifies against the exported tree head.' : 'Proof failed to verify.', !out.valid); });
   handle('consistency-form', 'submit', async () => { $('proof-result').textContent = JSON.stringify(await api(`/v1/audit/consistency?first=${$('consistency-first').value}`), null, 2); });
   handle('perception-form', 'submit', async () => { const session = await api('/v1/secure-perception/sessions', { method: 'POST', body: { attestation: JSON.parse($('attestation-json').value) } }); $('release-session').value = session.session_id; $('perception-result').textContent = JSON.stringify(session, null, 2); notify('Dev-attested session opened. This is software attestation, not a trusted display.'); });
-  handle('release-form', 'submit', async () => { const body = { session_id: $('release-session').value.trim(), fields: csvSelection($('release-fields').value), purpose: $('release-purpose').value }; $('perception-result').textContent = JSON.stringify(await api('/v1/secure-perception/release', { method: 'POST', body }), null, 2); });
-  handle('fallback-form', 'submit', async () => { $('perception-result').textContent = JSON.stringify(await api('/v1/secure-perception/fallback', { method: 'POST', body: { reason: $('fallback-reason').value } }), null, 2); });
+  handle('release-form', 'submit', async () => { const body = { session_id: $('release-session').value.trim(), fields: fieldsMap($('release-fields').value), purpose: $('release-purpose').value }; $('perception-result').textContent = JSON.stringify(await api('/v1/secure-perception/release', { method: 'POST', body }), null, 2); });
+  handle('fallback-form', 'submit', async () => { const body = { fields: fieldsMap($('fallback-fields').value), purpose: $('fallback-purpose').value, reason: $('fallback-reason').value }; $('perception-result').textContent = JSON.stringify(await api('/v1/secure-perception/fallback', { method: 'POST', body }), null, 2); });
   handle('grants-form', 'submit', async () => { const subject = $('grants-subject').value.trim(); $('grants-result').textContent = JSON.stringify(await api(`/v1/grants${subject ? `?subject=${encodeURIComponent(subject)}` : ''}`), null, 2); });
   handle('refresh-grants', 'click', async () => { $('grants-result').textContent = JSON.stringify(await api('/v1/grants'), null, 2); });
   const loaders = { keys: loadKeys, ceremonies: loadCeremonies, connectors: loadConnectors, grants: async () => {} };
