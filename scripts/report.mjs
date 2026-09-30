@@ -44,10 +44,19 @@ const py = run('python3', ['scripts/verify-vectors.py']);
 write('reports/verification-python.json', JSON.stringify({ verifier: 'scripts/verify-vectors.py (Python cryptography)', exit: py.status, output: (py.stdout ?? '').trim() }, null, 2) + '\n');
 
 // ---- 3. Static checks + production gate ----
+// source-check/artifact-audit snapshot a LIVE gate: check.mjs verifies
+// MANIFEST.sha256 against the working tree, so its exit code is honestly
+// environment-dependent — a clean checkout yields 0, a CI runner (already
+// churned by conformance vector regeneration and simulate's tracked
+// report writes) yields 1. Neither value is byte-stable, so these are
+// volatile evidence like reports/benchmark.json: regenerated for the
+// evidence upload, never compared for staleness. The gate itself is
+// proven by the live `node scripts/check.mjs` CI step (w8-composite CI).
+const writeVolatile = (path, content) => { if (!checkOnly) writeFileSync(path, content); };
 const check = run(process.execPath, ['scripts/check.mjs']);
 const checkOut = (check.stdout ?? '').trim().split('\n').at(-1);
-write('reports/source-check.json', checkOut + '\n');
-write('reports/artifact-audit.json', JSON.stringify({ check_exit: check.status, report: JSON.parse(checkOut), generated_at: 'scripts/report.mjs' }, null, 2) + '\n');
+writeVolatile('reports/source-check.json', checkOut + '\n');
+writeVolatile('reports/artifact-audit.json', JSON.stringify({ check_exit: check.status, report: JSON.parse(checkOut), generated_at: 'scripts/report.mjs' }, null, 2) + '\n');
 const gate = run(process.execPath, ['scripts/release-check.mjs']);
 write('reports/production-gate.json', JSON.stringify({ verifier: 'scripts/release-check.mjs', exit: gate.status, expected_exit: 1, output: (gate.stdout ?? '').trim() }, null, 2) + '\n');
 

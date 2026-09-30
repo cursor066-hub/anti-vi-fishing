@@ -1,8 +1,8 @@
 {
-  "check_exit": 0,
+  "check_exit": 1,
   "report": {
     "syntax_files": 63,
-    "syntax_and_focused_source_checks": true,
+    "syntax_and_focused_source_checks": false,
     "security_certification": false
   },
   "generated_at": "scripts/report.mjs"

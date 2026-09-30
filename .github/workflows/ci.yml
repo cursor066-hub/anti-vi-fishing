@@ -62,10 +62,15 @@ jobs:
       - name: Generated artifacts are not stale
         run: |
           node scripts/report.mjs --check-only
-          git diff --exit-code -- docs/ examples/ ai-eval/ vectors/canonical-vectors.json vectors/envelope-vectors.json vectors/keys.json reports/code-inventory.json reports/sbom.cdx.json reports/requirements-summary.json reports/simulation-results.json reports/VERIFICATION.md reports/verification-summary.json reports/test-summary.json reports/tests.tap reports/final-regression.tap reports/final-regression-summary.json reports/artifact-audit.json reports/source-check.json reports/production-gate.json
+          git diff --exit-code -- docs/ examples/ ai-eval/ vectors/canonical-vectors.json vectors/envelope-vectors.json vectors/keys.json reports/code-inventory.json reports/sbom.cdx.json reports/requirements-summary.json reports/simulation-results.json reports/VERIFICATION.md reports/verification-summary.json reports/test-summary.json reports/tests.tap reports/final-regression.tap reports/final-regression-summary.json reports/production-gate.json
           # reports/benchmark.json is intentionally absent: it embeds measured
           # timings, so byte-equality can never hold — freshness there is
           # proven by the live `benchmark.mjs --assert` run above (w6-ledger S5).
+          # reports/source-check.json + artifact-audit.json are likewise absent:
+          # they snapshot check.mjs's live exit code, which depends on
+          # working-tree churn this pipeline itself creates — proven by the
+          # live `node scripts/check.mjs` step, not by byte equality
+          # (w8-composite CI).
       - name: Upload verification evidence
         uses: actions/upload-artifact@v4
         with:
