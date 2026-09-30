@@ -89,7 +89,7 @@ const sbom = {
     { type: 'application', name: 'bun', version: '1.3.14', scope: 'required', description: 'verification toolchain: independent WebCrypto verifier (exact CI pin)' },
     { type: 'application', name: 'python', version: '3.12', scope: 'required', description: 'verification toolchain: independent canonicalizer + cryptography' },
     { type: 'library', name: 'cryptography', version: '46.0.7', scope: 'required', description: 'verification toolchain: pinned in CI' },
-    { type: 'application', name: 'github-actions', version: 'checkout@11d5960a;setup-bun@0c5077e5;setup-python@a26af69b;setup-node@ea165f8d;upload-artifact@49933ea5', scope: 'required', description: 'CI actions (SHA-pinned)' }
+    { type: 'application', name: 'github-actions', version: 'checkout@11d5960a;setup-bun@0c5077e5;setup-python@a26af69b;setup-node@49933ea5;upload-artifact@ea165f8d', scope: 'required', description: 'CI actions (SHA-pinned)' }
   ],
   dependencies: [], externalReferences: [], properties: [{ name: 'third-party-application-dependencies', value: 'none (runtime); verification toolchain listed above' }]
 };
