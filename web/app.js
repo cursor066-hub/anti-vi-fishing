@@ -11,23 +11,53 @@ export function typedValue(value, rule) {
   if (!value.trim()) throw new Error('Complete all required action fields.'); return value;
 }
 export function csvSelection(value) { const items = value.split(',').map(x => x.trim()).filter(Boolean); if (!items.length || new Set(items).size !== items.length) throw new Error('Provide a nonempty list without duplicates.'); return items; }
+export function fieldsMap(value) { const out = {}; for (const pair of csvSelection(value)) { const i = pair.indexOf('='); if (i <= 0) throw new Error('Enter fields as name=value pairs, comma-separated.'); out[pair.slice(0, i).trim()] = pair.slice(i + 1).trim(); } return out; }
 export function formatQuantity(c) { if (c.action.type === 'finance.payment.first') return `${c.requested_state.currency} ${(c.quantity / 100).toFixed(2)} (${c.quantity} minor units)`; return `${c.quantity} unit${c.quantity === 1 ? '' : 's'}`; }
+// Exact in-browser replica of src/canonical.mjs (IF-CJSON-1): NFC strings,
+// ASCII object keys, safe integers only, sorted keys, strict key charset.
+export function canonicalJson(value, depth = 0) {
+  if (depth > 32) throw new Error('Maximum nesting depth exceeded');
+  if (value === null || typeof value === 'boolean') return JSON.stringify(value);
+  if (typeof value === 'number') { if (!Number.isSafeInteger(value) || Object.is(value, -0)) throw new Error('Only safe non-negative-zero integers are supported'); return String(value); }
+  if (typeof value === 'string') { if (value !== value.normalize('NFC') || /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(value)) throw new Error('Strings must be valid NFC Unicode'); if (value.length > 65536) throw new Error('String too long'); return JSON.stringify(value); }
+  if (Array.isArray(value)) { if (value.length > 10000) throw new Error('Array too long'); return '[' + value.map(v => canonicalJson(v, depth + 1)).join(',') + ']'; }
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value).sort(); if (keys.length > 256) throw new Error('Object too large');
+    return '{' + keys.map(k => { if (!/^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}$/.test(k) || ['__proto__', 'prototype', 'constructor'].includes(k)) throw new Error('Unsupported object key'); return JSON.stringify(k) + ':' + canonicalJson(value[k], depth + 1); }).join(',') + '}';
+  }
+  throw new Error('Unsupported canonical value');
+}
+// Signs an IF-CJSON-1 'capsule-intent' envelope in the browser via WebCrypto
+// Ed25519 — identical message bytes to src/crypto.mjs signed(). The private
+// key never leaves this page context.
+export async function signIntent(payload, keyFile) {
+  const protectedHeader = { profile: 'IF-CJSON-1', suite: keyFile.suite ?? 'Ed25519', key_id: keyFile.key_id, purpose: 'capsule-intent' };
+  if (protectedHeader.suite !== 'Ed25519') throw new Error('Browser signing supports Ed25519 identity keys; use the CLI signer for ES256.');
+  const message = new TextEncoder().encode(canonicalJson({ protected: protectedHeader, payload }));
+  const der = Uint8Array.from(atob(keyFile.private_key.replace(/-----[^-]+-----|\s/g, '')), c => c.charCodeAt(0));
+  let key;
+  try { key = await crypto.subtle.importKey('pkcs8', der, { name: 'Ed25519' }, false, ['sign']); }
+  catch { throw new Error('This browser lacks WebCrypto Ed25519 support — sign with the CLI instead.'); }
+  const sig = await crypto.subtle.sign({ name: 'Ed25519' }, key, message);
+  const b64 = btoa(String.fromCharCode(...new Uint8Array(sig))).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+  return { protected: protectedHeader, payload, signature: b64 };
+}
 
 if (typeof document !== 'undefined') {
   const $ = id => document.getElementById(id);
-  const state = { me: null, csrf: null, schemas: [], policy: null, selected: null, currentState: null, currentResource: null, offset: 0, pageCount: 0, runtime: null };
+  const state = { me: null, csrf: null, schemas: [], policy: null, selected: null, currentState: null, currentResource: null, offset: 0, pageCount: 0, runtime: null, identityKey: null };
   function notify(message, error = false) { const el = $('notice'); el.hidden = false; el.textContent = message; el.dataset.error = String(error); if (error) el.setAttribute('role', 'alert'); else el.setAttribute('role', 'status'); }
   async function api(path, { method = 'GET', body, headers = {} } = {}) {
     const response = await fetch(path, { method, credentials: 'same-origin', headers: { ...headers, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(state.csrf ? { 'X-CSRF-Token': state.csrf } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     const value = await response.json();
-    if (!response.ok) { if (response.status === 401) { state.me = null; state.csrf = null; $('login-panel').hidden = false; $('workspace').hidden = true; $('logout').hidden = true; $('identity').textContent = 'Session expired'; } throw new Error(`${value.error?.code ?? response.status}: ${value.error?.message ?? 'Request failed'}`); }
+    if (!response.ok) { if (response.status === 401 && value.error?.code === 'INV-401-AUTH') { state.me = null; state.csrf = null; $('login-panel').hidden = false; $('workspace').hidden = true; $('logout').hidden = true; $('identity').textContent = 'Session expired'; } throw new Error(`${value.error?.code ?? response.status}: ${value.error?.message ?? 'Request failed'}`); }
     return value;
   }
   function handle(id, event, fn) {
     $(id).addEventListener(event, async e => {
-      e.preventDefault(); const buttons = event === 'submit' ? [...e.currentTarget.querySelectorAll('button')] : [e.currentTarget]; const wasDisabled = buttons.map(b => b.disabled); buttons.forEach(b => { b.disabled = true; b.setAttribute('aria-busy', 'true'); });
+      e.preventDefault(); $('notice').hidden = true; const buttons = event === 'submit' ? [...e.currentTarget.querySelectorAll('button')] : [e.currentTarget]; const wasDisabled = buttons.map(b => b.disabled); buttons.forEach(b => { b.disabled = true; b.setAttribute('aria-busy', 'true'); });
       try { await fn(e); } catch (error) { notify(error.message || 'Network unavailable. Retry after checking connection.', true); }
-      finally { buttons.forEach((b, i) => { b.disabled = wasDisabled[i]; b.removeAttribute('aria-busy'); }); if (state.selected) applyAvailability(); $('previous').disabled = state.offset === 0; $('next').disabled = state.pageCount < 25; }
+      finally { buttons.forEach((b, i) => { if (b.disabled) b.disabled = wasDisabled[i]; b.removeAttribute('aria-busy'); }); if (state.selected) applyAvailability(); $('previous').disabled = state.offset === 0; $('next').disabled = state.pageCount < 25; }
     });
   }
   function node(tag, value, className) { const n = document.createElement(tag); if (value !== undefined) n.textContent = value; if (className) n.className = className; return n; }
@@ -73,8 +103,20 @@ if (typeof document !== 'undefined') {
     $('identity').textContent = `${state.me.tenant_id} / ${state.me.subject_id}`; $('logout').hidden = false; $('login-panel').hidden = true; $('workspace').hidden = false;
     state.schemas = await api('/v1/schemas'); $('action-type').replaceChildren(new Option('Choose action type', '')); for (const s of state.schemas.filter(s => s.type.startsWith('finance.'))) $('action-type').append(new Option(s.type, s.type));
     const canActions = state.me.roles.some(r => ['operator', 'approver', 'custodian', 'security', 'policy_admin'].includes(r));
-    const access = { actions: canActions, propose: state.me.roles.includes('operator'), coverage: true, policy: state.me.roles.some(r => ['policy_admin', 'security'].includes(r)), runtime: state.me.roles.includes('operator'), audit: state.me.roles.some(r => ['auditor', 'security'].includes(r)) };
+    const admin = state.me.roles.some(r => ['security', 'policy_admin', 'custodian'].includes(r));
+    const has = (...r) => state.me.roles.some(x => r.includes(x));
+    // Affordances mirror the server's own authorization sets — a nav entry is
+    // hidden exactly when every API call under it would 403 (UX-004).
+    const access = { actions: canActions, propose: state.me.roles.includes('operator'), coverage: true, policy: has('policy_admin', 'security'), runtime: has('operator', 'workload'), audit: has('auditor', 'security'), keys: has('security', 'policy_admin'), ceremonies: admin, connectors: has('operator', 'security', 'policy_admin', 'auditor'), proofs: has('operator', 'security', 'auditor'), perception: has('operator', 'approver', 'custodian', 'security'), grants: has('operator', 'security', 'auditor') };
     document.querySelectorAll('nav button').forEach(b => { b.hidden = !access[b.dataset.view]; });
+    // Per-ACTION affordances inside a visible view must also mirror the
+    // server's role set: a button that always 403s is a dishonest
+    // affordance (w7-console F3).
+    $('rotate-form').hidden = !has('security', 'custodian');
+    $('ceremony-form').hidden = !has('security', 'custodian');
+    $('ack-form').hidden = !has('custodian');
+    $('split-form').hidden = !has('security', 'custodian');
+    $('reconstruct-form').hidden = !has('security', 'custodian');
     if (canActions) { show('actions'); await loadList(); } else { show('audit'); }
     notify('Connected to the isolated engineering workspace. Targets and evidence issuers are synthetic.');
   });
@@ -83,6 +125,12 @@ if (typeof document !== 'undefined') {
   handle('refresh', 'click', loadList); handle('previous', 'click', async () => { state.offset = Math.max(0, state.offset - 25); await loadList(); }); handle('next', 'click', async () => { state.offset += 25; await loadList(); }); handle('back-actions', 'click', async () => { show('actions'); await loadList(); });
   $('action-type').addEventListener('change', renderRequested); $('resource').addEventListener('input', () => { state.currentState = null; state.currentResource = null; });
   handle('load-state', 'click', async () => { if (!$('resource').checkValidity() || !$('resource').value) throw new Error('Enter a valid target resource identifier.'); const resource = $('resource').value; state.currentState = await api(`/v1/resources/${encodeURIComponent(resource)}`); state.currentResource = resource; $('state-preview').textContent = JSON.stringify(state.currentState, null, 2); });
+  handle('identity-key-file', 'change', async e => {
+    const file = e.target.files[0]; if (!file) { state.identityKey = null; return; }
+    const key = JSON.parse(await file.text());
+    if (typeof key?.private_key !== 'string' || typeof key?.key_id !== 'string' || !key.private_key.includes('PRIVATE KEY')) throw new Error('Select an identity key file generated by bootstrap (identity-<tenant>-<subject>.json).');
+    state.identityKey = key; notify(`Identity key ${key.key_id} loaded — the private key stays in this page.`);
+  });
   handle('propose-form', 'submit', async () => {
     if (!state.currentState || state.currentResource !== $('resource').value) throw new Error('Read current target state for this exact resource first.');
     const schema = state.schemas.find(s => s.type === $('action-type').value), requested = {}; for (const input of $('requested-fields').querySelectorAll('input')) requested[input.name] = typedValue(input.value, input.dataset.rule);
@@ -98,7 +146,7 @@ if (typeof document !== 'undefined') {
     const certificate = await api(`/v1/certificates/${r.certificate_id}`), result = await api('/gate/v1/execute', { method: 'POST', body: { certificate, dry_run: dry } }); await detail(r.capsule.capsule_id); $('outcome').hidden = false; $('outcome').textContent = JSON.stringify(result, null, 2); notify(dry ? 'Dry-run passed without target mutation.' : `Synthetic outcome: ${result.payload.status}.`);
   }
   handle('dry-run', 'click', () => execute(true)); handle('execute', 'click', () => execute(false));
-  handle('reconcile', 'click', async () => { const result = await api(`/gate/v1/outcomes/${state.selected.certificate_id}`); await detail(state.selected.capsule.capsule_id); $('outcome').hidden = false; $('outcome').textContent = JSON.stringify(result, null, 2); });
+  handle('reconcile', 'click', async () => { const result = await api(`/gate/v1/outcomes/${state.selected.certificate_id}`, { method: 'POST', body: {} }); await detail(state.selected.capsule.capsule_id); $('outcome').hidden = false; $('outcome').textContent = JSON.stringify(result, null, 2); });
   handle('cancel', 'click', async () => { await api(`/v1/action-capsules/${state.selected.capsule.capsule_id}/cancel`, { method: 'POST', body: {} }); await detail(state.selected.capsule.capsule_id); });
   handle('evidence-form', 'submit', async () => { await api(`/v1/action-capsules/${state.selected.capsule.capsule_id}/evidence`, { method: 'POST', body: JSON.parse($('evidence-json').value) }); $('evidence-json').value = ''; await detail(state.selected.capsule.capsule_id); notify('Signed evidence attached. Earlier approvals were invalidated.'); });
   handle('challenge', 'click', async () => { const challenge = await api(`/v1/action-capsules/${state.selected.capsule.capsule_id}/approval-challenge`); download(challenge, `approval-challenge-${challenge.capsule_id}.json`); notify('Challenge downloaded. Sign it outside the browser with your independently controlled software key.'); });
@@ -111,4 +159,57 @@ if (typeof document !== 'undefined') {
   });
   handle('runtime-read', 'click', async () => { const c = state.runtime.payload; $('runtime-result').textContent = JSON.stringify(await api('/gate/v1/runtime', { method: 'POST', body: { capability: state.runtime, device_id: c.device_id, resource: c.resource, destination: c.destination, action: c.action, purpose: c.purpose, columns: c.columns, row_ids: c.row_ids, request_id: crypto.randomUUID(), protocol: 'https', port: 443 } }), null, 2); });
   handle('audit-form', 'submit', async () => { const bundle = await api('/v1/audit-exports', { method: 'POST', body: { purpose: $('audit-purpose').value } }); download(bundle, `invariant-audit-${state.me.tenant_id}.json`); notify(`Exported ${bundle.entries.length} linked records. Verify with an independently pinned trust key.`); });
+  async function loadKeys() {
+    const data = await api('/v1/keys'); $('key-rows').replaceChildren();
+    for (const k of data.keys) {
+      const tr = node('tr'), title = node('td', `${k.key_id.slice(0, 12)}… ${k.purpose}`); title.append(node('span', `${k.suite} · ${k.exportable ? 'exportable' : 'non-exportable'}`, 'resource'));
+      const status = node('td', k.revoked ? 'revoked' : k.pending ? 'pending' : 'active');
+      const cell = node('td'), button = node('button', 'Attest', 'secondary');
+      button.addEventListener('click', async () => { $('attest-result').textContent = JSON.stringify(await api(`/v1/keys/${k.key_id}/attest`), null, 2); });
+      cell.append(button); tr.append(title, status, cell); $('key-rows').append(tr);
+    }
+  }
+  handle('refresh-keys', 'click', loadKeys);
+  handle('rotate-form', 'submit', async () => { const out = await api('/v1/keys/rotate-prepare', { method: 'POST', body: { key_class: $('rotate-class').value } }); $('rotate-result').textContent = JSON.stringify(out, null, 2); await loadKeys(); notify('Pending key created inside the vault. Activate it via a verified key.rotate action.'); });
+  let selectedCeremony = null;
+  async function loadCeremonies() {
+    const data = await api('/v1/ceremonies'); $('ceremony-rows').replaceChildren();
+    for (const c of data.items) {
+      const tr = node('tr'), title = node('td', c.ceremony_id); title.append(node('span', c.purpose, 'resource'));
+      const cell = node('td'), button = node('button', 'Open', 'secondary'); button.addEventListener('click', () => selectCeremony(c)); cell.append(button);
+      tr.append(title, node('td', c.status), cell); $('ceremony-rows').append(tr);
+    }
+  }
+  function selectCeremony(c) { selectedCeremony = c; $('ceremony-title').textContent = c.ceremony_id; $('ceremony-detail').textContent = JSON.stringify(c, null, 2); }
+  handle('refresh-ceremonies', 'click', loadCeremonies);
+  handle('ceremony-form', 'submit', async () => {
+    const body = { ceremony_id: $('cer-id').value, purpose: $('cer-purpose').value, threshold: typedValue($('cer-threshold').value, 'positive'), custodians: csvSelection($('cer-custodians').value), valid_until: Date.now() + typedValue($('cer-ttl').value, 'positive') * 60000 };
+    const c = await api('/v1/ceremonies', { method: 'POST', body }); await loadCeremonies(); selectCeremony(c); notify('Ceremony created. Custodians acknowledge offline.');
+  });
+  handle('ack-form', 'submit', async () => { if (!selectedCeremony) throw new Error('Select a ceremony first.'); await api(`/v1/ceremonies/${selectedCeremony.ceremony_id}/acknowledge`, { method: 'POST', body: JSON.parse($('ack-json').value) }); $('ack-json').value = ''; await loadCeremonies(); notify('Custodian acknowledgement recorded.'); });
+  handle('split-form', 'submit', async () => { if (!selectedCeremony) throw new Error('Select a ceremony first.'); const out = await api(`/v1/ceremonies/${selectedCeremony.ceremony_id}/split`, { method: 'POST', body: { secret: $('split-secret').value.trim() } }); $('ceremony-result').textContent = JSON.stringify(out, null, 2); download(out, `shares-${selectedCeremony.ceremony_id}.json`); notify('Shares split. Distribute each share to its named custodian.'); });
+  handle('reconstruct-form', 'submit', async () => { if (!selectedCeremony) throw new Error('Select a ceremony first.'); const shares = $('reconstruct-shares').value.split('\n').map(s => s.trim()).filter(Boolean); const out = await api(`/v1/ceremonies/${selectedCeremony.ceremony_id}/reconstruct`, { method: 'POST', body: { shares } }); $('ceremony-result').textContent = JSON.stringify(out, null, 2); });
+  async function loadConnectors() {
+    const data = await api('/v1/connectors/status'); $('connector-rows').replaceChildren();
+    for (const i of data.issuers) {
+      const tr = node('tr'), title = node('td', i.name ?? i.key_id.slice(0, 12)); title.append(node('span', i.key_id.slice(0, 12), 'resource'));
+      const cell = node('td'), button = node('button', 'Drift check', 'secondary');
+      if (!i.endpoint) { button.disabled = true; button.title = 'No live endpoint registered'; }
+      button.hidden = !(state.me?.roles ?? []).some(r => ['security', 'policy_admin'].includes(r));
+      button.addEventListener('click', async () => { try { $('drift-result').textContent = JSON.stringify(await api(`/v1/connectors/${i.key_id}/drift-check`, { method: 'POST', body: {} }), null, 2); } catch (error) { notify(error.message || 'Drift check failed.', true); } });
+      cell.append(button); tr.append(title, node('td', `${i.channel} / ${i.failure_domain}`), node('td', i.endpoint ?? 'offline envelope only'), node('td', i.revoked ? 'revoked' : 'trusted'), cell); $('connector-rows').append(tr);
+    }
+  }
+  handle('refresh-connectors', 'click', loadConnectors);
+  let lastProof = null;
+  handle('proof-form', 'submit', async () => { lastProof = await api(`/v1/audit/proofs/${$('proof-seq').value}`); $('proof-result').textContent = JSON.stringify(lastProof, null, 2); $('verify-proof').disabled = false; });
+  handle('verify-proof', 'click', async () => { if (!lastProof) return; const out = await api('/v1/audit/verify-proof', { method: 'POST', body: { proof: lastProof } }); notify(out.valid ? 'Inclusion proof verifies against the exported tree head.' : 'Proof failed to verify.', !out.valid); });
+  handle('consistency-form', 'submit', async () => { $('proof-result').textContent = JSON.stringify(await api(`/v1/audit/consistency?first=${$('consistency-first').value}`), null, 2); });
+  handle('perception-form', 'submit', async () => { const session = await api('/v1/secure-perception/sessions', { method: 'POST', body: { attestation: JSON.parse($('attestation-json').value) } }); $('release-session').value = session.session_id; $('perception-result').textContent = JSON.stringify(session, null, 2); notify('Dev-attested session opened. This is software attestation, not a trusted display.'); });
+  handle('release-form', 'submit', async () => { const body = { session_id: $('release-session').value.trim(), fields: fieldsMap($('release-fields').value), purpose: $('release-purpose').value }; $('perception-result').textContent = JSON.stringify(await api('/v1/secure-perception/release', { method: 'POST', body }), null, 2); });
+  handle('fallback-form', 'submit', async () => { const body = { fields: fieldsMap($('fallback-fields').value), purpose: $('fallback-purpose').value, reason: $('fallback-reason').value }; $('perception-result').textContent = JSON.stringify(await api('/v1/secure-perception/fallback', { method: 'POST', body }), null, 2); });
+  handle('grants-form', 'submit', async () => { const subject = $('grants-subject').value.trim(); $('grants-result').textContent = JSON.stringify(await api(`/v1/grants${subject ? `?subject=${encodeURIComponent(subject)}` : ''}`), null, 2); });
+  handle('refresh-grants', 'click', async () => { $('grants-result').textContent = JSON.stringify(await api('/v1/grants'), null, 2); });
+  const loaders = { keys: loadKeys, ceremonies: loadCeremonies, connectors: loadConnectors, grants: async () => {} };
+  document.querySelectorAll('nav button').forEach(b => { const fn = loaders[b.dataset.view]; if (fn) b.addEventListener('click', async () => { try { await fn(); } catch (e) { notify(e.message, true); } }); });
 }

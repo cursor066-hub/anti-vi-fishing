@@ -1,0 +1,64 @@
+{
+ "format": "IF-ENVELOPE-1 conformance vectors v1",
+ "message": "canonical({protected, payload}) UTF-8; ECDSA P-256/SHA-256 signatures in IEEE-P1363 form",
+ "vectors": [
+  {
+   "name": "es256-capability-shaped",
+   "purpose": "capability",
+   "key_id": "663cf3c430029f9e2e48ae223ef376c6",
+   "public_key": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEuKGMEBVEmVjEEOcjzwFfOpFoo2y6\nIUUoVyaUfpLo+TPy4SvP95GWmnpJPUsNEEbjsb/03dHo6xrj/Cz+KZOeOw==\n-----END PUBLIC KEY-----\n",
+   "envelope": {
+    "protected": {
+     "profile": "IF-CJSON-1",
+     "suite": "ES256",
+     "key_id": "663cf3c430029f9e2e48ae223ef376c6",
+     "purpose": "capability"
+    },
+    "payload": {
+     "capability_id": "cap-001",
+     "subject_id": "operator-1",
+     "action": "data.read",
+     "columns": [
+      "id",
+      "name"
+     ],
+     "row_ids": [
+      "row-1"
+     ],
+     "max_cost": 10,
+     "issued_at": 1700000000000,
+     "expires_at": 1700000060000
+    },
+    "signature": "fvUqQhnv0MbydH01qM4WdB6XFFBR6umoJCBmNX6DqvhxeoYev7fZSTjtj-4_rKQGnC7wHsrRW24qBzfRa2t0Rg"
+   }
+  },
+  {
+   "name": "es256-evidence-shaped",
+   "purpose": "evidence",
+   "key_id": "663cf3c430029f9e2e48ae223ef376c6",
+   "public_key": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEuKGMEBVEmVjEEOcjzwFfOpFoo2y6\nIUUoVyaUfpLo+TPy4SvP95GWmnpJPUsNEEbjsb/03dHo6xrj/Cz+KZOeOw==\n-----END PUBLIC KEY-----\n",
+   "envelope": {
+    "protected": {
+     "profile": "IF-CJSON-1",
+     "suite": "ES256",
+     "key_id": "663cf3c430029f9e2e48ae223ef376c6",
+     "purpose": "evidence"
+    },
+    "payload": {
+     "evidence_id": "ev-001",
+     "kind": "ownership",
+     "claim": "supports",
+     "capsule_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "subject_id": "acct-1",
+     "acquired_at": 1700000000000,
+     "issuer_version": "1.0.0",
+     "claims": {
+      "account": "TESTBANK000001",
+      "verified_at": 1700000000000
+     }
+    },
+    "signature": "B5MsK0iTbK3AIevSbKMMoFm1dtYBGGHcOxPY33Fpxn54A2Uv6sSXRueNrb2RKCR1GRxZyYcmJldcsPBR4v3_yA"
+   }
+  }
+ ]
+}

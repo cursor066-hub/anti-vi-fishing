@@ -1,14 +1,9 @@
 {
-  "all_local_document_links_valid": true,
-  "json_artifacts_parse": true,
-  "requirement_rows": 211,
-  "original_srs_preserved_byte_for_byte": true,
-  "private_deployment_artifacts_in_distribution": false,
-  "source_check": {
-    "syntax_files": 28,
-    "syntax_and_focused_source_checks": true,
+  "check_exit": 1,
+  "report": {
+    "syntax_files": 76,
+    "syntax_and_focused_source_checks": false,
     "security_certification": false
   },
-  "production_gate": "BLOCKED as required",
-  "verification_summary_consistent": true
+  "generated_at": "scripts/report.mjs"
 }

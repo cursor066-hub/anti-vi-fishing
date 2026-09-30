@@ -6,44 +6,78 @@ source = (root / 'spec/Invariant_Fabric_SRS_and_System_Architecture.md').read_te
 rows = []
 for line in source.splitlines():
     parts = [part.strip() for part in line.split('|')]
-    if len(parts) >= 5 and re.fullmatch(r'(?:[A-Z]{2,3}|NFR-[A-Z]+)-\d{3}', parts[1]):
+    if len(parts) >= 5 and re.fullmatch(r'(?:NFR-)?[A-Z]{2,4}-\d{3}', parts[1]):
         rows.append({'id': parts[1], 'requirement': parts[2], 'minimum_acceptance': parts[3]})
 assert len(rows) == 211 and len({r['id'] for r in rows}) == 211
-verified = set('''COV-002 COV-007 COV-008 ACT-001 ACT-003 ACT-004 ACT-006 ACT-007 ACT-008 ACT-011 EVD-001 EVD-002 EVD-003 EVD-005 EVD-008 EVD-009 EVD-011 POL-001 POL-002 POL-003 POL-005 POL-006 POL-007 POL-009 POL-010 POL-015 COM-001 COM-002 COM-003 COM-005 COM-006 COM-009 COM-010 COM-011 COM-012 RUN-002 RUN-007 DAT-002 DAT-003 DAT-004 DAT-009 IDN-002 IDN-008 AUD-001 AUD-005 AUD-007 AUD-008 AUD-009 AIG-001 AIG-006 AIG-008 AIG-009 CON-004 CON-005 CON-010'''.split())
-not_implemented = set('''COV-001 COV-004 COV-010 ACT-012 POL-008 POL-013 RUN-010 DAT-007 DAT-011 IDN-004 IDN-005 IDN-009 NET-001 NET-005 NET-006 KEY-005 KEY-008 KEY-009 AUD-010 AIG-003 AIG-004 AIG-007 AIG-010 CON-002 CON-006 CON-008 UX-006 NFR-AVL-003 NFR-OPS-003 NFR-OPS-004 NFR-OPS-005 NFR-MNT-005'''.split())
-external = set('''PER-001 PER-002 PER-003 PER-004 PER-005 PER-006 PER-010 KEY-001 KEY-002 KEY-003 KEY-006 KEY-011 NFR-SEC-003 NFR-SEC-007 NFR-SEC-008 NFR-AVL-001 NFR-AVL-005 NFR-PRV-001 NFR-PRV-003 NFR-OPS-001 NFR-MNT-004 NFR-USA-001 NFR-USA-002 NFR-USA-003 NFR-CMP-001 NFR-CMP-003 NFR-CMP-004 NFR-TST-004'''.split())
+# Hand-maintained per-requirement proof status (w6-ledger S2 — deduped set).
+# UX-001 demoted to PARTIAL: approval_threshold floors at >=1 for every rule,
+# so 'no additional human approval' is unreachable in this profile. COV-003
+# demoted: the ENFORCED coverage label is unreachable in the current model.
+_verified_ids = '''COV-002 COV-004 COV-007 COV-008 ACT-001 ACT-002 ACT-003 ACT-004 ACT-005 ACT-006 ACT-007 ACT-008 ACT-009 ACT-010 ACT-011 ACT-012 EVD-001 EVD-002 EVD-003 EVD-004 EVD-005 EVD-006 EVD-007 EVD-008 EVD-009 EVD-010 EVD-011 POL-001 POL-002 POL-003 POL-004 POL-005 POL-006 POL-007 POL-008 POL-009 POL-010 POL-011 POL-012 POL-013 POL-014 POL-015 COM-001 COM-002 COM-003 COM-004 COM-005 COM-006 COM-007 COM-008 COM-009 COM-010 COM-011 COM-012 COM-013 COM-014 RUN-001 RUN-002 RUN-003 RUN-004 RUN-005 RUN-006 RUN-007 RUN-008 RUN-009 RUN-010 DAT-001 DAT-002 DAT-003 DAT-004 DAT-005 DAT-006 DAT-007 DAT-008 DAT-009 DAT-010 DAT-011 DAT-012 IDN-001 IDN-002 IDN-003 IDN-004 IDN-005 IDN-006 IDN-007 IDN-008 IDN-009 IDN-010 AUD-001 AUD-002 AUD-003 AUD-004 AUD-005 AUD-006 AUD-007 AUD-008 AUD-009 AUD-010 AIG-001 AIG-002 AIG-003 AIG-004 AIG-005 AIG-006 AIG-007 AIG-008 AIG-009 AIG-010 CON-001 CON-002 CON-003 CON-004 CON-005 CON-006 CON-007 CON-008 CON-009 CON-010 KEY-002 KEY-004 KEY-005 KEY-007 KEY-008 KEY-009 KEY-010 KEY-012 UX-003 UX-005 UX-006 UX-007 UX-008 UX-009 UX-010 PER-006 PER-007 PER-008 PER-009 PER-010 NET-002 NET-003 NET-004 NET-005 NET-006 NET-007 NET-008 NET-009 NET-010 COV-001 COV-005 COV-006 COV-009 NFR-OPS-004 NFR-OPS-005 NFR-SEC-001 NFR-SEC-004 NFR-SEC-005 NFR-SEC-006 NFR-MNT-001 NFR-MNT-002 NFR-MNT-003 NFR-MNT-004 NFR-MNT-005 NFR-AVL-002 NFR-AVL-004 NFR-PERF-001 NFR-PERF-003 NFR-PERF-004 NFR-PRV-005 NFR-USA-004 NFR-TST-001 NFR-TST-002 NFR-TST-003 NFR-TST-004'''.split()
+assert len(_verified_ids) == len(set(_verified_ids)), 'verified set must not contain duplicate IDs'
+verified = set(_verified_ids)
+# w9-srs corrections: KEY-002 (Shamir quorum), NFR-TST-004 (release gate)
+# and PER-006 (release-field constraints) are implemented and tested —
+# promoted. NFR-SEC-002 overclaimed VERIFIED without an independent
+# review artifact — demoted to PARTIAL. NFR-MNT-004 is met by the
+# CODEOWNERS policy extended to every security-critical module. w10:
+# NFR-SEC-007 gains a real signed-provenance path (release-sign.mjs +
+# verify-release.mjs, tested roundtrip) — promoted NOT_IMPLEMENTED to
+# PARTIAL; production-grade KMS signing remains external.
+not_implemented = set('''NFR-AVL-003 NFR-OPS-003'''.split())
+external = set('''PER-001 PER-002 PER-003 PER-004 PER-005 KEY-001 KEY-003 NFR-AVL-001 NFR-PRV-003 NFR-OPS-001 NFR-USA-001 NFR-USA-002 NFR-USA-003 NFR-CMP-001 NFR-CMP-003 NFR-CMP-004'''.split())
+# w11-ledger corrections: KEY-006's inventory/transition-plan acceptance is
+# a real document (docs/ALGORITHM-AGILITY.md bound to SUITES by test) and
+# KEY-011's trusted-component firmware trust is implemented via
+# secure_perception.allowed_firmware — both honest PARTIALs, not external.
 by_prefix = {
-'COV': ('Coverage/integration owner', 'R2', 'src/coverage.mjs; src/fabric.mjs', 'Actual target discovery, drift agents, independently executed bypass tests and historical guarantee intervals are not established. All manifests suppress production guarantee.'),
-'ACT': ('Core security maintainer', 'R0', 'src/canonical.mjs; src/schema.mjs; src/fabric.mjs', 'Typed single actions are implemented. Composition, independent high-assurance protocol review and some full-platform semantics are not implemented.'),
-'EVD': ('Evidence integration owner', 'R1', 'src/fabric.mjs; src/policy.mjs', 'Evidence issuer signatures and conservative dependency rules are implemented; source acquisition, issuer onboarding and real authority verification are not.'),
-'POL': ('Customer policy governance owner', 'R2', 'src/policy.mjs; src/fabric.mjs', 'Deterministic local constitution and delayed software-quorum policy activation exist; emergency policy profiles, production staged release and protected full lifecycle remain gaps.'),
+'COV': ('Coverage/integration owner', 'R2', 'src/coverage.mjs; src/fabric.mjs', 'All four coverage labels are representable; actual target discovery, drift agents, independently executed bypass tests and historical guarantee intervals are not established. All manifests suppress production guarantee.'),
+'ACT': ('Core security maintainer', 'R0', 'src/canonical.mjs; src/schema.mjs; src/fabric.mjs', 'Typed actions and same-actor certified-children composition are implemented. Cross-actor choreography and independent high-assurance protocol review are not.'),
+'EVD': ('Evidence integration owner', 'R1', 'src/fabric.mjs; src/policy.mjs; src/issuerd.mjs', 'Independent signed evidence, issuer daemons and HTTP acquisition are implemented; real authority verification, issuer onboarding governance and external attestable record stores are not.'),
+'POL': ('Customer policy governance owner', 'R2', 'src/policy.mjs; src/fabric.mjs', 'Deterministic local constitution, staged deployment via not_before and tightened-threshold emergency policies exist; production staged release infrastructure and protected full lifecycle remain gaps.'),
 'COM': ('Gate security maintainer', 'R2', 'src/fabric.mjs; src/target.mjs', 'State/replay/reservation/observed-outcome behavior is tested against a simulator. Real target credential isolation and total mediation are not proven.'),
-'RUN': ('Runtime enforcement owner', 'R4', 'src/runtime.mjs', 'Local software decisions and persistent budgets are implemented; packet integration, certified configuration integrity, independent remote revocation and local-cache SLA are not established.'),
-'DAT': ('Data gate/privacy owner', 'R3', 'src/runtime.mjs; src/target.mjs; src/fabric.mjs', 'Synthetic dataset selection and budgets only. No real database query rewriting/credential broker, output watermark, per-record crypto-shredding or backup erasure.'),
-'IDN': ('Identity security owner', 'R3', 'src/server.mjs; src/fabric.mjs', 'Local 24-hour tokens, software approvals and quarantine are exercised. WebAuthn/federation, real device attestation, protected recovery and JIT identity lifecycle are not integrated.'),
+'RUN': ('Runtime enforcement owner', 'R4', 'src/runtime.mjs', 'Local software decisions, persistent budgets and signed config-snapshot integrity checks are implemented; packet integration, independent remote revocation and local-cache SLA are not established.'),
+'DAT': ('Data gate/privacy owner', 'R3', 'src/runtime.mjs; src/target.mjs; src/fabric.mjs; src/datagate.mjs; src/store.mjs', 'Synthetic dataset selection, budgets, watermarking, reconstruction detection and per-record DEK crypto-shredding with WAL truncation are implemented. No real database query rewriting/credential broker; ciphertext surviving in pre-erasure backups is out of scope.'),
+'IDN': ('Identity security owner', 'R3', 'src/server.mjs; src/fabric.mjs', 'Local 24-hour tokens, software approvals, quarantine and verified JIT grants are exercised. WebAuthn/federation, real device attestation and brokered service credentials are not integrated; MFA reset/recovery is governance-gated in the engineering profile.'),
 'NET': ('Network enforcement owner', 'R4', 'src/runtime.mjs', 'Software envelope decisions only; no kernel, endpoint, switch, proxy, actual packet or network quarantine enforcement.'),
-'PER': ('Trusted hardware owner', 'R5', 'src/server.mjs; docs/SECURITY.md', 'Hardware unavailable. Secure Perception fails closed and is never claimed by the ordinary UI. No hostile-OS extraction or usability demonstration exists.'),
-'KEY': ('Independent customer custodians', 'R2/R5', 'src/crypto.mjs; src/bootstrap.mjs; docs/SECURITY.md', 'Ed25519 software keys and 3-of-5 multisignature only. No HSM/MPC shares, certified custody, root recovery, rotation/migration or post-quantum implementation.'),
-'AUD': ('Audit/privacy owner', 'R2', 'src/store.mjs; scripts/verify-export.mjs; scripts/verify-export-webcrypto.mjs', 'Signed local hash chain and independently pinned checkpoint verification are implemented. External witness publication, role-specific field views and complete retention erasure remain gaps.'),
-'AIG': ('AI governance owner', 'R2', 'src/policy.mjs; docs/SECURITY.md', 'AI is disabled and has no authority or network/data access. A configured advisory model, provenance pipeline, provider agreements and model-evaluation lifecycle are not implemented.'),
-'CON': ('Target integration owner', 'R2', 'src/target.mjs', 'Controlled SQLite target simulator, not a bank/ERP/cloud connector. Real target APIs, least-privilege credentials, support workflow and upgrade revalidation are missing.'),
-'UX': ('Frontend/accessibility owner', 'R2', 'web/index.html; web/app.js; web/style.css', 'Functional HTTP integration and static UI/logic checks exist. Browser rendering, responsive screenshots, Playwright journeys, WCAG and human comprehension studies were unavailable.'),
-'NFR-SEC': ('Security/release owner', 'R2', 'docs/SECURITY.md; tests/', 'Focused security tests are not ASVS certification, full SAST/DAST, current advisory review, independently signed release provenance or penetration assessment.'),
+'PER': ('Trusted hardware owner', 'R5', 'src/server.mjs; src/secureview.mjs; docs/SECURITY.md', 'Hardware unavailable. A dev-attested software Secure Perception profile and a policy-gated controlled-workspace fallback exist and are honestly labelled; neither is a trusted display. No hostile-OS extraction or usability demonstration exists.'),
+'KEY': ('Independent customer custodians', 'R2/R5', 'src/crypto.mjs; src/keystore.mjs; src/shamir.mjs; src/ceremony.mjs; docs/SECURITY.md', 'Software vault (IF-SOFTHSM-1), rotation, revocation, attestation, dual-suite agility (Ed25519+ES256) and Shamir threshold recovery with enforced delay and per-custodian notice records are implemented. No real HSM/MPC, certified custody, physical OOB channel, or post-quantum suite.'),
+'AUD': ('Audit/privacy owner', 'R2', 'src/store.mjs; scripts/verify-export.mjs; scripts/verify-export-webcrypto.mjs', 'Signed local hash chain, cursor-paginated entry access and independently pinned checkpoint verification are implemented. External witness publication, a real analytics pipeline to segregate, external witness publication and independent operational audit remain gaps.'),
+'AIG': ('AI governance owner', 'R2', 'src/policy.mjs; src/advisory.mjs; docs/SECURITY.md', 'A deterministic advisory extractor exists with confidence/provenance marking and zero authority. External model providers, continuous evaluation and provider agreements are not implemented.'),
+'CON': ('Target integration owner', 'R2', 'src/target.mjs; src/connectors.mjs; src/issuerd.mjs', 'Controlled SQLite target simulator plus real HTTP evidence issuers with manifest drift revalidation. Real bank/ERP/cloud APIs, least-privilege credentials and support workflow are missing.'),
+'UX': ('Frontend/accessibility owner', 'R2', 'web/index.html; web/app.js; web/style.css', 'Full operator console (actions, policy, runtime, keys, ceremonies, connectors, proofs, perception, grants, audit) over the HTTP API exists. Browser rendering, responsive screenshots, Playwright journeys, WCAG and human comprehension studies were unavailable.'),
+'NFR-SEC': ('Security/release owner', 'R2', 'docs/SECURITY.md; scripts/release-sign.mjs; scripts/verify-release.mjs; tests/', 'Focused security tests, an adversarial suite, a seeded canonical-JSON fuzz corpus and signed SLSA-lite release provenance (detached envelope + pinned-anchor verification) are implemented; ASVS certification, full SAST/DAST, advisory review, KMS-backed release signing and penetration assessment are not.'),
 'NFR-PERF': ('Performance owner', 'R2/R4', 'reports/benchmark.json; scripts/benchmark.mjs', 'Single-host synthetic microbenchmark, not production load/soak evidence. Runtime signed-audit p99 does not meet the 1 ms target; see measured report.'),
-'NFR-AVL': ('Platform/SRE owner', 'R2', 'docs/RUNBOOKS.md', 'No multi-zone deployment, consensus/replication, production availability measurement, SLA or validated RTO/RPO exercise.'),
+'NFR-AVL': ('Platform/SRE owner', 'R2', 'docs/RUNBOOKS.md; scripts/backup.mjs; scripts/restore-check.mjs', 'Engine-native online backup and offline restore-verification tooling are implemented and drilled. No multi-zone deployment, consensus/replication, production availability measurement, SLA or validated RTO/RPO exercise.'),
 'NFR-PRV': ('Privacy/legal owner', 'R2', 'docs/SECURITY.md; docs/RUNBOOKS.md', 'Synthetic data/minimisation defaults and logical retention only. Legal basis, DPIA, regional contracts, full deletion and biometric hardware evidence require external review/integration.'),
 'NFR-OPS': ('Platform/SRE owner', 'R2', 'docs/RUNBOOKS.md; deploy/', 'Runbook and staging templates are supplied, but no assigned production account, operational staff, incident system or live release/DR exercise exists.'),
-'NFR-MNT': ('Maintainer/release owner', 'R2', 'docs/API.md; reports/sbom.cdx.json', 'Versioned engineering API and runtime inventory are supplied; human ownership, full dual certificate/policy conformance, lifecycle notices and release process are incomplete.'),
+'NFR-MNT': ('Maintainer/release owner', 'R2', 'docs/API.md; docs/openapi.json; reports/sbom.cdx.json', 'Versioned engineering API, OpenAPI document and runtime inventory are supplied; human ownership, full dual certificate/policy conformance, lifecycle notices and release process are incomplete.'),
 'NFR-USA': ('Product/accessibility researcher', 'R2/R5', 'web/; docs/WORKFLOWS.md', 'No browser, accessibility audit or independent human comprehension/usability study was available.'),
 'NFR-CMP': ('Qualified legal/compliance owner', 'R2', 'docs/PRODUCTION-ACCEPTANCE.md; docs/SECURITY.md', 'No certification, legal opinion, executed compliance mapping, disclosure operation or sector/regulatory assessment is claimed.'),
 'NFR-TST': ('Independent verification/release owner', 'R2', 'tests/; reports/tests.tap; docs/requirements.csv', 'Synthetic software and adversarial evidence is included; independent red team, real target tests and signed production acceptance remain unclosed.')
 }
-tests = list((root/'tests').glob('*.test.mjs'))
+tests = sorted((root/'tests').glob('*.test.mjs'), key=lambda p: p.name) + [root/'scripts/simulate.mjs', root/'scripts/ai-eval.mjs']
+# A citation must name the requirement inside a real test() block that also
+# asserts — an ID sitting in a comment alone cannot mint evidence
+# (w11-ledger F3). Script harnesses (simulate/ai-eval) are executable
+# scenarios cited by file, so their whole text counts.
+def evidence_blocks(path):
+    text = path.read_text()
+    if not path.name.endswith('.test.mjs'):
+        return [text]
+    return re.split(r'(?m)^test\(', text)[1:]
 for row in rows:
     prefix = row['id'].rsplit('-', 1)[0]
     owner, baseline, implementation, limitation = by_prefix[prefix]
-    matches = [str(p.relative_to(root)) for p in tests if row['id'] in p.read_text()]
-    row.update(status='VERIFIED_IN_ENGINEERING_PROFILE' if row['id'] in verified else 'NOT_IMPLEMENTED' if row['id'] in not_implemented else 'BLOCKED_EXTERNAL' if row['id'] in external else 'PARTIAL', owner_role=owner, named_owner='Not assigned; required before production', release_baseline=baseline, verification_method='Automated test / simulation' if matches else 'Source inspection / analysis; external acceptance still required', implementation=implementation, stored_evidence='; '.join(matches + ['reports/tests.tap', 'reports/final-regression.tap']) if matches else 'docs/PRODUCTION-ACCEPTANCE.md', limitations=limitation, production_acceptance='NOT_APPROVED')
+    matches = [str(p.relative_to(root)) for p in tests
+               if any(row['id'] in b and ('assert' in b or 'requireThat' in b or 'hasCode' in b or 'throws' in b or not p.name.endswith('.test.mjs')) for b in evidence_blocks(p))]
+    # Evidence lists only the files that literally name the requirement —
+    # corpus-level artifacts would be boilerplate on every row (w6-ledger S3).
+    status = 'VERIFIED_IN_ENGINEERING_PROFILE' if row['id'] in verified else 'NOT_IMPLEMENTED' if row['id'] in not_implemented else 'BLOCKED_EXTERNAL' if row['id'] in external else 'PARTIAL'
+    # A test that names a blocked row exercised only its rejection leg — the
+    # method must not read as if the requirement itself passed (w9-srs F17).
+    method = 'Automated test / simulation' if matches and status in ('VERIFIED_IN_ENGINEERING_PROFILE', 'PARTIAL') else ('Automated test covers rejection legs only; the required capability is absent' if matches else 'Source inspection / analysis; external acceptance still required')
+    row.update(status=status, owner_role=owner, named_owner='Not assigned; required before production', release_baseline=baseline, verification_method=method, implementation=implementation, stored_evidence='; '.join(matches) if matches else 'docs/PRODUCTION-ACCEPTANCE.md', limitations=limitation, production_acceptance='NOT_APPROVED')
 (root/'docs').mkdir(exist_ok=True)
 with (root/'docs/requirements.csv').open('w', newline='') as file:
     writer = csv.DictWriter(file, fieldnames=list(rows[0]), lineterminator="\n"); writer.writeheader(); writer.writerows(rows)

@@ -1,0 +1,113 @@
+name: engineering-ci
+
+on:
+  push:
+    branches: [main, 'devin/**']
+    # Release tags run the same pipeline — a tagged commit must carry its own
+    # green evidence, not inherit whatever run last touched the branch
+    # (supply-chain M8).
+    tags: ['v*']
+  pull_request:
+
+# Least-privilege token: the pipeline only reads the checkout.
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: engineering-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # Actions are pinned by commit SHA — a moved or hijacked tag cannot
+      # substitute different code into the job that produces attestation
+      # evidence (supply-chain M7). The tag is kept in the comment.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: '1.3.14'
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.19.0'
+      - run: pip install 'cryptography==46.0.7'
+      - name: Static source checks
+        run: node scripts/check.mjs
+      # NFR-SEC-007: the release-attestation pipeline signs provenance with
+      # an ephemeral fixture key and verifies it back — the roundtrip is the
+      # engineering evidence; production keys are never in the repo. It must
+      # run on the pristine checkout: release-sign refuses dirty trees, and
+      # the later test/simulation steps legitimately rewrite tracked reports
+      # (supply-chain M5).
+      - name: Release attestation sign/verify roundtrip
+        run: |
+          node scripts/release-sign.mjs --generate-fixture-key var/relkeys
+          node scripts/release-sign.mjs --key var/relkeys/release-key.pem --public-key var/relkeys/release-key.pub --out var/release-attestation.json --test-anchors-out var/relkeys/anchors.json
+          node scripts/verify-release.mjs var/release-attestation.json var/relkeys/anchors.json
+      - name: Test suite
+        run: npm test
+      - name: Simulation harness
+        run: node scripts/simulate.mjs
+      # Verify the COMMITTED vectors first — a tampered checked-in vector set
+      # must fail before regeneration can erase it (release-audit H2).
+      - name: Committed conformance vectors verify
+        run: |
+          python3 scripts/verify-vectors.py
+          node scripts/verify-vectors-webcrypto.mjs
+      - name: Cross-implementation conformance vectors
+        run: npm run conformance
+      - name: Independent export verifiers (node + bun)
+        run: |
+          node scripts/verify-export.mjs reports/sample-audit.json reports/sample-pinned-trust.json
+          bun scripts/verify-export-webcrypto.mjs reports/sample-audit.json reports/sample-pinned-trust.json
+          python3 scripts/canonical-vectors.py examples/canonical-vectors.json
+      - name: Benchmark (asserted eval budget, informational runtime)
+        run: node scripts/benchmark.mjs --assert
+      - name: AI advisory golden eval
+        run: node scripts/ai-eval.mjs
+      - name: Requirements traceability
+        run: python3 scripts/traceability.py
+      # Generated contracts must be regenerated here so the diff gate below
+      # actually bites — nothing can diff a file the job never rewrites
+      # (supply-chain M1).
+      - name: Regenerate API contracts
+        run: node scripts/generate-contracts.mjs
+      # Deterministic generated artifacts must match what is committed —
+      # a stale contract, ledger or vector set fails the build (release-audit H1).
+      # ES256 envelope vectors are ECDSA-nonced (regenerated per run, verified
+      # at committed state above); sample-* audit bundles mint fresh keys.
+      - name: Generated artifacts are not stale
+        run: |
+          node scripts/report.mjs --check-only
+          git diff --exit-code -- docs/ examples/ ai-eval/ vectors/canonical-vectors.json vectors/envelope-vectors.json vectors/parse-vectors.json vectors/keys.json reports/code-inventory.json reports/sbom.cdx.json reports/requirements-summary.json reports/simulation-results.json reports/VERIFICATION.md reports/verification-summary.json reports/test-summary.json reports/tests.tap reports/final-regression.tap reports/final-regression-summary.json reports/production-gate.json
+          # reports/benchmark.json is intentionally absent: it embeds measured
+          # timings, so byte-equality can never hold — freshness there is
+          # proven by the live `benchmark.mjs --assert` run above (w6-ledger S5).
+          # reports/source-check.json + artifact-audit.json are likewise absent:
+          # they snapshot check.mjs's live exit code, which depends on
+          # working-tree churn this pipeline itself creates — proven by the
+          # live `node scripts/check.mjs` step, not by byte equality
+          # (w8-composite CI).
+      - name: Upload verification evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: verification-evidence
+          path: reports/
+          retention-days: 30
+      # The production gate must fail (BLOCKED) — exit 0 is a broken gate,
+      # not a pass. Asserting the expected non-zero keeps the gate honest.
+      - name: Production gate remains honestly BLOCKED
+        run: |
+          set +e
+          node scripts/release-check.mjs
+          code=$?
+          set -e
+          test "$code" -eq 1

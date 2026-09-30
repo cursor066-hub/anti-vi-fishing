@@ -5,6 +5,7 @@ import { invalid } from './errors.mjs';
 // This deliberately restricted profile is NOT advertised as general RFC 8785.
 export function canonical(value, depth = 0) {
   if (depth > 32) throw invalid('Maximum nesting depth exceeded');
+
   if (value === null || typeof value === 'boolean') return JSON.stringify(value);
   if (typeof value === 'number') {
     if (!Number.isSafeInteger(value) || Object.is(value, -0)) throw invalid('Only safe non-negative-zero integers are supported');
@@ -23,13 +24,34 @@ export function canonical(value, depth = 0) {
     const keys = Object.keys(value).sort();
     if (keys.length > 256) throw invalid('Object too large');
     return '{' + keys.map(k => {
-      if (!/^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}$/.test(k) || ['__proto__', 'prototype', 'constructor'].includes(k)) throw invalid('Unsupported object key');
+      // Every Object.prototype member name is rejected — not only the
+      // classic pollution trio — because a stored own property named
+      // 'toString'/'valueOf'/etc silently shadows the inherited method at
+      // every downstream String(o)/method call (w8-canonical F6).
+      if (!/^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}$/.test(k) || k === '__proto__' || PROTO_KEYS.has(k)) throw invalid('Unsupported object key');
       return JSON.stringify(k) + ':' + canonical(value[k], depth + 1);
     }).join(',') + '}';
   }
   throw invalid('Unsupported canonical value');
 }
+// The forbidden key set is a fixed literal list, not an engine-derived
+// enumeration: every Object.prototype member name plus 'prototype' and the
+// legacy watch/unwatch traps — identical to the set both independent
+// verifiers (Python, WebCrypto) enforce, and stable even under an engine
+// whose Object.prototype grows members (w8-canonical F6; w9-fixverify NB-2).
+const PROTO_KEYS = new Set(['__defineGetter__', '__defineSetter__', '__lookupGetter__', '__lookupSetter__', '__proto__', 'constructor', 'hasOwnProperty', 'isPrototypeOf', 'propertyIsEnumerable', 'toLocaleString', 'toString', 'valueOf', 'prototype', 'watch', 'unwatch']);
+
+// Deepest container nesting of an already-parsed value. Proposals are
+// re-wrapped several levels deep inside their stored record, so callers
+// must bound depth before the write path, not after (w9-fixverify NB-4).
+export function depth(value) {
+  if (value === null || typeof value !== 'object') return 0;
+  let max = 0;
+  for (const v of Array.isArray(value) ? value : Object.values(value)) { const d = depth(v); if (d > max) max = d; }
+  return 1 + max;
+}
 export function digest(value) { return createHash('sha256').update(canonical(value)).digest('hex'); }
+
 export function hashBytes(value) { return createHash('sha256').update(value).digest('hex'); }
 export function clone(value) { return JSON.parse(canonical(value)); }
 
@@ -49,7 +71,11 @@ export function parseStrict(text) {
     throw invalid('Unterminated JSON string');
   }
   function read(depth) {
-    if (depth > 32) throw invalid('Maximum nesting depth exceeded');
+    // Parsed bodies are always consumed inside a signed wrapper —
+    // canonical({protected, payload}) adds one level — so the admission
+    // bound is one shallower than the algebra's ceiling; a body the parser
+    // admits can always be signed (w8-canonical F4).
+    if (depth > 31) throw invalid('Maximum nesting depth exceeded');
     ws(); const c = text[i];
     if (c === '"') return str();
     if (c === '{') {
@@ -71,7 +97,10 @@ export function parseStrict(text) {
       for (const [word, val] of [['true', true], ['false', false], ['null', null]]) {
         if (text.slice(i, i + word.length) === word) { i += word.length; return val; }
       }
-      const m = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/.exec(text.slice(i));
+      // Integer lexemes only — exponent/fraction spellings that would silently
+      // normalize to another number (1e3→1000, 1.0000000000000001→1) are
+      // rejected; the wire must already carry the canonical spelling.
+      const m = /^-?(?:0|[1-9][0-9]*)/.exec(text.slice(i));
       if (m) { i += m[0].length; return Number(m[0]); }
     }
     throw invalid('Invalid JSON');

@@ -1,0 +1,4075 @@
+{
+  "format": "IF-AUDIT-1",
+  "public_keys": {
+    "88c14b4920c8d07e879cae1fb52ab1d2": {
+      "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAjEkozHXbkIZny1GCXAohDp+FmYmHkOqQfk5fmyFG6cs=\n-----END PUBLIC KEY-----\n"
+    }
+  },
+  "prior_checkpoint": null,
+  "checkpoint": {
+    "protected": {
+      "profile": "IF-CJSON-1",
+      "suite": "Ed25519",
+      "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+      "purpose": "checkpoint"
+    },
+    "payload": {
+      "tenant_id": "acme",
+      "size": 156,
+      "head": "205a927ce554d8b6eb142fe9420856b32b70720862c2c7c64d3cfa52120b6945",
+      "tree_head": "d9d8f2aeaa610f0d8f2b40b42eab6063c833a0e42414314275fda4b7c5431bfd"
+    },
+    "signature": "AgqTgBCi4IMCMcr6VBABol4rlkHxv4fCQDeMCqTdz_ViXqxFg63d_GBMwIyXUplbN-X38Mkp6xK2dfI5sTVOAA"
+  },
+  "entries": [
+    {
+      "hash": "6ffb3760f742dfc135861c8ab656ca554ed0caf73c0e99d35271368d91ee9688",
+      "envelope": {
+        "payload": {
+          "actor": "customer-bootstrap",
+          "metadata": {
+            "policy_digest": "7f0b719b5cda7a4c8620cf05e5b8c19c132217ae0067e7ca272e8b1aeba888ae",
+            "software_quorum": 3
+          },
+          "previous": "0000000000000000000000000000000000000000000000000000000000000000",
+          "reference": "constitution:acme",
+          "sequence": 1,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "POLICY_GENESIS"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "qFs6oMNnYNvhRA6AnIIuM7ydnWGpbRjQ42iKQZHg_50C-nT3yk0mdAgwicgBZCjqi6TfrI8ZZtuy3CytYoxrDA"
+      }
+    },
+    {
+      "hash": "a7eabc256528dc035cf3de523a3fb393237f3c36cd0f465f80497d902c1a26c4",
+      "envelope": {
+        "payload": {
+          "actor": "system",
+          "metadata": {
+            "config_digest": "79731834775279639b409175daa4e1faa5d545c6f31c28cdf9fc0f1565f4f952"
+          },
+          "previous": "6ffb3760f742dfc135861c8ab656ca554ed0caf73c0e99d35271368d91ee9688",
+          "reference": "config",
+          "sequence": 2,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "CONFIG_SNAPSHOT"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "4T-wUT8AK3XcRKR2tTSjfdsvmybLwNAMP43iBctadfrl606cFOiT6SAxysLnCw7BOXmRq1-9mY71-lSRgGTgAg"
+      }
+    },
+    {
+      "hash": "d07f9e01988b291f713721c0da90d38463f71b1a848bbbf9b35a1f509ae6c76d",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "action_type": "finance.beneficiary.create",
+            "capsule_digest": "ab7d0f531fa80e71d6aeaf80108ed0c736b607f1224a765b2e4cda9df1a402c7"
+          },
+          "previous": "a7eabc256528dc035cf3de523a3fb393237f3c36cd0f465f80497d902c1a26c4",
+          "reference": "d32a3fa5-8402-45a9-b27d-2bb1c631a4d6",
+          "sequence": 3,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "CAPSULE_PROPOSED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "sFx4dMVR-nzTlM0acMjUnPu92jZg9sw701xJWdtGGYrO5yxKs0LjNiYVM36y3ijHKFC3Mzk2e8-iQg_zRq37Aw"
+      }
+    },
+    {
+      "hash": "75c607392f590c0003bbdd3286094041412115c3e50137b9a115a6dff4d89052",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "evidence_digest": "c47a0c7c34477e8af8a8300450ebd49c1651ef18a29a80b9bb2c792186104998",
+            "evidence_id": "1b65946f-67c9-4e99-812e-b51536770386"
+          },
+          "previous": "d07f9e01988b291f713721c0da90d38463f71b1a848bbbf9b35a1f509ae6c76d",
+          "reference": "d32a3fa5-8402-45a9-b27d-2bb1c631a4d6",
+          "sequence": 4,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "EVIDENCE_ATTACHED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "RRGdXl2AL4VO8ud9EobJwf6Rw9DDP1JPBpmqKPcCej0IgXPHWGD7u5OsdjttEeUhV6HLKFOGWPupAGJAZsIaCA"
+      }
+    },
+    {
+      "hash": "56c2aa78e9acb9368b4d00ef456931f927d02470ab02f274f3e70ea5be16dee4",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "evidence_digest": "cddf3f7db432254bd8f61e326bfb22ef8a077d018cf5ed18e2365153aa92ebcc",
+            "evidence_id": "f3face6a-fe72-4de9-8484-86cd30f72435"
+          },
+          "previous": "75c607392f590c0003bbdd3286094041412115c3e50137b9a115a6dff4d89052",
+          "reference": "d32a3fa5-8402-45a9-b27d-2bb1c631a4d6",
+          "sequence": 5,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "EVIDENCE_ATTACHED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "77VDdKX-CeJ9CJEaMa1e845jCDbYNNXOQWDs5LwjgiCxw8YJy7CUY4zOQJUIcjX2s-90vOykTM8S_H9ZI3idDg"
+      }
+    },
+    {
+      "hash": "0d957f7e118eb36dd2b91bee73c67a3927d0c77598c9475ccaa0745d736df4f7",
+      "envelope": {
+        "payload": {
+          "actor": "custodian-1",
+          "metadata": {
+            "approval_digest": "4e0299f046a1dd08ab546e7e139915b2e83802ec462245ab2715a1d9c5e1bb74",
+            "signer_id": "5b1d645d25fd6e4719866282fb3bf894"
+          },
+          "previous": "56c2aa78e9acb9368b4d00ef456931f927d02470ab02f274f3e70ea5be16dee4",
+          "reference": "d32a3fa5-8402-45a9-b27d-2bb1c631a4d6",
+          "sequence": 6,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "EXACT_ACTION_APPROVED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "kk6PvLF6JQZhedAG5LBIpCwHBPCt2fhkFEmEtIJNpKC6LWvoY88HicoEERfokssUO4HwdJLhVaORr13co4ZPBg"
+      }
+    },
+    {
+      "hash": "b39a8728648f9b0c6718e1e6563b701c1acd97db9a9810d6368ae8790841c3c0",
+      "envelope": {
+        "payload": {
+          "actor": "custodian-2",
+          "metadata": {
+            "approval_digest": "1dfa66915b2427049f88c6a3002ecd674db5924b57eaf963ab704e8c8db186ca",
+            "signer_id": "eba72f112603dea47419814f8cf2c3fa"
+          },
+          "previous": "0d957f7e118eb36dd2b91bee73c67a3927d0c77598c9475ccaa0745d736df4f7",
+          "reference": "d32a3fa5-8402-45a9-b27d-2bb1c631a4d6",
+          "sequence": 7,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "EXACT_ACTION_APPROVED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "oB6HUpa2Cfucjt9nsEHA801pkiyER7-_tDbN3npXpsEekztuO08wcmvZyqlVlk0Jrm7adHaIADave_x-OoTZDA"
+      }
+    },
+    {
+      "hash": "5f83006f2a9fd309890d776791fa63ca6bff8dfbd5fa242f941c64c38a9f0271",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "certificate_digest": "fe684f3da3f052e75bee62f92f27550645d450d373867161b4702b762a0f2a15",
+            "certificate_id": "d11dc01d-7bf9-4baa-bffa-7fdd6a275dd5"
+          },
+          "previous": "b39a8728648f9b0c6718e1e6563b701c1acd97db9a9810d6368ae8790841c3c0",
+          "reference": "d32a3fa5-8402-45a9-b27d-2bb1c631a4d6",
+          "sequence": 8,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "CERTIFICATE_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "wniDblKyGyNBgudOFocQeHUhNsrkUvLzkgDROdL46KGby_82p-OwycyRuT9VX_5-uaDz8QbqbzlZ6EI749ZtAQ"
+      }
+    },
+    {
+      "hash": "ace722d7f61d796cf1d171eed364eb56b353ec4bb4c041c1419f955fa6ec43fb",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "capsule_digest": "ab7d0f531fa80e71d6aeaf80108ed0c736b607f1224a765b2e4cda9df1a402c7"
+          },
+          "previous": "5f83006f2a9fd309890d776791fa63ca6bff8dfbd5fa242f941c64c38a9f0271",
+          "reference": "d11dc01d-7bf9-4baa-bffa-7fdd6a275dd5",
+          "sequence": 9,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "EXECUTION_RESERVED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "kFVBoFQBtXFXsJWyNgc07sdfQsDCympnTHWPWgl67Wl4SwQj3B4BhKo7Ptls5QFbRPRZ-9-AMjhNK3_SN_CkAQ"
+      }
+    },
+    {
+      "hash": "e2fa053bd2156b8af37010fc1d10e0410a32cfe36fec66010cb149bd15d214bc",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "outcome_digest": "605d6d07e2e3b8b03b4ba7f3b1283b16f4a9191fa7b8b4bc78918406b97f57eb",
+            "reason": "TARGET_RECONCILED",
+            "revoked_post_reservation": null,
+            "status": "VERIFIED",
+            "supersedes": null
+          },
+          "previous": "ace722d7f61d796cf1d171eed364eb56b353ec4bb4c041c1419f955fa6ec43fb",
+          "reference": "d11dc01d-7bf9-4baa-bffa-7fdd6a275dd5",
+          "sequence": 10,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "EXECUTION_OUTCOME"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "k0OpqPUm1BhGO_f2x00XVxf30PjU7LsIMw91T55MjYScBk5tpKSUZk-nPD7kA-968wAeUbYqgvzlAOARVfrmCg"
+      }
+    },
+    {
+      "hash": "da19efc69ac827aef8d05a2c3831f94e533da4736cafce60cd29fa3b92134f7a",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "code": "INV-409-REPLAY"
+          },
+          "previous": "e2fa053bd2156b8af37010fc1d10e0410a32cfe36fec66010cb149bd15d214bc",
+          "reference": "local-gate",
+          "sequence": 11,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "SECURITY_OPERATION_REJECTED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "3VVo2lYaU51HaJlg7b5XEzeNMAIgJqOEEnVFDKKychlJ1cWW2r2czOO9IRsF1YlhXqoSN6RaX-SVfQ9jdFcfCA"
+      }
+    },
+    {
+      "hash": "10f18547bf1f39a03b4d94a784a62ce551e66311aa81de7833ed5fe68934f75a",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "action_type": "finance.beneficiary.create",
+            "capsule_digest": "c09bfa580763258b512d954211ac4fe80521afe6bebd18ef60ff66adb6086b9d"
+          },
+          "previous": "da19efc69ac827aef8d05a2c3831f94e533da4736cafce60cd29fa3b92134f7a",
+          "reference": "7b7f2408-41a7-4620-bec7-f0c759576b5a",
+          "sequence": 12,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "CAPSULE_PROPOSED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "9XwIiEp9ogTWvrRf1OrPtq39Y2LQYvv8oXUNtHcChscqbUEevTHY6MCQjM7vpmuiutoc1Dth0xKNOP3MQ1mtAQ"
+      }
+    },
+    {
+      "hash": "957ab866bd2293ba6c9c0a8ff8a991ada1ef62773f6f8a0cd324af269a0cd38b",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "evidence_digest": "369ac12e51683e8dc7f5b390fa8c2f6131b801b85480948b58ef4fe80769cf91",
+            "evidence_id": "42e0e85d-fa52-49cf-ab9e-32eccba9ddd4"
+          },
+          "previous": "10f18547bf1f39a03b4d94a784a62ce551e66311aa81de7833ed5fe68934f75a",
+          "reference": "7b7f2408-41a7-4620-bec7-f0c759576b5a",
+          "sequence": 13,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "EVIDENCE_ATTACHED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "fWrgi2imvO3FDqryMRhYmL8wXdkJBE9EES54PqaSf9FYKpQWl7ZK98TGDSpJmic1EpTSue7leovsJzRgv9T7AA"
+      }
+    },
+    {
+      "hash": "d7b6a8790c77956627b722a5df8fab27c09e3476b56a72eaaffb7d634c15d50b",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "evidence_digest": "b66ef816f47d79c0fd6b3dce634b78cf2d3d680071b81719a1c811102ef85934",
+            "evidence_id": "6e79cd43-714c-4852-8093-74d58df494d7"
+          },
+          "previous": "957ab866bd2293ba6c9c0a8ff8a991ada1ef62773f6f8a0cd324af269a0cd38b",
+          "reference": "7b7f2408-41a7-4620-bec7-f0c759576b5a",
+          "sequence": 14,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "EVIDENCE_ATTACHED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "uQCZNcx7GPL1NmiurL9PAJDlrwz2vg95fTDgKq35aAUJo1H9VboaFFHmPidkd3AIrKYvmunUwDrNpjuUbVMAAQ"
+      }
+    },
+    {
+      "hash": "7576e9328d1d5d8da30e653a19ff22d85f40b76d5147f11e03cb70a30dabcb63",
+      "envelope": {
+        "payload": {
+          "actor": "custodian-1",
+          "metadata": {
+            "approval_digest": "cc3ba91ae5785b86b852aee3344706359ff3852b8de16617a3a1bed7109aaac1",
+            "signer_id": "5b1d645d25fd6e4719866282fb3bf894"
+          },
+          "previous": "d7b6a8790c77956627b722a5df8fab27c09e3476b56a72eaaffb7d634c15d50b",
+          "reference": "7b7f2408-41a7-4620-bec7-f0c759576b5a",
+          "sequence": 15,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "EXACT_ACTION_APPROVED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "DB1kzqPsCk9DhiXOGJAu5TgQ7G662w1RNM6KTraq-l1I9rDSpwlc4V0yo7VW55OMmVz2aD6pQ0KNnSzDEFuuAA"
+      }
+    },
+    {
+      "hash": "7834dc8a62c21b14aa5b57a1dcaa707366abbc789f13fbe5f67ed187b7862931",
+      "envelope": {
+        "payload": {
+          "actor": "custodian-2",
+          "metadata": {
+            "approval_digest": "82e6fbed29f33082fffa0daa39062359aaaace8be8813de86f7b4a684b7c87f2",
+            "signer_id": "eba72f112603dea47419814f8cf2c3fa"
+          },
+          "previous": "7576e9328d1d5d8da30e653a19ff22d85f40b76d5147f11e03cb70a30dabcb63",
+          "reference": "7b7f2408-41a7-4620-bec7-f0c759576b5a",
+          "sequence": 16,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "EXACT_ACTION_APPROVED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "mTcb91zPHxpKZ9jMCdCXyN-bNL3lbSvhQUjVixeaPSjT4w6-3Ep6Crt5pgKrFzDQLheBem4lwqSXpNZw5hyvBg"
+      }
+    },
+    {
+      "hash": "3109e54394d9bf6830ea67a195bf338967348e696ec18c961ed31bac871fa54a",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "certificate_digest": "3b0176f0c8a7c82c333843c906a72694bd2afe12a4fc6bb6726e5e2d20273af3",
+            "certificate_id": "95b5c3a7-e196-4792-ac12-0a45412c59bf"
+          },
+          "previous": "7834dc8a62c21b14aa5b57a1dcaa707366abbc789f13fbe5f67ed187b7862931",
+          "reference": "7b7f2408-41a7-4620-bec7-f0c759576b5a",
+          "sequence": 17,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "CERTIFICATE_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "zjsZvU8QBx2m8VPe8k-mlfULt-B2NuZEABDt7bVcC1RaeZuvhX-Kq7VA7jwVWv6FOq1lp8nYQ0FkUwFuQBYdAQ"
+      }
+    },
+    {
+      "hash": "de3dd6541fc757ba46b1bb6e2896a2e90a84b7fc9ce8240b57fcbaeab0c94080",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "capsule_digest": "c09bfa580763258b512d954211ac4fe80521afe6bebd18ef60ff66adb6086b9d"
+          },
+          "previous": "3109e54394d9bf6830ea67a195bf338967348e696ec18c961ed31bac871fa54a",
+          "reference": "95b5c3a7-e196-4792-ac12-0a45412c59bf",
+          "sequence": 18,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "EXECUTION_RESERVED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "1q0X_rgfxJ29eGEyxKBfGLWK40baqRseq5MlW20j-udxAVlrxAHWKBVElXBuFnKwzmB-GB-9utm94AfUFy73DQ"
+      }
+    },
+    {
+      "hash": "92ee0b1f199e3ef42bf52179b69b3c7c9e0a48c234afff7b570e9acd1fd78402",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "outcome_digest": "9945c8bdde9bddd0c2177a1553d3fce4880eaf908d84beec703bbdd7d2e70abf",
+            "reason": "TARGET_RESULT_UNCONFIRMED",
+            "revoked_post_reservation": null,
+            "status": "UNCERTAIN",
+            "supersedes": null
+          },
+          "previous": "de3dd6541fc757ba46b1bb6e2896a2e90a84b7fc9ce8240b57fcbaeab0c94080",
+          "reference": "95b5c3a7-e196-4792-ac12-0a45412c59bf",
+          "sequence": 19,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "EXECUTION_OUTCOME"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "-ulF6lSjN3Xb8JhbCKRzDX_9Tode6lmkuOj97Y5AqFBNrMQKcr3KzZbatP_ZmMUdJJ5eSGMyvGPRFzyVMiq5Ag"
+      }
+    },
+    {
+      "hash": "bf2eda5840561ab24f67622db7254e7094d06253ba2f6598476e878b7937c831",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "outcome_digest": "f458d08156e0e37f9f237a10c2a4b1a08ac84e349f9c4c51b6cf5ade3e510e0a",
+            "reason": "RECONCILED_FROM_TARGET_JOURNAL",
+            "revoked_post_reservation": null,
+            "status": "VERIFIED",
+            "supersedes": "9945c8bdde9bddd0c2177a1553d3fce4880eaf908d84beec703bbdd7d2e70abf"
+          },
+          "previous": "92ee0b1f199e3ef42bf52179b69b3c7c9e0a48c234afff7b570e9acd1fd78402",
+          "reference": "95b5c3a7-e196-4792-ac12-0a45412c59bf",
+          "sequence": 20,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "EXECUTION_OUTCOME"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "fr_ogkv_WpqPBAZl6xG43QfEA1iKDPFoTCMijyEhAD7rdPdEatWOva-eK2IErpets_jKRu2HfATd1H46lAmyAg"
+      }
+    },
+    {
+      "hash": "f60df06feb0e94d882574e3e40a8306a390c3601c300ef213fcfb09db9d51e78",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "code": "INV-401-SIGNATURE"
+          },
+          "previous": "bf2eda5840561ab24f67622db7254e7094d06253ba2f6598476e878b7937c831",
+          "reference": "local-gate",
+          "sequence": 21,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "SECURITY_OPERATION_REJECTED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "4Ti-ydZ5FZlb4t4Z_WSAHxIgkSVbodCM2_DKVIT-XRY83EPKMzRoZPHO2X3GCnnmC7tW0U7-9q1MbHJ9U9PUDA"
+      }
+    },
+    {
+      "hash": "8d7ea1b2f89b850fabf2503c6aed2e3dcdbb9e7561b39bf2b30d6ed62d21651d",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "action_type": "finance.beneficiary.create",
+            "capsule_digest": "1dc217e7dc75ebc4fe102cba2afdd0ee5ff6775e48228b05d08498a0646524f3"
+          },
+          "previous": "f60df06feb0e94d882574e3e40a8306a390c3601c300ef213fcfb09db9d51e78",
+          "reference": "e87dffba-3136-470a-8816-c73e86497009",
+          "sequence": 22,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "CAPSULE_PROPOSED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "mEHsECkTAbULkIgsWsw42JWTw2YZp-zjliSf8HYvk6D4yE9hJ2Y2J3vYyXLG7crmJLLkHcUXC1z7kK5Z9A3wDQ"
+      }
+    },
+    {
+      "hash": "41346e5ad1b4be8488e31a6ae26283799c2b85b2558d4a787e8acd388e12f8d7",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "evidence_digest": "886d6e9046e12bb5a524d475b5a4d315f02cc99ba618fe0af2efc94fdec041f2",
+            "evidence_id": "9bfb5e73-a012-46c7-a76c-b70e8ab821cd"
+          },
+          "previous": "8d7ea1b2f89b850fabf2503c6aed2e3dcdbb9e7561b39bf2b30d6ed62d21651d",
+          "reference": "e87dffba-3136-470a-8816-c73e86497009",
+          "sequence": 23,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "EVIDENCE_ATTACHED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "9aN3pil_mng6ZDoBLctqLi_bpXbCfAv6-n7DYW_-yWYXKW3VAFKSMQnTVdO1UhoY1-HRgXAK5blFGepcUahpBA"
+      }
+    },
+    {
+      "hash": "5613344fadf9fd7b4aed55a3bd5884bca04e75235b566f69355f4c01fc05e0e8",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "evidence_digest": "04c16c9552d6cb623893759a9e7a3a966c2842da2ded76b0b804b186bb9b0d32",
+            "evidence_id": "cc3444ee-30ea-417d-982a-a85a0f7d62b0"
+          },
+          "previous": "41346e5ad1b4be8488e31a6ae26283799c2b85b2558d4a787e8acd388e12f8d7",
+          "reference": "e87dffba-3136-470a-8816-c73e86497009",
+          "sequence": 24,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "EVIDENCE_ATTACHED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "Fc21ddH_2-kM2Vl0gF0kItKQyh3lENb2ZU2MKY7BiGOiTrSYl46Nz32HVftSJV3v0SSR89WAqLqe6UPWNS3sAw"
+      }
+    },
+    {
+      "hash": "0d486a3b9e9685c5f2ef53ff801c966790415bb7bb25a123ff109f007bc2c413",
+      "envelope": {
+        "payload": {
+          "actor": "custodian-1",
+          "metadata": {
+            "approval_digest": "4d7af439804bea35202e515d0a95cf62c78f46d9a405fb81f6c73f8f4b27f2c4",
+            "signer_id": "5b1d645d25fd6e4719866282fb3bf894"
+          },
+          "previous": "5613344fadf9fd7b4aed55a3bd5884bca04e75235b566f69355f4c01fc05e0e8",
+          "reference": "e87dffba-3136-470a-8816-c73e86497009",
+          "sequence": 25,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "EXACT_ACTION_APPROVED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "8QZBFDhRmRh7Womfrnv7iTBtlzeqsuDsUkM-WvUp5Krj9ppVOdySXQ6jqtBBWQ6PJ51a3iAUBWsgg52-1U1mBQ"
+      }
+    },
+    {
+      "hash": "438c8d9a116c9b680f1afc9c836cbba15d79627d57d824ebc033f11a7c533d94",
+      "envelope": {
+        "payload": {
+          "actor": "custodian-2",
+          "metadata": {
+            "approval_digest": "353886d1ac37c685215d344c96f6f8d547fc837e5fd13ff6d730c64452673dec",
+            "signer_id": "eba72f112603dea47419814f8cf2c3fa"
+          },
+          "previous": "0d486a3b9e9685c5f2ef53ff801c966790415bb7bb25a123ff109f007bc2c413",
+          "reference": "e87dffba-3136-470a-8816-c73e86497009",
+          "sequence": 26,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "EXACT_ACTION_APPROVED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "OFQE2w6q0wzP3JjiOuXxHuPegKH89Dls6JYzpyw6RKxwAML9QltoM1GGUNjtIpTez6-YkZKfT_qfnYTYZEUuDA"
+      }
+    },
+    {
+      "hash": "958a0504535179d43ad6f3b74d61c04fbc37c667c29467eeebbb47fb4841858d",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "certificate_digest": "d88bdee35dab650ad9fbaa415309fc3d1cf230ce82f46b0ff7ad8f689488e196",
+            "certificate_id": "78f707d5-f75c-4233-bf15-241fb7a7a876"
+          },
+          "previous": "438c8d9a116c9b680f1afc9c836cbba15d79627d57d824ebc033f11a7c533d94",
+          "reference": "e87dffba-3136-470a-8816-c73e86497009",
+          "sequence": 27,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "CERTIFICATE_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "cXGALB03oCL8qJlYjfJLVxxlxNhW4sdljabwhNYquQzsXCOF_oOkTUqxraiIQIVr0t1kFUeZArj1GylzGLTIAQ"
+      }
+    },
+    {
+      "hash": "fb216e172141bf5dae22f68ad1505278df49a62c63eab8462138d5301aedff9f",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "code": "INV-409-STATE"
+          },
+          "previous": "958a0504535179d43ad6f3b74d61c04fbc37c667c29467eeebbb47fb4841858d",
+          "reference": "local-gate",
+          "sequence": 28,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "SECURITY_OPERATION_REJECTED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "O_dEya77sqQXauzslgIR2y9xor28BgsaRbQFXNwKYlSa1Zr6GEp1o3jb_iD-BYS-BUpjB5ZkydH2c_YNfKUcAQ"
+      }
+    },
+    {
+      "hash": "6e9cb67b1f71b1e80e7232e679f3e53435c5d1635ce26c739e18cf43bdbd3e8d",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "action_type": "finance.beneficiary.create",
+            "capsule_digest": "b814a78b46874e1237c2df5d436be280e44b0cc2cc68de888ad8c69b91fc99e2"
+          },
+          "previous": "fb216e172141bf5dae22f68ad1505278df49a62c63eab8462138d5301aedff9f",
+          "reference": "6f11cb06-32ae-4686-8053-146d59cc55ab",
+          "sequence": 29,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "CAPSULE_PROPOSED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "GYeNXV2mCage61JSxRfOuPhL7t4kg16PghoYIJ1nDwWiWiq9TZgFruACGlq7ipfE8i6RIeFlHuZubIEf4qsaCQ"
+      }
+    },
+    {
+      "hash": "e46408fc6af648731e53d89ff6bec256fcb185df8076b0e61451faea9328cb34",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "evidence_digest": "434b1adaaf38f1fe08e6f2d076758f610079e0412d8c213941d2ad2e4690adeb",
+            "evidence_id": "d1446168-46ef-4c3f-a0bf-2e13c4d9357b"
+          },
+          "previous": "6e9cb67b1f71b1e80e7232e679f3e53435c5d1635ce26c739e18cf43bdbd3e8d",
+          "reference": "6f11cb06-32ae-4686-8053-146d59cc55ab",
+          "sequence": 30,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "EVIDENCE_ATTACHED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "YLwIJBAECyHiRediV_-R2zIdqBwyAJ-gLGPS9HIzeVpmhA6TstXGTNIsv0pnFMRWo2M2vza3HdT9QzQUF4IZDw"
+      }
+    },
+    {
+      "hash": "e4a1e3404448f7045ab686e193866469410a250d9ad7efdda273a9484991a2c9",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "evidence_digest": "d465d2cdfa2b301337e66e00798154939913849022be4b75bc0de44610280040",
+            "evidence_id": "3d599bad-0ce9-4ea1-aa77-289efa8fa5d8"
+          },
+          "previous": "e46408fc6af648731e53d89ff6bec256fcb185df8076b0e61451faea9328cb34",
+          "reference": "6f11cb06-32ae-4686-8053-146d59cc55ab",
+          "sequence": 31,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "EVIDENCE_ATTACHED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "tpyYW1dJU9Jd_uDirpJvfZ4kRAoqmkzul8kgCHFARjW1Tg_nzB70BNY8WQh-cgDLjna5cUkD4yDsPFxtHGOrAg"
+      }
+    },
+    {
+      "hash": "6548e50d5bd0088cf6f5eb84592d5f70d133d3b7dcdd54855005597a9685785b",
+      "envelope": {
+        "payload": {
+          "actor": "custodian-1",
+          "metadata": {
+            "approval_digest": "a583fdf0652cdca250667566152ff7440deeff42b36516505343985d6e405f11",
+            "signer_id": "5b1d645d25fd6e4719866282fb3bf894"
+          },
+          "previous": "e4a1e3404448f7045ab686e193866469410a250d9ad7efdda273a9484991a2c9",
+          "reference": "6f11cb06-32ae-4686-8053-146d59cc55ab",
+          "sequence": 32,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "EXACT_ACTION_APPROVED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "t27khgp-XTnqphQ67G0nebAYVcpvCJjvHOlVtcSkhhwFH_0fTwu0uLMC5YdFrtZW7nf8l9pQ9hFB2x-E9SuMBQ"
+      }
+    },
+    {
+      "hash": "731dcc29db43bb3f77703a960ff195f36566fe2f724295a6510544c2b1e31f4d",
+      "envelope": {
+        "payload": {
+          "actor": "custodian-2",
+          "metadata": {
+            "approval_digest": "07a765279dcdf810a501cc88f53ab37a171bbc9ebf3b870f541326577322d25e",
+            "signer_id": "eba72f112603dea47419814f8cf2c3fa"
+          },
+          "previous": "6548e50d5bd0088cf6f5eb84592d5f70d133d3b7dcdd54855005597a9685785b",
+          "reference": "6f11cb06-32ae-4686-8053-146d59cc55ab",
+          "sequence": 33,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "EXACT_ACTION_APPROVED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "20OtlZKJTYExIBlZABTgstal5XcYgwq2nolhmDVBErjIyxKQq7mrzH4aiAwVh0xvaxvg2BDbCn3utBmtJSKsCA"
+      }
+    },
+    {
+      "hash": "ff1f489c04304fee118441b6431f7d0eb0e41e060619548b07a1761b94822bee",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "decision": "ESCROW",
+            "decision_digest": "a7df48598fc6bdbbb7ae71c42efb053f5f1bd301678296f5d003a2094383900e"
+          },
+          "previous": "731dcc29db43bb3f77703a960ff195f36566fe2f724295a6510544c2b1e31f4d",
+          "reference": "6f11cb06-32ae-4686-8053-146d59cc55ab",
+          "sequence": 34,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "POLICY_EVALUATED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "P7LAQS7kxXDl-kldJDSBfwX3MlgyEG9gvO2rvK2AcMTjLi5Dkd38aqNXEG9_lXgdSxaWbdzrp5wjkudk8P87AQ"
+      }
+    },
+    {
+      "hash": "2ca30d74bf60445341af14ea3483d8f0030075ac3c7447ca31008e0716d0728a",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "action_type": "cloud.firewall.change",
+            "capsule_digest": "2cc70654e3104f9603b72d86d28a7ff7d62e3c48047ca296f55d9504d0bd86cd"
+          },
+          "previous": "ff1f489c04304fee118441b6431f7d0eb0e41e060619548b07a1761b94822bee",
+          "reference": "f713ce45-834a-4951-a514-5479ea4f1338",
+          "sequence": 35,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "CAPSULE_PROPOSED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "OwplaShSYJMQ-58nI3CstOnfXAeCul1MHc3qoN3giYqALmhIIePg5GAF7f6F8Nr6jkeuEYEdWiymxAje_KyxCQ"
+      }
+    },
+    {
+      "hash": "f47825e02ba8df648b9381e97a00a4bfa8f6df48c8dfe78322a95d12ed893811",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "decision": "DENY",
+            "decision_digest": "ede26495ded273151346d1b4b330e77e14a3348ee693b5123c03dceb0b9c4187"
+          },
+          "previous": "2ca30d74bf60445341af14ea3483d8f0030075ac3c7447ca31008e0716d0728a",
+          "reference": "f713ce45-834a-4951-a514-5479ea4f1338",
+          "sequence": 36,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "POLICY_EVALUATED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "cx6bNCZcKgdpcg7CJTwG_t12HDnSHr2p7wiMfPFweBOY1ODxbfIQduOvBJfR1sun2l6WlrjYcv3tUOaZUxkdDg"
+      }
+    },
+    {
+      "hash": "3832da98382782af4dcf5fa2c1b36231e91b2766e496cea005e40370cc449e4a",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "700c9f55d04ee3dd3c430bf3a3a93e103d0f003a99b9b110ea775c43698a55c6",
+            "resource": "dataset-1"
+          },
+          "previous": "f47825e02ba8df648b9381e97a00a4bfa8f6df48c8dfe78322a95d12ed893811",
+          "reference": "102c30bb-be6a-43b6-83d3-5799d22de0b7",
+          "sequence": 37,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "Q15KkjzgvwSOVZisiPZfqcp35w0W4aKGy55ezzHrm4R6re8oTQLr82x4JDK1aPGBNPby7FSRofTboybDIpOhAA"
+      }
+    },
+    {
+      "hash": "ab3c1452127a66cabdcfc1d5be76199166b88e87f54597da3e8d862a73e34aa1",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "1ba3d4e0-ef18-41d7-8a6f-1859c0fe4612",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "3832da98382782af4dcf5fa2c1b36231e91b2766e496cea005e40370cc449e4a",
+          "reference": "102c30bb-be6a-43b6-83d3-5799d22de0b7",
+          "sequence": 38,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "ztf_GASdvveJoPXEgfSODuyS2IPGGcj9pIu3teBRG71fq1k6SBp186ZjIeZCiVnzQxQLatsZ8_gSpCruKR5ADg"
+      }
+    },
+    {
+      "hash": "6433c009cc21cde81eeb547aead658647272214b4d2011c34fd5c222b50eed4b",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "code": "INV-403-SCOPE"
+          },
+          "previous": "ab3c1452127a66cabdcfc1d5be76199166b88e87f54597da3e8d862a73e34aa1",
+          "reference": "local-gate",
+          "sequence": 39,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "SECURITY_OPERATION_REJECTED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "8B3IYibkG-gK5gHDExNFXWdrh_GELRQBsciZxlTmzfAmW0ljIM5Q9IYbkkjGjSdi2IwsdsdIWtpW7VO6Ql9oDw"
+      }
+    },
+    {
+      "hash": "8fc6a8d253871fdfb56e54c7abe983eff5bcb8d3e3e2dafc828c8c4e127f33d2",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "code": "INV-403-SCOPE"
+          },
+          "previous": "6433c009cc21cde81eeb547aead658647272214b4d2011c34fd5c222b50eed4b",
+          "reference": "local-gate",
+          "sequence": 40,
+          "tenant_id": "acme",
+          "time": 1788648000000,
+          "type": "SECURITY_OPERATION_REJECTED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "PURS0SlblnfKUM_bj3mBt74jnm6wOlU9jJKMKph8BP4tKtyl5ciUdLXYz8oASpMGFtBwf3s3-BJyyWxlcv8mDQ"
+      }
+    },
+    {
+      "hash": "170203d2af34b3ea7d38ab5632bad717187d8976198bf763039e59ab33bd2ea8",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "b9bce612465c96e2c706576ba2a356fc2520e466b86f5f29203df487713133ec",
+            "resource": "dataset-1"
+          },
+          "previous": "8fc6a8d253871fdfb56e54c7abe983eff5bcb8d3e3e2dafc828c8c4e127f33d2",
+          "reference": "283739c8-845c-4697-9210-30642dc033ca",
+          "sequence": 41,
+          "tenant_id": "acme",
+          "time": 1788648001001,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "bFU9bDij-9XEG-duGBBvdm0fsavTBUUxb9Di9-IXhxGwGrLb2waRLOtZI692JR22yg-SO61FcjWVeU6yDTmxCQ"
+      }
+    },
+    {
+      "hash": "d16ddd804cbc297cbfce21ec0ef43f2aa22e7c54f0b720cdf7f3d896d44eae33",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "5707ff67-d900-4073-a957-9f8bb7aa4e2d",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "170203d2af34b3ea7d38ab5632bad717187d8976198bf763039e59ab33bd2ea8",
+          "reference": "283739c8-845c-4697-9210-30642dc033ca",
+          "sequence": 42,
+          "tenant_id": "acme",
+          "time": 1788648001001,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "zuRQRw8efCeFNTd2ZK_5-T7fdRHQGOsiDBDwRXg0Zm3yNCrvUFxW-uWOQZl0WENn2YzQan1QWSEDjmJitWEVAg"
+      }
+    },
+    {
+      "hash": "0764de0b39eef845be9d70db0acfed12adf1bc0734dec7b60f343f547ff249f5",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "8ed64613ee74b7854a39dbe381751b00481fe7e071fe52da21db5bc881b79ff9",
+            "resource": "dataset-1"
+          },
+          "previous": "d16ddd804cbc297cbfce21ec0ef43f2aa22e7c54f0b720cdf7f3d896d44eae33",
+          "reference": "81d7da42-fcb2-4282-bb38-2ba5c2f16f94",
+          "sequence": 43,
+          "tenant_id": "acme",
+          "time": 1788648002002,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "DF-VM04UZrCGFNtbcWMQFAeAw6CIP7kZ0K67iGSNu6obCgDTg_jzn9yRnxKa2Ag_DIKsGL1u0cl55EooSb1nBQ"
+      }
+    },
+    {
+      "hash": "8792bd993741add3422d6a118afe160cbc97d7fd9ad0078520c55c2fd9b439db",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "7ed2a19d-a087-416f-8c84-1bc832df4f39",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "0764de0b39eef845be9d70db0acfed12adf1bc0734dec7b60f343f547ff249f5",
+          "reference": "81d7da42-fcb2-4282-bb38-2ba5c2f16f94",
+          "sequence": 44,
+          "tenant_id": "acme",
+          "time": 1788648002002,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "XcBZ3fKERJEdkYZ4O2XIcumlCS5_dqDCjoV2FMFZQ7E9RvGNxn-_mB_bQuhQRFl7MwOdxZ2mJnke0qre8-h7Cg"
+      }
+    },
+    {
+      "hash": "e7d80abfb01b501b3b935169ce508535f4600244dda8015bf3c516f751af811d",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "cb36928199ede4286a6438c4e09cd1939768c1d35acf63291bbd089bda21596a",
+            "resource": "dataset-1"
+          },
+          "previous": "8792bd993741add3422d6a118afe160cbc97d7fd9ad0078520c55c2fd9b439db",
+          "reference": "80d44c31-70cd-435a-8ed9-ad13e3b1b066",
+          "sequence": 45,
+          "tenant_id": "acme",
+          "time": 1788648003003,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "0AEHdBnbAus-LqXW8mOv4SssOkNbAlEhICP1v4yOw-iEDzzU3XoQBsXYYgnYEo8GgL1SHj1dHo61hlI5pn76Bw"
+      }
+    },
+    {
+      "hash": "f6546208dc597f40afc8775fbd90bbb923532514fa2e1235eab6f69f09e8142f",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "9c24e2d9-b57a-4be0-8f4b-0e3c8b59f187",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "e7d80abfb01b501b3b935169ce508535f4600244dda8015bf3c516f751af811d",
+          "reference": "80d44c31-70cd-435a-8ed9-ad13e3b1b066",
+          "sequence": 46,
+          "tenant_id": "acme",
+          "time": 1788648003003,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "0FZ7ai90thNzyCl15W3tyVGA7bzt0iiIZXr6junbwkT6KlZk70Tv2F1ddT_drs4A41lSkkkSx4ctQrvJ3l7bBA"
+      }
+    },
+    {
+      "hash": "242399af823e1232bd06bc4bb38aced4a558f01a6bc554dc5c67cace7e9bfa72",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "ebfbe612e5562435cac307e73fc7da77e75958bfa99bbbb7c88669737cabb7e0",
+            "resource": "dataset-1"
+          },
+          "previous": "f6546208dc597f40afc8775fbd90bbb923532514fa2e1235eab6f69f09e8142f",
+          "reference": "4d11f8f9-cc86-4bdb-85a2-3eb00c7d7533",
+          "sequence": 47,
+          "tenant_id": "acme",
+          "time": 1788648004004,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "aJxz0HBuqna6qa_FrbrZA2jsYGzflNAIEdP4USILkVdPXpEPSkPfxGPJ4nfFGm6mxL536HpenUD8escfP1sqDA"
+      }
+    },
+    {
+      "hash": "85e6f0d031272f05b252d9046768785679a706743a9514298532956125c63311",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "248c5bd0-407d-45e1-912e-d048f568f0fc",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "242399af823e1232bd06bc4bb38aced4a558f01a6bc554dc5c67cace7e9bfa72",
+          "reference": "4d11f8f9-cc86-4bdb-85a2-3eb00c7d7533",
+          "sequence": 48,
+          "tenant_id": "acme",
+          "time": 1788648004004,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "4tuJ-1voIoUrwCmXu6XE6Xr0agTO_ejw1VvNjRwMQ4l2xO_qdTox6w0CnY0fV9zb7Co9mVhDAFqrmCb65qbPAQ"
+      }
+    },
+    {
+      "hash": "9bc33ad3af83435b5cfab0c69424a28322648d80cd7f1c071d95e3054e486d5a",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "0d690fd3342e1f2fe068f5f7aa391640a1b2661e6e45cb34c6035046f62595d4",
+            "resource": "dataset-1"
+          },
+          "previous": "85e6f0d031272f05b252d9046768785679a706743a9514298532956125c63311",
+          "reference": "785484db-5cdc-4399-89c1-1511a8f67bc8",
+          "sequence": 49,
+          "tenant_id": "acme",
+          "time": 1788648005005,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "yn0A2f34EvPg1ZT1HRR_87oz3Zjw4EyH7087X27qB-dTbOz-3BR-Xdo-DjWUVv50q6tsmfgc41voVPhzeR8eAQ"
+      }
+    },
+    {
+      "hash": "fab29998846ed722cb7b8e4e50bdbef8b77a000294a980bf80d62d6b94946656",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "b9525a40-9f50-496c-805b-037fe2954cb7",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "9bc33ad3af83435b5cfab0c69424a28322648d80cd7f1c071d95e3054e486d5a",
+          "reference": "785484db-5cdc-4399-89c1-1511a8f67bc8",
+          "sequence": 50,
+          "tenant_id": "acme",
+          "time": 1788648005005,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "RT5l7PskIHSxm0Uix5DvOQT-rFdkdUFjWeikW1oCpmEpfMTty82TgdvlDQmKbLImOZyOxFpRmDOlfuErpJR3Cg"
+      }
+    },
+    {
+      "hash": "fac03a0ad6d98949c4c1c862dc23b67c3460dfad4eeaf6e8195c4619eda75f67",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "a34ae9bd1c5466d7950076c130362f8f41a09f85cc72fd3b1382b488e8bc2198",
+            "resource": "dataset-1"
+          },
+          "previous": "fab29998846ed722cb7b8e4e50bdbef8b77a000294a980bf80d62d6b94946656",
+          "reference": "3a0d443e-bcd3-4a2a-a9e3-7779bebb4bbc",
+          "sequence": 51,
+          "tenant_id": "acme",
+          "time": 1788648006006,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "q5rpD9VB6ER9pVhJvegWHtsBVtOjE5eyxoQ72jRxRPiSLxdSED0NcxaBWYW-vFEg2YXjhsEB3r49Oje9yWbZCQ"
+      }
+    },
+    {
+      "hash": "6f4fa7f4854d93cd96260962a5ba59bd565b5aa7c73caf83a751a9501589b300",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "5628ac07-4e1e-477c-837e-a9b90207188d",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "fac03a0ad6d98949c4c1c862dc23b67c3460dfad4eeaf6e8195c4619eda75f67",
+          "reference": "3a0d443e-bcd3-4a2a-a9e3-7779bebb4bbc",
+          "sequence": 52,
+          "tenant_id": "acme",
+          "time": 1788648006006,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "th0RwRE083Gxkc-p3yM0UGX8K-RyiWiul8QwRESsPu-5N62dhqiajPQ9ZvwYynpIm3vR1EfCm4NkHd798j2pAg"
+      }
+    },
+    {
+      "hash": "77869b457d43ac2701b2ea6adeda2c0f3d696dfe547cf6f3594fff3197bbb67d",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "00726bc85da923243db5fb983ac88cbd443565b4b7e953a2fc7e004b600a964a",
+            "resource": "dataset-1"
+          },
+          "previous": "6f4fa7f4854d93cd96260962a5ba59bd565b5aa7c73caf83a751a9501589b300",
+          "reference": "7dca756a-d820-4c37-9e1d-5dac977e2682",
+          "sequence": 53,
+          "tenant_id": "acme",
+          "time": 1788648007007,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "GyU6Sc-Nrgyqvqr6POK_t2HQoyngRzikoRGAQrNP-qcD2K8ykOKvkvBqoiEPtIsTMmrt6_uyFVeQWIVIf4kIBw"
+      }
+    },
+    {
+      "hash": "55c5feca9adbdae6efc073b7badaaea16097016a6f1b058f721d9415c5a503a8",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "4e4009f4-12b7-4f2f-9661-0c16258554bd",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "77869b457d43ac2701b2ea6adeda2c0f3d696dfe547cf6f3594fff3197bbb67d",
+          "reference": "7dca756a-d820-4c37-9e1d-5dac977e2682",
+          "sequence": 54,
+          "tenant_id": "acme",
+          "time": 1788648007007,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "2Arxc_xtG35_-xg6nV8JWwRhE9589vP77YPFVRsxXEtdqLJzl2VYlynDTWMeIEvvGyPKN9o8MCANFQ-TFGP3DA"
+      }
+    },
+    {
+      "hash": "b48359d361341f920bba6d0931e94d8789826ee14a8c3f6366807354fffce215",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "8b49a914c9b60d2eb5e70bf631f985393cdf12eec68c30f183967f37954dcbf9",
+            "resource": "dataset-1"
+          },
+          "previous": "55c5feca9adbdae6efc073b7badaaea16097016a6f1b058f721d9415c5a503a8",
+          "reference": "496bf27b-18a2-42bc-b9ea-ff600c62a30b",
+          "sequence": 55,
+          "tenant_id": "acme",
+          "time": 1788648008008,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "hklxnXqJGvX5vp39Kkko6JbvTXygcgBcttqeSDW2SnYa8DXuWaKM5gldbPmso6mmNYk3q7jG7cKaxO1plycMBg"
+      }
+    },
+    {
+      "hash": "3532fc5a7b152264e4daa1950b76ea8931c07e2e664d8a3d2cb534a709814072",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "f6ad3c7b-9c29-4d98-809c-77e4eb0525de",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "b48359d361341f920bba6d0931e94d8789826ee14a8c3f6366807354fffce215",
+          "reference": "496bf27b-18a2-42bc-b9ea-ff600c62a30b",
+          "sequence": 56,
+          "tenant_id": "acme",
+          "time": 1788648008008,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "a7b0F0rb_xMvoMVqoXK22xJOHVo1GRNGqE0fgE4XOnCFVGQtrhXpr2044wFeW7RoZJuSv83891DJe5mTAxVSCg"
+      }
+    },
+    {
+      "hash": "a6e9c4944fa9c5ac4f10ced3268afd9874adbac1884098612e7a54aec6b21b68",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "fdfe351b15eef437b1a2537ecf0a453e154a23f13ab025082414278319475a75",
+            "resource": "dataset-1"
+          },
+          "previous": "3532fc5a7b152264e4daa1950b76ea8931c07e2e664d8a3d2cb534a709814072",
+          "reference": "9910fb58-317f-4f1a-bb7b-d9d06f8923f1",
+          "sequence": 57,
+          "tenant_id": "acme",
+          "time": 1788648009009,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "Kw17m86PlvAZT6_h83HN7z7sPLhmXRqDkTq1wQRVODTyCdCg9FLoWIas4NDgUJfUkqlm_28NCYFwN4r_stzzBQ"
+      }
+    },
+    {
+      "hash": "b392d5427e2b0231137234af1f8e9afd3873448f995c4d4701f904c909798a15",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "3a993888-c82e-4a73-b627-0d29a20b6239",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "a6e9c4944fa9c5ac4f10ced3268afd9874adbac1884098612e7a54aec6b21b68",
+          "reference": "9910fb58-317f-4f1a-bb7b-d9d06f8923f1",
+          "sequence": 58,
+          "tenant_id": "acme",
+          "time": 1788648009009,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "popnxmFfI_21sM8bx4DJC5yXE9wSRycD6S-n8Wxg3HoFsPDjCbrQDZXdW4zNnug9Pvk5szOGTj7TZtUvGvnwBg"
+      }
+    },
+    {
+      "hash": "d6dcf0cfad6f682cc30c1212dbed3b973ea76925bc9d14ebc8c76958b68d3d79",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "ce8f6cd912f96a2273266b181738f3301e66bacbfc272fdd48261e949e0d699a",
+            "resource": "dataset-1"
+          },
+          "previous": "b392d5427e2b0231137234af1f8e9afd3873448f995c4d4701f904c909798a15",
+          "reference": "95b5e921-bd22-4fb1-8601-4a81277498bd",
+          "sequence": 59,
+          "tenant_id": "acme",
+          "time": 1788648010010,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "g17UIM5lvCK5kmBTxoR12HUo8cbMsgiNyyNhAG_ty7vQz38Y1W-Dy9u2LBrrByYwBd-rF-oTUIJXf9Sto-5cAQ"
+      }
+    },
+    {
+      "hash": "950252c2762d27ad2be926d71632bc2d0d0a1514feec92803abe07f50b537a00",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "10b54dc7-64e5-463d-ae40-e1f60fd3c5d1",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "d6dcf0cfad6f682cc30c1212dbed3b973ea76925bc9d14ebc8c76958b68d3d79",
+          "reference": "95b5e921-bd22-4fb1-8601-4a81277498bd",
+          "sequence": 60,
+          "tenant_id": "acme",
+          "time": 1788648010010,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "Mt4IQCRtq3-FOS58iWJKayfYxy6JU9jIWWyofqqVGELWatlYA9bIbeEkdnEbDCYCe0VypT_tw9sV-3hrQzdxDQ"
+      }
+    },
+    {
+      "hash": "e3ba28f85e6f108dadcb2aed25e9092080daee3cfb86ba0e5639f2d65df5ce3b",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "708387ed8c9db88ea5c632606c4d017b93630d3b7ae34c0249741a3342f31a20",
+            "resource": "dataset-1"
+          },
+          "previous": "950252c2762d27ad2be926d71632bc2d0d0a1514feec92803abe07f50b537a00",
+          "reference": "caedbce1-0a94-468f-99ed-663e27337509",
+          "sequence": 61,
+          "tenant_id": "acme",
+          "time": 1788648011011,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "wt4NBbVh-0r7G8__RceokHuhq6H9K3ryci3IW0Gri_VBPx4d1ROy-OYBxLitxlusQFy1NyImOKLIVoMtJwlVAg"
+      }
+    },
+    {
+      "hash": "8524da76da284cb1e6a844beea355d83bd8c4a7913d694684d30824cac99c735",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "66a3bb0e-4d2c-4172-94e0-93037584c85c",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "e3ba28f85e6f108dadcb2aed25e9092080daee3cfb86ba0e5639f2d65df5ce3b",
+          "reference": "caedbce1-0a94-468f-99ed-663e27337509",
+          "sequence": 62,
+          "tenant_id": "acme",
+          "time": 1788648011011,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "zdaTJYcRX6Hwtkt10_IFOX29ORac5u5fPDg9VU0UeDKLoDfn1STjNvq4xcwMZbcIQRrq40ayWOaQ7JI3KjcWBA"
+      }
+    },
+    {
+      "hash": "489bb770f454410a699b761c68129a5405d124d286e6089f96594ec7ac0db060",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "f65d7ca1b7b6862be0ad7856dca8125f84873119fe28d96f8319967a589c6fcc",
+            "resource": "dataset-1"
+          },
+          "previous": "8524da76da284cb1e6a844beea355d83bd8c4a7913d694684d30824cac99c735",
+          "reference": "8e721a50-585c-4a77-b00d-2ac814fe50a3",
+          "sequence": 63,
+          "tenant_id": "acme",
+          "time": 1788648012012,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "cAad550FD_7famxYAHUAoV1Km5qaMsI58o007a9UZeg6Xld0Hl2JYqnesmW31DUpUkv9M8aGZMLM_BoTKGm2CA"
+      }
+    },
+    {
+      "hash": "8a4652958e1925338f4050cdc408fd8c400a78f16e30fea5d5301479255e7fe8",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "7dc94b60-4968-4576-9318-f6ce68b3950d",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "489bb770f454410a699b761c68129a5405d124d286e6089f96594ec7ac0db060",
+          "reference": "8e721a50-585c-4a77-b00d-2ac814fe50a3",
+          "sequence": 64,
+          "tenant_id": "acme",
+          "time": 1788648012012,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "p_qOWdZvJSzHRkaQaUw1rsQM-SiYkMef22ZdL2Y1yeVbkAEDGvAqo7SEv0op9LSVAoc-6UFVMYjQDhWFZvYJDA"
+      }
+    },
+    {
+      "hash": "ca5e6e0e6979940cf7242f9349e517d4dfcab957b0d7ffbac42fe5850f529f08",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "0b4eafd646baf8df423c77b9226fd9e8106cae1486d88a6048f1c35771b4ec56",
+            "resource": "dataset-1"
+          },
+          "previous": "8a4652958e1925338f4050cdc408fd8c400a78f16e30fea5d5301479255e7fe8",
+          "reference": "f6ed1215-49d7-493b-a991-3dd8d2be9e35",
+          "sequence": 65,
+          "tenant_id": "acme",
+          "time": 1788648013013,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "UWvfxCcaraSh2-RsqBK87atN2bKguHBtUfgXgdLi2ynnYcay6bf30prjlvUOD7khYDwCldnssrx7rrhM7aLDCA"
+      }
+    },
+    {
+      "hash": "a6c9c5d4c9e740a910d64c9d69a38b13d76d14695e12f40825cec5587cb0fcc5",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "471faffa-f58a-48e5-985d-73ad6dd826dc",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "ca5e6e0e6979940cf7242f9349e517d4dfcab957b0d7ffbac42fe5850f529f08",
+          "reference": "f6ed1215-49d7-493b-a991-3dd8d2be9e35",
+          "sequence": 66,
+          "tenant_id": "acme",
+          "time": 1788648013013,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "6l2k193wk3QtKNBKS2xdO461-ECXW5ZYzlARnq4LT08b7tIuMgKqUiNUO5-qpnFv25dWGayYx-5WOuU4gOj0Aw"
+      }
+    },
+    {
+      "hash": "d780aaf5d08f8dc4138fe6b4d7ba0177686bfa37609691fb8935959c893249a5",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "5c3de573aefd233917f0693df16250bb954142e2780ed3bfd37a71b2fad5554a",
+            "resource": "dataset-1"
+          },
+          "previous": "a6c9c5d4c9e740a910d64c9d69a38b13d76d14695e12f40825cec5587cb0fcc5",
+          "reference": "ab5f1efa-efc2-4654-8dae-c36221e746d5",
+          "sequence": 67,
+          "tenant_id": "acme",
+          "time": 1788648014014,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "PBFCIzIcFJVg4JsfwqWU8YM20Y1O_ebkCDbiD3_9q53uYWnalfqgTOG3Qz0S6l-Qon7ARIPNqYaq9agZA5BwCA"
+      }
+    },
+    {
+      "hash": "3993a5a3d18aa2a957d48254c7f96ca39aa2083f22dbb045adad02c9d137a9cd",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "1f43d860-920f-4336-8ffe-bf3ff1625d4f",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "d780aaf5d08f8dc4138fe6b4d7ba0177686bfa37609691fb8935959c893249a5",
+          "reference": "ab5f1efa-efc2-4654-8dae-c36221e746d5",
+          "sequence": 68,
+          "tenant_id": "acme",
+          "time": 1788648014014,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "1FtppdYMfTO8-cHaG4kYdnx6TPjLq2K_zv8MKeg55DVvshteQKkGTPLulWoZsTYcMRJ_IDvUBPiqkCDu7NNNCw"
+      }
+    },
+    {
+      "hash": "25e1cb71d968a1806745e546f91eb2cb04bca108cf0e55801e1152db5d9c859c",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "9917a151478fa2f7b7c1d6a6d3441b814778aad99b049dc0ebf57d32ad7a9364",
+            "resource": "dataset-1"
+          },
+          "previous": "3993a5a3d18aa2a957d48254c7f96ca39aa2083f22dbb045adad02c9d137a9cd",
+          "reference": "f36d8f07-769c-46a5-8105-619411ce014b",
+          "sequence": 69,
+          "tenant_id": "acme",
+          "time": 1788648015015,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "UuJrnzTSV22CApiD1ZDh6UhZi8N4-UzQiQ_ujSR3gV4xuRn9FftEyw1DaowMIxi9tSvsN5KItunjZaBUNX1HDQ"
+      }
+    },
+    {
+      "hash": "10da8a68cd3835b9639238f928e7bd98da540339e661908170df07cbe080242a",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "7856d432-701e-49d5-88a9-fc6d866a882f",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "25e1cb71d968a1806745e546f91eb2cb04bca108cf0e55801e1152db5d9c859c",
+          "reference": "f36d8f07-769c-46a5-8105-619411ce014b",
+          "sequence": 70,
+          "tenant_id": "acme",
+          "time": 1788648015015,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "l_0QaNoPFrd64kqPUKw3w68Ififh-7jh6LLmlb506ncCgbZQ30BeTf71elSquTjPomzexf0WV5T1VOsrNe0YAw"
+      }
+    },
+    {
+      "hash": "473f3bd8c17ce2e98f885d599dd23387f1222328f37d2babe8291e6aef2d82db",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "c50a240ce5f2e14ec1bf849304f5d55f8bd3e7a3a80a8636ce87b47871171f79",
+            "resource": "dataset-1"
+          },
+          "previous": "10da8a68cd3835b9639238f928e7bd98da540339e661908170df07cbe080242a",
+          "reference": "cc02f05b-e4c1-4621-a84e-a9fe794e0ab0",
+          "sequence": 71,
+          "tenant_id": "acme",
+          "time": 1788648016016,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "Mk7q2NACvASelqI6YCf2kohe1y9Vuk67kffmvzZ2WBT6K-yqw4V-BxKixfZz5t5n7R5SmraEGOCqKobx68_2Bg"
+      }
+    },
+    {
+      "hash": "e306bd2f272e46acb14f2c181e83dddc0bc3701d0abba620de62566fb42d151b",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "204cfc4b-f975-46d4-8746-72a7ab0abfac",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "473f3bd8c17ce2e98f885d599dd23387f1222328f37d2babe8291e6aef2d82db",
+          "reference": "cc02f05b-e4c1-4621-a84e-a9fe794e0ab0",
+          "sequence": 72,
+          "tenant_id": "acme",
+          "time": 1788648016016,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "kjMyTZQjkIEeP0sKHXuX8ZISjuK5TjPErkXB5QE4cRak1K9zCdKeeKW0siBVhornHqkHkDxu7IysI1S0l2BxBw"
+      }
+    },
+    {
+      "hash": "b7eeb1d05acd692df7473e6e4cca209cb0d50184d4dbd3e7c8190ca3a8d287c0",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "9149d7aabcd9966f01f094c000bd35e0eacd533ee4772dbb36a0d404b0dfb609",
+            "resource": "dataset-1"
+          },
+          "previous": "e306bd2f272e46acb14f2c181e83dddc0bc3701d0abba620de62566fb42d151b",
+          "reference": "91defa8c-7636-48d1-ad40-0b50c34ad286",
+          "sequence": 73,
+          "tenant_id": "acme",
+          "time": 1788648017017,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "X7Ma9OHj0kYEkVNEJVM49REuCmZ8VCUXzJ-6Mv_oEh75BQMUc45kKoCTczNpEfZMWIJYrnxiCK2JLszsDKL_AQ"
+      }
+    },
+    {
+      "hash": "98ae345d83dc9be0083e9ce370c7782589e3b009dc766debee429fda378ffe8d",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "d56dc771-f71c-4f6c-9637-147ff03ed513",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "b7eeb1d05acd692df7473e6e4cca209cb0d50184d4dbd3e7c8190ca3a8d287c0",
+          "reference": "91defa8c-7636-48d1-ad40-0b50c34ad286",
+          "sequence": 74,
+          "tenant_id": "acme",
+          "time": 1788648017017,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "V8Y5-_Qvkr7k35JgSaCiU1g8G3ZalkCIoEq76RllsQ53H0Rm6DLroIPVSUxiXnKDEE3hEglm-7hY5EyzD32DBg"
+      }
+    },
+    {
+      "hash": "36f813738f8eee5803d4dc78b9d0d5955fa3786f663b2d0c86c76ad364102ab4",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "18501127b8aa243f1e6ac3ce7b3f5d26b4b1d14b9037ba64c289514d56384d7e",
+            "resource": "dataset-1"
+          },
+          "previous": "98ae345d83dc9be0083e9ce370c7782589e3b009dc766debee429fda378ffe8d",
+          "reference": "80aea569-5338-4486-9782-fd07287c2203",
+          "sequence": 75,
+          "tenant_id": "acme",
+          "time": 1788648018018,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "EtngssWDczayt0WgcSRv9ZcZWXslLeF2dkHTebpZ1xNvvg_6FWLgBN1xyPP6akK8Vi_eqyCMmywzRxr9HzLyDw"
+      }
+    },
+    {
+      "hash": "c6d80b9e0ce4a821f3aa7232d23009a6b6b668e006e9d615d5fce9c19fcf6cd3",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "ff143f29-331e-44dc-96e3-d8431f9e96c8",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "36f813738f8eee5803d4dc78b9d0d5955fa3786f663b2d0c86c76ad364102ab4",
+          "reference": "80aea569-5338-4486-9782-fd07287c2203",
+          "sequence": 76,
+          "tenant_id": "acme",
+          "time": 1788648018018,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "phTkjqaBoqUJOVNwsFOUm8ddph31RBtd6xL0_idheelRu-6DGG8-iRd1YADFhQUkWyNiVgJVd427NMNF7Bq2BQ"
+      }
+    },
+    {
+      "hash": "9941f1b8eb1bc7576e71a4d85a83697363a02e6e18ed144f1e1b1f6eca62dd8f",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "44450559ff5391c2869fc93e3c98d47377b04a64c6155b19df7ed3239cc7a105",
+            "resource": "dataset-1"
+          },
+          "previous": "c6d80b9e0ce4a821f3aa7232d23009a6b6b668e006e9d615d5fce9c19fcf6cd3",
+          "reference": "5b3b43d5-031c-4524-b9f6-e3685548932b",
+          "sequence": 77,
+          "tenant_id": "acme",
+          "time": 1788648019019,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "Kg_ywP5Nl6HJU3LGHAvXt27P7iJzzQfHImrkE0GYhHIRqvwOjivC8Pig7W8_0_G_w53irTr8jzb5D-0fZdkdDQ"
+      }
+    },
+    {
+      "hash": "d092500674ac54036b49e391828b3c8139ca3ba3b7232bc2530976d89bdae901",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "6f61b9fa-b16a-441e-964f-ec1b6dc40799",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "9941f1b8eb1bc7576e71a4d85a83697363a02e6e18ed144f1e1b1f6eca62dd8f",
+          "reference": "5b3b43d5-031c-4524-b9f6-e3685548932b",
+          "sequence": 78,
+          "tenant_id": "acme",
+          "time": 1788648019019,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "9qG82J3BWyzIJ7It_f_UfDZ_9XSjy243W9oqGA346yduD6b-l67Q-tll_fT4ptdBQTPgMJnPtKtkPBhIvjrwAA"
+      }
+    },
+    {
+      "hash": "7b3a24177a4d69a619833a595ffdc93bdfbefcf1890025467dece5994d49007c",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "6da34ecbb20cd3fa525297a50df6074d19b4df3bc7f68d4e8a3038b48f960811",
+            "resource": "dataset-1"
+          },
+          "previous": "d092500674ac54036b49e391828b3c8139ca3ba3b7232bc2530976d89bdae901",
+          "reference": "31e180fd-a3a0-404d-9215-59c07f8669cc",
+          "sequence": 79,
+          "tenant_id": "acme",
+          "time": 1788648020020,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "2JA0xyb9vJP1lopsON069XvPw0jRd9eKZ1NCvRIE31rlop9i7ZaSDJiV0-_pga8vJHg6clJXanDd1NkJe_xHCA"
+      }
+    },
+    {
+      "hash": "936955025243732c42a93267d991fc8057b543fd7a0d0488baefc6e5978166ca",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "f4aafe66-8939-4f4a-ac2d-44317db38417",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "7b3a24177a4d69a619833a595ffdc93bdfbefcf1890025467dece5994d49007c",
+          "reference": "31e180fd-a3a0-404d-9215-59c07f8669cc",
+          "sequence": 80,
+          "tenant_id": "acme",
+          "time": 1788648020020,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "9sL26P8eVwX8blSlJDYCy1XYrmLWv0s6R5LWhAOo3vt4kv_ZtCGSsdQvyx2hYs1f5iOsE7nsyueMXz-ET_1cCw"
+      }
+    },
+    {
+      "hash": "1d5bfa1d5f86a3829fcf501cea4014bacbb46b20a3009ac8c59519b1b61aa14b",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "ada9b3e35e32457f17d3d53bdae3cd3c4f6578dcf2751b851450fc5a8b29e25a",
+            "resource": "dataset-1"
+          },
+          "previous": "936955025243732c42a93267d991fc8057b543fd7a0d0488baefc6e5978166ca",
+          "reference": "69e1e9bc-f4a2-4f3f-9f0e-a8b374dc0eb3",
+          "sequence": 81,
+          "tenant_id": "acme",
+          "time": 1788648021021,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "ISYm05-5MYSse07_MHUHOYOra-1f-aMd1Sd7L24plR5UxKuH6p1tHh3g4knbYzB80H1iyVgN5lvz34HEh4RfCw"
+      }
+    },
+    {
+      "hash": "e2a968d54a78abe09a0120534e7925de895f8df784adfbc0929ec7b1fab63aa2",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "5570c801-6593-406a-9e99-5c8b2746bb2b",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "1d5bfa1d5f86a3829fcf501cea4014bacbb46b20a3009ac8c59519b1b61aa14b",
+          "reference": "69e1e9bc-f4a2-4f3f-9f0e-a8b374dc0eb3",
+          "sequence": 82,
+          "tenant_id": "acme",
+          "time": 1788648021021,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "WCQ9UGe0nJaTacBvghW8kwu6HXpARc3dT2WYH0pmwv7Gk1L0lLjv6xjIC3itmI7cw9VuvpLPwM4zsjHyRVbdAA"
+      }
+    },
+    {
+      "hash": "f5d1413f4eb84048396bfbe1b2890a234546fe4b9265d91eec80812639b30a31",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "b55e1652d3f66137506ffd74fb522d6d26d5ff9423591f285f5f8ee81a1fe1c4",
+            "resource": "dataset-1"
+          },
+          "previous": "e2a968d54a78abe09a0120534e7925de895f8df784adfbc0929ec7b1fab63aa2",
+          "reference": "6be82ec3-7a45-4c18-a56a-5ccebc05186f",
+          "sequence": 83,
+          "tenant_id": "acme",
+          "time": 1788648022022,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "12U801DcbAa3ACShd4eY0yiFwik5EGh1ILByO6H9XrqcX914jJNl0dvHB4_W4waie90rnjz8vWTJ9NKqSguzCg"
+      }
+    },
+    {
+      "hash": "4e22c5e7e13e2b552e043742b5e1c857c737339a8f9146f22454353fde2d2ee6",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "63a15a4d-8372-4a86-95b9-cd72fbffa839",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "f5d1413f4eb84048396bfbe1b2890a234546fe4b9265d91eec80812639b30a31",
+          "reference": "6be82ec3-7a45-4c18-a56a-5ccebc05186f",
+          "sequence": 84,
+          "tenant_id": "acme",
+          "time": 1788648022022,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "NDNq4TOWKFwvG07M0TzSM5pgAz6j3CMyoVDJz_H3BO_Djr7HNbhNLjQ69cEaNYDNmA1mDPX7yuZiMcV2rsEwCA"
+      }
+    },
+    {
+      "hash": "bb94b4dc20bf9529494373da0e1edb4b88e11c9e200acc200f86155e447409a3",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "cf2346c8ddc5c74f489777454fc88e9a2bfec476c11cff2159f9a1d1690fa934",
+            "resource": "dataset-1"
+          },
+          "previous": "4e22c5e7e13e2b552e043742b5e1c857c737339a8f9146f22454353fde2d2ee6",
+          "reference": "610b4692-bc0e-4b95-821a-ecb989e5fe97",
+          "sequence": 85,
+          "tenant_id": "acme",
+          "time": 1788648023023,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "sEsv5OJ0id3023bKMI6q6afexbfhh1zqELZQeKvRRc0gFMX9hef-dOETdOBFUj_Tv6xVsPdhhMcJvkCg26ftCw"
+      }
+    },
+    {
+      "hash": "0bafa2384542fbcb4ed38001c859b9808225cadde22b772e47bdcbe54495e32d",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "51845c40-6d53-426b-ab11-5a662906dd41",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "bb94b4dc20bf9529494373da0e1edb4b88e11c9e200acc200f86155e447409a3",
+          "reference": "610b4692-bc0e-4b95-821a-ecb989e5fe97",
+          "sequence": 86,
+          "tenant_id": "acme",
+          "time": 1788648023023,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "t5toVn8VOgY9PTWWsnlYmq5xygPOhsaZKdvLHoMI4xKbOkbw1_-Nz9dBVQftPoXkC8viy1R2Pn_VDriN81MgBw"
+      }
+    },
+    {
+      "hash": "642aef5c494c95acce1da66360d4187cba2d425a803505a95004aadc944b45e4",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "8a6621576d703251dd962679461e5cfd36f71e803d76c3a330dbf34ae3a1a560",
+            "resource": "dataset-1"
+          },
+          "previous": "0bafa2384542fbcb4ed38001c859b9808225cadde22b772e47bdcbe54495e32d",
+          "reference": "c252daae-3bad-4aab-a6b4-6c5488b126d1",
+          "sequence": 87,
+          "tenant_id": "acme",
+          "time": 1788648024024,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "5ABvqQ0yjN6Q1W3yGKj8CYjpz6Alqkp0A5mD0187NqzUE-dRlw5eXGjco4m7yBzqa5c6FadW-79fnjnKs7FOCA"
+      }
+    },
+    {
+      "hash": "3eb48d8f8d7ccd47fb221cae5f5b3b76fbec54eaf60e364658103fb971f4acf7",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "633abb75-7e3b-41de-8e5f-2cbe0b4fc8eb",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "642aef5c494c95acce1da66360d4187cba2d425a803505a95004aadc944b45e4",
+          "reference": "c252daae-3bad-4aab-a6b4-6c5488b126d1",
+          "sequence": 88,
+          "tenant_id": "acme",
+          "time": 1788648024024,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "9fi_m_tNqHNg7UmK4HkQl3FvvbiaIXSX30CwDs3nPX1oM08qIyUyDB5C02OB3bYw5SC7OxFNYuY6zEYxX_P-Cg"
+      }
+    },
+    {
+      "hash": "1ecc78e7e8e8764adb38853e7a5125bceccf3be6f56cd99c159cb70510f02595",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "ad042eda66b0af1cbfc634a66d116ff5d7628a419ea9a504ef48556f14d522dc",
+            "resource": "dataset-1"
+          },
+          "previous": "3eb48d8f8d7ccd47fb221cae5f5b3b76fbec54eaf60e364658103fb971f4acf7",
+          "reference": "709a72f0-eac5-4806-b1c0-54233108a422",
+          "sequence": 89,
+          "tenant_id": "acme",
+          "time": 1788648025025,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "2dCudXIupuaSac-uLRXqNw5exH7GczCF-J_WsEgpgrx8p7277l45LQyJDBXYDdNV96wmnz68XSjpUm1N_XJYDg"
+      }
+    },
+    {
+      "hash": "03dde929b5c5e3af83d7b6b3812147bdab856c6e4fbe059004530f466475b2a7",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "cfab8c40-09bf-4132-89d1-19056921454e",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "1ecc78e7e8e8764adb38853e7a5125bceccf3be6f56cd99c159cb70510f02595",
+          "reference": "709a72f0-eac5-4806-b1c0-54233108a422",
+          "sequence": 90,
+          "tenant_id": "acme",
+          "time": 1788648025025,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "l_PF0D94oTvBPR4Dj-S4rmdrzOI6BeIfh7rkjyb034KU9NH7muD72Cx_6h0OtU2GudH4sfrdmG5B5TB62RXaDA"
+      }
+    },
+    {
+      "hash": "abf1d5c8d9f551b1f036a37efb61e500b3f0c53bdf1c83e427d16efd31dff5d6",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "bba550c99dc67654108aca331f7de13ef68da64dfce7c9502dab8aeeb6506278",
+            "resource": "dataset-1"
+          },
+          "previous": "03dde929b5c5e3af83d7b6b3812147bdab856c6e4fbe059004530f466475b2a7",
+          "reference": "8af493a9-1ab3-4584-a950-4a32477f078d",
+          "sequence": 91,
+          "tenant_id": "acme",
+          "time": 1788648026026,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "188QNJrdopJPfAXj2XqRzbIvTVQUChIXSBZi7BPRqsOzAHOV0TKpiAnvKJ_QjLphkdtYJXCixlNxHdQSPVTEBA"
+      }
+    },
+    {
+      "hash": "2c9ccb03b686dffbf069a1a15b14d04d9bbe4aea093cc9b7126d4a433ac21ed8",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "f4e7d0b0-9941-4f6d-bce3-927dfdf1e174",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "abf1d5c8d9f551b1f036a37efb61e500b3f0c53bdf1c83e427d16efd31dff5d6",
+          "reference": "8af493a9-1ab3-4584-a950-4a32477f078d",
+          "sequence": 92,
+          "tenant_id": "acme",
+          "time": 1788648026026,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "piNZfHPp35RjUbGeyJewEkb7XD4n_ODoQG0Mim5R16LHrJPRCl9Uufa7Uf9WrvihLCMZnj6kLR4Hf99AgZTNDw"
+      }
+    },
+    {
+      "hash": "3179abde381ff10247ed7e629e63cd69489c90c6a0ee6e03c8099d969bc301c3",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "dc49978e0c9c388fa2ab647bcfafa6069a7f5174e0e8eaf897df34b705d9649c",
+            "resource": "dataset-1"
+          },
+          "previous": "2c9ccb03b686dffbf069a1a15b14d04d9bbe4aea093cc9b7126d4a433ac21ed8",
+          "reference": "20e80501-3963-4a31-b0d7-5f0263d2f1d0",
+          "sequence": 93,
+          "tenant_id": "acme",
+          "time": 1788648027027,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "TAjoKOBlzVgj1nVrBslT9sppdoJ0_1W6izEwtbvzVEiqL5SAKU3A3w8n2yIrlzFp2D5flwtaayFo3iwIf9hQAg"
+      }
+    },
+    {
+      "hash": "4d1788119685e501502f563c93d3b5b9d6be1915a362356f75e1c6321f605b92",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "5271aede-230d-4908-96e0-ad4914294395",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "3179abde381ff10247ed7e629e63cd69489c90c6a0ee6e03c8099d969bc301c3",
+          "reference": "20e80501-3963-4a31-b0d7-5f0263d2f1d0",
+          "sequence": 94,
+          "tenant_id": "acme",
+          "time": 1788648027027,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "HWG_jZFTzseb87sLXcaSJXFjNy7PD-IgFvD_cDOI1MNJoB0pQCYRnmjDqsuLSrhZZoV-E_i5ltjAsSkMUFi4Cw"
+      }
+    },
+    {
+      "hash": "da379dcbe1209d49fc623489f608e3c0a92a086c129c2f2fc6a3b33f83770adb",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "1d8f54afacdf1e42742afbb0b6da07c94c2dc1c1ed33d1a87d64a0ad56dcebc7",
+            "resource": "dataset-1"
+          },
+          "previous": "4d1788119685e501502f563c93d3b5b9d6be1915a362356f75e1c6321f605b92",
+          "reference": "a5bf0e19-c921-45ba-91ba-36720bd2499f",
+          "sequence": 95,
+          "tenant_id": "acme",
+          "time": 1788648028028,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "9MKYYNQgCDa4UhdMtXgfNp4LnQkqAhFB0wGFAR6eQVwsZVu9Kt_yrynAMyYnhiNpcCFy7EPpYntgFsyNvMIOAg"
+      }
+    },
+    {
+      "hash": "b42375388bf3ff9a11ed81cce58ed908ca7b31b195d3b6b06180d40a9765d96d",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "09d07687-bdb4-4337-97f2-e5cc1e0f515e",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "da379dcbe1209d49fc623489f608e3c0a92a086c129c2f2fc6a3b33f83770adb",
+          "reference": "a5bf0e19-c921-45ba-91ba-36720bd2499f",
+          "sequence": 96,
+          "tenant_id": "acme",
+          "time": 1788648028028,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "puEhDqcQBKUf59qYyX27-kFA3bvqqb6Kyhofo8WLM72HoejrPAFAr1ZkIK7mhUwR4g6LIdzQV0S52hLEVuWaDw"
+      }
+    },
+    {
+      "hash": "eaedb61ea6eda0f6f3ac4bd2b4dd8e2829c0303c25b9411dc5528c3e03a1d181",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "b63d32834da95d44c4836e27776a85d2bd16d395c66f3a1dd448b257bc93d765",
+            "resource": "dataset-1"
+          },
+          "previous": "b42375388bf3ff9a11ed81cce58ed908ca7b31b195d3b6b06180d40a9765d96d",
+          "reference": "8f6ad350-a2d8-45ea-a089-7041ffa69d1f",
+          "sequence": 97,
+          "tenant_id": "acme",
+          "time": 1788648029029,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "c5vnPs5nJGrUyFUWzINfJl75GALi-E6BdsnBX3kQRF4WLsQahPNG-UI46FuuCw6zNnEJq7IRoksz744bjZAHAg"
+      }
+    },
+    {
+      "hash": "720bd0f3691570ae0e281cdbb809f055cad9344d4d026c140904826eaa7ab1f4",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "bf21de02-2ce9-4bfc-9863-87567feb34d9",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "eaedb61ea6eda0f6f3ac4bd2b4dd8e2829c0303c25b9411dc5528c3e03a1d181",
+          "reference": "8f6ad350-a2d8-45ea-a089-7041ffa69d1f",
+          "sequence": 98,
+          "tenant_id": "acme",
+          "time": 1788648029029,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "pRi7_NkuVBDNJuFJq_0EkXnaIqNY0-BhyXafJsgwdNAo0oFK_GUeD5rU2IPsk6CKilCflZwwJqbKEByoTbfhDw"
+      }
+    },
+    {
+      "hash": "1a9d04551152960465f2a2c738ac5a8807976b07671f57fe4f314f8da185372c",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "61dcb9acf611782b3bd45ab89bac1f24d5a4f963b8530b72580e49c9cf743f18",
+            "resource": "dataset-1"
+          },
+          "previous": "720bd0f3691570ae0e281cdbb809f055cad9344d4d026c140904826eaa7ab1f4",
+          "reference": "e6ae2e16-bbf7-434e-8000-600d4e4cc843",
+          "sequence": 99,
+          "tenant_id": "acme",
+          "time": 1788648030030,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "D46c5R5npCubmJGtEugjrcceeusInTEjOkfPzaljQZ-RUDnexVfAk5k8EL3sN5UImpaLUGXSxZ0LpK3hJQ_DBw"
+      }
+    },
+    {
+      "hash": "5a5cc70ae098d55652d229a33ca1eef134997e67c271bc399c0acfe9662404c8",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "9da3ec33-9644-4d69-810b-d7065700edeb",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "1a9d04551152960465f2a2c738ac5a8807976b07671f57fe4f314f8da185372c",
+          "reference": "e6ae2e16-bbf7-434e-8000-600d4e4cc843",
+          "sequence": 100,
+          "tenant_id": "acme",
+          "time": 1788648030030,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "Wbcu8VaeYPw4cGrdvGgSINgXKqpLIBBKf2BHeEI6APJo0rDtBl7UBS3j4xp45kbYaYbp-NyMK4kr3x5iTbQUAw"
+      }
+    },
+    {
+      "hash": "8115bb0687bc2273176396912bf14aa62d2fccb3e051f160923bb98dae31ed22",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "7839ab4eb7f1d15051ad935b357e88beadccaf0b07bf8ec0fc419d79795421c1",
+            "resource": "dataset-1"
+          },
+          "previous": "5a5cc70ae098d55652d229a33ca1eef134997e67c271bc399c0acfe9662404c8",
+          "reference": "a7a49150-2256-45db-80e9-a75693d61c40",
+          "sequence": 101,
+          "tenant_id": "acme",
+          "time": 1788648031031,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "MiO6jaxAKlrgKEWRBnwiwEr_XbmrCbsPkMdVr80LWwuQXnGEQ7iL38BaZYZ73aLccKsJVTNvAkZyt3s3x-HJDg"
+      }
+    },
+    {
+      "hash": "bb2587562d47ea6720137488331d182eb66fb5747eb066bf6fb5fe895a90e970",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "b6442fa9-26a9-43d3-b3a5-259c2e44ffb7",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "8115bb0687bc2273176396912bf14aa62d2fccb3e051f160923bb98dae31ed22",
+          "reference": "a7a49150-2256-45db-80e9-a75693d61c40",
+          "sequence": 102,
+          "tenant_id": "acme",
+          "time": 1788648031031,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "tHLIH_cCPqr-TNOEdtuYc4CcrSJxJ9xKxPgC9ujyvumYNCEgmNjzYv22RUf1N5pJnzIL5go_UcIH34mMS97aDw"
+      }
+    },
+    {
+      "hash": "3179c40f0dbca6d3f03effebd63a8c16ac157ee442bb452616f33564a76d0bc7",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "88f58a0b79f966cab3c973ca04f2217d878d7cc7ff828a2967de6d2b24567307",
+            "resource": "dataset-1"
+          },
+          "previous": "bb2587562d47ea6720137488331d182eb66fb5747eb066bf6fb5fe895a90e970",
+          "reference": "eaa6f46b-ec57-4fe6-ac64-938135fb00bb",
+          "sequence": 103,
+          "tenant_id": "acme",
+          "time": 1788648032032,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "XvS9J0IiryrCCiWLTBpwpcAgGY3UcM8l8zQlFTZobRWL2GF6cOLWg2gXmuWISM9vYwqfiC76XiTFVlUTgv77DQ"
+      }
+    },
+    {
+      "hash": "7faa9048d1620f1243f406cc1fe3d262408799329e78539d8f3bd2f9152a726e",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "75f54403-c4f0-4dc6-b403-2afe65dec4a2",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "3179c40f0dbca6d3f03effebd63a8c16ac157ee442bb452616f33564a76d0bc7",
+          "reference": "eaa6f46b-ec57-4fe6-ac64-938135fb00bb",
+          "sequence": 104,
+          "tenant_id": "acme",
+          "time": 1788648032032,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "d24Bj-PXJk5h2ZP7EZxZR5xzZi-e2ys0-8WZCMrHNeclMLeZOgE36kFpBa-I0WIWKpY6Mgz7bTVHSZ0YNADYDQ"
+      }
+    },
+    {
+      "hash": "d2e42d55a567c7b36956458f434200718e64723eeb90d1466f77aedefc75a043",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "d1de777dadf11d3f434951acf47b35cb5d833a4338db9a1c873bc61751ec7e98",
+            "resource": "dataset-1"
+          },
+          "previous": "7faa9048d1620f1243f406cc1fe3d262408799329e78539d8f3bd2f9152a726e",
+          "reference": "cf5d7030-e902-4a8a-a3e7-1c9141aa6492",
+          "sequence": 105,
+          "tenant_id": "acme",
+          "time": 1788648033033,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "mSOka4TrA5kV3SgZhtifVkJRMXyNZSHwcNXb1n4hbWkNnujGxe-NfHGUfkLf1yqdvwLOOKryiMQiZdIBQgazBw"
+      }
+    },
+    {
+      "hash": "003491e1ff20ff90449c675a13ad701d99ddf15bb828402ea46adf92f88189d1",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "86ea7850-1e8e-4f4c-8494-0ad7fa7cb7dc",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "d2e42d55a567c7b36956458f434200718e64723eeb90d1466f77aedefc75a043",
+          "reference": "cf5d7030-e902-4a8a-a3e7-1c9141aa6492",
+          "sequence": 106,
+          "tenant_id": "acme",
+          "time": 1788648033033,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "itbIG4a6PjQA_D0lAzpV4ZUqrOwtQvySnY4R5dGG8RComxFxQazZ6DarT2DJeosU5DqUeG2jAjoCSpuojjZgDQ"
+      }
+    },
+    {
+      "hash": "a0eab158fd18b95cecf34bfe21acc9b75f1042c4f18ad0192658e1de54d29c26",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "59aa8086df0c62a0ca562246e55f9d3037cd57b10259c195064a61ffe05f710a",
+            "resource": "dataset-1"
+          },
+          "previous": "003491e1ff20ff90449c675a13ad701d99ddf15bb828402ea46adf92f88189d1",
+          "reference": "01d38627-bc90-4417-8326-0fca29016193",
+          "sequence": 107,
+          "tenant_id": "acme",
+          "time": 1788648034034,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "VSjAY1-WfYBmaje4VrmIZazfIUZfUPAUwNweiz1StEMM0BPSh7CR7muM0gpVa4v4_0_1g5betcxk2yimNz7VCA"
+      }
+    },
+    {
+      "hash": "0ad76a679e4c03787e450396afeede1d26636c662f3a9874e1a358f3cd6f5a74",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "3591742a-34c9-4266-bfd7-5d2e04f977f6",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "a0eab158fd18b95cecf34bfe21acc9b75f1042c4f18ad0192658e1de54d29c26",
+          "reference": "01d38627-bc90-4417-8326-0fca29016193",
+          "sequence": 108,
+          "tenant_id": "acme",
+          "time": 1788648034034,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "EAUD0GmOR_DDJdp7uuU5gQf63_ARE-7Luik2cNaVX3yc_LjNXxBqDmkwFuTAzvK9DCF8WHCC_3Hg-eYVTCyVBg"
+      }
+    },
+    {
+      "hash": "a347c504eb569c1af72ed2914b1ec0ad31bd0a0e15cf51907e4b5d13dc27cb21",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "bc4decf8c8a0fd9e579b8b24cbbbd5ef84631a5033c8f02feb204ae343780c57",
+            "resource": "dataset-1"
+          },
+          "previous": "0ad76a679e4c03787e450396afeede1d26636c662f3a9874e1a358f3cd6f5a74",
+          "reference": "95153442-bea1-4f2f-bbc8-e1dabc24036c",
+          "sequence": 109,
+          "tenant_id": "acme",
+          "time": 1788648035035,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "GkzlKZcruIDWZp6pTs-L_6ATC2TlRdZ_zwGgiIQy280pyMFLEtyMHk4WG3rYDsD4MwEpLboTgUnx83u0Z2znDQ"
+      }
+    },
+    {
+      "hash": "78fb2b59515c7a5d499ffdecba9529a53dbaaf4ee7f66092cda6fb67f0150e13",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "0742bc86-3a1d-48b3-8315-f8ff72cbb0e2",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "a347c504eb569c1af72ed2914b1ec0ad31bd0a0e15cf51907e4b5d13dc27cb21",
+          "reference": "95153442-bea1-4f2f-bbc8-e1dabc24036c",
+          "sequence": 110,
+          "tenant_id": "acme",
+          "time": 1788648035035,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "BhLv6BS-9DEkeOf8OOcCHgQpcIu-fFAiJdh_ljiF4NQSZ1hBbcoMu0Ae4ot0Hg8J1qItA37KuH3Yo8axAWXPBQ"
+      }
+    },
+    {
+      "hash": "22f07dc26e4b33ae6f9c1c1d20b11d4e9d7f2c7f66717cb2ebaa46de6058e5b5",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "8161dcd40e6b8645ceb0d449cbcb8d923c702e5c2f4abb47126f920e103a9e76",
+            "resource": "dataset-1"
+          },
+          "previous": "78fb2b59515c7a5d499ffdecba9529a53dbaaf4ee7f66092cda6fb67f0150e13",
+          "reference": "efd0a41e-89d1-4cc5-8763-4a5bcefcae1d",
+          "sequence": 111,
+          "tenant_id": "acme",
+          "time": 1788648036036,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "qYP2jaD0SShFDm38vB-XxYcodkk-iAZZ2B9HV0Lp084DAxQtWFoeqi0k8WAWvG_zlOmguR1rrrIsCGZ-cEHmCg"
+      }
+    },
+    {
+      "hash": "1f2a1ee465233ab6c4416a07a31ec09ba41cb6b2fc636ad0714d1f72bcd24219",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "502cbaac-5622-48be-9596-72624bbebd20",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "22f07dc26e4b33ae6f9c1c1d20b11d4e9d7f2c7f66717cb2ebaa46de6058e5b5",
+          "reference": "efd0a41e-89d1-4cc5-8763-4a5bcefcae1d",
+          "sequence": 112,
+          "tenant_id": "acme",
+          "time": 1788648036036,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "w2nLau7Pz8M4MB0Gfh3sC5kuHpuakQXrIkuh02VbdCjDwLslpmwE8wFQt2J3y3droEU2G2-8_ZQY7UOr0rPmAA"
+      }
+    },
+    {
+      "hash": "285035dd24be36e371244b123b74a2da67915fb262fe7ba316f25bffdab7679c",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "b347ee95d3a947a2d225c7813f428cb51d2457e454af762ccc114aeed65f4c06",
+            "resource": "dataset-1"
+          },
+          "previous": "1f2a1ee465233ab6c4416a07a31ec09ba41cb6b2fc636ad0714d1f72bcd24219",
+          "reference": "89ab4995-fb19-42f7-aae3-c8431c03dc5e",
+          "sequence": 113,
+          "tenant_id": "acme",
+          "time": 1788648037037,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "eNLKUvN1mHoCEUAZ7S-xdOh4ADYjTi7P2oFo0jbv6vTbGAxAMaRKN-2324TuNxPLsFIMNgnCbBzs7tXc2ouoBw"
+      }
+    },
+    {
+      "hash": "eaacae57d8e96a981781779b0854b61c550cd13306c6b5e3da9dfbd030f24466",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "d6779ba7-a67c-4473-b951-af715a15f6b3",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "285035dd24be36e371244b123b74a2da67915fb262fe7ba316f25bffdab7679c",
+          "reference": "89ab4995-fb19-42f7-aae3-c8431c03dc5e",
+          "sequence": 114,
+          "tenant_id": "acme",
+          "time": 1788648037037,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "hXjU7pU__PeFf5TOM_bAUGBh7-orYdUGgHyUXHZ_lEGjHF-AcOzeOeU_f5SWrEYtU9SrCPxphCIVa8PZPQU-CQ"
+      }
+    },
+    {
+      "hash": "5d73a6173c69bfc9d0b98ead14b1e1e6cdab0960da7cae46a18e6ed7e5d88385",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "4142df2a3bcf56c06ec27ac10f0e782b0ef7257dddaf9b3515078b2229e95f5d",
+            "resource": "dataset-1"
+          },
+          "previous": "eaacae57d8e96a981781779b0854b61c550cd13306c6b5e3da9dfbd030f24466",
+          "reference": "98242785-61f6-4441-8b01-14f7d1fca6be",
+          "sequence": 115,
+          "tenant_id": "acme",
+          "time": 1788648038038,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "fzkxVJT_Z8OvWXTcRkd1eOsLiPvei2HolTjzEw01zdKS59bfeqBUWgmYraL9FNp41CTqb_GrX0SyDzHocVlLDQ"
+      }
+    },
+    {
+      "hash": "61a5a4b9c60297377be1f65f3d0b1e00730c1076406f694ffef7ef2fcc1ed1f7",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "8f011baa-dd63-4e76-9c39-b60548366cce",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "5d73a6173c69bfc9d0b98ead14b1e1e6cdab0960da7cae46a18e6ed7e5d88385",
+          "reference": "98242785-61f6-4441-8b01-14f7d1fca6be",
+          "sequence": 116,
+          "tenant_id": "acme",
+          "time": 1788648038038,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "Prmn3J4sJqs1D7wV0A3yELRH3sfjg1l0m0oylLGnO8xQe5qOcF79K7aYMmJ2zAsYig5eVwDp5oZYtKiR92PWCQ"
+      }
+    },
+    {
+      "hash": "3029a84d2bd5ab846ef767786b7d8b9e2c121c47339a44baae5dd155185d5bcb",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "f174c7dd2726db7ba3a7b03435d6c42bca4356664b7ced75e5478b095e9a3ff0",
+            "resource": "dataset-1"
+          },
+          "previous": "61a5a4b9c60297377be1f65f3d0b1e00730c1076406f694ffef7ef2fcc1ed1f7",
+          "reference": "8e4710ad-41c8-401c-a1ae-e19ce3e0cef7",
+          "sequence": 117,
+          "tenant_id": "acme",
+          "time": 1788648039039,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "KyHq79ilGtyblcWYIb3ZXSdnrRv3EAeVXJNTBM1umihhTJ52ttVUV7DZNicvKULhTTLzzktdwEJttKxXxQs5Cg"
+      }
+    },
+    {
+      "hash": "95b05812feb5a3675d4889e6f1eff40e8b7aeab3c5f6bd6949ea9bd1f2cb84f8",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "97ffa2ea-a80e-4475-aec5-898ff6feac3e",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "3029a84d2bd5ab846ef767786b7d8b9e2c121c47339a44baae5dd155185d5bcb",
+          "reference": "8e4710ad-41c8-401c-a1ae-e19ce3e0cef7",
+          "sequence": 118,
+          "tenant_id": "acme",
+          "time": 1788648039039,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "b0PVG9JP0bOUwzzKfARaBzRS8GKS5KUqEiZSoPtUbV1zBFfoXnhEhVaylUHf0NhL8fwI4sCmc74WHtAfCJinBQ"
+      }
+    },
+    {
+      "hash": "830cc058bb3f5295299e9104839c825be0351121a011c8915f469d719e140b0d",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "4788fc2bff6242398cb79a2477c6bf9f20d3d79d4b5cbae37ec3bb921127eacf",
+            "resource": "dataset-1"
+          },
+          "previous": "95b05812feb5a3675d4889e6f1eff40e8b7aeab3c5f6bd6949ea9bd1f2cb84f8",
+          "reference": "aaa47263-dce3-4c08-9f7f-50f58401df5e",
+          "sequence": 119,
+          "tenant_id": "acme",
+          "time": 1788648040040,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "tHCBHVoECoanh7dIwFMMzeEaOkhlNfgQpNnX741lHdz1caDvtdBqqm4VSyRNY4PlOvdYOEh-fpehqvScrkjYCg"
+      }
+    },
+    {
+      "hash": "695d8b01c3bf925370b784c82436830700fb526d5c1577b709d2ef6365148183",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "097fc803-a760-453a-99eb-e44804481c7a",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "830cc058bb3f5295299e9104839c825be0351121a011c8915f469d719e140b0d",
+          "reference": "aaa47263-dce3-4c08-9f7f-50f58401df5e",
+          "sequence": 120,
+          "tenant_id": "acme",
+          "time": 1788648040040,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "-B1VUYIpEpN_QA-TOOBNbfd9iYkkjeZFp8cflDkMgP1k85HRC_2QssEMP_YNzKJjwEHmaScNjBoBFErRIFhgDQ"
+      }
+    },
+    {
+      "hash": "2d2d3b7151abb205bb3e9ea8ba7f4e970aacea596dda9c42ba3acc9b4f42be24",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "2b35f8fa510e359f09c2f99cb0a4bcb4f11b3ee838f5edf773cff815d36692d2",
+            "resource": "dataset-1"
+          },
+          "previous": "695d8b01c3bf925370b784c82436830700fb526d5c1577b709d2ef6365148183",
+          "reference": "ae3083fa-2d00-4e39-9cd0-e0590d4991dd",
+          "sequence": 121,
+          "tenant_id": "acme",
+          "time": 1788648041041,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "K-lEV3MlA5LFP5q-j_xiv_xZoilTUhVh-9EoSrMneOFxDQw1rt8w7KMKGqe1_2lP7Uj_nLN8Fq7cZ8rgRf0xBw"
+      }
+    },
+    {
+      "hash": "a2f17a4cdf06d6f0f2c3e588d767976518ef830666b9b16dff486278eb1a7768",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "7a9d934c-0de6-4be6-971f-ed25a5ea429e",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "2d2d3b7151abb205bb3e9ea8ba7f4e970aacea596dda9c42ba3acc9b4f42be24",
+          "reference": "ae3083fa-2d00-4e39-9cd0-e0590d4991dd",
+          "sequence": 122,
+          "tenant_id": "acme",
+          "time": 1788648041041,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "MZS1MrOOH0R3mRlJS5iPAVyfDxsLkaVpnHCbY6VJImXpKAlXotcoabrnz9n_BEadIcBvg4gUpg_bgAB8-FfWBw"
+      }
+    },
+    {
+      "hash": "7482672c926d7bc6d69639bfdf313c8be0981cc1a36ab6d37864b2955285663c",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "6557229044324bcacbacf2bffcfd58271a4056e77c140987edb2acf5aa3a7ef7",
+            "resource": "dataset-1"
+          },
+          "previous": "a2f17a4cdf06d6f0f2c3e588d767976518ef830666b9b16dff486278eb1a7768",
+          "reference": "09112795-dc19-42a2-b7c4-75e3cd67a084",
+          "sequence": 123,
+          "tenant_id": "acme",
+          "time": 1788648042042,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "cgH6b0jhKrXD-Vpq0Xq-hJaCDzj_21qUx2l6eJl6NMf4yzi4SR7dxyy2tMgcAXC0y1RNeRRDgCBfeUVeS2dbCA"
+      }
+    },
+    {
+      "hash": "71708cc57cf46243cf2ac818d67500f6d023dfab94ad04d175f7831af17b21ca",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "2a5960e7-60e8-4056-811c-4a94147374de",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "7482672c926d7bc6d69639bfdf313c8be0981cc1a36ab6d37864b2955285663c",
+          "reference": "09112795-dc19-42a2-b7c4-75e3cd67a084",
+          "sequence": 124,
+          "tenant_id": "acme",
+          "time": 1788648042042,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "-q7F71MrgsbFscMeq9k9cSV-Dpk7f6pEBv2f8D0cTtd5Y_dHv8PbOhxYPxxc42uofywhF5SAelotBQ6gTnnrCA"
+      }
+    },
+    {
+      "hash": "39694f29359a8c73f530aa1de477dfe17b49a34ac00e6a74c27ed41be69dd282",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "53fce64a6e7fcbb325ee0ce6f116cc86886914c8f0f3226446fe822248e79ea6",
+            "resource": "dataset-1"
+          },
+          "previous": "71708cc57cf46243cf2ac818d67500f6d023dfab94ad04d175f7831af17b21ca",
+          "reference": "731f73a8-2046-48aa-8b86-77ebc4d95b3f",
+          "sequence": 125,
+          "tenant_id": "acme",
+          "time": 1788648043043,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "QxEoo6Ilq1RuMNb71du56h_9NQX9jNX2k6dSiqdy5OkyUnV3SSSdEcWuVOny_BKESnoXxzYIMYrLu_6QWm8jBg"
+      }
+    },
+    {
+      "hash": "4117d8558f64887e21b194a221a83eaa85942df85322796937b383412474f39b",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "c3ba5561-069e-43a3-86fb-444d6938bc1a",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "39694f29359a8c73f530aa1de477dfe17b49a34ac00e6a74c27ed41be69dd282",
+          "reference": "731f73a8-2046-48aa-8b86-77ebc4d95b3f",
+          "sequence": 126,
+          "tenant_id": "acme",
+          "time": 1788648043043,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "OfXKPkUTj1WGduXQHnKFA3706OK43EybkUoBMi48spMoAp8aaEmznZQW1kcOCplmWH4_a0ZgMGPF9x6JIJIsAg"
+      }
+    },
+    {
+      "hash": "921162c1207881f98dbdbbd64d13f23df28b901dc76027d23809360451f6a9c0",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "79d1194a1e5c0cbc05cce8dbbc2f4ca15e617a5683beb4967f0f2fa03832a68c",
+            "resource": "dataset-1"
+          },
+          "previous": "4117d8558f64887e21b194a221a83eaa85942df85322796937b383412474f39b",
+          "reference": "119badb8-4bf1-4ad3-af14-0de213b35389",
+          "sequence": 127,
+          "tenant_id": "acme",
+          "time": 1788648044044,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "Omeynng7Yy4rYEZOoL8z8yI2tb7YAOWR0FLyvBtw34ZduxMEzQiluAhNGmEYCFvr_5CI2-6Wk3dqBDKOEijqBA"
+      }
+    },
+    {
+      "hash": "1c0b92a7758e9e8a8a63529228fcd951effca61a8cae2db2ddb4cfff07bbc9f1",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "e6600dc2-eb71-4318-9be0-4b244bb292e2",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "921162c1207881f98dbdbbd64d13f23df28b901dc76027d23809360451f6a9c0",
+          "reference": "119badb8-4bf1-4ad3-af14-0de213b35389",
+          "sequence": 128,
+          "tenant_id": "acme",
+          "time": 1788648044044,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "kpLuoRIGS40DZWmuBCFxCfJoqEaKWNprmfZgNfEHuRh7Ik0BCno1f_L_HFYoqZ-h1QBOMp5-3JceHzzDNnULCg"
+      }
+    },
+    {
+      "hash": "74c0b3e3bac45067acaad6b9b61d6f41380322985d68defa0d6e7b59e4f6be7b",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "d4cc3b16a5226a1e1574f3e74ecfa4c2c218113ca5a9065c4d188df30b368d97",
+            "resource": "dataset-1"
+          },
+          "previous": "1c0b92a7758e9e8a8a63529228fcd951effca61a8cae2db2ddb4cfff07bbc9f1",
+          "reference": "133a5dbb-e33f-4503-b759-1889d6f5f1ad",
+          "sequence": 129,
+          "tenant_id": "acme",
+          "time": 1788648045045,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "hy-SnThNC8y6Q9hBoU7bQqw8EjRGvLFtUe9EAs0y-G_WgHBdnM9wYpdyGlx_c6mT7j_fh0yvdssxge8Rn5MnDQ"
+      }
+    },
+    {
+      "hash": "e18776c1d8e0a4f93634a9a469a8e2f199ac3a5e7a578f159e6de607c49c98e2",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "67e2af7a-eb6a-4c63-8db4-6e59ca3d12a8",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "74c0b3e3bac45067acaad6b9b61d6f41380322985d68defa0d6e7b59e4f6be7b",
+          "reference": "133a5dbb-e33f-4503-b759-1889d6f5f1ad",
+          "sequence": 130,
+          "tenant_id": "acme",
+          "time": 1788648045045,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "4UacYN0RhCk8vX4eMNcKSmqewAb-MdrTgOFmC_Gs_bDkVxQ61ctftJM4baYoHfnHd_wTmQhTvvN5b-H-DmnNCw"
+      }
+    },
+    {
+      "hash": "6fe1a53444f2b5fdc83d97c9b378253fc3a89c4d303e919849177f924a7374a5",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "c6366e076330fcd22b9f166273af06b038d52ddcb79dbbedf987560556e88049",
+            "resource": "dataset-1"
+          },
+          "previous": "e18776c1d8e0a4f93634a9a469a8e2f199ac3a5e7a578f159e6de607c49c98e2",
+          "reference": "991bb268-7fd9-4393-b8ec-37c01a4ae00e",
+          "sequence": 131,
+          "tenant_id": "acme",
+          "time": 1788648046046,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "7E-VFnbUcOsqQQLDO3XckrMzqnrkFUa67yTpFE0XyNFX9cvTzb6YXPyEiM8ZnlHlX48Risvjisofb5IdiQnkBg"
+      }
+    },
+    {
+      "hash": "2f33d9a6ac7f0b802f7255513d21015d81e242574494c6dd8a51f604d566153a",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "fec75b51-3f7c-4828-9819-1384b9ed69f8",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "6fe1a53444f2b5fdc83d97c9b378253fc3a89c4d303e919849177f924a7374a5",
+          "reference": "991bb268-7fd9-4393-b8ec-37c01a4ae00e",
+          "sequence": 132,
+          "tenant_id": "acme",
+          "time": 1788648046046,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "JX5ywujcvzONQECsYOX0Z4c2827BkcgXA9fBrXSPkAGhvSqaWBgrSNbqq7cU_G2Ge8AODXTMU_jYkicm2mIhBg"
+      }
+    },
+    {
+      "hash": "e0c22c4fff143d3a827b7255964a1807182670646feb779f17c52d649e00f11b",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "e2060f7f0957a32f02447f3e913fc0d085503be749124caa37ff3c8d7f2f8104",
+            "resource": "dataset-1"
+          },
+          "previous": "2f33d9a6ac7f0b802f7255513d21015d81e242574494c6dd8a51f604d566153a",
+          "reference": "e8979c31-8b1e-4134-a1ae-9e0e96e655af",
+          "sequence": 133,
+          "tenant_id": "acme",
+          "time": 1788648047047,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "YgQpfFzPRrj_O3IMNeZH4B6S5RKCQQp0I7qGVnJSpG_YGUZeeBN8s8eWJDGakIjwbJzv5cI201nOU8_aGac9Cw"
+      }
+    },
+    {
+      "hash": "255a0aa893a95fb99028411e48f12b5b179b371402f10067866fde398cd90980",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "61cfd58c-3152-4661-b1f8-d9d1796b3c4d",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "e0c22c4fff143d3a827b7255964a1807182670646feb779f17c52d649e00f11b",
+          "reference": "e8979c31-8b1e-4134-a1ae-9e0e96e655af",
+          "sequence": 134,
+          "tenant_id": "acme",
+          "time": 1788648047047,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "Sxd1AQhfsaFP3NNwM4j9AqQjAcxVE1ZGveg8C95H60qB5BiIA6GL7EIKMJYAOT638qQXpNnEIJYzIF_r_38tAg"
+      }
+    },
+    {
+      "hash": "41f31fd5f71c2d938f454728adccaa3003126494373be532b4a5ecdfae620e55",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "5fefae0998da2a6c6a6b76ebb5d992081058627a4c879545d17c519f2523d939",
+            "resource": "dataset-1"
+          },
+          "previous": "255a0aa893a95fb99028411e48f12b5b179b371402f10067866fde398cd90980",
+          "reference": "7e586465-ae07-4d53-84e0-8f765a29423d",
+          "sequence": 135,
+          "tenant_id": "acme",
+          "time": 1788648048048,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "ENKsE7f9frhaRF58yzwmrXHLgfVV5VB9gwjk5XAlScwqXP-1p_GOyd7izuF3euzR4r18sLbVbYqUfJlef1K0Bw"
+      }
+    },
+    {
+      "hash": "f36cca1d81482c0ee6fdb4bbc1b5d8bba6c536904e64e348fba29ec6cf8f480a",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "a0986dfa-074c-49ec-ab58-d261b07ade92",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "41f31fd5f71c2d938f454728adccaa3003126494373be532b4a5ecdfae620e55",
+          "reference": "7e586465-ae07-4d53-84e0-8f765a29423d",
+          "sequence": 136,
+          "tenant_id": "acme",
+          "time": 1788648048048,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "mYBL8z18nSBHXHezH6EU-nW2PhOBicl1QQ3jdqNgX-VW8TikXj8-0Xf1mc6DDn-9k94yt8ovGMHRCpitNq0kAw"
+      }
+    },
+    {
+      "hash": "990ba25720d2da47725beaa4a678399401e6816ae8ac5d6900c2c75d58789d9e",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "229de72f258e0f3f9be13892efd14e65d404ad84f94d9d828c4b3d6db282dec7",
+            "resource": "dataset-1"
+          },
+          "previous": "f36cca1d81482c0ee6fdb4bbc1b5d8bba6c536904e64e348fba29ec6cf8f480a",
+          "reference": "0e7dda74-f87e-4247-aca9-9e050dbb02b6",
+          "sequence": 137,
+          "tenant_id": "acme",
+          "time": 1788648049049,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "YGi1ee0Mr4ZSgG6lP8lQMK-IJlBv5x5S7uZ5owxVKKZUQ_vtFOugK0drK3vrHxuZuB2pIeEZF_XZI8iCFo0DDg"
+      }
+    },
+    {
+      "hash": "32086420ca2e93323c05db5df4c575ed77ce9661a9493ce4034f06b06df2a0c7",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "cost": 2,
+            "request_id": "31cbde37-f54e-4b33-b038-f86a85c59e2c",
+            "resource": "dataset-1",
+            "selection_digest": "8eb82c927cb04600306d7eac0256a2c35165fc9df9ea7d3f3ac85bb160d10df9",
+            "watermarked": true
+          },
+          "previous": "990ba25720d2da47725beaa4a678399401e6816ae8ac5d6900c2c75d58789d9e",
+          "reference": "0e7dda74-f87e-4247-aca9-9e050dbb02b6",
+          "sequence": 138,
+          "tenant_id": "acme",
+          "time": 1788648049049,
+          "type": "RUNTIME_ALLOWED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "nvDUeud0-YWwTJOj4foXChvqeZG-zKfsU3OUAgiv9Aq4WZHsDOyegWOajZFl8d9_5XTCGbTdoe1skiN3wyoABQ"
+      }
+    },
+    {
+      "hash": "082780d8caa0090276fb2b1fcd4d1f789976976fed19b47ff3a4455cedc7387f",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "digest": "c01d281be7c5f0d564f7cb46586832e05cd8de6b6ceda0ad81ad13020f48c678",
+            "resource": "dataset-1"
+          },
+          "previous": "32086420ca2e93323c05db5df4c575ed77ce9661a9493ce4034f06b06df2a0c7",
+          "reference": "0d3b1c20-c1dc-4409-9666-0943381ef232",
+          "sequence": 139,
+          "tenant_id": "acme",
+          "time": 1788648050050,
+          "type": "CAPABILITY_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "vud9-Kdu-hvHwCAeEG4igYPuAlo7ysaPc5CuK9Gwp5BvcFAlEtrLbe8VZnQsK5TNOwFkAgW22ydHWjI9kibLBg"
+      }
+    },
+    {
+      "hash": "bbef9a1ac9ce3a52a3d1e79e3d17352e36f96a356a4a11f8dcc2046153231abc",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "code": "INV-429-BUDGET"
+          },
+          "previous": "082780d8caa0090276fb2b1fcd4d1f789976976fed19b47ff3a4455cedc7387f",
+          "reference": "local-gate",
+          "sequence": 140,
+          "tenant_id": "acme",
+          "time": 1788648050050,
+          "type": "SECURITY_OPERATION_REJECTED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "9lxfhsAmozIL-o29T72YL0UPxbMCvOi-BgQL4IJYvuROtZpVfBGeZEoiq4FJRPTiLzYwweWFT9PN02c0V967Bg"
+      }
+    },
+    {
+      "hash": "308bb7d42f331ae11dafd882c7b066064861d93fd59f682b7de4eac899be3733",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "action_type": "policy.change",
+            "capsule_digest": "fbaab501ba7bdd83e8c8c6272586199900419033dce6c1cb87b7e35a9bd7b012"
+          },
+          "previous": "bbef9a1ac9ce3a52a3d1e79e3d17352e36f96a356a4a11f8dcc2046153231abc",
+          "reference": "d0469296-c79b-4938-81d1-455258204ee9",
+          "sequence": 141,
+          "tenant_id": "acme",
+          "time": 1788648050050,
+          "type": "CAPSULE_PROPOSED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "ouukh1E1mLbIC_46dxTP0oWAAwFc6jiY3golopulohG-6NbgqjeHGDAxrg58ybkq6gUS1hQb2KzjBRjafbezDA"
+      }
+    },
+    {
+      "hash": "caeee9e56685a520ce47746e2a3f8b45ec179fb93ce6af09a266f3e4c89b7404",
+      "envelope": {
+        "payload": {
+          "actor": "policy-admin",
+          "metadata": {
+            "candidate_digest": "f8efb369a1e3651df972de0c78a7fd44711900f4bd46359cd1f2419e564fb86f",
+            "result_digest": "f15c422e3c1f66ae8f649008362291f46dbc267ba8d2fb3b1c3f4cae8c9976aa"
+          },
+          "previous": "308bb7d42f331ae11dafd882c7b066064861d93fd59f682b7de4eac899be3733",
+          "reference": "b87ac12a-700e-4647-b0f7-52d3e689633a",
+          "sequence": 142,
+          "tenant_id": "acme",
+          "time": 1788648050050,
+          "type": "POLICY_SIMULATED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "sB-unkFuduT8FMcc0I95eGk0YyTCTSSJlnyI2SeqvaS2iW8D-QPAGHhWtydhRUcte5X-Rch-fRVlUPe19l-GDg"
+      }
+    },
+    {
+      "hash": "ba4275ec89ad4e15867b3952177ead421fd768d5ee4d5e2dc780ae48ee93fda6",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "evidence_digest": "4babfbcf0746c3ec5b863693246c52c40cf5b43549c46f9e317062ddf1f08687",
+            "evidence_id": "41686813-feff-4978-9a69-e5a7358cd7b7"
+          },
+          "previous": "caeee9e56685a520ce47746e2a3f8b45ec179fb93ce6af09a266f3e4c89b7404",
+          "reference": "d0469296-c79b-4938-81d1-455258204ee9",
+          "sequence": 143,
+          "tenant_id": "acme",
+          "time": 1788648170051,
+          "type": "EVIDENCE_ATTACHED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "95O4WlOHjrelK1veuB1V0YR5DSewL1pZmDGv-eDKtKim6msH8aV5b2PoXuKWSkprsrh6J50mzruxFQoNcbu3Cw"
+      }
+    },
+    {
+      "hash": "282844af7adaa68a8844277a0e0d648abbf3859cc7be03dea20250cac2b567bd",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "evidence_digest": "63badf5df43488eca6fc15728cdf201ec26ed97c754fc9971b93789482a913fe",
+            "evidence_id": "629af3d8-494a-48ae-a86d-9fff1271f4a6"
+          },
+          "previous": "ba4275ec89ad4e15867b3952177ead421fd768d5ee4d5e2dc780ae48ee93fda6",
+          "reference": "d0469296-c79b-4938-81d1-455258204ee9",
+          "sequence": 144,
+          "tenant_id": "acme",
+          "time": 1788648170051,
+          "type": "EVIDENCE_ATTACHED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "lp8rxe-clwhiUsEA_nQtfK0UiLF-tfbYzFGwY-Z2z638S78cBxKlrrU-IgVGK5WKtKcfADoU_aQh3OKwlY6EDg"
+      }
+    },
+    {
+      "hash": "594d75e64e8a0bb8c5fb3c673c2a427a9f0d16586387d243e3ce7303ff603033",
+      "envelope": {
+        "payload": {
+          "actor": "custodian-1",
+          "metadata": {
+            "approval_digest": "afe22be8764b912318685e30ac177159a9a54494644daf8e2d413b107a4e90ca",
+            "signer_id": "5b1d645d25fd6e4719866282fb3bf894"
+          },
+          "previous": "282844af7adaa68a8844277a0e0d648abbf3859cc7be03dea20250cac2b567bd",
+          "reference": "d0469296-c79b-4938-81d1-455258204ee9",
+          "sequence": 145,
+          "tenant_id": "acme",
+          "time": 1788648170051,
+          "type": "EXACT_ACTION_APPROVED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "l_QfcOHzVjPxfv1Teu9CKhUp7892xuM3ftLeIJA24jILMbr9eJV3dV-mTU0_X_G5AYkQ7VJH3MQZoPcOE9gCBA"
+      }
+    },
+    {
+      "hash": "eeeb956da88f5ef4b491afb728975ea2d3cb32dacb6a35246e579d47988b6b50",
+      "envelope": {
+        "payload": {
+          "actor": "custodian-2",
+          "metadata": {
+            "approval_digest": "f6575670118ab8eb0362cd687afa740c09ff78666a44e56480dbe8c8b6106bb6",
+            "signer_id": "eba72f112603dea47419814f8cf2c3fa"
+          },
+          "previous": "594d75e64e8a0bb8c5fb3c673c2a427a9f0d16586387d243e3ce7303ff603033",
+          "reference": "d0469296-c79b-4938-81d1-455258204ee9",
+          "sequence": 146,
+          "tenant_id": "acme",
+          "time": 1788648170051,
+          "type": "EXACT_ACTION_APPROVED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "VJJjwU-PyV1h7nO81ovpvkyTuE86PeO6igMkKddzPiJU80XetlDlCf_IE3s8Ja3S66GhjaNlr22CpYaDCasGBw"
+      }
+    },
+    {
+      "hash": "614273f26c7357d410e4534ed22feaeb5d342171616d5da3119f33c1b1252413",
+      "envelope": {
+        "payload": {
+          "actor": "custodian-3",
+          "metadata": {
+            "approval_digest": "bef68f437db858c772d9cc805b3daa21810eb10ad332f9546d2c88241c2b3889",
+            "signer_id": "e400164715aabc48fa4532c1aecf9ab8"
+          },
+          "previous": "eeeb956da88f5ef4b491afb728975ea2d3cb32dacb6a35246e579d47988b6b50",
+          "reference": "d0469296-c79b-4938-81d1-455258204ee9",
+          "sequence": 147,
+          "tenant_id": "acme",
+          "time": 1788648170051,
+          "type": "EXACT_ACTION_APPROVED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "XC43ToFeGool-9hlQ--4C28fYuNcbPSxKWxIjAi1V0nFHUvTxUoxmaWbXV694_MRVKBCben6bHrbTeTIr2sQBA"
+      }
+    },
+    {
+      "hash": "60ce9f8b289720e164e89de58fc19e87390d74e5c37c21545537fcc69921450c",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "certificate_digest": "e0e5aa1b5a6defb57c43a2e2bee734938c5776bd4bf853aa1f1b8523dd6e2049",
+            "certificate_id": "ef9e80bd-13ee-4136-98a0-2591039214f3"
+          },
+          "previous": "614273f26c7357d410e4534ed22feaeb5d342171616d5da3119f33c1b1252413",
+          "reference": "d0469296-c79b-4938-81d1-455258204ee9",
+          "sequence": 148,
+          "tenant_id": "acme",
+          "time": 1788648170051,
+          "type": "CERTIFICATE_ISSUED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "CDy7Ra_Jl9PNasE2_tdaABFbHOnZvQ1tly_GKs3jlPSLmUec7BCECKxszC4RK2mpns_yPFC_Zzgk19zJ3d52Bg"
+      }
+    },
+    {
+      "hash": "fe985ca12313f8941941437fc9a619b9414f3ea8dc4b0f485dc23f99ff96338b",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "capsule_digest": "fbaab501ba7bdd83e8c8c6272586199900419033dce6c1cb87b7e35a9bd7b012"
+          },
+          "previous": "60ce9f8b289720e164e89de58fc19e87390d74e5c37c21545537fcc69921450c",
+          "reference": "ef9e80bd-13ee-4136-98a0-2591039214f3",
+          "sequence": 149,
+          "tenant_id": "acme",
+          "time": 1788648170051,
+          "type": "EXECUTION_RESERVED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "gllho1UodwCHOg-hG1Hxk0_JaIG8uB7K_3FRDJF49fnFP3LKE2Rl8bKCkiU89K4H5ct__oE5gwhpptu9RCI2CA"
+      }
+    },
+    {
+      "hash": "3dcd98e0fd6cfe25ffdec927a8ad6b0b272a0334fb4ebf95f3724ba39332321e",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "activate_at": 1788648290050,
+            "version": 2
+          },
+          "previous": "fe985ca12313f8941941437fc9a619b9414f3ea8dc4b0f485dc23f99ff96338b",
+          "reference": "constitution:acme:v2",
+          "sequence": 150,
+          "tenant_id": "acme",
+          "time": 1788648170051,
+          "type": "POLICY_STAGED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "2EFVe_Nl38_4CXdsv1UwF5Iu5NLfDtxieUhg_lOHSZGMnaMc9CrNZoEaNzUHbCRPzWLSVXgCldm6tCzAHk-5Dg"
+      }
+    },
+    {
+      "hash": "92f476bbe2db2b7cdbf2c15b37a43516cf1d3738db5d9a3bf5968b334c063519",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "outcome_digest": "4cd159a5f041c67eb5fdd7680680252641e22d7dd30d22ca6bc0513b67dd7c2f",
+            "reason": "TARGET_RECONCILED",
+            "revoked_post_reservation": null,
+            "status": "VERIFIED",
+            "supersedes": null
+          },
+          "previous": "3dcd98e0fd6cfe25ffdec927a8ad6b0b272a0334fb4ebf95f3724ba39332321e",
+          "reference": "ef9e80bd-13ee-4136-98a0-2591039214f3",
+          "sequence": 151,
+          "tenant_id": "acme",
+          "time": 1788648170051,
+          "type": "EXECUTION_OUTCOME"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "vSvdxsVhHc1OOOmRGqzQkg5t1pHIoqyXK9foHjk-1J0hRztMu4eW1WWC9G71T-VLbeuvQOv1i6dMozKO2vNUDQ"
+      }
+    },
+    {
+      "hash": "46b8dc35c48186495f51aefe7845f4646de493c73a2af33f22534575d733e709",
+      "envelope": {
+        "payload": {
+          "actor": "system",
+          "metadata": {
+            "staged_from": 1788648170051,
+            "version": 2
+          },
+          "previous": "92f476bbe2db2b7cdbf2c15b37a43516cf1d3738db5d9a3bf5968b334c063519",
+          "reference": "constitution:acme:v2",
+          "sequence": 152,
+          "tenant_id": "acme",
+          "time": 1788648320051,
+          "type": "POLICY_ACTIVATED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "aIpVhdnBRLinmEi0tViiS3T38b9W401jEcbfcpbkTlhq3I7eTk3ceqg-jh_vqqGgg85Yu2XyEp3BdCoBivhjBQ"
+      }
+    },
+    {
+      "hash": "fe52d938011a92b3c0e67cd3839608bdcae2469298b1aa2a4b3e7f5637cc7c7f",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "action_type": "finance.beneficiary.create",
+            "capsule_digest": "58b230a63960e2d250c067dddd5eaad39b4d131542906c326b63fc2d93b1d297"
+          },
+          "previous": "46b8dc35c48186495f51aefe7845f4646de493c73a2af33f22534575d733e709",
+          "reference": "571fee28-1899-48da-a915-32f7fbfd76cd",
+          "sequence": 153,
+          "tenant_id": "acme",
+          "time": 1788648320051,
+          "type": "CAPSULE_PROPOSED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "lgbOk64V-bDsHudgd4NEmcr7Ko6Ev0VUf1UHc1iEBvjdeCbkQzd2V-toypzbmQiBmqCrHH7APjUezFCkw4XiAQ"
+      }
+    },
+    {
+      "hash": "e3371a7584eda22bdea1d1089c486ee3f309baa61049b87dcf76be7d35e98e4f",
+      "envelope": {
+        "payload": {
+          "actor": "security",
+          "metadata": {
+            "reason_digest": "c1ee8fa3aa6a685a1c4bb84c866ed825e34ac59e37833b2a1caec3b724c63232"
+          },
+          "previous": "fe52d938011a92b3c0e67cd3839608bdcae2469298b1aa2a4b3e7f5637cc7c7f",
+          "reference": "device:operator-device",
+          "sequence": 154,
+          "tenant_id": "acme",
+          "time": 1788648320051,
+          "type": "AUTHORITY_REVOKED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "YCcmQA3jyFDQMniL6U02gZYo8m11_fyqErnHNrT3upSoZEzChk18GUBe7PMgqNoxz8diJLtOremoRbzKnnrmAw"
+      }
+    },
+    {
+      "hash": "a5ae5aff8e0e9810fa2bc66c1f3c8dbbc9907af383032aba5f6e8341b8ccdf30",
+      "envelope": {
+        "payload": {
+          "actor": "operator",
+          "metadata": {
+            "code": "INV-403-QUARANTINE"
+          },
+          "previous": "e3371a7584eda22bdea1d1089c486ee3f309baa61049b87dcf76be7d35e98e4f",
+          "reference": "local-gate",
+          "sequence": 155,
+          "tenant_id": "acme",
+          "time": 1788648320051,
+          "type": "SECURITY_OPERATION_REJECTED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "DWVJwKAaWaoL37l88HtELnYOMxgF6MBX3eNYlpcP1scJf-Q56nfkawZ7Kggffcv5rKGuSKBy567r1OmL6CfaAA"
+      }
+    },
+    {
+      "hash": "205a927ce554d8b6eb142fe9420856b32b70720862c2c7c64d3cfa52120b6945",
+      "envelope": {
+        "payload": {
+          "actor": "auditor",
+          "metadata": {
+            "purpose_digest": "decd91db845aa81c21d41713332473de47f2e072191d5a586becefacac1db50f"
+          },
+          "previous": "a5ae5aff8e0e9810fa2bc66c1f3c8dbbc9907af383032aba5f6e8341b8ccdf30",
+          "reference": "tenant-log",
+          "sequence": 156,
+          "tenant_id": "acme",
+          "time": 1788648320051,
+          "type": "AUDIT_ACCESSED"
+        },
+        "protected": {
+          "key_id": "88c14b4920c8d07e879cae1fb52ab1d2",
+          "profile": "IF-CJSON-1",
+          "purpose": "audit",
+          "suite": "Ed25519"
+        },
+        "signature": "E7lj1RcK1t6jfwTQ9H1Y6TXdTYaThelamjd_i35aSjt81sEFO8aUTe3EC1zlM9BjjI78oVoCexqbTPOOBR88CA"
+      }
+    }
+  ]
+}

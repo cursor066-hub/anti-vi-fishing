@@ -16,6 +16,171 @@
     }
   ],
   "paths": {
+    "/healthz": {
+      "get": {
+        "operationId": "get_healthz",
+        "summary": "Liveness",
+        "description": "Roles: unauthenticated. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/readyz": {
+      "get": {
+        "operationId": "get_readyz",
+        "summary": "Readiness (db probe)",
+        "description": "Roles: unauthenticated. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/": {
+      "get": {
+        "operationId": "get_",
+        "summary": "Operator console HTML (static asset)",
+        "description": "Roles: unauthenticated. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/app.js": {
+      "get": {
+        "operationId": "get_app_js",
+        "summary": "Operator console script (static asset)",
+        "description": "Roles: unauthenticated. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/style.css": {
+      "get": {
+        "operationId": "get_style_css",
+        "summary": "Operator console stylesheet (static asset)",
+        "description": "Roles: unauthenticated. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
     "/v1/me": {
       "get": {
         "operationId": "get_v1_me",
@@ -84,7 +249,7 @@
       "get": {
         "operationId": "get_v1_policy",
         "summary": "Read active constitution",
-        "description": "Roles: operator, approver, custodian, policy_admin, security. Engineering profile; all target mutations are simulated.",
+        "description": "Roles: operator, approver, custodian, policy_admin, security, auditor. Engineering profile; all target mutations are simulated.",
         "tags": [
           "Control"
         ],
@@ -116,7 +281,7 @@
       "get": {
         "operationId": "get_v1_action_capsules",
         "summary": "List capsules (limit 1–100 and offset)",
-        "description": "Roles: operator, approver, custodian, security, policy_admin. Engineering profile; all target mutations are simulated.",
+        "description": "Roles: operator, approver, custodian, security, policy_admin, auditor. Engineering profile; all target mutations are simulated.",
         "tags": [
           "Control"
         ],
@@ -141,11 +306,35 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "description": "Canonical decimal integer grammar only (no hex/exponent/float/signed spellings); unknown or duplicate query parameters are rejected"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000,
+              "description": "Canonical decimal integer grammar only (no hex/exponent/float/signed spellings); unknown or duplicate query parameters are rejected"
+            }
+          }
+        ]
       },
       "post": {
         "operationId": "post_v1_action_capsules",
-        "summary": "Propose exact action",
+        "summary": "Propose exact action (input + capsule-intent envelope signed by the actor identity key)",
         "description": "Roles: operator, policy_admin, workload. Engineering profile; all target mutations are simulated.",
         "tags": [
           "Control"
@@ -177,7 +366,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/Proposal"
+                "$ref": "#/components/schemas/ProposalRequest"
               }
             }
           }
@@ -199,7 +388,7 @@
       "get": {
         "operationId": "get_v1_action_capsules_id_",
         "summary": "Read exact capsule",
-        "description": "Roles: operator, approver, custodian, security, policy_admin. Engineering profile; all target mutations are simulated.",
+        "description": "Roles: operator, approver, custodian, security, policy_admin, auditor. Engineering profile; all target mutations are simulated.",
         "tags": [
           "Control"
         ],
@@ -232,7 +421,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+              "pattern": "^[A-Za-z0-9-]+$",
               "maxLength": 128
             }
           }
@@ -242,7 +431,7 @@
     "/v1/action-capsules/{id}/evidence": {
       "post": {
         "operationId": "post_v1_action_capsules_id_evidence",
-        "summary": "Attach signed evidence",
+        "summary": "Attach a pre-signed evidence envelope",
         "description": "Roles: operator, security, policy_admin. Engineering profile; all target mutations are simulated.",
         "tags": [
           "Control"
@@ -286,7 +475,61 @@
             "required": true,
             "schema": {
               "type": "string",
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+              "pattern": "^[A-Za-z0-9-]+$",
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/action-capsules/{id}/acquire-evidence": {
+      "post": {
+        "operationId": "post_v1_action_capsules_id_acquire_evidence",
+        "summary": "Pull signed evidence from a live issuer daemon (fabric derives binding claims)",
+        "description": "Roles: operator, security, policy_admin. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "201": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AcquireEvidence"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9-]+$",
               "maxLength": 128
             }
           }
@@ -340,7 +583,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+              "pattern": "^[A-Za-z0-9-]+$",
               "maxLength": 128
             }
           }
@@ -394,7 +637,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+              "pattern": "^[A-Za-z0-9-]+$",
               "maxLength": 128
             }
           }
@@ -438,7 +681,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+              "pattern": "^[A-Za-z0-9-]+$",
               "maxLength": 128
             }
           }
@@ -487,7 +730,135 @@
         }
       }
     },
+    "/v1/approvals/batch": {
+      "post": {
+        "operationId": "post_v1_approvals_batch",
+        "summary": "Batch-approve a declared 2-32 action set (one signature per capsule)",
+        "description": "Roles: approver, custodian. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "201": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchApproval"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/containment": {
+      "get": {
+        "operationId": "get_v1_containment",
+        "summary": "Reconstruct the denied-consume / quarantine containment sequence",
+        "description": "Roles: operator, security, auditor, policy_admin. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/certificates": {
+      "get": {
+        "operationId": "get_v1_certificates",
+        "summary": "List certificates (limit 1–200 and offset)",
+        "description": "Roles: operator, security, auditor, policy_admin. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "description": "Canonical decimal integer grammar only (no hex/exponent/float/signed spellings); unknown or duplicate query parameters are rejected"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000,
+              "description": "Canonical decimal integer grammar only (no hex/exponent/float/signed spellings); unknown or duplicate query parameters are rejected"
+            }
+          }
+        ]
+      },
       "post": {
         "operationId": "post_v1_certificates",
         "summary": "Mint single-use authority after ALLOW",
@@ -566,7 +937,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+              "pattern": "^[A-Za-z0-9-]+$",
               "maxLength": 128
             }
           }
@@ -618,8 +989,50 @@
     "/gate/v1/outcomes/{id}": {
       "get": {
         "operationId": "get_gate_v1_outcomes_id_",
+        "summary": "Read recorded outcome (read-only)",
+        "description": "Roles: operator, security, policy_admin. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Gate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+              "maxLength": 128
+            }
+          }
+        ]
+      },
+      "post": {
+        "operationId": "post_gate_v1_outcomes_id_",
         "summary": "Reconcile target journal (may append outcome evidence)",
-        "description": "Roles: operator, policy_admin, security. Engineering profile; all target mutations are simulated.",
+        "description": "Roles: operator, security, policy_admin. Engineering profile; all target mutations are simulated.",
         "tags": [
           "Gate"
         ],
@@ -827,6 +1240,36 @@
             }
           }
         }
+      },
+      "get": {
+        "operationId": "get_v1_revocations",
+        "summary": "List revocations",
+        "description": "Roles: operator, security, auditor, policy_admin. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/v1/coverage": {
@@ -901,11 +1344,110 @@
         }
       }
     },
+    "/v1/coverage/history": {
+      "get": {
+        "operationId": "get_v1_coverage_history",
+        "summary": "Coverage state reconstructed at instant ?at=",
+        "description": "Roles: operator, approver, custodian, security, auditor, policy_admin. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "at",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000000000000,
+              "description": "Canonical decimal integer grammar only (no hex/exponent/float/signed spellings); unknown or duplicate query parameters are rejected"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/coverage/{id}/technical-validation": {
+      "post": {
+        "operationId": "post_v1_coverage_id_technical_validation",
+        "summary": "Attach independently executed validation evidence to a path",
+        "description": "Roles: security. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Envelope"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9-]+$",
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
     "/v1/connectors": {
       "get": {
         "operationId": "get_v1_connectors",
         "summary": "Read simulator connector limitations",
-        "description": "Roles: authenticated. Engineering profile; all target mutations are simulated.",
+        "description": "Roles: operator, security, policy_admin, auditor. Engineering profile; all target mutations are simulated.",
         "tags": [
           "Control"
         ],
@@ -931,6 +1473,82 @@
             }
           }
         }
+      }
+    },
+    "/v1/connectors/status": {
+      "get": {
+        "operationId": "get_v1_connectors_status",
+        "summary": "Issuer and target connector status incl. drift",
+        "description": "Roles: operator, security, policy_admin, auditor. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connectors/{id}/drift-check": {
+      "post": {
+        "operationId": "post_v1_connectors_id_drift_check",
+        "summary": "Live manifest drift check against issuer endpoint",
+        "description": "Roles: security, policy_admin. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9-]+$",
+              "maxLength": 128
+            }
+          }
+        ]
       }
     },
     "/v1/policies/simulate": {
@@ -969,6 +1587,38 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/Policy"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/policy/history": {
+      "get": {
+        "operationId": "get_v1_policy_history",
+        "summary": "Staged and historical policy versions",
+        "description": "Roles: operator, security, auditor, policy_admin. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
               }
             }
           }
@@ -1015,6 +1665,278 @@
             }
           }
         }
+      }
+    },
+    "/v1/audit/entries": {
+      "get": {
+        "operationId": "get_v1_audit_entries",
+        "summary": "Paginated audit view (cursor + limit 1–5000)",
+        "description": "Roles: operator, security, auditor, policy_admin. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5000
+            }
+          },
+          {
+            "name": "view",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "finance",
+                "privacy",
+                "technical"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "/v1/audit/proofs/{sequence}": {
+      "get": {
+        "operationId": "get_v1_audit_proofs_sequence_",
+        "summary": "RFC 6962 inclusion proof",
+        "description": "Roles: operator, security, auditor. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "sequence",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ]
+      }
+    },
+    "/v1/audit/consistency": {
+      "get": {
+        "operationId": "get_v1_audit_consistency",
+        "summary": "Consistency proof between tree sizes",
+        "description": "Roles: operator, security, auditor. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "first",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000000000,
+              "description": "Canonical decimal integer grammar only (no hex/exponent/float/signed spellings); unknown or duplicate query parameters are rejected"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/audit/verify-proof": {
+      "post": {
+        "operationId": "post_v1_audit_verify_proof",
+        "summary": "Verify a supplied inclusion proof against the live tree",
+        "description": "Roles: operator, security, auditor. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProofVerify"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/subjects": {
+      "get": {
+        "operationId": "get_v1_subjects",
+        "summary": "Identity inventory",
+        "description": "Roles: operator, security, auditor, policy_admin. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/grants": {
+      "get": {
+        "operationId": "get_v1_grants",
+        "summary": "Active JIT grants",
+        "description": "Roles: operator, security, auditor, policy_admin. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "subject",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+              "maxLength": 128
+            }
+          }
+        ]
       }
     },
     "/v1/retention/hold": {
@@ -1133,6 +2055,676 @@
         }
       }
     },
+    "/v1/ceremonies": {
+      "get": {
+        "operationId": "get_v1_ceremonies",
+        "summary": "List key ceremonies",
+        "description": "Roles: security, custodian, policy_admin. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "post_v1_ceremonies",
+        "summary": "Plan a threshold ceremony",
+        "description": "Roles: security, custodian. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "201": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CeremonyCreate"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/ceremonies/{id}/acknowledge": {
+      "post": {
+        "operationId": "post_v1_ceremonies_id_acknowledge",
+        "summary": "Custodian acknowledges participation",
+        "description": "Roles: custodian. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CeremonyAcknowledge"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/ceremonies/{id}/split": {
+      "post": {
+        "operationId": "post_v1_ceremonies_id_split",
+        "summary": "Split exportable material into committed shares",
+        "description": "Roles: security, custodian. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CeremonySplit"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/ceremonies/{id}/reconstruct": {
+      "post": {
+        "operationId": "post_v1_ceremonies_id_reconstruct",
+        "summary": "Reconstruct under ceremony quorum (digest returned, not material)",
+        "description": "Roles: security, custodian. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CeremonyReconstruct"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/ceremonies/{id}/abort": {
+      "post": {
+        "operationId": "post_v1_ceremonies_id_abort",
+        "summary": "Abort a live ceremony (security officer or member custodian)",
+        "description": "Roles: security, custodian. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Empty"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/keys": {
+      "get": {
+        "operationId": "get_v1_keys",
+        "summary": "List vault keys (public metadata only)",
+        "description": "Roles: security, policy_admin. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/keys/rotate-prepare": {
+      "post": {
+        "operationId": "post_v1_keys_rotate_prepare",
+        "summary": "Pre-stage a pending rotation key",
+        "description": "Roles: security, custodian. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "201": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RotatePrepare"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/keys/{id}/attest": {
+      "get": {
+        "operationId": "get_v1_keys_id_attest",
+        "summary": "Vault-signed key attestation",
+        "description": "Roles: security, auditor. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/config-drift": {
+      "get": {
+        "operationId": "get_v1_config_drift",
+        "summary": "Configuration drift status",
+        "description": "Roles: security, policy_admin. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/config-drift/reassert": {
+      "post": {
+        "operationId": "post_v1_config_drift_reassert",
+        "summary": "Re-attest config after correction",
+        "description": "Roles: security. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/clock/recover": {
+      "post": {
+        "operationId": "post_v1_clock_recover",
+        "summary": "Audited clock repair after stall",
+        "description": "Roles: security, policy_admin. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/secure-perception/sessions": {
+      "post": {
+        "operationId": "post_v1_secure_perception_sessions",
+        "summary": "Open dev-attested sealed perception session",
+        "description": "Roles: operator, approver, custodian, security. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "201": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PerceptionSession"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/secure-perception/release": {
+      "post": {
+        "operationId": "post_v1_secure_perception_release",
+        "summary": "Release sealed fields under purpose binding",
+        "description": "Roles: operator, approver, custodian, security. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PerceptionRelease"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/secure-perception/fallback": {
+      "post": {
+        "operationId": "post_v1_secure_perception_fallback",
+        "summary": "Labelled non-perception fallback submission",
+        "description": "Roles: operator, approver, custodian, security. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PerceptionFallback"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/advisory": {
+      "post": {
+        "operationId": "post_v1_advisory",
+        "summary": "Deterministic advisory plane (never confers authority)",
+        "description": "Roles: operator, approver, custodian, security, policy_admin. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Advisory"
+              }
+            }
+          }
+        }
+      }
+    },
     "/session": {
       "post": {
         "operationId": "post_session",
@@ -1205,16 +2797,6 @@
               }
             }
           }
-        },
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/Empty"
-              }
-            }
-          }
         }
       }
     }
@@ -1279,7 +2861,10 @@
                 "const": "IF-CJSON-1"
               },
               "suite": {
-                "const": "Ed25519"
+                "enum": [
+                  "Ed25519",
+                  "ES256"
+                ]
               },
               "key_id": {
                 "type": "string"
@@ -1294,7 +2879,7 @@
           },
           "signature": {
             "type": "string",
-            "pattern": "^[A-Za-z0-9_-]{86}$"
+            "pattern": "^[A-Za-z0-9_-]{43,128}$"
           }
         }
       },
@@ -1373,7 +2958,9 @@
               "key",
               "subject",
               "device",
-              "capability"
+              "capability",
+              "grant",
+              "token"
             ]
           },
           "id": {
@@ -1399,6 +2986,7 @@
           "connector_version",
           "owner",
           "status",
+          "path_class",
           "max_age_ms",
           "configuration_digest"
         ],
@@ -1433,6 +3021,20 @@
               "UNKNOWN"
             ]
           },
+          "path_class": {
+            "enum": [
+              "web_ui",
+              "mobile",
+              "api",
+              "cli",
+              "batch",
+              "import",
+              "service_account",
+              "direct_database",
+              "recovery",
+              "emergency"
+            ]
+          },
           "max_age_ms": {
             "type": "integer",
             "minimum": 1000,
@@ -1455,6 +3057,35 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 512
+          }
+        }
+      },
+      "BatchApproval": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "capsule_ids",
+          "signatures"
+        ],
+        "properties": {
+          "capsule_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+              "maxLength": 128
+            },
+            "minItems": 2,
+            "maxItems": 32,
+            "uniqueItems": true
+          },
+          "signatures": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Envelope"
+            },
+            "minItems": 2,
+            "maxItems": 32
           }
         }
       },
@@ -1579,6 +3210,22 @@
           }
         }
       },
+      "ProposalRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "input",
+          "signature"
+        ],
+        "properties": {
+          "input": {
+            "$ref": "#/components/schemas/Proposal"
+          },
+          "signature": {
+            "$ref": "#/components/schemas/Envelope"
+          }
+        }
+      },
       "RuntimeRequest": {
         "type": "object",
         "additionalProperties": false,
@@ -1652,6 +3299,265 @@
           },
           "port": {
             "const": 443
+          }
+        }
+      },
+      "AcquireEvidence": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "issuer",
+          "kind",
+          "claims"
+        ],
+        "properties": {
+          "issuer": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+            "maxLength": 128
+          },
+          "kind": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "claims": {
+            "type": "object"
+          }
+        }
+      },
+      "PerceptionSession": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "attestation"
+        ],
+        "properties": {
+          "attestation": {
+            "type": "object"
+          }
+        }
+      },
+      "PerceptionRelease": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "session_id",
+          "fields",
+          "purpose"
+        ],
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+            "maxLength": 128
+          },
+          "fields": {
+            "type": "object"
+          },
+          "purpose": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "capsule_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+            "maxLength": 128
+          },
+          "evidence_ref": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+            "maxLength": 128
+          }
+        }
+      },
+      "PerceptionFallback": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "fields",
+          "purpose"
+        ],
+        "properties": {
+          "fields": {
+            "type": "object"
+          },
+          "purpose": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "session_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+            "maxLength": 128
+          },
+          "capsule_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+            "maxLength": 128
+          },
+          "evidence_ref": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+            "maxLength": 128
+          }
+        }
+      },
+      "Advisory": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "operation"
+        ],
+        "properties": {
+          "operation": {
+            "enum": [
+              "extract",
+              "explain",
+              "intent"
+            ]
+          },
+          "document": {
+            "type": "string",
+            "maxLength": 1000000
+          },
+          "decision": {
+            "type": "string"
+          },
+          "kind_hint": {
+            "type": "string"
+          },
+          "capsule_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+            "maxLength": 128
+          }
+        }
+      },
+      "CeremonyCreate": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ceremony_id",
+          "tenant_id",
+          "purpose",
+          "threshold",
+          "custodians",
+          "valid_until"
+        ],
+        "properties": {
+          "ceremony_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+            "maxLength": 128
+          },
+          "tenant_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+            "maxLength": 128
+          },
+          "purpose": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "threshold": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 16
+          },
+          "custodians": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+              "maxLength": 128
+            },
+            "minItems": 2,
+            "maxItems": 16,
+            "uniqueItems": true
+          },
+          "valid_until": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "min_delay_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2592000000
+          }
+        }
+      },
+      "CeremonyAcknowledge": {
+        "$ref": "#/components/schemas/Envelope"
+      },
+      "CeremonySplit": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "secret"
+        ],
+        "properties": {
+          "secret": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192
+          }
+        }
+      },
+      "CeremonyReconstruct": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "shares"
+        ],
+        "properties": {
+          "shares": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 2,
+            "maxItems": 16
+          }
+        }
+      },
+      "RotatePrepare": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "key_class"
+        ],
+        "properties": {
+          "key_class": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "suite": {
+            "enum": [
+              "Ed25519",
+              "ES256"
+            ]
+          }
+        }
+      },
+      "ProofVerify": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "proof"
+        ],
+        "properties": {
+          "proof": {
+            "type": "object"
           }
         }
       },
@@ -3908,6 +5814,1280 @@
           }
         }
       },
+      "identity_jit_grant": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_id",
+          "schema_digest",
+          "actor",
+          "action",
+          "current_state",
+          "requested_state",
+          "destination",
+          "quantity",
+          "exclusions",
+          "evidence_refs",
+          "policy_version",
+          "nonce",
+          "created_at",
+          "expires_at",
+          "rollback_or_compensation",
+          "privacy_classification"
+        ],
+        "properties": {
+          "schema_id": {
+            "const": "if:identity.jit.grant:1"
+          },
+          "schema_digest": {
+            "const": "c26cb62ef0dcc91708ec44fc3069bc98f77c6504a1dca6af9a3aa225d0df3dd9"
+          },
+          "actor": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "subject_id",
+              "identity_class",
+              "device_id"
+            ],
+            "properties": {
+              "subject_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "maxLength": 128
+              },
+              "identity_class": {
+                "enum": [
+                  "workforce",
+                  "workload",
+                  "device",
+                  "counterparty"
+                ]
+              },
+              "device_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "maxLength": 128
+              }
+            }
+          },
+          "action": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "target_resource",
+              "purpose"
+            ],
+            "properties": {
+              "type": {
+                "const": "identity.jit.grant"
+              },
+              "target_resource": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "maxLength": 128
+              },
+              "purpose": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            }
+          },
+          "current_state": {
+            "$ref": "#/components/schemas/State"
+          },
+          "requested_state": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "subject_id",
+              "resources",
+              "actions",
+              "destinations",
+              "columns",
+              "row_ids",
+              "ttl_ms",
+              "reason",
+              "roles"
+            ],
+            "properties": {
+              "subject_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "maxLength": 128
+              },
+              "resources": {
+                "type": "array",
+                "uniqueItems": true,
+                "maxItems": 256,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              },
+              "actions": {
+                "type": "array",
+                "uniqueItems": true,
+                "maxItems": 256,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              },
+              "destinations": {
+                "type": "array",
+                "uniqueItems": true,
+                "maxItems": 256,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              },
+              "columns": {
+                "type": "array",
+                "uniqueItems": true,
+                "maxItems": 256,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              },
+              "row_ids": {
+                "type": "array",
+                "uniqueItems": true,
+                "maxItems": 256,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              },
+              "ttl_ms": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000000000000
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "roles": {
+                "type": "array",
+                "uniqueItems": true,
+                "maxItems": 256,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              }
+            }
+          },
+          "destination": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "quantity": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000000000
+          },
+          "exclusions": {
+            "type": "array",
+            "uniqueItems": true,
+            "maxItems": 256,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          "evidence_refs": {
+            "type": "array",
+            "uniqueItems": true,
+            "maxItems": 256,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          "policy_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "nonce": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+            "maxLength": 128,
+            "minLength": 16
+          },
+          "created_at": {
+            "type": "integer"
+          },
+          "expires_at": {
+            "type": "integer"
+          },
+          "rollback_or_compensation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "privacy_classification": {
+            "enum": [
+              "internal",
+              "confidential",
+              "restricted"
+            ]
+          }
+        }
+      },
+      "key_rotate": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_id",
+          "schema_digest",
+          "actor",
+          "action",
+          "current_state",
+          "requested_state",
+          "destination",
+          "quantity",
+          "exclusions",
+          "evidence_refs",
+          "policy_version",
+          "nonce",
+          "created_at",
+          "expires_at",
+          "rollback_or_compensation",
+          "privacy_classification"
+        ],
+        "properties": {
+          "schema_id": {
+            "const": "if:key.rotate:1"
+          },
+          "schema_digest": {
+            "const": "70a6fa24c6038ac9765eb5d6a9c32d3206d237309546cf93a517b05e649f880d"
+          },
+          "actor": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "subject_id",
+              "identity_class",
+              "device_id"
+            ],
+            "properties": {
+              "subject_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "maxLength": 128
+              },
+              "identity_class": {
+                "enum": [
+                  "workforce",
+                  "workload",
+                  "device",
+                  "counterparty"
+                ]
+              },
+              "device_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "maxLength": 128
+              }
+            }
+          },
+          "action": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "target_resource",
+              "purpose"
+            ],
+            "properties": {
+              "type": {
+                "const": "key.rotate"
+              },
+              "target_resource": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "maxLength": 128
+              },
+              "purpose": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            }
+          },
+          "current_state": {
+            "$ref": "#/components/schemas/State"
+          },
+          "requested_state": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "key_class",
+              "new_key_id",
+              "new_public_key",
+              "ceremony_id",
+              "revoke_old"
+            ],
+            "properties": {
+              "key_class": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "new_key_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "maxLength": 128
+              },
+              "ceremony_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "maxLength": 128
+              }
+            }
+          },
+          "destination": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "quantity": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000000000
+          },
+          "exclusions": {
+            "type": "array",
+            "uniqueItems": true,
+            "maxItems": 256,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          "evidence_refs": {
+            "type": "array",
+            "uniqueItems": true,
+            "maxItems": 256,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          "policy_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "nonce": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+            "maxLength": 128,
+            "minLength": 16
+          },
+          "created_at": {
+            "type": "integer"
+          },
+          "expires_at": {
+            "type": "integer"
+          },
+          "rollback_or_compensation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "privacy_classification": {
+            "enum": [
+              "internal",
+              "confidential",
+              "restricted"
+            ]
+          }
+        }
+      },
+      "key_ceremony": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_id",
+          "schema_digest",
+          "actor",
+          "action",
+          "current_state",
+          "requested_state",
+          "destination",
+          "quantity",
+          "exclusions",
+          "evidence_refs",
+          "policy_version",
+          "nonce",
+          "created_at",
+          "expires_at",
+          "rollback_or_compensation",
+          "privacy_classification"
+        ],
+        "properties": {
+          "schema_id": {
+            "const": "if:key.ceremony:1"
+          },
+          "schema_digest": {
+            "const": "f0d15802d0d410b589bc48764a10c0b10196230a49548b14c9ff17aa21c03adf"
+          },
+          "actor": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "subject_id",
+              "identity_class",
+              "device_id"
+            ],
+            "properties": {
+              "subject_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "maxLength": 128
+              },
+              "identity_class": {
+                "enum": [
+                  "workforce",
+                  "workload",
+                  "device",
+                  "counterparty"
+                ]
+              },
+              "device_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "maxLength": 128
+              }
+            }
+          },
+          "action": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "target_resource",
+              "purpose"
+            ],
+            "properties": {
+              "type": {
+                "const": "key.ceremony"
+              },
+              "target_resource": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "maxLength": 128
+              },
+              "purpose": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            }
+          },
+          "current_state": {
+            "$ref": "#/components/schemas/State"
+          },
+          "requested_state": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ceremony_id",
+              "purpose",
+              "threshold",
+              "custodians"
+            ],
+            "properties": {
+              "ceremony_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "maxLength": 128
+              },
+              "purpose": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "threshold": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000000000000
+              },
+              "custodians": {
+                "type": "array",
+                "uniqueItems": true,
+                "maxItems": 256,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              }
+            }
+          },
+          "destination": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "quantity": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000000000
+          },
+          "exclusions": {
+            "type": "array",
+            "uniqueItems": true,
+            "maxItems": 256,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          "evidence_refs": {
+            "type": "array",
+            "uniqueItems": true,
+            "maxItems": 256,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          "policy_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "nonce": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+            "maxLength": 128,
+            "minLength": 16
+          },
+          "created_at": {
+            "type": "integer"
+          },
+          "expires_at": {
+            "type": "integer"
+          },
+          "rollback_or_compensation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "privacy_classification": {
+            "enum": [
+              "internal",
+              "confidential",
+              "restricted"
+            ]
+          }
+        }
+      },
+      "action_composite": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_id",
+          "schema_digest",
+          "actor",
+          "action",
+          "current_state",
+          "requested_state",
+          "destination",
+          "quantity",
+          "exclusions",
+          "evidence_refs",
+          "policy_version",
+          "nonce",
+          "created_at",
+          "expires_at",
+          "rollback_or_compensation",
+          "privacy_classification"
+        ],
+        "properties": {
+          "schema_id": {
+            "const": "if:action.composite:1"
+          },
+          "schema_digest": {
+            "const": "22759a0c70901e3860c7c3481030446f63a4816b816fea505b850a869f49ccaa"
+          },
+          "actor": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "subject_id",
+              "identity_class",
+              "device_id"
+            ],
+            "properties": {
+              "subject_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "maxLength": 128
+              },
+              "identity_class": {
+                "enum": [
+                  "workforce",
+                  "workload",
+                  "device",
+                  "counterparty"
+                ]
+              },
+              "device_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "maxLength": 128
+              }
+            }
+          },
+          "action": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "target_resource",
+              "purpose"
+            ],
+            "properties": {
+              "type": {
+                "const": "action.composite"
+              },
+              "target_resource": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "maxLength": 128
+              },
+              "purpose": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            }
+          },
+          "current_state": {
+            "$ref": "#/components/schemas/State"
+          },
+          "requested_state": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "children"
+            ],
+            "properties": {
+              "children": {
+                "type": "array",
+                "uniqueItems": true,
+                "maxItems": 256,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              }
+            }
+          },
+          "destination": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "quantity": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000000000
+          },
+          "exclusions": {
+            "type": "array",
+            "uniqueItems": true,
+            "maxItems": 256,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          "evidence_refs": {
+            "type": "array",
+            "uniqueItems": true,
+            "maxItems": 256,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          "policy_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "nonce": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+            "maxLength": 128,
+            "minLength": 16
+          },
+          "created_at": {
+            "type": "integer"
+          },
+          "expires_at": {
+            "type": "integer"
+          },
+          "rollback_or_compensation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "privacy_classification": {
+            "enum": [
+              "internal",
+              "confidential",
+              "restricted"
+            ]
+          }
+        }
+      },
+      "ai_model_deploy": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_id",
+          "schema_digest",
+          "actor",
+          "action",
+          "current_state",
+          "requested_state",
+          "destination",
+          "quantity",
+          "exclusions",
+          "evidence_refs",
+          "policy_version",
+          "nonce",
+          "created_at",
+          "expires_at",
+          "rollback_or_compensation",
+          "privacy_classification"
+        ],
+        "properties": {
+          "schema_id": {
+            "const": "if:ai.model.deploy:1"
+          },
+          "schema_digest": {
+            "const": "8eae83d4d504311dba2b68852820d40db50bff4b714473c619d2f400374a2dff"
+          },
+          "actor": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "subject_id",
+              "identity_class",
+              "device_id"
+            ],
+            "properties": {
+              "subject_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "maxLength": 128
+              },
+              "identity_class": {
+                "enum": [
+                  "workforce",
+                  "workload",
+                  "device",
+                  "counterparty"
+                ]
+              },
+              "device_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "maxLength": 128
+              }
+            }
+          },
+          "action": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "target_resource",
+              "purpose"
+            ],
+            "properties": {
+              "type": {
+                "const": "ai.model.deploy"
+              },
+              "target_resource": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "maxLength": 128
+              },
+              "purpose": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            }
+          },
+          "current_state": {
+            "$ref": "#/components/schemas/State"
+          },
+          "requested_state": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "model_id",
+              "model_version",
+              "eval_report_digest"
+            ],
+            "properties": {
+              "model_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "maxLength": 128
+              },
+              "model_version": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "eval_report_digest": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            }
+          },
+          "destination": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "quantity": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000000000
+          },
+          "exclusions": {
+            "type": "array",
+            "uniqueItems": true,
+            "maxItems": 256,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          "evidence_refs": {
+            "type": "array",
+            "uniqueItems": true,
+            "maxItems": 256,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          "policy_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "nonce": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+            "maxLength": 128,
+            "minLength": 16
+          },
+          "created_at": {
+            "type": "integer"
+          },
+          "expires_at": {
+            "type": "integer"
+          },
+          "rollback_or_compensation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "privacy_classification": {
+            "enum": [
+              "internal",
+              "confidential",
+              "restricted"
+            ]
+          }
+        }
+      },
+      "legal_contract_execute": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_id",
+          "schema_digest",
+          "actor",
+          "action",
+          "current_state",
+          "requested_state",
+          "destination",
+          "quantity",
+          "exclusions",
+          "evidence_refs",
+          "policy_version",
+          "nonce",
+          "created_at",
+          "expires_at",
+          "rollback_or_compensation",
+          "privacy_classification"
+        ],
+        "properties": {
+          "schema_id": {
+            "const": "if:legal.contract.execute:1"
+          },
+          "schema_digest": {
+            "const": "25b34016d50b5e0a31941d24331a2795ec7bb86d838505f69708ce9199bfecde"
+          },
+          "actor": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "subject_id",
+              "identity_class",
+              "device_id"
+            ],
+            "properties": {
+              "subject_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "maxLength": 128
+              },
+              "identity_class": {
+                "enum": [
+                  "workforce",
+                  "workload",
+                  "device",
+                  "counterparty"
+                ]
+              },
+              "device_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "maxLength": 128
+              }
+            }
+          },
+          "action": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "target_resource",
+              "purpose"
+            ],
+            "properties": {
+              "type": {
+                "const": "legal.contract.execute"
+              },
+              "target_resource": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "maxLength": 128
+              },
+              "purpose": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            }
+          },
+          "current_state": {
+            "$ref": "#/components/schemas/State"
+          },
+          "requested_state": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "contract_id",
+              "counterparty",
+              "amount_minor",
+              "currency"
+            ],
+            "properties": {
+              "contract_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "maxLength": 128
+              },
+              "counterparty": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "maxLength": 128
+              },
+              "amount_minor": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000000000000
+              },
+              "currency": {
+                "type": "string",
+                "enum": [
+                  "EUR",
+                  "USD",
+                  "GBP",
+                  "CHF",
+                  "CAD",
+                  "AUD",
+                  "NZD",
+                  "SGD"
+                ]
+              }
+            }
+          },
+          "destination": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "quantity": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000000000
+          },
+          "exclusions": {
+            "type": "array",
+            "uniqueItems": true,
+            "maxItems": 256,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          "evidence_refs": {
+            "type": "array",
+            "uniqueItems": true,
+            "maxItems": 256,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          "policy_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "nonce": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+            "maxLength": 128,
+            "minLength": 16
+          },
+          "created_at": {
+            "type": "integer"
+          },
+          "expires_at": {
+            "type": "integer"
+          },
+          "rollback_or_compensation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "privacy_classification": {
+            "enum": [
+              "internal",
+              "confidential",
+              "restricted"
+            ]
+          }
+        }
+      },
+      "security_case_investigate": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_id",
+          "schema_digest",
+          "actor",
+          "action",
+          "current_state",
+          "requested_state",
+          "destination",
+          "quantity",
+          "exclusions",
+          "evidence_refs",
+          "policy_version",
+          "nonce",
+          "created_at",
+          "expires_at",
+          "rollback_or_compensation",
+          "privacy_classification"
+        ],
+        "properties": {
+          "schema_id": {
+            "const": "if:security.case.investigate:1"
+          },
+          "schema_digest": {
+            "const": "4e02424d996679e7d2b3ad0d6fb43634c673cb9188c9124e1dff4f5abadaac13"
+          },
+          "actor": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "subject_id",
+              "identity_class",
+              "device_id"
+            ],
+            "properties": {
+              "subject_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "maxLength": 128
+              },
+              "identity_class": {
+                "enum": [
+                  "workforce",
+                  "workload",
+                  "device",
+                  "counterparty"
+                ]
+              },
+              "device_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "maxLength": 128
+              }
+            }
+          },
+          "action": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "target_resource",
+              "purpose"
+            ],
+            "properties": {
+              "type": {
+                "const": "security.case.investigate"
+              },
+              "target_resource": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "maxLength": 128
+              },
+              "purpose": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            }
+          },
+          "current_state": {
+            "$ref": "#/components/schemas/State"
+          },
+          "requested_state": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "case_id",
+              "scope"
+            ],
+            "properties": {
+              "case_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "maxLength": 128
+              },
+              "scope": {
+                "type": "array",
+                "uniqueItems": true,
+                "maxItems": 256,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              }
+            }
+          },
+          "destination": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "quantity": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000000000
+          },
+          "exclusions": {
+            "type": "array",
+            "uniqueItems": true,
+            "maxItems": 256,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          "evidence_refs": {
+            "type": "array",
+            "uniqueItems": true,
+            "maxItems": 256,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          "policy_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "nonce": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+            "maxLength": 128,
+            "minLength": 16
+          },
+          "created_at": {
+            "type": "integer"
+          },
+          "expires_at": {
+            "type": "integer"
+          },
+          "rollback_or_compensation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "privacy_classification": {
+            "enum": [
+              "internal",
+              "confidential",
+              "restricted"
+            ]
+          }
+        }
+      },
       "Proposal": {
         "oneOf": [
           {
@@ -3948,6 +7128,27 @@
           },
           {
             "$ref": "#/components/schemas/policy_change"
+          },
+          {
+            "$ref": "#/components/schemas/identity_jit_grant"
+          },
+          {
+            "$ref": "#/components/schemas/key_rotate"
+          },
+          {
+            "$ref": "#/components/schemas/key_ceremony"
+          },
+          {
+            "$ref": "#/components/schemas/action_composite"
+          },
+          {
+            "$ref": "#/components/schemas/ai_model_deploy"
+          },
+          {
+            "$ref": "#/components/schemas/legal_contract_execute"
+          },
+          {
+            "$ref": "#/components/schemas/security_case_investigate"
           }
         ]
       }

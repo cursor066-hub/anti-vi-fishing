@@ -8,10 +8,25 @@ Type=simple
 User=invariant
 Group=invariant
 WorkingDirectory=/opt/invariant-fabric
-ExecStart=/usr/bin/node /opt/invariant-fabric/src/cli.mjs serve --dir /var/lib/invariant-fabric --port 8080
+# --origin must equal the nginx server_name pair — without it every request
+# fails the Host check (w9-deploy F8). --trust-proxy honours X-Forwarded-For
+# only when the request also presents the shared proxy secret — loopback
+# alone proves nothing about which local process forwarded the request
+# (w10-fixverify F-2). The secret lives in a root-only EnvironmentFile and
+# must match the X-Fabric-Proxy value in nginx-staging.conf.
+EnvironmentFile=-/etc/invariant-fabric/proxy.env
+ExecStart=/usr/bin/node /opt/invariant-fabric/src/cli.mjs serve --dir /var/lib/invariant-fabric --port 8080 --origin https://invariant.internal --trust-proxy --proxy-secret ${PROXY_SECRET}
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
+# Resource ceilings — a runaway fabric must not starve the host (w9-deploy F8).
+MemoryMax=1G
+TasksMax=64
+LimitNOFILE=4096
+ProtectClock=true
+SystemCallFilter=@system-service
+MemoryDenyWriteExecute=true
+RestrictNamespaces=true
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true

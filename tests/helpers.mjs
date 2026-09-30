@@ -21,25 +21,52 @@ export function fixture(t, tenants = ['acme', 'globex']) {
   function proposed(type = 'finance.beneficiary.create', requested = { vendor_id: 'vendor-1', bank_account: 'TESTBANK000002', currency: 'EUR' }, overrides = {}, principal = p()) {
     const resource = overrides.action?.target_resource ?? `new-${randomUUID()}`;
     const action = { type, target_resource: resource, purpose: 'Synthetic verification' };
-    const input = proposal(type, actor(principal.subject_id), f.target.state(principal.tenant_id, resource), requested, time, { action, ...overrides });
-    return f.propose(principal, input, randomUUID());
+    const state = type === 'secret.use' ? f.target.secretState(principal.tenant_id, requested.secret_id) : f.target.state(principal.tenant_id, resource);
+    const input = proposal(type, actor(principal.subject_id), state, requested, time, { action, ...overrides });
+    // ACT-005: request intent is signed by the actor's identity key.
+    const intent = signed(input, setup.identityKeys[principal.tenant_id][principal.subject_id], 'capsule-intent');
+    return f.propose(principal, input, randomUUID(), intent);
   }
-  function evidence(record, { issuer = 'bank', kind = 'ownership', advisory = false, claim = 'supports', dependencies = [], confidence = 100, tenant = record.capsule.tenant_id, expiry = time + 600000 } = {}) {
-    const payload = { evidence_id: randomUUID(), tenant_id: tenant, capsule_digest: record.capsule_digest, kind, content_digest: digest({ source: 'synthetic-only', claim }), acquired_at: time, expires_at: expiry, confidence, advisory, claim, dependencies, provenance: 'Synthetic test issuer; no external authority assertion', retention_until: expiry + 60000 };
+  function evidence(record, { issuer, kind = 'ownership', advisory = false, claim = 'supports', dependencies = [], confidence = 100, tenant = record.capsule.tenant_id, expiry = time + 600000, claims } = {}) {
+    // Issuer keys are scoped to their declared kinds — pick an issuer that
+    // legitimately serves the requested kind when none is specified.
+    issuer ??= kind === 'ownership' ? 'bank' : kind === 'governance_review' ? 'governance' : kind === 'dataset_authority' ? 'registry' : ['identity_proof', 'recovery_authority'].includes(kind) ? 'hris' : ['device_health', 'workload_attestation'].includes(kind) ? 'device-attestation' : kind === 'build_provenance' || kind === 'test_result' ? 'build-pipeline' : 'bank';
+    // Envelopes carry the claim fields a policy evidence binding can check:
+    // for bound kinds they mirror the capsule's own action content.
+    const rs = record.capsule.requested_state ?? {};
+    claims ??= claim !== 'supports' ? {} : kind === 'ownership' ? { account: rs.bank_account ?? 'TESTBANK000001', owner_id: record.capsule.action.target_resource }
+      : kind === 'dataset_authority' ? { dataset: rs.dataset ?? record.capsule.action.target_resource }
+      : kind === 'identity_proof' || kind === 'recovery_authority' ? { subject_id: rs.subject_id ?? record.capsule.actor.subject_id }
+      : kind === 'workload_attestation' ? { workload_id: rs.workload_id ?? 'workload-1' }
+      : kind === 'governance_review' ? { ref: 'REV-2026-001', action_ref: record.capsule.capsule_id }
+      : kind === 'payment_confirmation' ? { transaction_id: record.capsule.capsule_id }
+      : kind === 'device_health' ? { device_id: record.capsule.actor.device_id }
+      : {};
+    const payload = { evidence_id: randomUUID(), tenant_id: tenant, capsule_digest: record.capsule_digest, kind, content_digest: digest({ source: 'synthetic-only', claim }), acquired_at: time, expires_at: expiry, confidence, advisory, claim, dependencies, provenance: 'Synthetic test issuer; no external authority assertion', retention_until: expiry + 60000, claims };
     const key = setup.issuerKeys[tenant][issuer], envelope = signed(payload, key, 'evidence');
     f.attachEvidence(p('operator', tenant), record.capsule.capsule_id, envelope); return envelope;
   }
-  function approve(record, count = 2) {
-    for (let i = 1; i <= count; i++) {
-      const principal = p(`custodian-${i}`, record.capsule.tenant_id), challenge = f.approvalChallenge(principal, record.capsule.capsule_id);
-      f.approve(principal, signed(challenge, setup.custodianKeys[record.capsule.tenant_id][principal.subject_id], 'action-approval'));
+  function approve(record, countOrSigners = 2) {
+    const subjects = Array.isArray(countOrSigners) ? countOrSigners : Array.from({ length: countOrSigners }, (_, i) => `custodian-${i + 1}`);
+    for (const subject of subjects) {
+      const principal = p(subject, record.capsule.tenant_id), challenge = f.approvalChallenge(principal, record.capsule.capsule_id);
+      f.approve(principal, signed(challenge, setup.identityKeys[record.capsule.tenant_id][subject], 'action-approval'));
     }
+  }
+  // An approval envelope built as `subject` without the role-gated challenge
+  // route — the object a compromised or ineligible credential would present.
+  function approvalEnvelope(record, subject, mutate = {}) {
+    const tenant = record.capsule.tenant_id, key = setup.identityKeys[tenant][subject];
+    const [keyId] = Object.entries(f.identities(tenant)).find(([, v]) => v.subject_id === subject);
+    const stored = f.store.must(tenant, 'capsule', record.capsule.capsule_id);
+    const payload = { tenant_id: tenant, capsule_id: record.capsule.capsule_id, capsule_digest: stored.capsule_digest, evidence_graph_digest: f.graph(tenant, stored).digest, policy_digest: digest(f.policy(tenant)), signer_id: keyId, approved_at: time, expires_at: Math.min(time + 300000, stored.capsule.expires_at), ...mutate };
+    return signed(payload, key, 'action-approval');
   }
   function ready(record = proposed(), options = {}) {
     const kind = options.kind ?? 'ownership'; evidence(record, { kind }); evidence(record, { issuer: 'registry', kind }); approve(record, options.approvals ?? 2);
     return { record, certificate: f.certificate(p('operator', record.capsule.tenant_id), record.capsule.capsule_id) };
   }
-  return { f, setup, directory, p, actor, proposed, evidence, approve, ready, close, now: () => time, advance: ms => { time += ms; }, clone };
+  return { f, setup, directory, p, actor, proposed, evidence, approve, approvalEnvelope, ready, close, now: () => time, advance: ms => { time += ms; }, set: t => { time = t; }, clone };
 }
 export const hasCode = code => e => e?.code === code;
 export function runtimeInput(overrides = {}) { return { device_id: 'operator-device', resource: 'dataset-1', destination: 'customer-vault', action: 'data.read', purpose: 'operations', columns: ['id', 'name'], row_ids: ['row-1'], classification: 'internal', jurisdiction: 'EU', max_cost: 1000, ttl_ms: 60000, ...overrides }; }

@@ -14,14 +14,21 @@ function encode(v, depth = 0) {
 }
 const bytes = v => new TextEncoder().encode(encode(v));
 async function hash(v) { return Buffer.from(await crypto.subtle.digest('SHA-256', bytes(v))).toString('hex'); }
+const P256_HALF_ORDER = BigInt('0x7FFFFFFF80000000FFFFFFFFFFFFFFFFDE737D56D38BCF4279DCE5617E3192A8');
+const SUITE = {
+  Ed25519: { alg: 'Ed25519', import: { name: 'Ed25519' } },
+  ES256: { alg: { name: 'ECDSA', hash: 'SHA-256' }, import: { name: 'ECDSA', namedCurve: 'P-256' } },
+};
 async function verify(envelope, keys, purpose) {
   check(Object.keys(envelope).sort().join() === 'payload,protected,signature', 'Invalid envelope');
-  const h = envelope.protected; check(Object.keys(h).sort().join() === 'key_id,profile,purpose,suite' && h.profile === 'IF-CJSON-1' && h.suite === 'Ed25519' && h.purpose === purpose, 'Bad context');
+  const h = envelope.protected; check(Object.keys(h).sort().join() === 'key_id,profile,purpose,suite' && h.profile === 'IF-CJSON-1' && SUITE[h.suite] && h.purpose === purpose, 'Bad context');
   const source = keys[h.key_id]; check(source && !source.revoked, 'Untrusted key');
   check(/^[A-Za-z0-9_-]{86}$/.test(envelope.signature), 'Bad signature encoding');
+  const sig = Buffer.from(envelope.signature, 'base64url');
+  if (h.suite === 'ES256') check(sig.length === 64 && BigInt('0x' + sig.subarray(32).toString('hex')) <= P256_HALF_ORDER, 'Non-canonical (high-s) ECDSA signature');
   const raw = Buffer.from(source.public_key.replace(/-----[^-]+-----|\s/g, ''), 'base64');
-  const key = await crypto.subtle.importKey('spki', raw, { name: 'Ed25519' }, false, ['verify']);
-  check(await crypto.subtle.verify('Ed25519', key, Buffer.from(envelope.signature, 'base64url'), bytes({ protected: h, payload: envelope.payload })), 'Bad signature'); return envelope.payload;
+  const key = await crypto.subtle.importKey('spki', raw, SUITE[h.suite].import, false, ['verify']);
+  check(await crypto.subtle.verify(SUITE[h.suite].alg, key, sig, bytes({ protected: h, payload: envelope.payload })), 'Bad signature'); return envelope.payload;
 }
 function noDuplicates(raw) {
   const stack = [];

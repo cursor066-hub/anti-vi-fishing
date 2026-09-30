@@ -4,22 +4,48 @@ import { fixture, hasCode, runtimeInput, runtimeRequest } from './helpers.mjs';
 import { clone, digest } from '../src/canonical.mjs';
 import { signed } from '../src/crypto.mjs';
 import { spawnSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
+
+// Locate the independent WebCrypto verifier runtime: PATH, the conventional
+// ~/.bun install, or an explicit BUN_BIN override.
+const bun = process.env.BUN_BIN ?? (existsSync(join(homedir(), '.bun/bin/bun')) ? join(homedir(), '.bun/bin/bun') : 'bun');
+const bunAvailable = spawnSync(bun, ['--version'], { encoding: 'utf8' }).status === 0;
 
 test('COM-002: all independently signed certificate binding mutations still fail registered-authority equality', t => {
   const h = fixture(t), { certificate } = h.ready();
   const mutations = { capsule_digest: '0'.repeat(64), policy_version: 999, evidence_graph_digest: '0'.repeat(64), target_gate_id: 'different-gate', nonce: 'different-nonce-long', expires_at: certificate.payload.expires_at + 1000, signer_set: [], constraints: { destination: 'EVILBANK9999' } };
   for (const [key, value] of Object.entries(mutations)) { const cert = signed({ ...certificate.payload, [key]: value }, h.setup.config.tenants.acme.keys.execution, 'action-certificate'); assert.throws(() => h.f.execute(h.p(), cert), e => ['INV-401-CERTIFICATE', 'INV-403-SCOPE'].includes(e.code), key); }
+  // Semantic arms — the presented envelope stays cryptographically valid
+  // while the stored/live state it binds to moves out from under it.
+  const { certificate: c2 } = h.ready();
+  h.f.store.put('acme', 'policy', 'active', { ...h.f.policy('acme'), version: 99 }, h.now());
+  assert.throws(() => h.f.execute(h.p(), c2), hasCode('INV-409-STATE'), 'policy digest drift kills execution');
+});
+test('COM-002: expiry, revocation and live re-evaluation each kill execution independently', t => {
+  const h = fixture(t);
+  const { certificate: cExpired } = h.ready(); h.advance(120001);
+  assert.throws(() => h.f.execute(h.p(), cExpired), hasCode('INV-401-CERTIFICATE'), 'expired certificate');
+  const { certificate: cRevoked } = h.ready();
+  h.f.revoke(h.p('security'), { kind: 'certificate', id: cRevoked.payload.certificate_id, reason: 'compromise drill' });
+  assert.throws(() => h.f.execute(h.p(), cRevoked), hasCode('INV-401-CERTIFICATE'), 'revoked certificate');
+  const { record: r3, certificate: c3 } = h.ready();
+  h.f.revoke(h.p('security'), { kind: 'subject', id: r3.capsule.actor.subject_id, reason: 'initiator compromise drill' });
+  assert.throws(() => h.f.execute(h.p(), c3), e => ['INV-412-EVIDENCE', 'INV-403-QUARANTINE', 'INV-401-AUTH'].includes(e.code), 'live re-evaluation/health fails');
 });
 test('RUN-004: runtime issuer-key revocation and active-policy change invalidate cached token', t => {
-  const h = fixture(t), cap = h.f.runtime.issue(h.p(), runtimeInput()); h.f.revoke(h.p('security'), { kind: 'key', id: cap.protected.key_id, reason: 'Execution key compromise drill' });
+  const h = fixture(t), cap = h.f.runtime.issue(h.p(), runtimeInput());
+  // A pending successor must exist before the bound signer can be revoked
+  // (w11-lifecycle F1) — the capability signed by the old key still dies.
+  h.f.prepareRotation(h.p('security'), 'execution');
+  h.f.revoke(h.p('security'), { kind: 'key', id: cap.protected.key_id, reason: 'Execution key compromise drill' });
   assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap)), hasCode('INV-401-CAPABILITY'));
 });
 test('DAT-001 COM-009: exact data export cannot return extra columns from downstream', t => {
   const h = fixture(t), input = { dataset: 'dataset-1', columns: ['id', 'name'], row_ids: ['row-1'], max_rows: 1, classification: 'internal', jurisdiction: 'EU' };
   const r = h.proposed('data.export', input, { action: { type: 'data.export', target_resource: 'dataset-1', purpose: 'Operations' }, destination: 'customer-vault' });
-  h.evidence(r, { kind: 'dataset_authority' }); const cert = h.f.certificate(h.p(), r.capsule.capsule_id), original = h.f.target.execute.bind(h.f.target);
+  h.evidence(r, { kind: 'dataset_authority' }); h.approve(r, 1); const cert = h.f.certificate(h.p(), r.capsule.capsule_id), original = h.f.target.execute.bind(h.f.target);
   h.f.target.execute = (...args) => { const output = original(...args); output.output[0].passport = 'SYNTHETIC-EXFILTRATION'; return output; };
   assert.equal(h.f.execute(h.p(), cert).payload.status, 'UNCERTAIN');
 });
@@ -37,7 +63,9 @@ test('AIG-006: source prose cannot override typed policy fields', t => {
 test('KEY-010 NFR-MNT-002: independent verifiers reject signed-log tampering and duplicate JSON keys', t => {
   const h = fixture(t); h.proposed(); const bundle = h.f.exportAudit(h.p('auditor'), 'Verifier adversarial test'), file = join(h.directory, 'audit.json'), trust = join(h.directory, 'trust.json');
   writeFileSync(file, JSON.stringify(bundle)); writeFileSync(trust, JSON.stringify(bundle.public_keys));
-  for (const [command, script] of [[process.execPath, 'scripts/verify-export.mjs'], ['bun', 'scripts/verify-export-webcrypto.mjs']]) {
+  // Node verifier always runs; the WebCrypto leg needs a present bun runtime.
+  const verifiers = [[process.execPath, 'scripts/verify-export.mjs'], ...(bunAvailable ? [[bun, 'scripts/verify-export-webcrypto.mjs']] : [])];
+  for (const [command, script] of verifiers) {
     const valid = spawnSync(command, [script, file, trust], { encoding: 'utf8' }); assert.equal(valid.status, 0, valid.stderr);
     const changed = clone(bundle); changed.entries[0].envelope.payload.metadata.policy_digest = 'f'.repeat(64); writeFileSync(file, JSON.stringify(changed));
     assert.equal(spawnSync(command, [script, file, trust]).status, 1);
@@ -49,14 +77,19 @@ test('ACT-007 UX-002: unsupported or ambiguous currency scales fail rather than 
   const h = fixture(t);
   for (const currency of ['XYZ', 'JPY', 'eur']) assert.throws(() => h.proposed('finance.beneficiary.create', { vendor_id: 'vendor-1', bank_account: 'TESTBANK000001', currency }), hasCode('INV-400-SCHEMA'));
 });
-test('POL-001 POL-002 POL-015: exact inputs and trusted test time produce identical decision and reasons', t => {
+test('POL-001 POL-015: exact inputs and trusted test time produce identical decision and reasons', t => {
   const h = fixture(t), r = h.proposed(); h.evidence(r); h.evidence(r, { issuer: 'registry' }); h.approve(r);
   const record = h.f.getCapsule(h.p(), r.capsule.capsule_id), expected = h.f.evaluation('acme', record, h.now());
   assert.equal(expected.decision, 'ALLOW'); for (let i = 0; i < 100; i++) assert.deepEqual(h.f.evaluation('acme', record, h.now()), expected);
+  // POL-015: a denied evaluation surfaces the failing predicate codes to the
+  // operator but never echoes the sensitive request content back.
+  const denied = h.f.evaluate(h.p(), h.proposed().capsule.capsule_id);
+  assert.ok(denied.reasons.length > 0 && denied.reasons.every(x => typeof x.code === 'string' && x.code.length > 0));
+  assert.ok(!JSON.stringify(denied).includes('TESTBANK000001')); assert.ok(!JSON.stringify(denied).includes('TESTBANK000002'));
 });
 test('CON-004 COM-012: missing data-output fields return UNCERTAIN rather than an exception after dispatch', t => {
   const h = fixture(t), r = h.proposed('data.export', { dataset: 'dataset-1', columns: ['id'], row_ids: ['row-1'], max_rows: 1, classification: 'internal', jurisdiction: 'EU' }, { action: { type: 'data.export', target_resource: 'dataset-1', purpose: 'Operations' }, destination: 'customer-vault' });
-  h.evidence(r, { kind: 'dataset_authority' }); const certificate = h.f.certificate(h.p(), r.capsule.capsule_id), original = h.f.target.execute.bind(h.f.target);
+  h.evidence(r, { kind: 'dataset_authority' }); h.approve(r, 1); const certificate = h.f.certificate(h.p(), r.capsule.capsule_id), original = h.f.target.execute.bind(h.f.target);
   h.f.target.execute = (...args) => { const raw = original(...args); delete raw.output; return raw; };
   assert.equal(h.f.execute(h.p(), certificate).payload.status, 'UNCERTAIN');
   const cert = certificate.payload;

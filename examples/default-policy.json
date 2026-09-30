@@ -21,7 +21,12 @@
       "independent_domains": 2,
       "max_evidence_age_ms": 3600000,
       "max_quantity": 1000000000,
-      "require_hardware": false
+      "require_hardware": false,
+      "evidence_bindings": {
+        "ownership": {
+          "account": "requested_state.bank_account"
+        }
+      }
     },
     "finance.bank.change": {
       "approval_role": "approver",
@@ -35,7 +40,12 @@
       "independent_domains": 2,
       "max_evidence_age_ms": 3600000,
       "max_quantity": 1000000000,
-      "require_hardware": false
+      "require_hardware": false,
+      "evidence_bindings": {
+        "ownership": {
+          "account": "requested_state.bank_account"
+        }
+      }
     },
     "finance.beneficiary.create": {
       "approval_role": "approver",
@@ -49,7 +59,12 @@
       "independent_domains": 2,
       "max_evidence_age_ms": 3600000,
       "max_quantity": 1000000000,
-      "require_hardware": false
+      "require_hardware": false,
+      "evidence_bindings": {
+        "ownership": {
+          "account": "requested_state.bank_account"
+        }
+      }
     },
     "finance.payment.first": {
       "approval_role": "approver",
@@ -63,11 +78,19 @@
       "independent_domains": 2,
       "max_evidence_age_ms": 3600000,
       "max_quantity": 10000000,
-      "require_hardware": false
+      "require_hardware": false,
+      "evidence_bindings": {
+        "ownership": {
+          "account": "requested_state.bank_account"
+        },
+        "payment_confirmation": {
+          "transaction_id": "capsule_id"
+        }
+      }
     },
     "data.export": {
       "approval_role": "approver",
-      "approval_threshold": 0,
+      "approval_threshold": 1,
       "cooldown_ms": 0,
       "destinations": [
         "customer-vault"
@@ -83,7 +106,12 @@
       "independent_domains": 1,
       "max_evidence_age_ms": 3600000,
       "max_quantity": 1000,
-      "require_hardware": false
+      "require_hardware": false,
+      "evidence_bindings": {
+        "dataset_authority": {
+          "dataset": "requested_state.dataset"
+        }
+      }
     },
     "identity.mfa.reset": {
       "approval_role": "approver",
@@ -98,7 +126,18 @@
       "independent_domains": 2,
       "max_evidence_age_ms": 3600000,
       "max_quantity": 1000000000,
-      "require_hardware": false
+      "require_hardware": false,
+      "evidence_bindings": {
+        "identity_proof": {
+          "subject_id": "requested_state.subject_id"
+        },
+        "recovery_authority": {
+          "subject_id": "requested_state.subject_id"
+        },
+        "device_health": {
+          "device_id": "actor.device_id"
+        }
+      }
     },
     "identity.authenticator.enroll": {
       "approval_role": "approver",
@@ -113,7 +152,18 @@
       "independent_domains": 2,
       "max_evidence_age_ms": 3600000,
       "max_quantity": 1000000000,
-      "require_hardware": false
+      "require_hardware": false,
+      "evidence_bindings": {
+        "identity_proof": {
+          "subject_id": "requested_state.subject_id"
+        },
+        "recovery_authority": {
+          "subject_id": "requested_state.subject_id"
+        },
+        "device_health": {
+          "device_id": "actor.device_id"
+        }
+      }
     },
     "identity.account.recover": {
       "approval_role": "approver",
@@ -128,7 +178,43 @@
       "independent_domains": 2,
       "max_evidence_age_ms": 3600000,
       "max_quantity": 1000000000,
-      "require_hardware": false
+      "require_hardware": false,
+      "evidence_bindings": {
+        "identity_proof": {
+          "subject_id": "requested_state.subject_id"
+        },
+        "recovery_authority": {
+          "subject_id": "requested_state.subject_id"
+        },
+        "device_health": {
+          "device_id": "actor.device_id"
+        }
+      }
+    },
+    "identity.jit.grant": {
+      "approval_role": "approver",
+      "approval_threshold": 2,
+      "cooldown_ms": 0,
+      "destinations": [],
+      "evidence_kinds": [
+        "identity_proof"
+      ],
+      "forbidden_fields": [],
+      "independent_domains": 2,
+      "max_evidence_age_ms": 3600000,
+      "max_quantity": 1000000000,
+      "require_hardware": false,
+      "evidence_bindings": {
+        "identity_proof": {
+          "subject_id": "requested_state.subject_id"
+        },
+        "recovery_authority": {
+          "subject_id": "requested_state.subject_id"
+        },
+        "device_health": {
+          "device_id": "actor.device_id"
+        }
+      }
     },
     "cloud.firewall.change": {
       "approval_role": "approver",
@@ -157,7 +243,15 @@
       "independent_domains": 2,
       "max_evidence_age_ms": 3600000,
       "max_quantity": 1000000000,
-      "require_hardware": false
+      "require_hardware": false,
+      "evidence_bindings": {
+        "build_provenance": {
+          "artifact_digest": "requested_state.artifact_digest"
+        },
+        "test_result": {
+          "test_digest": "requested_state.test_digest"
+        }
+      }
     },
     "secret.use": {
       "approval_role": "approver",
@@ -171,7 +265,15 @@
       "independent_domains": 2,
       "max_evidence_age_ms": 3600000,
       "max_quantity": 1000000000,
-      "require_hardware": false
+      "require_hardware": false,
+      "evidence_bindings": {
+        "workload_attestation": {
+          "workload_id": "requested_state.workload_id"
+        },
+        "device_health": {
+          "device_id": "actor.device_id"
+        }
+      }
     },
     "backup.delete": {
       "approval_role": "custodian",
@@ -185,7 +287,12 @@
       "independent_domains": 2,
       "max_evidence_age_ms": 3600000,
       "max_quantity": 1000000000,
-      "require_hardware": false
+      "require_hardware": false,
+      "evidence_bindings": {
+        "governance_review": {
+          "action_ref": "capsule_id"
+        }
+      }
     },
     "policy.change": {
       "approval_role": "custodian",
@@ -199,8 +306,146 @@
       "independent_domains": 2,
       "max_evidence_age_ms": 3600000,
       "max_quantity": 1000000000,
+      "require_hardware": false,
+      "evidence_bindings": {
+        "governance_review": {
+          "action_ref": "capsule_id"
+        }
+      }
+    },
+    "key.rotate": {
+      "approval_role": "custodian",
+      "approval_threshold": 3,
+      "cooldown_ms": 60000,
+      "destinations": [],
+      "evidence_kinds": [
+        "governance_review"
+      ],
+      "forbidden_fields": [],
+      "independent_domains": 2,
+      "max_evidence_age_ms": 3600000,
+      "max_quantity": 1000000000,
+      "require_hardware": false
+    },
+    "key.ceremony": {
+      "approval_role": "custodian",
+      "approval_threshold": 3,
+      "cooldown_ms": 120000,
+      "destinations": [],
+      "evidence_kinds": [
+        "governance_review"
+      ],
+      "forbidden_fields": [],
+      "independent_domains": 2,
+      "max_evidence_age_ms": 3600000,
+      "max_quantity": 1000000000,
+      "require_hardware": false
+    },
+    "action.composite": {
+      "approval_role": "approver",
+      "approval_threshold": 2,
+      "cooldown_ms": 0,
+      "destinations": [],
+      "evidence_kinds": [],
+      "forbidden_fields": [],
+      "independent_domains": 0,
+      "max_evidence_age_ms": 3600000,
+      "max_quantity": 16,
+      "require_hardware": false
+    },
+    "ai.model.deploy": {
+      "approval_role": "approver",
+      "approval_threshold": 2,
+      "cooldown_ms": 0,
+      "destinations": [],
+      "evidence_kinds": [
+        "test_result",
+        "governance_review"
+      ],
+      "forbidden_fields": [],
+      "independent_domains": 2,
+      "max_evidence_age_ms": 3600000,
+      "max_quantity": 1000000000,
+      "require_hardware": false,
+      "evidence_bindings": {
+        "test_result": {
+          "test_digest": "requested_state.test_digest"
+        }
+      }
+    },
+    "legal.contract.execute": {
+      "approval_role": "approver",
+      "approval_threshold": 2,
+      "cooldown_ms": 0,
+      "destinations": [],
+      "evidence_kinds": [
+        "counterparty_credential",
+        "legal_registry"
+      ],
+      "forbidden_fields": [],
+      "independent_domains": 2,
+      "max_evidence_age_ms": 3600000,
+      "max_quantity": 1000000000,
+      "require_hardware": false,
+      "evidence_bindings": {
+        "counterparty_credential": {
+          "counterparty_id": "requested_state.counterparty_id"
+        },
+        "legal_registry": {
+          "entity": "requested_state.entity"
+        }
+      }
+    },
+    "security.case.investigate": {
+      "approval_role": "approver",
+      "approval_threshold": 1,
+      "cooldown_ms": 0,
+      "destinations": [],
+      "evidence_kinds": [
+        "governance_review"
+      ],
+      "forbidden_fields": [],
+      "independent_domains": 2,
+      "max_evidence_age_ms": 3600000,
+      "max_quantity": 1000000000,
       "require_hardware": false
     }
+  },
+  "fail_modes": {
+    "default": "closed",
+    "data.read": "closed",
+    "service.connect": "cached-allow"
+  },
+  "max_stale_ms": 300000,
+  "stale_ms": {
+    "default": 300000,
+    "data.read": 300000,
+    "service.connect": 300000
+  },
+  "staged_policy": {
+    "min_delay_ms": 60000,
+    "emergency_extra_custodians": 1,
+    "emergency_max_ttl_ms": 86400000
+  },
+  "secure_perception": {
+    "enabled": true,
+    "allowed_firmware": [
+      "if-secureview-dev-1"
+    ],
+    "session_ttl_ms": 300000,
+    "release_fields": "*",
+    "fallback": "controlled-workspace",
+    "required_assurance": "dev-attested-software"
+  },
+  "retention": {
+    "default_ms": 31536000000,
+    "per_kind": {}
+  },
+  "algorithms": {
+    "allowed_suites": [
+      "Ed25519"
+    ],
+    "deprecation": []
   },
   "runtime": {
     "max_cost": 10000,
@@ -245,10 +490,45 @@
     "classifications": [
       "internal"
     ],
+    "remediation_services": [
+      "device-wipe",
+      "mdm-notify"
+    ],
     "sensitivity_weights": {
       "internal": 1,
       "confidential": 5,
       "restricted": 10
-    }
+    },
+    "reconstruction": {
+      "window_ms": 86400000,
+      "max_distinct_rows": 5000,
+      "max_distinct_columns": 100,
+      "max_coverage_percent": 90
+    },
+    "network": {
+      "deny_workstation_peers": true,
+      "allowed_protocols": [
+        "https"
+      ],
+      "allowed_ports": [
+        443
+      ]
+    },
+    "datasets": [
+      "dataset-1"
+    ],
+    "allowed_columns": [
+      "id",
+      "name",
+      "region",
+      "passport"
+    ],
+    "allowed_transforms": [
+      "mask",
+      "tokenise",
+      "drop",
+      "constant",
+      "aggregate"
+    ]
   }
 }
