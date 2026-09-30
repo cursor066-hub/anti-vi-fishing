@@ -120,7 +120,10 @@ export function createConfiguration(tenantNames = ['acme'], now = Date.now(), { 
       // scoping is enforced by issuerd rules in real deployments: a daemon can
       // only answer the kinds in its rules file). This preserves the fixture
       // contract where any configured issuer may attest any kind.
-      issuers[key.key_id] = { public_key: key.public_key, name, issuer_id: name, failure_domain: `${tenant}-${name}`, channel: role.channel, kinds: allKinds, version: '1.0.0' };
+      // The issuance endpoint is authenticated by a per-issuer bearer token
+      // shared between the registered connector metadata and the daemon spec.
+      const issue_token = randomBytes(24).toString('base64url');
+      issuers[key.key_id] = { public_key: key.public_key, name, issuer_id: name, failure_domain: `${tenant}-${name}`, channel: role.channel, kinds: allKinds, version: '1.0.0', issue_token };
       if (issuerEndpoint) issuers[key.key_id].endpoint = `${issuerEndpoint}`;
     }
     // Dev Secure Perception component: generated per tenant; private material
@@ -162,7 +165,7 @@ export function bootstrap(directory, tenants = ['acme'], now = Date.now(), { iss
     for (const [subject, key] of Object.entries(setup.custodianKeys[tenant])) save(join(signingDir, `${tenant}-${subject}.json`), key);
     for (const [name, role] of Object.entries(ISSUER_ROLES)) {
       const key = setup.issuerKeys[tenant][name];
-      const spec = { issuer: name, tenant, version: '1.0.0', channel: role.channel, key, kinds: ISSUER_RULES[name] ?? {}, records: records[name] ?? {} };
+      const spec = { issuer: name, tenant, version: '1.0.0', channel: role.channel, key, kinds: ISSUER_RULES[name] ?? {}, records: records[name] ?? {}, issue_token: Object.values(setup.config.tenants[tenant].issuers).find(i => i.name === name)?.issue_token };
       save(join(issuerDir, `${tenant}-${name}.issuer.json`), spec);
     }
     // Dev secure-view component bundle for the operator console.

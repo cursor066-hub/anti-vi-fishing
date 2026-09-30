@@ -69,13 +69,15 @@ export function watermark(rows, ctx) {
 // DAT-009: cumulative reconstruction control. Counts distinct rows and
 // columns a subject has touched per dataset inside the window; crossing the
 // configured coverage threshold produces a budget denial plus an audit signal.
-export function reconstructionCheck(db, { tenant, subject, dataset, rows, columns, now, policy }) {
+export function reconstructionCheck(touchDb, catalogDb, { tenant, subject, dataset, rows, columns, now, policy }) {
+  // Touch records live on the fabric store's transaction so a rolled-back
+  // consume cannot leave phantom access rows (cross-DB atomicity, M2).
   const window = policy.window_ms ?? 86400000;
-  const ins = db.prepare('INSERT INTO data_access VALUES(?,?,?,?,?,?)');
+  const ins = touchDb.prepare('INSERT INTO data_access VALUES(?,?,?,?,?,?)');
   for (const row of rows) for (const c of columns) ins.run(tenant, subject, dataset, row, c, now);
-  const rowCount = db.prepare('SELECT count(DISTINCT row_id) AS n FROM data_access WHERE tenant=? AND subject=? AND dataset=? AND at>?').get(tenant, subject, dataset, now - window).n;
-  const colCount = db.prepare('SELECT count(DISTINCT column_name) AS n FROM data_access WHERE tenant=? AND subject=? AND dataset=? AND at>?').get(tenant, subject, dataset, now - window).n;
-  const totalRows = db.prepare('SELECT count(*) AS n FROM dataset_rows WHERE tenant=? AND dataset=?').get(tenant, dataset).n;
+  const rowCount = touchDb.prepare('SELECT count(DISTINCT row_id) AS n FROM data_access WHERE tenant=? AND subject=? AND dataset=? AND at>?').get(tenant, subject, dataset, now - window).n;
+  const colCount = touchDb.prepare('SELECT count(DISTINCT column_name) AS n FROM data_access WHERE tenant=? AND subject=? AND dataset=? AND at>?').get(tenant, subject, dataset, now - window).n;
+  const totalRows = catalogDb.prepare('SELECT count(*) AS n FROM dataset_rows WHERE tenant=? AND dataset=?').get(tenant, dataset).n;
   const coveragePercent = totalRows ? Math.floor((rowCount * 100) / totalRows) : 0;
   const limits = policy ?? { max_distinct_rows: 100000, max_distinct_columns: 100000, max_coverage_percent: 100 };
   if (rowCount > limits.max_distinct_rows || colCount > limits.max_distinct_columns || coveragePercent > limits.max_coverage_percent) {

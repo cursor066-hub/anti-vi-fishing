@@ -90,8 +90,19 @@ export class Fabric {
     for (const e of this.keys(t).retired ?? []) out[e.key_id] = { public_key: e.public_key };
     return out;
   }
-  signExecution(t, payload, purpose) { return this.vault.envelope(this.keys(t).execution.key_id, purpose, payload); }
-  signAudit(t, payload, purpose = 'audit') { return this.vault.envelope(this.keys(t).audit.key_id, purpose, payload); }
+  signExecution(t, payload, purpose) {
+    const key_id = this.keys(t).execution.key_id;
+    this.assertSuiteAllowed(t, this.vault.entry(key_id).suite ?? 'Ed25519');
+    return this.vault.envelope(key_id, purpose, payload);
+  }
+  signAudit(t, payload, purpose = 'audit') {
+    const key_id = this.keys(t).audit.key_id;
+    this.assertSuiteAllowed(t, this.vault.entry(key_id).suite ?? 'Ed25519');
+    return this.vault.envelope(key_id, purpose, payload);
+  }
+  assertSuiteAllowed(t, suite) {
+    requireThat((this.policy(t).algorithms?.allowed_suites ?? ['Ed25519']).includes(suite), 'INV-451-POLICY', 'Signature suite retired by constitution', 451);
+  }
   // RUN-010: security re-attests a drifted configuration snapshot, restoring
   // privileges. This is the only operation allowed through during drift.
   reassertConfig(p) {
@@ -218,6 +229,7 @@ export class Fabric {
   }
   verifyEvidenceEnvelope(t, envelope) {
     const payload = verifySigned(envelope, this.tenant(t).issuers, 'evidence');
+    this.assertSuiteAllowed(t, envelope.protected.suite);
     fields(payload, ['evidence_id', 'tenant_id', 'capsule_digest', 'kind', 'content_digest', 'acquired_at', 'expires_at', 'confidence', 'advisory', 'claim', 'dependencies', 'provenance', 'retention_until'], ['claims', 'issuer_version']);
     identifier(payload.evidence_id); text(payload.kind, 'evidence kind'); text(payload.provenance, 'provenance', 2048); uniqueStrings(payload.dependencies, 'dependencies', 32);
     const now = this.clock();
@@ -233,14 +245,14 @@ export class Fabric {
     fields(input, ['issuer', 'kind', 'claims'], ['subject_id', 'dependencies']);
     identifier(input.issuer, 'issuer'); text(input.kind, 'evidence kind');
     const t = p.tenant_id, record = this.store.must(t, 'capsule', capsule_id);
-    const entry = Object.entries(this.tenant(t).issuers).find(([, v]) => v.name === input.issuer || v.endpoint?.includes(`/${input.issuer}`) || input.issuer === v.issuer_id);
+    const entry = Object.entries(this.tenant(t).issuers).find(([, v]) => v.name === input.issuer || input.issuer === v.issuer_id || (v.endpoint ?? '').split('/').includes(input.issuer));
     requireThat(entry, 'INV-404-NOT-FOUND', 'Issuer not found', 404);
     const [key_id, issuer] = entry;
     requireThat(issuer.endpoint, 'INV-412-EVIDENCE', 'Issuer has no live endpoint; attach a pre-signed envelope instead', 412);
     requireThat(!this.revoked(t, 'issuer', key_id) && !this.revoked(t, 'key', key_id), 'INV-401-EVIDENCE', 'Evidence source revoked', 401);
     let envelope;
     try {
-      const res = await httpJson(`${issuer.endpoint}/v1/issuers/${issuer.name ?? input.issuer}/issue`, { method: 'POST', body: { tenant_id: t, capsule_digest: record.capsule_digest, kind: input.kind, subject_id: input.subject_id ?? p.subject_id, claims: input.claims, dependencies: input.dependencies ?? [] }, timeout_ms: 10000 });
+      const res = await httpJson(`${issuer.endpoint}/v1/issuers/${issuer.name ?? input.issuer}/issue`, { method: 'POST', headers: issuer.issue_token ? { Authorization: `Bearer ${issuer.issue_token}` } : undefined, body: { tenant_id: t, capsule_digest: record.capsule_digest, kind: input.kind, subject_id: input.subject_id ?? p.subject_id, claims: input.claims, dependencies: input.dependencies ?? [] }, timeout_ms: 10000 });
       requireThat(res.status === 201, 'INV-503-EVIDENCE-SOURCE', `Issuer refused (${res.status})`, 503);
       envelope = res.data;
     } catch (e) {
@@ -264,6 +276,7 @@ export class Fabric {
       return this.transaction(p, now => { this.store.audit(p.tenant_id, 'CONNECTOR_DRIFT', p.subject_id, key_id, { drifted: 'unreachable', code: e.code ?? 'transport' }, now); return { drifted: true, changes: [{ field: 'endpoint', detail: 'unreachable' }], checked_at: now }; });
     }
     const observedPayload = verifySigned(observed, { [key_id]: issuer }, 'connector-manifest');
+    this.assertSuiteAllowed(t, observed.protected.suite);
     const registered = { connector_id: `issuer:${issuer.name}`, version: issuer.version ?? '1.0.0', actions: issuer.kinds, channel: issuer.channel, key_id };
     const result = driftCheck(registered, { connector_id: observedPayload.connector_id, version: observedPayload.version, actions: observedPayload.actions, channel: observedPayload.domain, key_id: observed.protected.key_id }, this.clock());
     return this.transaction(p, now => {
@@ -287,6 +300,7 @@ export class Fabric {
     this.authorize(p, ['approver', 'custodian']);
     return this.transaction(p, now => {
       const t = p.tenant_id, payload = verifySigned(envelope, this.identities(t), 'action-approval');
+      this.assertSuiteAllowed(t, envelope.protected.suite);
       fields(payload, ['tenant_id', 'capsule_id', 'capsule_digest', 'evidence_graph_digest', 'policy_digest', 'signer_id', 'approved_at', 'expires_at']);
       requireThat(payload.tenant_id === t && payload.signer_id === envelope.protected.key_id, 'INV-403-SCOPE', 'Approval scope mismatch', 403);
       const identity = this.identities(t)[payload.signer_id]; requireThat(identity.subject_id === p.subject_id, 'INV-403-SCOPE', 'Approval signer does not match authenticated identity', 403);
@@ -350,7 +364,8 @@ export class Fabric {
       const suite = this.vault.entry(this.keys(t).execution.key_id).suite ?? 'Ed25519';
       requireThat(policy.algorithms.allowed_suites.includes(suite), 'INV-451-POLICY', 'Certificate suite is no longer approved by policy', 451);
       const graph = this.graph(t, r), expiry = Math.min(now + policy.certificate_ttl_ms, r.capsule.expires_at, policy.expires_at, ...graph.items.map(e => e.payload.expires_at), ...r.approvals.map(a => a.payload.expires_at));
-      const payload = { certificate_id: randomUUID(), tenant_id: t, capsule_id: id, capsule_digest: r.capsule_digest, evidence_graph_digest: graph.digest, policy_id: policy.policy_id, policy_version: policy.version, policy_digest: digest(policy), decision: 'ALLOW', constraints: { destination: r.capsule.destination, quantity: r.capsule.quantity, requested_digest: digest(r.capsule.requested_state), current_state: r.capsule.current_state, exclusions: r.capsule.exclusions }, target_gate_id: this.config.gate_id, signer_set: decision.eligible_signers, nonce: r.capsule.nonce, issued_at: now, expires_at: expiry, single_use: true, suite, revocation_ref: `certificate:${id}` };
+      const certificate_id = randomUUID();
+      const payload = { certificate_id, tenant_id: t, capsule_id: id, capsule_digest: r.capsule_digest, evidence_graph_digest: graph.digest, policy_id: policy.policy_id, policy_version: policy.version, policy_digest: digest(policy), decision: 'ALLOW', constraints: { destination: r.capsule.destination, quantity: r.capsule.quantity, requested_digest: digest(r.capsule.requested_state), current_state: r.capsule.current_state, exclusions: r.capsule.exclusions }, target_gate_id: this.config.gate_id, signer_set: decision.eligible_signers, nonce: r.capsule.nonce, issued_at: now, expires_at: expiry, single_use: true, suite, revocation_ref: `certificate:${certificate_id}` };
       requireThat(!this.revoked(t, 'key', this.keys(t).execution.key_id) && this.vault.has(this.keys(t).execution.key_id), 'INV-401-SIGNATURE', 'Execution key revoked', 401);
       const envelope = this.signExecution(t, payload, 'action-certificate');
       this.store.insert(t, 'certificate', payload.certificate_id, { envelope, consumed: false, status: 'CERTIFIED' }, now);
@@ -485,6 +500,9 @@ export class Fabric {
         // The pending vault key is activated only after the rotation capsule is
         // VERIFIED; the retiring key stays verifiable but can no longer sign.
         const req = r.capsule.requested_state;
+        // The ledger records what the vault does: the advertised public key
+        // must be the real pending vault key, not a caller-supplied value.
+        requireThat(req.new_public_key === this.vault.publicKey(req.new_key_id), 'INV-400-SCHEMA', 'new_public_key does not match the pending vault key');
         this.vault.activate(req.new_key_id);
         const klass = req.key_class, previous = this.keys(t)[klass];
         this.tenant(t).keys[klass] = { key_id: req.new_key_id, public_key: req.new_public_key };
@@ -578,8 +596,12 @@ export class Fabric {
     const proof = consistencyProof(hashes, first);
     return { format: 'IF-MERKLE-1', tenant_id: p.tenant_id, first, second: hashes.length, first_root: merkleRoot(hashes.slice(0, first)), second_root: merkleRoot(hashes), proof };
   }
-  verifyAuditProof(tenant, proof) {
-    // Stateless helper for the offline verifier and tests.
+  verifyAuditProof(tenant, proof, pinned = null) {
+    // Stateless helper for the offline verifier and tests. When `pinned`
+    // ({root, size} from a previously trusted checkpoint) is supplied, the
+    // claimed tree is bound to it — an RFC-6962 inclusion proof is only
+    // meaningful relative to a pinned (root, size).
+    if (pinned) requireThat(pinned.root === proof.root && pinned.size === proof.size, 'INV-409-FORK', 'Proof does not match the pinned checkpoint', 409);
     return verifyInclusion(proof.leaf_hash, proof.sequence - 1, proof.size, proof.path, proof.root);
   }
   exportAudit(p, purpose) {
@@ -626,6 +648,7 @@ export class Fabric {
     this.authorize(p, ['custodian']);
     return this.transaction(p, now => {
       const t = p.tenant_id, payload = verifySigned(envelope, this.identities(t), 'ceremony-acknowledgement');
+      this.assertSuiteAllowed(t, envelope.protected.suite);
       fields(payload, ['ceremony_id', 'artifact_digest', 'custodian', 'acknowledged_at']);
       const ceremony = this.store.must(t, 'ceremony', identifier(payload.ceremony_id));
       requireThat(payload.custodian === p.subject_id && payload.artifact_digest === ceremony.artifact_digest, 'INV-403-SCOPE', 'Acknowledgement scope mismatch', 403);

@@ -240,3 +240,110 @@ test('AIG-009: disabling the advisory plane preserves enforcement (no degradatio
   const r = h.ready(); // enforcement path unaffected by advisory plane being off
   assert.equal(h.f.execute(h.p(), r.certificate).payload.status, 'VERIFIED');
 });
+
+// ---------- Adversarial review fixes (round 3) ----------
+
+import { createIssuerServer, writeIssuer, answerQuery } from '../src/issuerd.mjs';
+import { ISSUER_RULES, issuerRecords } from '../src/bootstrap.mjs';
+import { httpJson } from '../src/connectors.mjs';
+
+test('H1: a certificate revoked via its own revocation_ref cannot execute', t => {
+  const h = fixture(t), r = h.ready();
+  const certId = r.certificate.payload.revocation_ref.split(':')[1];
+  assert.equal(certId, r.certificate.payload.certificate_id);
+  h.f.revoke(h.p('security'), { kind: 'certificate', id: certId, reason: 'revocation_ref path' });
+  assert.throws(() => h.f.execute(h.p(), r.certificate), hasCode('INV-401-CERTIFICATE'));
+});
+
+test('M1: key.rotate adopting a non-vault public key is rejected', t => {
+  const h = fixture(t);
+  const prep = h.f.prepareRotation(h.p('security'), 'execution');
+  const bogus = generateKey().public_key;
+  const r = h.proposed('key.rotate', { key_class: 'execution', new_key_id: prep.key_id, new_public_key: bogus, ceremony_id: 'cer-1', revoke_old: false }, { action: { type: 'key.rotate', target_resource: 'key-registry', purpose: 'Rotation' } });
+  h.evidence(r, { kind: 'governance_review' }); h.evidence(r, { kind: 'governance_review', issuer: 'registry' });
+  h.approve(r, 3); h.advance(60001);
+  assert.throws(() => h.f.execute(h.p(), h.f.certificate(h.p(), r.capsule.capsule_id)), hasCode('INV-400-SCHEMA'));
+  assert.equal(h.f.keys('acme').execution.key_id !== prep.key_id, true); // tenant key unchanged
+});
+
+test('H2: issuerd issuance requires the bearer token; conflict answers never leak unclaimed fields', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'if-issuer-auth-')); t.after(() => rmSync(dir, { recursive: true }));
+  const key = generateKey(), token = 'tok-' + randomBytes(12).toString('hex');
+  const spec = { issuer: 'bank', tenant: 'acme', version: '1.0.0', channel: 'authoritative', key, kinds: ISSUER_RULES.bank, records: issuerRecords().bank, issue_token: token };
+  writeIssuer(dir, spec);
+  const srv = createIssuerServer({ 'acme:bank': spec }, { port: 0, host: '127.0.0.1' });
+  await srv.listen(); t.after(() => srv.close());
+  const port = srv.server.address().port, body = { kind: 'ownership', subject_id: 'operator', claims: { account: 'TESTBANK000001', owner_id: 'vendor-1' }, capsule_digest: 'a'.repeat(64), tenant_id: 'acme' };
+  const unauth = await httpJson(`http://127.0.0.1:${port}/v1/issuers/bank/issue`, { method: 'POST', body });
+  assert.equal(unauth.status, 401);
+  const authed = await httpJson(`http://127.0.0.1:${port}/v1/issuers/bank/issue`, { method: 'POST', body, token });
+  assert.equal(authed.status, 201);
+  const wrong = await httpJson(`http://127.0.0.1:${port}/v1/issuers/bank/issue`, { method: 'POST', body: { ...body, claims: { account: 'TESTBANK000001', owner_id: 'intruder' } }, token });
+  assert.equal(wrong.data.payload.claim, 'conflict');
+  // Conflict only echoes fields the caller already asserted correctly.
+  for (const v of Object.values(wrong.data.payload.claims ?? {})) assert.notEqual(String(v), 'vendor-1');
+  // No token on a non-loopback bind refuses issuance outright.
+  const open = createIssuerServer({ 'acme:bank': { ...spec, issue_token: undefined } }, { port: 0, host: '0.0.0.0' });
+  await open.listen(); t.after(() => open.close());
+  const refused = await httpJson(`http://127.0.0.1:${open.server.address().port}/v1/issuers/bank/issue`, { method: 'POST', body });
+  assert.equal(refused.status, 503);
+});
+
+test('L1: malleated ES256 signature (r, n-s) is rejected', t => {
+  const key = generateKey('ES256');
+  const env = signed({ a: 1 }, key, 'evidence');
+  const sig = Buffer.from(env.signature, 'base64url');
+  const n = BigInt('0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551');
+  const s = BigInt('0x' + sig.subarray(32).toString('hex'));
+  if (s <= n / 2n) {
+    const low = (n - s).toString(16).padStart(64, '0');
+    env.signature = Buffer.concat([sig.subarray(0, 32), Buffer.from(low, 'hex')]).toString('base64url');
+    assert.throws(() => verifySigned(env, { [key.key_id]: key }, 'evidence'), hasCode('INV-401-SIGNATURE'));
+  }
+  // And the original verifies under the canonical low-s rule.
+  const ok = signed({ a: 1 }, key, 'evidence');
+  assert.equal(verifySigned(ok, { [key.key_id]: key }, 'evidence').a, 1);
+});
+
+test('L2: explain renders real reason codes, never [object Object]', t => {
+  const h = fixture(t);
+  const r = h.proposed('finance.beneficiary.create', { vendor_id: 'v', bank_account: 'TESTBANK000001', currency: 'EUR' });
+  const decision = h.f.evaluate(h.p(), r.capsule.capsule_id);
+  const out = h.f.advise(h.p(), { operation: 'explain', decision });
+  assert.equal(out.verdict, decision.decision);
+  for (const x of out.reasons) { assert.equal(typeof x.code, 'string'); assert.equal(/\[object Object\]/.test(x.text), false); }
+  assert.equal(/\[object Object\]/.test(out.text), false);
+});
+
+test('L3: secure-perception release binds capsule_id and evidence_ref into the sealed envelope', t => {
+  const h = fixture(t);
+  const component = h.setup.componentSecrets.acme['secure-view-acme'];
+  const session = h.f.perceptionSession(h.p(), component.attest('b'.repeat(64)));
+  const released = h.f.perceptionRelease(h.p(), session.session_id, { fields: { vendor: 'v1' }, purpose: 'verify', capsule_id: 'cap-1', evidence_ref: 'ev-9' });
+  assert.equal(released.binding.capsule_id, 'cap-1');
+  assert.equal(released.binding.evidence_ref, 'ev-9');
+});
+
+test('L4: evidence signed under a retired suite is rejected policy-wide', t => {
+  const h = fixture(t), r = h.proposed('finance.beneficiary.create', { vendor_id: 'v', bank_account: 'TESTBANK000001', currency: 'EUR' });
+  const esKey = generateKey('ES256');
+  h.f.tenant('acme').issuers[esKey.key_id] = { public_key: esKey.public_key, name: 'es-issuer', issuer_id: 'es-issuer', channel: 'authoritative', kinds: ['ownership'], failure_domain: 'acme-es', version: '1.0.0' };
+  const env = signed({ evidence_id: 'ev-es-1', tenant_id: 'acme', capsule_digest: r.capsule.capsule_id, kind: 'ownership', content_digest: digest({ x: 1 }), acquired_at: h.now(), expires_at: h.now() + 60000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'x', retention_until: h.now() + 120000 }, esKey, 'evidence');
+  // Default constitution allows Ed25519 only — a valid ES256 envelope must fail policy, not crypto.
+  assert.throws(() => h.f.attachEvidence(h.p(), r.capsule.capsule_id, env), hasCode('INV-451-POLICY'));
+});
+
+test('M2: a rolled-back consume leaves no phantom data_access touches', t => {
+  const h = fixture(t);
+  const cap = h.f.runtime.issue(h.p(), { device_id: 'operator-device', resource: 'dataset-1', destination: 'customer-vault', action: 'data.read', purpose: 'operations', columns: ['id'], row_ids: ['row-1'], classification: 'internal', jurisdiction: 'EU', max_cost: 10, ttl_ms: 60000 });
+  const req = () => ({ capability: cap, device_id: 'operator-device', resource: 'dataset-1', destination: 'customer-vault', action: 'data.read', purpose: 'operations', columns: ['id'], row_ids: ['row-1'], request_id: 'req-m2-1', protocol: 'https', port: 443 });
+  const touches = () => h.f.store.db.prepare('SELECT count(*) AS n FROM data_access WHERE tenant=?').get('acme').n;
+  const origAudit = h.f.store.audit.bind(h.f.store);
+  h.f.store.audit = (...a) => { if (a[1] === 'RUNTIME_ALLOWED') throw new Error('simulated audit failure'); return origAudit(...a); };
+  assert.throws(() => h.f.runtime.consume(h.p(), req()));
+  h.f.store.audit = origAudit;
+  assert.equal(touches(), 0);
+  const ok = h.f.runtime.consume(h.p(), { ...req(), request_id: 'req-m2-2' });
+  assert.equal(ok.decision, 'ALLOW');
+  assert.ok(touches() > 0);
+});

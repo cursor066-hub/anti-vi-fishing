@@ -54,7 +54,7 @@ Service-connect capabilities similarly validate a local software envelope. They 
 
 An auditor or security operator exports the metadata log with an explicit purpose; access is appended to the log. Independently obtain and pin `trust-public-acme.json` from local bootstrap. Verify the export with `scripts/verify-export.mjs` or the independent WebCrypto implementation. Never establish customer trust solely from the public key included in an untrusted export. A prior independently held checkpoint adds prefix/fork detection. The sample pinned key in this ZIP authenticates synthetic sample evidence only.
 
-Security operators can apply evidence legal holds and run the logical retention sweep. Evidence referenced by nonterminal actions is held; legal hold always wins. Eligible expired evidence is replaced by a digest-only tombstone. Original ciphertext may remain in SQLite free pages/WAL/backups, so complete erasure and per-record cryptographic shredding are **not** claimed.
+Security operators can apply evidence legal holds and run the logical retention sweep. Evidence referenced by nonterminal actions is held; legal hold always wins. Eligible expired evidence is replaced by a digest-only tombstone, and per-record DEK crypto-shredding destroys the record's data-encryption key (`secure_delete=ON` zeroes freed pages; the WAL is truncated post-commit). The honest residual: ciphertext written into backups taken **before** erasure survives, so complete erasure of pre-erasure backups is **not** claimed.
 
 ## Platform workflows (v2)
 

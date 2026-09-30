@@ -37,6 +37,8 @@ export class Store {
         PRIMARY KEY(tenant,capability,request));
       CREATE INDEX IF NOT EXISTS usage_window ON usage(tenant,subject,resource,at);
       CREATE TABLE IF NOT EXISTS clock (id INTEGER PRIMARY KEY CHECK(id=1), last INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS data_access(tenant TEXT, subject TEXT, dataset TEXT, row_id TEXT, column_name TEXT, at INTEGER);
+      CREATE INDEX IF NOT EXISTS data_access_ix ON data_access(tenant,subject,dataset,at);
       PRAGMA user_version=1;
     `);
   }
@@ -46,7 +48,11 @@ export class Store {
     try {
       const result = fn();
       if (result && typeof result.then === 'function') throw new Error('Transactions must be synchronous');
-      this.db.exec('COMMIT'); return result;
+      this.db.exec('COMMIT');
+      // Post-commit WAL truncation so shredded DEK material never lingers in
+      // the log — runs outside the transaction, where SQLite allows it.
+      this.checkpoint();
+      return result;
     } catch (e) { this.db.exec('ROLLBACK'); throw e; }
   }
   key(tenant) {
@@ -79,6 +85,7 @@ export class Store {
       .map(row => decrypt(row.value, this.dek(tenant, kind, row.id) ?? this.key(tenant), `${tenant}/${kind}/${row.id}`));
   }
   remove(tenant, kind, id) {
+    this._shredded = true;
     this.db.prepare('DELETE FROM deks WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id);
     this.db.prepare('DELETE FROM records WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id);
   }

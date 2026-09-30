@@ -79,7 +79,7 @@ export class RuntimeGate {
         const dataset = this.f.target.state(t, cap.resource).material_fields;
         requireThat(dataset.classification === cap.classification && dataset.jurisdiction === cap.jurisdiction, 'INV-409-STATE', 'Dataset classification or jurisdiction changed', 409);
         // DAT-009: cumulative overlap/reconstruction check BEFORE release.
-        recon = reconstructionCheck(this.f.target.db, { tenant: t, subject: cap.subject_id, dataset: cap.resource, rows: input.row_ids, columns: input.columns, now, policy: r.reconstruction });
+        recon = reconstructionCheck(this.f.store.db, this.f.target.db, { tenant: t, subject: cap.subject_id, dataset: cap.resource, rows: input.row_ids, columns: input.columns, now, policy: r.reconstruction });
         requireThat(recon.allowed, 'INV-429-BUDGET', `Reconstruction limit reached (${recon.coverage_percent}% of dataset rows touched)`, 429, { row_count: recon.row_count, column_count: recon.column_count });
         rows = this.f.target.readDataset(t, cap.resource, input.columns, input.row_ids, input.row_ids.length);
         if (cap.transforms) rows = applyTransforms(rows, cap.transforms, { tenant: t, dataset: cap.resource, tenantKey: this.f.target.key(t).toString('base64url') });

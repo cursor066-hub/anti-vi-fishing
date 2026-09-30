@@ -19,7 +19,7 @@ export function loadIssuers(directory) {
   for (const file of readdirSync(directory)) {
     if (!file.endsWith('.issuer.json')) continue;
     const spec = JSON.parse(readFileSync(join(directory, file), 'utf8'));
-    fields(spec, ['issuer', 'key', 'channel', 'kinds', 'records', 'version'], ['tenant']);
+    fields(spec, ['issuer', 'key', 'channel', 'kinds', 'records', 'version'], ['tenant', 'issue_token']);
     identifier(spec.issuer); text(spec.version, 'issuer version', 32);
     requireThat(['authoritative', 'communication', 'device', 'counterparty'].includes(spec.channel), 'INV-400-SCHEMA', 'Unsupported issuer channel');
     // Registry key: '<tenant>:<issuer>' when the spec carries a tenant, so
@@ -61,15 +61,21 @@ export function answerQuery(issuer, request, now) {
     throw e;
   }
   let claim = 'supports';
-  const extracted = {};
+  const extracted = {}, matched = new Set();
   for (const [field, expected] of Object.entries(rule.expect ?? {})) {
     const want = typeof expected === 'string' && expected.startsWith('${') ? interpolate(expected, request.claims ?? {}) : expected;
     extracted[field] = record[field] ?? null;
     const got = record[field];
-    if (String(got) !== String(want)) claim = 'conflict';
+    if (String(got) === String(want)) matched.add(field); else claim = 'conflict';
   }
-  for (const f of rule.extract ?? []) extracted[f] = record[f] ?? null;
-  return signed({ ...base, claim, content_digest: digest({ issuer: issuer.issuer, key, record }), claims: extracted, provenance: `issuer:${issuer.issuer}@${issuer.version} record:${key.split(':')[0]}:* transformation:direct`, issuer_version: issuer.version }, issuer.key, 'evidence');
+  for (const f of rule.extract ?? []) {
+    extracted[f] = record[f] ?? null;
+    if (String(record[f]) === String(request.claims?.[f])) matched.add(f);
+  }
+  // A conflict answer must not leak record fields the caller did not already
+  // know — only fields whose claim matched are echoed back.
+  const revealed = claim === 'conflict' ? Object.fromEntries(Object.entries(extracted).filter(([f]) => matched.has(f))) : extracted;
+  return signed({ ...base, claim, content_digest: digest({ issuer: issuer.issuer, key, record }), claims: revealed, provenance: `issuer:${issuer.issuer}@${issuer.version} record:${key.split(':')[0]}:* transformation:direct`, issuer_version: issuer.version }, issuer.key, 'evidence');
 }
 
 export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', clock = Date.now, logPath } = {}) {
@@ -116,6 +122,15 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
         requireThat(/^[a-f0-9]{64}$/.test(request.capsule_digest), 'INV-400-SCHEMA', 'capsule_digest must be a digest');
         const issuer = resolveIssuer(m[1], request.tenant_id);
         requireThat(issuer, 'INV-404-NOT-FOUND', 'Issuer not found', 404);
+        // Issuance is authenticated: an `issue_token` in the spec is required
+        // off-loopback; on loopback an unset token only serves the dev profile.
+        const token = issuer.issue_token ?? null, loopback = ['127.0.0.1', '::1', 'localhost'].includes(host);
+        if (token) {
+          const auth = req.headers.authorization ?? '';
+          requireThat(auth === `Bearer ${token}`, 'INV-401-AUTH', 'Issuance requires the issuer bearer token', 401);
+        } else {
+          requireThat(loopback, 'INV-503-CONNECTOR', 'Issuance endpoint requires a configured issue_token off loopback', 503);
+        }
         try {
           const envelope = answerQuery(issuer, request, clock());
           issuanceLog({ issuer: issuer.issuer, request_digest: digest(request), evidence_id: envelope.payload.evidence_id, claim: envelope.payload.claim });

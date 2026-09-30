@@ -6,15 +6,33 @@ export const SUITES = {
   Ed25519: { curve: 'ed25519', namedCurve: null, hash: null, dsaEncoding: null },
   ES256: { curve: 'ec', namedCurve: 'P-256', hash: 'sha256', dsaEncoding: 'ieee-p1363' }
 };
-function signSuite(suite, message, privatePem) {
+// P-256 group order n: ECDSA (r, s) and (r, n-s) are equivalent; canonical
+// low-s is enforced on both sign and verify so signatures are non-malleable.
+const P256_ORDER = BigInt('0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551');
+export function signSuite(suite, message, privatePem) {
   const s = SUITES[suite];
   requireThat(s, 'INV-400-SCHEMA', 'Unsupported algorithm suite');
   const key = s.dsaEncoding ? { key: createPrivateKey(privatePem), dsaEncoding: s.dsaEncoding } : createPrivateKey(privatePem);
-  return sign(s.hash, message, key).toString('base64url');
+  const sig = sign(s.hash, message, key);
+  if (s.dsaEncoding === 'ieee-p1363' && sig.length === 64) {
+    const scalar = BigInt('0x' + sig.subarray(32).toString('hex'));
+    if (scalar > P256_ORDER / 2n) {
+      const low = P256_ORDER - scalar, out = Buffer.concat([sig.subarray(0, 32), Buffer.from(low.toString(16).padStart(64, '0'), 'hex')]);
+      return out.toString('base64url');
+    }
+  }
+  return sig.toString('base64url');
 }
-function verifySuite(suite, message, publicPem, signature) {
+// P-256 group order n/2: ECDSA (r, s) and (r, n-s) are both valid for the
+// same message, so low-s is the canonical form — high-s is rejected.
+const P256_HALF_ORDER = BigInt('0x7FFFFFFF80000000FFFFFFFFFFFFFFFFDE737D56D38BCF4279DCE5617E3192A8');
+export function verifySuite(suite, message, publicPem, signature) {
   const s = SUITES[suite];
   if (!s) return false;
+  if (s.dsaEncoding === 'ieee-p1363' && signature.length === 64) {
+    const scalar = BigInt('0x' + signature.subarray(32).toString('hex'));
+    if (scalar > P256_HALF_ORDER) return false;
+  }
   const key = s.dsaEncoding ? { key: createPublicKey(publicPem), dsaEncoding: s.dsaEncoding } : createPublicKey(publicPem);
   return verify(s.hash, message, key, signature);
 }

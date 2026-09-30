@@ -32,13 +32,14 @@ export function openSession(component, attestation, policy, now) {
   const sp = policy.secure_perception ?? {};
   requireThat(sp.enabled !== false, 'INV-451-POLICY', 'Secure Perception is disabled by policy', 451);
   requireThat((sp.allowed_firmware ?? []).includes(attestation.payload.firmware_version), 'INV-401-ATTESTATION', 'Component firmware not trusted by policy', 401);
-  requireThat(attestation.payload.nonce === sp.nonce || /^[a-f0-9]{64}$/.test(attestation.payload.nonce ?? ''), 'INV-400-SCHEMA', 'Bad attestation nonce');
+  requireThat(sp.nonce ? attestation.payload.nonce === sp.nonce : /^[a-f0-9]{64}$/.test(attestation.payload.nonce ?? ''), 'INV-400-SCHEMA', 'Bad attestation nonce');
   const server = generateKeyPairSync('ec', { namedCurve: 'P-256' });
   const session = {
     session_id: 'sv-' + digest({ component: attestation.payload.component, now, salt: randomBytes(8).toString('hex') }).slice(0, 24),
     component: attestation.payload.component, firmware_version: attestation.payload.firmware_version,
     component_public: component.signing.public_key, component_ecdh: component.ecdh_public,
     assurance: ASSURANCE.dev, production: false, expires_at: now + (sp.session_ttl_ms ?? 300000),
+    nonce: attestation.payload.nonce ?? null,
     _server_private: server.privateKey, server_ephemeral: server.publicKey.export({ type: 'spki', format: 'pem' })
   };
   return session;
@@ -52,12 +53,12 @@ function deriveKey(session) {
 
 export function releaseFields(session, release, policy, now) {
   // release: {capsule_id?, evidence_ref?, fields: {name:value}, purpose}
-  fields(release, ['fields', 'purpose']);
+  fields(release, ['fields', 'purpose'], ['capsule_id', 'evidence_ref']);
   requireThat(session.expires_at > now, 'INV-409-STATE', 'Perception session expired', 409);
   const sp = policy.secure_perception ?? {};
   const allowed = sp.release_fields ?? Object.keys(release.fields);
   for (const f of Object.keys(release.fields)) requireThat(allowed.includes(f), 'INV-451-POLICY', `Field ${f} not releasable under perception policy`, 451);
-  const binding = { session_id: session.session_id, purpose: release.purpose, fields: Object.keys(release.fields).sort(), capsule_id: release.capsule_id ?? null, expires_at: session.expires_at, issued_at: now };
+  const binding = { session_id: session.session_id, purpose: release.purpose, fields: Object.keys(release.fields).sort(), capsule_id: release.capsule_id ?? null, evidence_ref: release.evidence_ref ?? null, expires_at: session.expires_at, issued_at: now };
   const plaintext = canonical({ ...binding, data: release.fields });
   const key = deriveKey(session); const nonce = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', key, nonce);

@@ -10,4 +10,7 @@ for (const file of files.filter(p => p.startsWith('src/') || p.startsWith('web/'
   const s = readFileSync(file, 'utf8');
   for (const [name, regex] of [['dynamic eval', /\beval\s*\(/], ['DOM injection', /\.innerHTML\s*=/], ['embedded private key', /-----BEGIN (?:PRIVATE|RSA PRIVATE) KEY-----/], ['unfinished code marker', /\b(?:TODO|FIXME)\b/]]) if (regex.test(s)) { console.error(`${file}: ${name}`); failed = true; }
 }
+// MANIFEST.sha256 must describe exactly the tracked tree — silent drift fails.
+const mf = spawnSync(process.execPath, ['scripts/manifest.mjs', '--verify'], { encoding: 'utf8' });
+if (mf.status !== 0) { console.error(mf.stderr || mf.stdout); failed = true; }
 console.log(JSON.stringify({ syntax_files: files.length, syntax_and_focused_source_checks: !failed, security_certification: false })); if (failed) process.exitCode = 1;

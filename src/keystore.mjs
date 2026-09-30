@@ -2,7 +2,7 @@ import { createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify, r
 import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { canonical, digest } from './canonical.mjs';
-import { encrypt, decrypt, SUITES } from './crypto.mjs';
+import { encrypt, decrypt, SUITES, verifySuite, signSuite } from './crypto.mjs';
 import { fields, text, identifier, integer } from './schema.mjs';
 import { requireThat, InvariantError } from './errors.mjs';
 
@@ -32,6 +32,7 @@ export class KeyVault {
   }
   has(key_id) { return this.keys.has(key_id) && !this.keys.get(key_id).revoked; }
   entry(key_id) { const e = this.keys.get(key_id); requireThat(e && !e.revoked && !e.pending, 'INV-401-SIGNATURE', 'Key unavailable, revoked or pending activation', 401); return e; }
+  publicKey(key_id) { return this.keys.get(key_id)?.public_key ?? null; }
   generate(purpose, { suite = 'Ed25519', exportable = false, key_id = null, pending = false } = {}) {
     requireThat(SUITES[suite], 'INV-400-SCHEMA', 'Unapproved algorithm suite');
     text(purpose, 'key purpose', 64);
@@ -63,19 +64,14 @@ export class KeyVault {
   sign(key_id, purpose, message) {
     const e = this.entry(key_id);
     requireThat(e.purpose === purpose || e.purpose === 'any', 'INV-403-SCOPE', `Key is bound to purpose ${e.purpose}`, 403);
-    const s = SUITES[e.suite] ?? SUITES.Ed25519;
-    const key = s.dsaEncoding ? { key: createPrivateKey(this._private(key_id)), dsaEncoding: s.dsaEncoding } : createPrivateKey(this._private(key_id));
-    return sign(s.hash, Buffer.isBuffer(message) ? message : Buffer.from(message), key).toString('base64url');
+    return signSuite(e.suite ?? 'Ed25519', Buffer.isBuffer(message) ? message : Buffer.from(message), this._private(key_id));
   }
   verify(key_id, message, signatureB64) {
     const e = this.entry(key_id);
     try {
-      const s = SUITES[e.suite] ?? SUITES.Ed25519;
-      const key = s.dsaEncoding ? { key: createPublicKey(e.public_key), dsaEncoding: s.dsaEncoding } : createPublicKey(e.public_key);
-      return verify(s.hash, Buffer.isBuffer(message) ? message : Buffer.from(message), key, Buffer.from(signatureB64, 'base64url'));
+      return verifySuite(e.suite ?? 'Ed25519', Buffer.isBuffer(message) ? message : Buffer.from(message), e.public_key, Buffer.from(signatureB64, 'base64url'));
     } catch { return false; }
   }
-  publicKey(key_id) { return this.entry(key_id).public_key; }
   // Envelope signing with the IF-CJSON-1 profile; identical wire shape to
   // crypto.signed() but the private key never leaves the vault.
   envelope(key_id, purpose, payload) {
@@ -119,10 +115,10 @@ export class KeyVault {
 }
 export function verifyAttestation(envelope, attestorKeys) {
   const h = envelope?.protected;
-  requireThat(h && h.profile === 'IF-CJSON-1' && h.purpose === 'key-attestation', 'INV-401-SIGNATURE', 'Invalid attestation envelope', 401);
+  requireThat(h && h.profile === 'IF-CJSON-1' && h.purpose === 'key-attestation' && SUITES[h.suite ?? 'Ed25519'], 'INV-401-SIGNATURE', 'Invalid attestation envelope', 401);
   const key = attestorKeys[h.key_id];
   requireThat(key && !key.revoked, 'INV-401-SIGNATURE', 'Attestor unavailable', 401);
-  const ok = verify(null, Buffer.from(canonical({ protected: h, payload: envelope.payload })), createPublicKey(key.public_key), Buffer.from(envelope.signature, 'base64url'));
+  const ok = verifySuite(h.suite ?? 'Ed25519', Buffer.from(canonical({ protected: h, payload: envelope.payload })), key.public_key, Buffer.from(envelope.signature, 'base64url'));
   requireThat(ok, 'INV-401-SIGNATURE', 'Attestation signature failed', 401);
   return envelope.payload;
 }

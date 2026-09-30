@@ -57,8 +57,12 @@ const REASON_TEXT = {
 };
 export function explain(decision, model = 'explain-v1') {
   const m = MODELS[model]; requireThat(m && m.kind === 'decision-explanation', 'INV-400-SCHEMA', 'Unknown explanation model');
-  const reasons = (decision.reasons ?? []).map(r => ({ code: r, text: REASON_TEXT[r] ?? `policy returned ${r}` }));
-  return { model: m.version, verdict: decision.verdict, reasons, advisory: true, text: `${decision.verdict}: ` + (reasons.map(r => r.text).join('; ') || 'request satisfied all policy conditions') };
+  const verdict = decision.decision ?? decision.verdict;
+  const reasons = (decision.reasons ?? []).map(r => {
+    const code = typeof r === 'string' ? r : r?.code, message = typeof r === 'string' ? null : r?.message;
+    return { code, text: REASON_TEXT[code] ?? message ?? `policy returned ${code}` };
+  });
+  return { model: m.version, verdict, reasons, advisory: true, text: `${verdict}: ` + (reasons.map(r => r.text).join('; ') || 'request satisfied all policy conditions') };
 }
 
 const INTENT_WORDS = [
