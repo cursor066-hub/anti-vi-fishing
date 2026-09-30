@@ -40,8 +40,12 @@ export class Fabric {
         // into signing outside their class or exfiltrating private material.
         const purposes = { execution: ['action-certificate', 'capability'], audit: ['audit', 'outcome', 'revocation', 'coverage', 'checkpoint', 'backup-manifest'] };
         this._keyPurposes = purposes;
-        if (key.private_key && !this.vault.has(key.key_id)) this.vault.importKey({ key_id: key.key_id, public_key: key.public_key, private_key: key.private_key }, purposes[klass], { exportable: false, tenant_id: tenant });
-        requireThat(this.vault.has(key.key_id), 'INV-503-CONFIG', `Tenant ${klass} key is not in the keystore`, 503);
+        // Presence, not signing-eligibility: a revoked configured key must
+        // still load (it verifies every artifact it signed in the past) —
+        // gating on has() would try to re-import it and wedge cold start on
+        // a key-id conflict (w13 fixverify).
+        if (key.private_key && !this.vault.keys.has(key.key_id)) this.vault.importKey({ key_id: key.key_id, public_key: key.public_key, private_key: key.private_key }, purposes[klass], { exportable: false, tenant_id: tenant });
+        requireThat(this.vault.keys.has(key.key_id), 'INV-503-CONFIG', `Tenant ${klass} key is not in the keystore`, 503);
       }
       auditSigners[tenant] = { key_id: t.keys.audit.key_id, public_key: t.keys.audit.public_key, keys: () => this.auditPublicKeys(tenant), sign: (payload, purpose = 'audit') => { const sel = this._signingKeyId(tenant, 'audit'); return this.vault.envelope(sel.key_id, purpose, this._recoveryBody(sel, payload), { allowPending: sel.recovery }); } };
     }
@@ -218,23 +222,31 @@ export class Fabric {
     return plain;
   }
   keys(t) { return this.tenant(t).keys; }
-  // Verification keys for execution signatures: current plus retired keys so
-  // certificates issued before rotation still verify within their TTL.
-  executionPublic(t) {
-    const out = { [this.keys(t).execution.key_id]: { public_key: this.keys(t).execution.public_key } };
-    for (const e of this.keys(t).retired ?? []) out[e.key_id] = { public_key: e.public_key };
-    // A revoked bound key must not blind verification of recovery-signed
-    // envelopes: pending successors covering the class verify too
-    // (w11-lifecycle F1).
-    if (this.revoked(t, 'key', this.keys(t).execution.key_id)) for (const [kid, e] of this.vault.keys) if (e.pending && !e.revoked && this.ownsVaultKey(t, kid)) out[kid] = { public_key: e.public_key };
+  // Verification keys for a signing class: everything that could ever have
+  // legitimately signed — the configured key, retired lineage, every
+  // key-rotation record's previous/next keys, and pending recovery
+  // successors. Past signatures stay valid when a key is later revoked or
+  // rotated out — the ledger records which authority signed (recovery_
+  // signing), so verification must see the whole lineage, including on a
+  // cold start where _reconcileLedger restores only the latest rotation.
+  // Admitting the superset is safe: an insider without private material
+  // cannot forge a signature under any of them (w13 fixverify).
+  _verifyKeys(t, klass) {
+    const out = {};
+    const cur = this.keys(t)[klass];
+    if (cur) out[cur.key_id] = { public_key: cur.public_key };
+    for (const e of this.keys(t).retired ?? []) if (!e.key_class || e.key_class === klass) out[e.key_id] = { public_key: e.public_key };
+    for (const rot of this.store.list(t, 'key-rotation', 1000)) if (rot.key_class === klass) {
+      out[rot.previous_key_id] = { public_key: rot.previous_public_key };
+      out[rot.new_key_id] = { public_key: rot.new_public_key };
+    }
+    const needed = this._keyPurposes[klass] ?? [];
+    for (const [kid, e] of this.vault.keys) if (e.pending && this.ownsVaultKey(t, kid)
+      && (e.purpose === 'any' || needed.every(x => (Array.isArray(e.purpose) ? e.purpose : [e.purpose]).includes(x)))) out[kid] = { public_key: e.public_key };
     return out;
   }
-  auditPublicKeys(t) {
-    const out = { [this.keys(t).audit.key_id]: { public_key: this.keys(t).audit.public_key } };
-    for (const e of this.keys(t).retired ?? []) out[e.key_id] = { public_key: e.public_key };
-    if (this.revoked(t, 'key', this.keys(t).audit.key_id)) for (const [kid, e] of this.vault.keys) if (e.pending && !e.revoked && this.ownsVaultKey(t, kid)) out[kid] = { public_key: e.public_key };
-    return out;
-  }
+  executionPublic(t) { return this._verifyKeys(t, 'execution'); }
+  auditPublicKeys(t) { return this._verifyKeys(t, 'audit'); }
   // Resolves the key allowed to mint class envelopes right now: the bound
   // key when live, else the pending, tenant-owned successor minted before
   // the revoke — the designed escape that keeps a compromise-response from

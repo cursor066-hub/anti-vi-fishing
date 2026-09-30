@@ -8,6 +8,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { fixture, hasCode } from './helpers.mjs';
+import { signAcknowledgement } from '../src/ceremony.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -106,4 +107,59 @@ test('w12: manifest --verify flags tracked-but-unlisted files and ignored payloa
   writeFileSync(join(dir, '.gitignore'), 'ignored-payload.sh\n');
   writeFileSync(join(dir, 'ignored-payload.sh'), '#!/bin/sh\n');
   verifyFails(/unexpected file: ignored-payload\.sh/);
+});
+
+// ---- signature gate cold start: the whole rotation lineage verifies ----
+// Two completed audit rotations (k0→k1→k2) leave the earliest signer absent
+// from `keys.retired` after a cold open (the ledger restores only the latest
+// rotation record) — but rows signed by k0 must still verify: the verify set
+// is derived from every key-rotation record, not the reconstructed pointer.
+test('w12: cold open verifies audit rows signed two rotations ago', t => {
+  const h = fixture(t);
+  const rotateAudit = (ceremonyId) => {
+    const pending = h.f.prepareRotation(h.p('security'), 'audit');
+    const custodians = ['custodian-1', 'custodian-2'];
+    const c = h.f.createCeremony(h.p('security'), { ceremony_id: ceremonyId, purpose: 'key.rotate', threshold: 2, custodians, valid_until: h.now() + 3600000, min_delay_ms: 120000, rotation: { key_class: 'audit', new_key_id: pending.key_id } });
+    for (const s of custodians) h.f.acknowledgeCeremony(h.p(s), signAcknowledgement(c, s, h.setup.custodianKeys.acme[s], h.now()));
+    h.f.revoke(h.p('security'), { kind: 'key', id: h.f.keys('acme').audit.key_id, reason: `${ceremonyId} succession` });
+    const r = h.proposed('key.rotate', { key_class: 'audit', new_key_id: pending.key_id, new_public_key: pending.public_key, ceremony_id: ceremonyId, revoke_old: true }, { action: { type: 'key.rotate', target_resource: 'key-registry', purpose: 'Rotation' } });
+    h.evidence(r, { kind: 'governance_review' }); h.evidence(r, { kind: 'governance_review', issuer: 'audit-committee' });
+    h.approve(r, 3); h.advance(60001);
+    const outcome = h.f.execute(h.p(), h.f.certificate(h.p(), r.capsule.capsule_id));
+    assert.equal(outcome.payload.status, 'VERIFIED');
+    return pending;
+  };
+  const k0 = h.f.keys('acme').audit.key_id;
+  rotateAudit('cer-a1'); rotateAudit('cer-a2');
+  assert.notEqual(h.f.keys('acme').audit.key_id, k0, 'lineage advanced');
+  const f2 = new h.f.constructor(h.setup.config, h.directory, () => h.now());
+  t.after(() => f2.close());
+  // Rows at chain head were signed by k0 — the retired-out key — and the
+  // fresh index must still verify them (and serve them to an auditor).
+  assert.doesNotThrow(() => f2.revoked('acme', 'device', 'anything'));
+  const page = f2.auditPageScoped(h.p('auditor'), { limit: 200 });
+  assert.ok(page.entries.length > 0);
+});
+
+// ---- signature gate cold start: successor-signed chain reopens cleanly ----
+// A chain whose tail was signed by the pending audit successor (configured
+// key revoked) must rebuild its provenance index on a fresh Fabric without
+// wedging — the verification key set covers every legitimate signer, so the
+// revocation event need not be indexed before its rows verify.
+test('w12: a cold open verifies a chain the audit successor signed (no wedge)', t => {
+  const h = fixture(t);
+  const { certificate } = h.ready();
+  const pendingAudit = h.f.prepareRotation(h.p('security'), 'audit');
+  h.f.revoke(h.p('security'), { kind: 'key', id: h.f.keys('acme').audit.key_id, reason: 'drill' });
+  const outcome = h.f.execute(h.p(), certificate);
+  assert.equal(outcome.payload.status, 'VERIFIED');
+  assert.equal(outcome.protected.key_id, pendingAudit.key_id, 'outcome signed by the pending audit successor');
+  // A second instance over the same directory is the cold-start: its
+  // provenance index and vault load from disk alone (the first instance's
+  // in-memory state cannot help it).
+  const f2 = new h.f.constructor(h.setup.config, h.directory, () => h.now());
+  t.after(() => f2.close());
+  assert.doesNotThrow(() => f2.revoked('acme', 'device', 'anything'));
+  assert.doesNotThrow(() => f2.policy('acme'));
+  assert.doesNotThrow(() => f2.auditPageScoped(h.p('auditor'), { limit: 100 }));
 });
