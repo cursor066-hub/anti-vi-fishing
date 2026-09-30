@@ -47,7 +47,9 @@ export async function httpJson(url, { method = 'GET', body, timeout_ms = 10000, 
   const target = new URL(url);
   // Cleartext transport is only acceptable toward loopback (the synthetic
   // issuer mesh); any remote endpoint must be TLS (w5 F-8).
-  const LOOPBACK = new Set(['localhost', '127.0.0.1', '::1', '[::1]', '0.0.0.0']);
+  // '0.0.0.0' is NOT a loopback address — it is the wildcard bind; some
+  // systems route it to an arbitrary interface (w9-deploy F10).
+  const LOOPBACK = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
   requireThat(target.protocol === 'https:' || (target.protocol === 'http:' && LOOPBACK.has(target.hostname)), 'INV-400-CONNECTOR', `Refusing cleartext http to non-loopback host ${target.hostname}`, 400);
   const transport = target.protocol === 'https:' ? https : http;
   return await new Promise((resolve, reject) => {
@@ -62,7 +64,12 @@ export async function httpJson(url, { method = 'GET', body, timeout_ms = 10000, 
         try {
           // Fatal decode — replacement characters must never reach the
           // canonicalizer as if they were the sender's bytes (w8-canonical F9).
-          const textBody = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks));
+          // The decoder's TypeError is normalised into the connector error
+          // taxonomy so callers see INV-502, not a bare runtime throw
+          // (w9-fixverify NB-3).
+          let textBody;
+          try { textBody = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)); }
+          catch { throw new InvariantError('INV-502-CONNECTOR', 'Connector returned invalid UTF-8', 502); }
           requireThat(size <= 1048576, 'INV-413-CONNECTOR', 'Connector response too large', 413);
           requireThat((res.headers['content-type'] ?? '').split(';')[0] === 'application/json', 'INV-502-CONNECTOR', 'Connector returned non-JSON', 502);
           const data = parseStrict(textBody);

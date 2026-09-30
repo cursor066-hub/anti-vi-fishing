@@ -11,3 +11,32 @@ docs/production-acceptance.json @cursor066-hub
 MANIFEST.sha256          @cursor066-hub
 scripts/ai-eval.mjs      @cursor066-hub
 ai-eval/                 @cursor066-hub
+
+# Security-critical components carry explicit review requirements — no
+# single-owner merge on the files that define authorization, custody,
+# policy and evidence semantics (NFR-MNT-004, w9-srs F6).
+src/fabric.mjs           @cursor066-hub
+src/policy.mjs           @cursor066-hub
+src/crypto.mjs           @cursor066-hub
+src/keystore.mjs         @cursor066-hub
+src/ceremony.mjs         @cursor066-hub
+src/shamir.mjs           @cursor066-hub
+src/store.mjs            @cursor066-hub
+src/runtime.mjs          @cursor066-hub
+src/secureview.mjs       @cursor066-hub
+src/canonical.mjs        @cursor066-hub
+src/issuerd.mjs          @cursor066-hub
+src/server.mjs           @cursor066-hub
+src/bootstrap.mjs        @cursor066-hub
+src/connectors.mjs       @cursor066-hub
+src/datagate.mjs         @cursor066-hub
+src/advisory.mjs         @cursor066-hub
+src/target.mjs           @cursor066-hub
+src/schema.mjs           @cursor066-hub
+src/errors.mjs           @cursor066-hub
+src/cli.mjs              @cursor066-hub
+tests/                   @cursor066-hub
+vectors/                 @cursor066-hub
+deploy/                  @cursor066-hub
+docs/SECURITY.md         @cursor066-hub
+docs/requirements.csv    @cursor066-hub

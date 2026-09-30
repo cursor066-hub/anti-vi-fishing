@@ -31,9 +31,13 @@ try {
   } else if (command === 'serve') {
     const directory = resolve(option('dir', './var/local')), port = Number(option('port', '8080'));
     requireThat(Number.isInteger(port) && port >= 1024 && port <= 65535, 'INV-400-SCHEMA', 'Port must be in 1024–65535');
-    requireThat((statSync(join(directory, 'config.json')).mode & 0o077) === 0, 'INV-503-CONFIG', 'config.json must not be readable by group or other users', 503);
+    // Every credential-bearing file the daemon reads gets the custody check
+    // — config.json alone left keystore/master key/tokens/DBs unguarded
+    // (w9-deploy F6).
+    for (const f of ['config.json', 'master.key', 'keystore.json', 'access-tokens.json', 'fabric.db', 'target.db'])
+      try { requireThat((statSync(join(directory, f)).mode & 0o077) === 0, 'INV-503-CONFIG', `${f} must not be readable by group or other users`, 503); } catch (e) { if (e.code === 'ENOENT') continue; throw e; }
     const fabric = new Fabric(loadConfiguration(directory), directory), origin = option('origin', `http://127.0.0.1:${port}`);
-    const app = createServer(fabric, { port, origin }); await app.listen();
+    const app = createServer(fabric, { port, origin, trustProxy: args.includes('--trust-proxy') }); await app.listen();
     console.log(`Invariant Fabric engineering console: ${origin} (loopback only; no production guarantee)`);
     let closing = false;
     const close = async () => { if (closing) return; closing = true; await app.close(); fabric.close(); process.exitCode = 0; };
@@ -43,7 +47,7 @@ try {
     const directory = resolve(option('dir', './var/local/issuers')), port = Number(option('port', '8090'));
     requireThat(Number.isInteger(port) && port >= 1024 && port <= 65535, 'INV-400-SCHEMA', 'Port must be in 1024–65535');
     const issuers = loadIssuers(directory);
-    const app = createIssuerServer(issuers, { port, logPath: join(directory, 'issuance-log.jsonl') }); await app.listen();
+    const app = createIssuerServer(issuers, { port, logPath: join(directory, 'issuance-log.jsonl'), allow_insecure_loopback: args.includes('--allow-insecure-loopback') }); await app.listen();
     console.log(`Invariant evidence issuers on http://127.0.0.1:${port} serving: ${[...new Set(Object.values(issuers).filter(i => i.issuer).map(i => i.issuer))].join(', ')}`);
     let closing = false;
     const close = async () => { if (closing) return; closing = true; await app.close(); process.exitCode = 0; };
@@ -66,7 +70,7 @@ try {
     writeFileSync(outputPath, canonical(signed(payload, key, purpose)) + '\n', { flag: 'wx', mode: 0o600 });
     console.log(`Signed ${purpose} to ${resolve(outputPath)}. Software signature only; not trusted-display or WebAuthn confirmation.`);
   } else {
-    console.log('Usage:\n  node src/cli.mjs init --dir ./var/local [--tenants acme,globex]\n  node src/cli.mjs issuerd --dir ./var/local/issuers [--port 8090]\n  node src/cli.mjs serve --dir ./var/local [--port 8080] [--origin http://127.0.0.1:8080]\n  node src/cli.mjs sign --key PATH --input PATH --output PATH [--purpose action-approval|evidence|root-policy|capsule-intent|ceremony-acknowledgement]');
+    console.log('Usage:\n  node src/cli.mjs init --dir ./var/local [--tenants acme,globex]\n  node src/cli.mjs issuerd --dir ./var/local/issuers [--port 8090] [--allow-insecure-loopback]\n  node src/cli.mjs serve --dir ./var/local [--port 8080] [--origin http://127.0.0.1:8080] [--trust-proxy]\n  node src/cli.mjs sign --key PATH --input PATH --output PATH [--purpose action-approval|evidence|root-policy|capsule-intent|ceremony-acknowledgement]');
     if (command) process.exitCode = 2;
   }
 } catch (e) { console.error(JSON.stringify({ error: e.code ?? 'INV-500-CLI', message: e.code ? e.message : 'Command failed; verify local paths and file permissions. No secret values were printed.' })); process.exitCode = 1; }

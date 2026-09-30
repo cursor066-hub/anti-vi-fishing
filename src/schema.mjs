@@ -1,4 +1,4 @@
-import { digest, canonical } from './canonical.mjs';
+import { digest, canonical, depth } from './canonical.mjs';
 import { requireThat, invalid } from './errors.mjs';
 
 export function fields(value, required, optional = []) {
@@ -61,6 +61,12 @@ export function validateRequested(type, requested) {
 }
 export function validateProposal(input) {
   fields(input, ['schema_id', 'schema_digest', 'actor', 'action', 'current_state', 'requested_state', 'destination', 'quantity', 'exclusions', 'evidence_refs', 'policy_version', 'nonce', 'created_at', 'expires_at', 'rollback_or_compensation', 'privacy_classification']);
+  // Admission bound: a stored record re-wraps the proposal inside
+  // capsule→request_intent→payload, and the canonicalizer ceilings at 32.
+  // Proposals deeper than this are guaranteed-rejected later — inside the
+  // write transaction — so refuse them here, before any row exists
+  // (w9-fixverify NB-4; bound measured against the live store path).
+  requireThat(depth(input) <= 29, 'INV-400-SCHEMA', 'Capsule nesting exceeds the storable depth bound');
   fields(input.actor, ['subject_id', 'identity_class', 'device_id']); identifier(input.actor.subject_id); identifier(input.actor.device_id); oneOf(input.actor.identity_class, ['workforce', 'workload', 'device', 'counterparty'], 'identity class');
   fields(input.action, ['type', 'target_resource', 'purpose']); const schema = SCHEMAS[input.action.type]; requireThat(schema, 'INV-400-SCHEMA', 'Unsupported action type');
   requireThat(input.schema_id === schema.id && input.schema_digest === digest(schema), 'INV-400-SCHEMA', 'Schema identifier or digest mismatch');

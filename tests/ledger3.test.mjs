@@ -183,11 +183,15 @@ test('NFR-PERF-004: the integrated evaluation path sustains >=100 decisions/seco
   assert.ok(bench.integrated_evaluation_with_sqlite_audit.operations_per_second >= 100);
 });
 
-test('NFR-PERF-001 NFR-PERF-003: the benchmark publishes its environment and separates connector latency', () => {
+test('NFR-PERF-001 NFR-PERF-003: the benchmark publishes its environment, separates connector latency and meets its declared targets', () => {
   const bench = JSON.parse(readFileSync('reports/benchmark.json', 'utf8'));
   assert.ok(bench.reference_environment.cpu && bench.reference_environment.os && bench.reference_environment.architecture);
   assert.ok('target_network_latency' in bench);
   assert.ok('core_deterministic_evaluation' in bench);
+  // The artifact must prove the published targets were actually met, not
+  // merely declared (w9-srs F14).
+  assert.ok(bench.asserted_targets.core_p95_at_most_250_ms === true && bench.asserted_targets.core_p99_at_most_750_ms === true);
+  assert.ok(bench.core_deterministic_evaluation.p95_ms <= 250 && bench.core_deterministic_evaluation.p99_ms <= 750, JSON.stringify(bench.core_deterministic_evaluation));
 });
 
 test('NFR-AVL-002: connector unavailability does not remove already-issued local controls inside the stale window', t => {
@@ -364,7 +368,7 @@ test('AIG-010: the AI advisory plane has a versioned regression suite that is ex
 
 test('NFR-OPS-004: customer-visible incidents carry a detection→containment→recovery→root-cause template', () => {
   const rb = readFileSync('docs/RUNBOOKS.md', 'utf8');
-  for (const phase of ['contain', 'recover', 'root cause', 'corrective']) assert.ok(rb.toLowerCase().includes(phase), `incident template missing phase: ${phase}`);
+  for (const phase of ['detect', 'contain', 'recover', 'root cause', 'corrective']) assert.ok(rb.toLowerCase().includes(phase), `incident template missing phase: ${phase}`);
 });
 
 test('NFR-OPS-005: staged rollout and rollback are drilled in the simulation suite', () => {
@@ -374,6 +378,20 @@ test('NFR-OPS-005: staged rollout and rollback are drilled in the simulation sui
   const canary = (results.scenarios ?? []).filter(x => /canary|staged|cutover|promot/i.test(x.name ?? ''));
   assert.ok(canary.length >= 3, 'canary/staging/rollback scenarios missing from simulation results');
   assert.ok(canary.every(x => x.pass === true), JSON.stringify(canary));
+});
+
+test('NFR-TST-004: the release gate refuses release while any critical finding is open', () => {
+  const r = spawnSync(process.execPath, ['scripts/release-check.mjs'], { encoding: 'utf8' });
+  assert.equal(r.status, 1, 'release-check must fail closed while external acceptance items remain unverified');
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.production_release, 'BLOCKED');
+  assert.ok(out.blocked_items.length > 0 && out.engineering_tests_do_not_override_external_acceptance === true);
+});
+
+test('NFR-MNT-004: repository policy requires owner review of every security-critical module', () => {
+  const co = readFileSync('.github/CODEOWNERS', 'utf8');
+  for (const path of ['src/fabric.mjs', 'src/canonical.mjs', 'src/keystore.mjs', 'src/ceremony.mjs', 'src/shamir.mjs', 'src/crypto.mjs', 'src/policy.mjs', 'src/server.mjs', 'src/issuerd.mjs', 'src/store.mjs', 'src/runtime.mjs', 'src/datagate.mjs', 'src/secureview.mjs', 'src/advisory.mjs', 'src/connectors.mjs', 'src/bootstrap.mjs', 'src/cli.mjs', 'src/target.mjs', 'src/schema.mjs', 'src/errors.mjs', 'tests/', 'vectors/', 'deploy/', 'docs/SECURITY.md', 'docs/requirements.csv'])
+    assert.ok(co.includes(path), `CODEOWNERS missing security-critical path: ${path}`);
 });
 
 test('NFR-TST-002: release acceptance includes adversarial bypass testing, executed by the gate', t => {

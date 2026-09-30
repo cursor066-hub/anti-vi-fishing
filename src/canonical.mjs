@@ -5,6 +5,7 @@ import { invalid } from './errors.mjs';
 // This deliberately restricted profile is NOT advertised as general RFC 8785.
 export function canonical(value, depth = 0) {
   if (depth > 32) throw invalid('Maximum nesting depth exceeded');
+
   if (value === null || typeof value === 'boolean') return JSON.stringify(value);
   if (typeof value === 'number') {
     if (!Number.isSafeInteger(value) || Object.is(value, -0)) throw invalid('Only safe non-negative-zero integers are supported');
@@ -33,12 +34,24 @@ export function canonical(value, depth = 0) {
   }
   throw invalid('Unsupported canonical value');
 }
-// Every Object.prototype member name, plus 'prototype' and the legacy
-// watch/unwatch traps — the same superset the independent Python and
-// WebCrypto verifiers enforce, so all three implementations reject an
-// identical key set (w8-canonical F6).
-const PROTO_KEYS = new Set([...Object.getOwnPropertyNames(Object.prototype), 'prototype', 'watch', 'unwatch']);
+// The forbidden key set is a fixed literal list, not an engine-derived
+// enumeration: every Object.prototype member name plus 'prototype' and the
+// legacy watch/unwatch traps — identical to the set both independent
+// verifiers (Python, WebCrypto) enforce, and stable even under an engine
+// whose Object.prototype grows members (w8-canonical F6; w9-fixverify NB-2).
+const PROTO_KEYS = new Set(['__defineGetter__', '__defineSetter__', '__lookupGetter__', '__lookupSetter__', '__proto__', 'constructor', 'hasOwnProperty', 'isPrototypeOf', 'propertyIsEnumerable', 'toLocaleString', 'toString', 'valueOf', 'prototype', 'watch', 'unwatch']);
+
+// Deepest container nesting of an already-parsed value. Proposals are
+// re-wrapped several levels deep inside their stored record, so callers
+// must bound depth before the write path, not after (w9-fixverify NB-4).
+export function depth(value) {
+  if (value === null || typeof value !== 'object') return 0;
+  let max = 0;
+  for (const v of Array.isArray(value) ? value : Object.values(value)) { const d = depth(v); if (d > max) max = d; }
+  return 1 + max;
+}
 export function digest(value) { return createHash('sha256').update(canonical(value)).digest('hex'); }
+
 export function hashBytes(value) { return createHash('sha256').update(value).digest('hex'); }
 export function clone(value) { return JSON.parse(canonical(value)); }
 

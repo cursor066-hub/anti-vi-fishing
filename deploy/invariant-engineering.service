@@ -8,10 +8,17 @@ Type=simple
 User=invariant
 Group=invariant
 WorkingDirectory=/opt/invariant-fabric
-ExecStart=/usr/bin/node /opt/invariant-fabric/src/cli.mjs serve --dir /var/lib/invariant-fabric --port 8080
+# --origin must equal the nginx server_name pair — without it every request
+# fails the Host check (w9-deploy F8). --trust-proxy honours X-Forwarded-For
+# from the loopback nginx for rate-limit buckets.
+ExecStart=/usr/bin/node /opt/invariant-fabric/src/cli.mjs serve --dir /var/lib/invariant-fabric --port 8080 --origin https://invariant.internal --trust-proxy
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
+# Resource ceilings — a runaway fabric must not starve the host (w9-deploy F8).
+MemoryMax=1G
+TasksMax=64
+LimitNOFILE=4096
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true

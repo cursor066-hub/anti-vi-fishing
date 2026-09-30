@@ -54,7 +54,7 @@ export function defaultPolicy(tenant) {
     fail_modes: { default: 'closed', 'data.read': 'closed', 'service.connect': 'cached-allow' }, max_stale_ms: 300000,
     // Per-class staleness ceilings (NFR-AVL-004): a class may tighten the
     // global max_stale_ms but never loosen it beyond the default window.
-    stale_ms: { default: 300000 },
+    stale_ms: { default: 300000, 'data.read': 300000, 'service.connect': 300000 },
     // POL-013/POL-014: staged rollout and emergency change contracts.
     staged_policy: { min_delay_ms: 60000, emergency_extra_custodians: 1, emergency_max_ttl_ms: 86400000 },
     secure_perception: { enabled: true, allowed_firmware: ['if-secureview-dev-1'], session_ttl_ms: 300000, release_fields: '*', fallback: 'controlled-workspace', required_assurance: 'dev-attested-software' },

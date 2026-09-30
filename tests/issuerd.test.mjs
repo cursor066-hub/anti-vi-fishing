@@ -64,7 +64,7 @@ test('RUN-007 NFR-SEC-005: issuerd refuses cross-tenant issuance; record miss is
   const spec = { issuer: 'bank', tenant: 'acme', version: '1.0.0', channel: 'authoritative', key, kinds: ISSUER_RULES.bank, records: issuerRecords().bank };
   assert.throws(() => answerQuery(spec, { tenant_id: 'globex', kind: 'ownership', subject_id: 'operator', claims: { account: 'TESTBANK000001', owner_id: 'vendor-1' }, capsule_digest: 'a'.repeat(64) }, Date.now()), e => e instanceof InvariantError && e.code === 'INV-403-SCOPE');
   writeIssuer(dir, spec);
-  const srv = createIssuerServer(loadIssuers(dir), { port: 0, host: '127.0.0.1' });
+  const srv = createIssuerServer(loadIssuers(dir), { port: 0, host: '127.0.0.1', allow_insecure_loopback: true });
   await srv.listen(); t.after(() => srv.close());
   const port = srv.server.address().port;
   const missing = await httpJson(`http://127.0.0.1:${port}/v1/issuers/bank/issue`, { method: 'POST', body: { kind: 'ownership', subject_id: 'operator', claims: { account: 'GHOST-9', owner_id: 'nobody' }, capsule_digest: 'a'.repeat(64), tenant_id: 'acme' } });

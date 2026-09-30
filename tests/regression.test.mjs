@@ -396,7 +396,7 @@ test('audit: key.rotate requires an acknowledged ceremony', t => {
   assert.throws(() => h.f.execute(h.p(), cert), hasCode('INV-409-STATE'));
 });
 
-test('audit: releaseFields honour a policy allowlist (INV-451 on unlisted fields)', t => {
+test('audit PER-006: releaseFields honour a policy allowlist (INV-451 on unlisted fields)', t => {
   const policy = { secure_perception: { fallback: 'controlled-workspace', release_fields: ['bank_account'] } };
   assert.throws(() => workspaceFallback({ fields: { bank_account: 'TESTBANK1', ssn: '001' }, purpose: 'review', reason: 'x' }, policy, 1), hasCode('INV-451-POLICY'));
 });

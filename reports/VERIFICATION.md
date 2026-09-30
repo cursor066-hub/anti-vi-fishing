@@ -2,7 +2,7 @@
 
 ## Executed evidence
 
-**389 automated test cases passed, 0 failed** (node --test over tests/). TAP output in reports/tests.tap.
+**406 automated test cases passed, 0 failed** (node --test over tests/). TAP output in reports/tests.tap.
 
 **22 simulation scenarios** run by scripts/simulate.mjs (reports/simulation-results.json).
 
@@ -10,10 +10,10 @@
 
 | Status | Count |
 |---|---|
-| VERIFIED_IN_ENGINEERING_PROFILE | 170 |
-| PARTIAL | 12 |
-| BLOCKED_EXTERNAL | 27 |
-| NOT_IMPLEMENTED | 2 |
+| VERIFIED_IN_ENGINEERING_PROFILE | 173 |
+| PARTIAL | 17 |
+| BLOCKED_EXTERNAL | 18 |
+| NOT_IMPLEMENTED | 3 |
 
 VERIFIED_IN_ENGINEERING_PROFILE means directly exercised in the declared engineering profile only — not closure of external/production acceptance. The production gate is expected BLOCKED: 1 is the observed exit code (1 = blocked by named items).
 

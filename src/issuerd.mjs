@@ -24,8 +24,11 @@ export function loadIssuers(directory) {
     // refuse to serve, matching the `sign` and `serve` custody bars
     // (w8-tooling F8).
     requireThat((statSync(join(directory, file)).mode & 0o077) === 0, 'INV-503-CONFIG', `Issuer file ${file} must not be readable by group or other users`, 503);
-    const spec = JSON.parse(readFileSync(join(directory, file), 'utf8'));
-    fields(spec, ['issuer', 'key', 'channel', 'kinds', 'records', 'version'], ['tenant', 'issue_token', 'read_token', 'token_expires_at']);
+    // Specs parse through the strict grammar too — duplicate keys, floats
+    // and oversize strings must fail at load, not inside canonical() at
+    // serve time (w9-deploy F10).
+    const spec = parseStrict(readFileSync(join(directory, file), 'utf8'));
+    fields(spec, ['issuer', 'key', 'channel', 'kinds', 'records', 'version'], ['tenant', 'issue_token', 'read_token', 'token_expires_at', 'issue_token_digest', 'read_token_digest']);
     identifier(spec.issuer); text(spec.version, 'issuer version', 32);
     // Tenant names use the strict tenant charset — ':' inside a tenant or
     // issuer name would collide with the '<tenant>:<issuer>' key form.
@@ -36,20 +39,30 @@ export function loadIssuers(directory) {
     // two tenants can run same-named issuers with independent keys/records.
     // A bare '<issuer>' alias is registered only when unambiguous.
     const key = spec.tenant ? `${spec.tenant}:${spec.issuer}` : spec.issuer;
-    requireThat(!issuers[key], 'INV-409-CONFLICT', `Duplicate issuer ${key}`, 409);
+    requireThat(!Object.hasOwn(issuers, key), 'INV-409-CONFLICT', `Duplicate issuer ${key}`, 409);
     issuers[key] = spec;
-    if (!issuers[spec.issuer]) issuers[spec.issuer] = spec; else if (issuers[spec.issuer] !== spec) issuers[spec.issuer] = { ambiguous: true };
+    if (!Object.hasOwn(issuers, spec.issuer)) issuers[spec.issuer] = spec; else if (issuers[spec.issuer] !== spec) issuers[spec.issuer] = { ambiguous: true };
   }
   requireThat(Object.keys(issuers).length > 0, 'INV-503-CONFIG', 'No issuers configured', 503);
   return issuers;
 }
 
 // Constant-time bearer comparison — a plain `===` leaks match length via
-// early-exit timing (issuerd-audit LOW-2).
-function bearerMatches(auth, token) {
-  // Compare fixed-size digests so the token length is not a timing oracle.
-  if (typeof auth !== 'string') return false;
-  return timingSafeEqual(Buffer.from(digest(auth)), Buffer.from(digest(`Bearer ${token}`)));
+// early-exit timing (issuerd-audit LOW-2). The stored side is the bearer
+// DIGEST so a circulated spec file never carries a live credential
+// (w9-deploy F7).
+function bearerMatches(auth, storedDigest) {
+  if (typeof auth !== 'string' || !storedDigest) return false;
+  return timingSafeEqual(Buffer.from(digest(auth)), Buffer.from(storedDigest));
+}
+// The stored credential for a scope: the spec's `*_token_digest`, else the
+// digest of its plaintext token (legacy specs/tests), else null — tokenless
+// issuers serve only under the explicit insecure-loopback opt-in.
+function bearerDigest(i, scope) {
+  const stored = scope === 'issue' ? i.issue_token_digest : (i.read_token_digest ?? i.issue_token_digest);
+  if (stored) return stored;
+  const plain = scope === 'issue' ? i.issue_token : (i.read_token ?? i.issue_token);
+  return plain ? digest(`Bearer ${plain}`) : null;
 }
 
 function interpolate(template, claims) {
@@ -65,12 +78,14 @@ export function answerQuery(issuer, request, now) {
   // MED-3: a spec bound to a tenant must not mint envelopes asserting other
   // tenants — the signed payload copies request.tenant_id verbatim.
   requireThat(!issuer.tenant || issuer.tenant === request.tenant_id, 'INV-403-SCOPE', 'Issuer does not serve this tenant', 403);
-  const rule = issuer.kinds[request.kind];
+  // Own-property lookups — 'constructor'/'toString' kind names must miss,
+  // not resolve Object.prototype members (w9-deploy F10).
+  const rule = Object.hasOwn(issuer.kinds, request.kind) ? issuer.kinds[request.kind] : undefined;
   requireThat(rule, 'INV-412-EVIDENCE', `Issuer does not supply evidence kind ${request.kind}`, 412);
   requireThat(Number.isSafeInteger(rule.confidence) && rule.confidence >= 0 && rule.confidence <= 100, 'INV-503-CONFIG', `Evidence rule for ${request.kind} must declare an explicit confidence`);
   requireThat(request.dependencies === undefined || (Array.isArray(request.dependencies) && request.dependencies.every(d => typeof d === 'string')), 'INV-400-SCHEMA', 'dependencies must be an array of strings');
   const key = interpolate(rule.lookup, request.claims ?? {});
-  const record = issuer.records[key];
+  const record = Object.hasOwn(issuer.records, key) ? issuer.records[key] : null;
   const evidence_id = randomUUID();
   const base = {
     evidence_id, tenant_id: request.tenant_id, capsule_digest: request.capsule_digest, kind: request.kind,
@@ -119,7 +134,7 @@ export function answerQuery(issuer, request, now) {
   return signed({ ...base, claim, content_digest: digest({ issuer: issuer.issuer, key, record }), claims: revealed, provenance: prov('*'), issuer_version: issuer.version }, issuer.key, 'evidence');
 }
 
-export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', clock = Date.now, logPath } = {}) {
+export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', clock = Date.now, logPath, allow_insecure_loopback = false } = {}) {
   const sequence = { n: 0, previous: '0'.repeat(64) };
   // Continue the hash chain across restarts: seed sequence/previous from the
   // last logged record so truncation of earlier entries stays detectable
@@ -149,62 +164,78 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
     appendFileSync(logPath, canonical({ ...record, digest: sequence.previous }) + '\n', { mode: 0o600 });
   }
   for (const i of Object.values(issuers)) i.metrics ??= { requests: 0, errors: 0, issued: 0, refused: 0, latencies: [] };
+  // Per-IP token buckets are per-server-instance — a static map shared
+  // across createIssuerServer calls leaks budgets between daemons and
+  // couples unrelated tests (w9-deploy F10).
+  const buckets = new Map();
   const server = http.createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Cache-Control', 'no-store');
-    const send = (status, data) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(canonical(data)); };
+    // Serialize before any byte is flushed: a canonical() failure must land
+    // in the catch cleanly, never mid-response after writeHead (w9-deploy F1).
+    const send = (status, data) => { const bodyOut = canonical(data); res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(bodyOut); };
+    const ip = req.socket.remoteAddress ?? 'unknown';
+    const bucketFor = (scope, issuer = '*') => {
+      const key = `${ip}:${scope}:${issuer}`, now = clock();
+      const limits = { ip: [600, 60000], read: [240, 60000], issue: [120, 60000], probe: [30, 60000] };
+      const [cap, window] = limits[scope] ?? limits.probe;
+      let b = buckets.get(key); if (!b || now >= b.reset) { b = { left: cap, reset: now + window }; buckets.set(key, b); }
+      if (buckets.size > 10000) for (const [k, v] of buckets) if (now >= v.reset) buckets.delete(k);
+      return b;
+    };
+    const take = (scope, issuer) => { const b = bucketFor(scope, issuer); requireThat(b.left > 0, 'INV-429-RATE', 'Rate limit exceeded', 429); b.left--; };
     try {
+      // The coarse per-IP bucket is taken before any request validation —
+      // malformed traffic must consume budget too (w9-deploy F9).
+      take('ip');
       const url = new URL(req.url, `http://${host}:${port}`);
+      // Same Host pinning as the main server: requests naming another
+      // authority are answered by nothing here (w9-deploy F5). Compare
+      // against the socket's own local address/port so a wildcard-bound
+      // daemon still pins the authority it actually received (w9-deploy F5).
+      requireThat(req.headers.host === `${req.socket.localAddress}:${req.socket.localPort}` || req.headers.host === req.socket.localAddress, 'INV-400-HOST', 'Unrecognised host', 400);
       const loopback = ['127.0.0.1', '::1', 'localhost'].includes(host);
-      // Scoped bearer credentials: `issue_token` authorises only the mutating
-      // /issue surface; `read_token` (or issue_token when no read token is
-      // configured) authorises the read surfaces. Both expire at
-      // `token_expires_at` — expired credentials are refused, forcing rotation
-      // through a configuration update rather than riding forever (IDN-009).
-      const checkAuth = (issuer, scope = 'read') => {
-        const token = scope === 'issue' ? issuer?.issue_token : (issuer?.read_token ?? issuer?.issue_token);
-        if (token) {
-          requireThat(!issuer.token_expires_at || issuer.token_expires_at > clock(), 'INV-401-AUTH', 'Issuer token expired; rotate it via configuration update', 401);
-          requireThat(bearerMatches(req.headers.authorization ?? '', token), 'INV-401-AUTH', `Issuer endpoint requires the ${scope} bearer token`, 401);
-        } else {
-          requireThat(loopback, 'INV-503-CONNECTOR', 'Issuer endpoint requires a configured bearer token off loopback', 503);
-        }
+      // Whether the presented bearer authorises THIS issuer — boolean, so
+      // callers can fold it into the same 404 as a missing name and a
+      // wrong-issuer bearer learns nothing (w9-deploy F4). `issue` scope
+      // requires the issue credential; `read` scope accepts a read
+      // credential or the issue credential when no read credential is
+      // configured. Both expire at `token_expires_at` (IDN-009).
+      const issuerAuthOk = (issuer, scope) => {
+        const d = bearerDigest(issuer, scope);
+        if (!d) return loopback && allow_insecure_loopback;
+        if (issuer.token_expires_at && issuer.token_expires_at <= clock()) return false;
+        return bearerMatches(req.headers.authorization ?? '', d);
       };
       // Authenticate before existence/scope resolution (w5 F-3): an
       // unauthenticated caller must get a uniform 401 — never a 404/403 that
       // enumerates issuer names or tenant bindings. `anyBearer` accepts any
       // configured, unexpired issuer token of the required scope; per-issuer
-      // binding is still enforced by checkAuth afterwards.
+      // binding is still enforced by issuerAuthOk afterwards.
       const anyBearer = (scope) => {
         const auth = req.headers.authorization ?? '';
         return Object.values(issuers).some(i => {
-          const t = scope === 'issue' ? i.issue_token : (i.read_token ?? i.issue_token);
-          return t && (!i.token_expires_at || i.token_expires_at > clock()) && bearerMatches(auth, t);
+          const d = bearerDigest(i, scope);
+          return d && (!i.token_expires_at || i.token_expires_at > clock()) && bearerMatches(auth, d);
         });
       };
-      const noTokens = !Object.values(issuers).some(i => i.issue_token || i.read_token);
-      const gate = (scope) => { requireThat(loopback || !noTokens, 'INV-503-CONNECTOR', 'Issuer endpoint requires a configured bearer token off loopback', 503); requireThat(anyBearer(scope) || (loopback && noTokens), 'INV-401-AUTH', `Issuer endpoint requires the ${scope} bearer token`, 401); };
-      // Per-IP token bucket (w5 F-4): reads and issues are separately
-      // budgeted; unauthenticated traffic shares a small bucket so probing
-      // cannot burn signing CPU or grow the issuance log unboundedly.
-      const buckets = createIssuerServer._buckets ??= new Map();
-      const ip = req.socket.remoteAddress ?? 'unknown';
-      const bucketFor = (scope) => {
-        const key = `${ip}:${scope}`, now = clock();
-        const limits = { read: [240, 60000], issue: [120, 60000], probe: [30, 60000] };
-        const [cap, window] = limits[scope] ?? limits.probe;
-        let b = buckets.get(key); if (!b || now >= b.reset) { b = { left: cap, reset: now + window }; buckets.set(key, b); }
-        if (buckets.size > 10000) for (const [k, v] of buckets) if (now >= v.reset) buckets.delete(k);
-        return b;
-      };
-      const take = (scope) => { const b = bucketFor(scope); requireThat(b.left > 0, 'INV-429-RATE', 'Rate limit exceeded', 429); b.left--; };
-      const resolveIssuer = (name, tenant) => (tenant && issuers[`${tenant}:${name}`]) || (issuers[name] && !issuers[name].ambiguous ? issuers[name] : (issuers[`${tenant}:${name}`] ?? null));
+      const noTokens = !Object.values(issuers).some(i => i.issue_token || i.read_token || i.issue_token_digest || i.read_token_digest);
+      // A tokenless spec set is only servable behind an explicit opt-in —
+      // loopback alone must never open the issuer surface silently
+      // (w9-deploy F10).
+      const openLoopback = loopback && noTokens && allow_insecure_loopback;
+      const gate = (scope) => { requireThat(loopback || !noTokens, 'INV-503-CONNECTOR', 'Issuer endpoint requires a configured bearer token off loopback', 503); requireThat(!noTokens || allow_insecure_loopback, 'INV-503-CONNECTOR', 'Tokenless issuers require the insecure-loopback opt-in', 503); requireThat(anyBearer(scope) || openLoopback, 'INV-401-AUTH', `Issuer endpoint requires the ${scope} bearer token`, 401); };
+      // Own-property lookups only — a caller-controlled name like 'toString'
+      // must never resolve an inherited member into a truthy issuer
+      // (w9-fixverify: same oracle class as revoke()).
+      const own = k => (Object.hasOwn(issuers, k) ? issuers[k] : undefined);
+      const resolveIssuer = (name, tenant) => (tenant && own(`${tenant}:${name}`)) || (own(name) && !own(name).ambiguous ? own(name) : (own(`${tenant}:${name}`) ?? null));
       if (req.method === 'GET' && url.pathname === '/v1/issuers') {
         const auth = req.headers.authorization ?? '';
         const holder = Object.values(issuers).find(i => {
-          const t = i.read_token ?? i.issue_token;
-          return t && bearerMatches(auth, t) && (!i.token_expires_at || i.token_expires_at > clock());
+          const d = bearerDigest(i, 'read');
+          return d && bearerMatches(auth, d) && (!i.token_expires_at || i.token_expires_at > clock());
         });
-        if (!holder) { take('probe'); requireThat(loopback || !noTokens, 'INV-503-CONNECTOR', 'Issuer endpoint requires a configured bearer token off loopback', 503); requireThat(loopback && noTokens, 'INV-401-AUTH', 'Issuer listing requires a valid read bearer token', 401); } else take('read');
+        if (!holder) { take('probe'); requireThat(loopback || !noTokens, 'INV-503-CONNECTOR', 'Issuer endpoint requires a configured bearer token off loopback', 503); requireThat(!noTokens || allow_insecure_loopback, 'INV-503-CONNECTOR', 'Tokenless issuers require the insecure-loopback opt-in', 503); requireThat(openLoopback, 'INV-401-AUTH', 'Issuer listing requires a valid read bearer token', 401); } else take('read');
         // The directory is scoped to the holder's tenant: one issuer's token
         // must not enumerate every tenant's issuers (issuerd-audit MED-4),
         // and a tenantless holder must not enumerate tenant-scoped issuers
@@ -223,10 +254,12 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
       if (req.method === 'GET' && (m = /^\/v1\/issuers\/([A-Za-z0-9_-]+)\/manifest$/.exec(url.pathname))) {
         if (!anyBearer('read')) { take('probe'); } gate('read'); take('read');
         const issuer = resolveIssuer(m[1], url.searchParams.get('tenant'));
-        requireThat(issuer, 'INV-404-NOT-FOUND', 'Issuer not found', 404);
         const requestedTenant = url.searchParams.get('tenant');
-        if (requestedTenant) requireThat(!issuer.tenant || issuer.tenant === requestedTenant, 'INV-403-SCOPE', 'Issuer does not serve this tenant', 403);
-        checkAuth(issuer);
+        // Existence, tenant binding and per-issuer authorisation share one
+        // answer — a bearer for a different issuer learns nothing about
+        // whether the name resolved (w9-deploy F4).
+        requireThat(issuer && (!requestedTenant || !issuer.tenant || issuer.tenant === requestedTenant) && issuerAuthOk(issuer, 'read'), 'INV-404-NOT-FOUND', 'Issuer not found', 404);
+        take('read', issuer.issuer);
         return send(200, signed({
           connector_id: `issuer:${issuer.issuer}`, version: issuer.version, domain: issuer.channel,
           actions: Object.keys(issuer.kinds), permissions: ['issue signed evidence within declared kinds'],
@@ -238,16 +271,23 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
       if (req.method === 'POST' && (m = /^\/v1\/issuers\/([A-Za-z0-9_-]+)\/issue$/.exec(url.pathname))) {
         const chunks = []; let size = 0;
         for await (const c of req) { size += c.length; requireThat(size <= 262144, 'INV-413-BODY', 'Request too large', 413); chunks.push(c); }
-        const request = parseStrict(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));
+        // Malformed wire bytes surface as INV-400-SCHEMA, never as a 500:
+        // the fatal decoder throws TypeError, which the generic handler
+        // would otherwise map to INV-500 (w9-fixverify NB-1).
+        let request;
+        try { request = parseStrict(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))); }
+        catch (e) { if (e instanceof InvariantError) throw e; throw new InvariantError('INV-400-SCHEMA', 'Malformed request body encoding', 400); }
         fields(request, ['tenant_id', 'capsule_digest', 'kind', 'subject_id', 'claims'], ['dependencies']);
         identifier(request.tenant_id, 'tenant'); identifier(request.subject_id, 'subject'); text(request.kind, 'kind', 64);
         requireThat(/^[a-f0-9]{64}$/.test(request.capsule_digest), 'INV-400-SCHEMA', 'capsule_digest must be a digest');
         if (!anyBearer('issue')) { take('probe'); issuanceLog({ issuer: 'unknown', request_digest: digest(request), refused: true, unauthenticated: true, code: 'INV-401-AUTH' }); } gate('issue'); take('issue');
         const issuer = resolveIssuer(m[1], request.tenant_id);
-        requireThat(issuer, 'INV-404-NOT-FOUND', 'Issuer not found', 404);
         // Authentication failures are logged to the issuance chain too —
-        // probing must not be invisible to provenance audit (MED-5).
-        try { checkAuth(issuer, 'issue'); } catch (e) { issuanceLog({ issuer: issuer.issuer, request_digest: digest(request), refused: true, unauthenticated: true, code: e.code ?? 'ERR' }); throw e; }
+        // probing must not be invisible to provenance audit (MED-5) — but
+        // the response is a uniform 404 so wrong-issuer bearers cannot
+        // enumerate names (w9-deploy F4).
+        try { requireThat(issuer && issuerAuthOk(issuer, 'issue'), 'INV-404-NOT-FOUND', 'Issuer not found', 404); } catch (e) { issuanceLog({ issuer: issuer?.issuer ?? 'unknown', request_digest: digest(request), refused: true, unauthenticated: true, code: 'INV-404-NOT-FOUND' }); throw e; }
+        take('issue', issuer.issuer);
         issuer.metrics.requests++; const t0 = performance.now();
         try {
           const envelope = answerQuery(issuer, request, clock());
@@ -263,18 +303,28 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
       if (req.method === 'GET' && (m = /^\/v1\/issuers\/([A-Za-z0-9_-]+)\/health$/.exec(url.pathname))) {
         if (!anyBearer('read')) { take('probe'); } gate('read'); take('read');
         const issuer = resolveIssuer(m[1], url.searchParams.get('tenant'));
-        requireThat(issuer, 'INV-404-NOT-FOUND', 'Issuer not found', 404);
-        checkAuth(issuer);
+        requireThat(issuer && issuerAuthOk(issuer, 'read'), 'INV-404-NOT-FOUND', 'Issuer not found', 404);
+        take('read', issuer.issuer);
         const lat = issuer.metrics.latencies, sorted = [...lat].sort((a, b) => a - b);
-        return send(200, { status: 'ok', issuer: issuer.issuer, version: issuer.version, records: Object.keys(issuer.records).length, uptime_ms: process.uptime() * 1000 | 0, metrics: { requests: issuer.metrics.requests, errors: issuer.metrics.errors, issued: issuer.metrics.issued, refused: issuer.metrics.refused, p50_ms: sorted.length ? sorted[Math.floor(sorted.length / 2)] : 0 }, token_expires_at: issuer.token_expires_at ?? null });
+        // Latencies are floats — emit an integer so the response can never
+        // fail canonicalisation (w9-deploy F1).
+        return send(200, { status: 'ok', issuer: issuer.issuer, version: issuer.version, records: Object.keys(issuer.records).length, uptime_ms: process.uptime() * 1000 | 0, metrics: { requests: issuer.metrics.requests, errors: issuer.metrics.errors, issued: issuer.metrics.issued, refused: issuer.metrics.refused, p50_ms: sorted.length ? Math.round(sorted[Math.floor(sorted.length / 2)]) : 0 }, token_expires_at: issuer.token_expires_at ?? null });
       }
       throw new InvariantError('INV-404-NOT-FOUND', 'Resource not found', 404);
     } catch (e) {
-      const known = e instanceof InvariantError;
-      send(known ? e.status : 500, { error: { code: known ? e.code : 'INV-500-INTERNAL', message: known ? e.message : 'Internal failure', ...(e.details ? { details: e.details } : {}) } });
+      // Serialize-first send plus this guard: a mid-response failure
+      // destroys the socket instead of re-writing headers — and a throw
+      // inside the catch can never exit the process (w9-deploy F1/F2).
+      try {
+        const known = e instanceof InvariantError;
+        if (!res.headersSent) send(known ? e.status : 500, { error: { code: known ? e.code : 'INV-500-INTERNAL', message: known ? e.message : 'Internal failure' } });
+        else res.destroy();
+      } catch { res.destroy(); }
     }
   });
-  server.requestTimeout = 10000;
+  // Socket hardening mirrors the main server: header trickle, idle
+  // keep-alives and unbounded request streams are all bounded (w9-deploy F5).
+  server.requestTimeout = 15000; server.headersTimeout = 8000; server.keepAliveTimeout = 5000; server.maxRequestsPerSocket = 100;
   return { server, issuers, listen: () => new Promise(r => server.listen(port, host, r)), close: () => new Promise((r, j) => { server.closeAllConnections(); server.close(e => e ? j(e) : r()); }) };
 }
 
@@ -290,7 +340,7 @@ if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
     const directory = resolve(opt('dir', './var/issuers'));
     const port = Number(opt('port', '8090'));
     const issuers = loadIssuers(directory);
-    const app = createIssuerServer(issuers, { port, logPath: join(directory, 'issuance-log.jsonl') });
+    const app = createIssuerServer(issuers, { port, logPath: join(directory, 'issuance-log.jsonl'), allow_insecure_loopback: args.includes('--allow-insecure-loopback') });
     await app.listen();
     console.log(`Invariant evidence issuers on http://127.0.0.1:${port} serving: ${Object.keys(issuers).join(', ')}`);
     const close = async () => { await app.close(); process.exit(0); };

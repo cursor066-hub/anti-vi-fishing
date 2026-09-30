@@ -401,7 +401,10 @@ export class Fabric {
       // Nonce namespaces are per-surface: a capsule must not squat on an
       // attestation nonce (or vice versa) to block a legitimate session
       // open (w8-canonical F12).
-      const prior = this.store.db.prepare('SELECT capsule FROM nonces WHERE tenant=? AND nonce=?').get(p.tenant_id, 'capsule:' + input.nonce);
+      // The bare-key lookup also covers nonce rows written before the
+      // 'capsule:'/'perception:' namespacing shipped — a legacy row must
+      // still block the replay (w9-fixverify NB-5).
+      const prior = this.store.db.prepare('SELECT capsule FROM nonces WHERE tenant=? AND nonce IN (?, ?)').get(p.tenant_id, 'capsule:' + input.nonce, input.nonce);
       requireThat(!prior, 'INV-409-REPLAY', 'Nonce is already bound to another action', 409);
       const capsule = { ...clone(input), request_intent: clone(requestIntent), capsule_id: randomUUID(), tenant_id: p.tenant_id, received_at: now };
       const record = { capsule, capsule_digest: digest(capsule), status: 'CANONICALISED', evidence: [], approvals: [], decision: null, certificate_id: null, created_at: now };
@@ -1603,7 +1606,9 @@ export class Fabric {
       const session = openSession(component, attestation, this.policy(t), now);
       this.assertHealthy(t, p.subject_id, this.identity(p).device_id, now);
       // Replay guard: an attestation nonce may mint exactly one session.
-      const seen = this.store.db.prepare('SELECT capsule FROM nonces WHERE tenant=? AND nonce=?').get(t, 'perception:' + attestation.payload.nonce);
+      // Bare-key lookup covers pre-namespacing rows as well (w9-fixverify
+      // NB-5): a legacy nonce row must still block the replay.
+      const seen = this.store.db.prepare('SELECT capsule FROM nonces WHERE tenant=? AND nonce IN (?, ?)').get(t, 'perception:' + attestation.payload.nonce, attestation.payload.nonce);
       requireThat(!seen, 'INV-409-REPLAY', 'Attestation nonce already consumed', 409);
       this.store.db.prepare('INSERT INTO nonces VALUES(?,?,?)').run(t, 'perception:' + attestation.payload.nonce, `perception:${session.session_id}`);
       const stored = { ...session, _server_private: session._server_private.export({ type: 'pkcs8', format: 'pem' }), creator: p.subject_id };

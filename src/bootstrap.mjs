@@ -206,7 +206,10 @@ export function bootstrap(directory, tenants = ['acme'], now = Date.now(), { iss
     for (const [name, role] of Object.entries(ISSUER_ROLES)) {
       const key = setup.issuerKeys[tenant][name];
       const registered = Object.values(setup.config.tenants[tenant].issuers).find(i => i.name === name);
-      const spec = { issuer: name, tenant, version: '1.0.0', channel: role.channel, key, kinds: ISSUER_RULES[name] ?? {}, records: records[name] ?? {}, issue_token: registered?.issue_token, read_token: registered?.read_token, token_expires_at: registered?.token_expires_at };
+      // Spec files carry bearer DIGESTS, not plaintext — the file handed to
+      // the issuerd host must not hold a live credential (w9-deploy F7).
+      // config.json keeps the plaintext it needs for outbound auth.
+      const spec = { issuer: name, tenant, version: '1.0.0', channel: role.channel, key, kinds: ISSUER_RULES[name] ?? {}, records: records[name] ?? {}, ...(registered?.issue_token ? { issue_token_digest: digest(`Bearer ${registered.issue_token}`) } : {}), ...(registered?.read_token ? { read_token_digest: digest(`Bearer ${registered.read_token}`) } : {}), ...(registered?.token_expires_at ? { token_expires_at: registered.token_expires_at } : {}) };
       save(join(issuerDir, `${tenant}-${name}.issuer.json`), spec);
     }
     // Dev secure-view component bundle for the operator console.

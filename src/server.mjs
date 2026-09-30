@@ -41,7 +41,7 @@ export const ROUTE_METHODS = new Map(Object.entries({
   '/v1/secure-perception/fallback': 'POST', '/v1/advisory': 'POST',
 }).map(([k, v]) => [k, v.split(',')]));
 
-export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin = `http://127.0.0.1:${port}`, tenantSessionCap = 250 } = {}) {
+export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin = `http://127.0.0.1:${port}`, tenantSessionCap = 250, trustProxy = false } = {}) {
   requireThat(['127.0.0.1', '::1'].includes(host), 'INV-503-RELEASE', 'Engineering HTTP service must bind to loopback', 503);
   const web = fileURLToPath(new URL('../web/', import.meta.url));
   const sessions = new Map(), rate = new Map();
@@ -125,6 +125,17 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
     // as a clean error response, never a destroyed socket after a 200 header.
     const send = (status, data, type = 'application/json; charset=utf-8') => { const bodyOut = type.startsWith('application/json') ? canonical(data) : data; res.writeHead(status, { 'Content-Type': type }); res.end(bodyOut); };
     try {
+      // Bucket identity: the socket peer, or the first X-Forwarded-For hop
+      // when --trust-proxy is set AND the peer is loopback — the shipped
+      // nginx pairs all real clients onto 127.0.0.1, so socket-keyed
+      // buckets collapse to one global bucket behind it (w9-deploy F3). A
+      // direct non-loopback client can never spoof the header.
+      const peer = req.socket.remoteAddress;
+      const clientIp = trustProxy && ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(peer)
+        ? (req.headers['x-forwarded-for']?.split(',')[0]?.trim() || peer) : peer;
+      // Rate-limit before any request validation — malformed traffic must
+      // consume the budget too (w9-deploy F9).
+      rateLimit(`ip:${clientIp}`, 600);
       requireThat(['GET', 'POST'].includes(req.method), 'INV-405-METHOD', 'Method not allowed', 405);
       requireThat(req.headers.host === new URL(origin).host, 'INV-400-HOST', 'Unrecognised host', 400);
       requireThat(!req.headers.origin || req.headers.origin === origin, 'INV-403-ORIGIN', 'Cross-origin requests are not allowed', 403);
@@ -135,13 +146,12 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       const rawTarget = req.url, rawPath = rawTarget.split('?')[0];
       requireThat(rawTarget.startsWith('/') && rawPath === path, 'INV-400-SCHEMA', 'Request target must be an origin-form canonical path', 400);
       queryCheck(url, path);
-      rateLimit(`ip:${req.socket.remoteAddress}`, 600);
       if (path === '/healthz' && req.method === 'GET') return send(200, { status: 'ok', profile: 'engineering', production_ready: false });
       if (path === '/readyz' && req.method === 'GET') { fabric.store.db.prepare('SELECT 1').get(); return send(200, { status: 'ready', profile: 'engineering', real_targets: false }); }
       const assets = { '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/style.css': ['style.css', 'text/css; charset=utf-8'] };
       if (req.method === 'GET' && assets[path]) { const [file, type] = assets[path]; return send(200, readFileSync(join(web, file)), type); }
       if (path === '/session' && req.method === 'POST') {
-        rateLimit(`login:${req.socket.remoteAddress}`, 20);
+        rateLimit(`login:${clientIp}`, 20);
         requireThat(req.headers.origin === origin, 'INV-403-ORIGIN', 'Session creation requires same origin', 403);
         const input = await body(req); fields(input, ['token']); const result = authenticateToken(input.token);
         // A login is a tenant-scoped request too — attribute it once the

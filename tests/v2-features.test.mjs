@@ -257,7 +257,7 @@ test('EVD-004 CON-001: issuerd answers evidence queries over real HTTP; answers 
   const key = generateKey();
   const spec = { issuer: 'bank', tenant: 'acme', version: '1.0.0', channel: 'authoritative', key, kinds: ISSUER_RULES.bank, records: issuerRecords().bank };
   writeIssuer(dir, spec);
-  const srv = createIssuerServer({ bank: spec }, { port: 0, host: '127.0.0.1' });
+  const srv = createIssuerServer({ bank: spec }, { port: 0, host: '127.0.0.1', allow_insecure_loopback: true });
   await srv.listen(); t.after(() => srv.close());
   const port = srv.server.address().port;
   const manifest = await httpJson(`http://127.0.0.1:${port}/v1/issuers/bank/manifest`);
@@ -273,7 +273,7 @@ test('EVD-004: fabric.acquireEvidence fetches evidence over HTTP and attaches it
   const h = fixture(t);
   const issuers = issuerRecords();
   const spec = { issuer: 'bank', tenant: 'acme', version: '1.0.0', channel: 'authoritative', key: h.setup.issuerKeys.acme.bank, kinds: ISSUER_RULES.bank, records: issuers.bank };
-  const srv = createIssuerServer({ bank: spec }, { port: 0, host: '127.0.0.1', clock: () => h.now() });
+  const srv = createIssuerServer({ bank: spec }, { port: 0, host: '127.0.0.1', clock: () => h.now(), allow_insecure_loopback: true });
   await srv.listen(); t.after(() => srv.close());
   const port = srv.server.address().port;
   // Point the bank issuer entry at the live daemon
@@ -337,7 +337,7 @@ test('DAT-009 DAT-011: reconstruction budget and watermarks on released rows', t
 
 // ---------- End-to-end bootstrap with vault ----------
 
-test('NFR-SEC-004 KEY-002: bootstrap writes vault + master key; config has no private key material', t => {
+test('NFR-SEC-004 KEY-002 CON-007: bootstrap writes vault + master key; config has no private key material', t => {
   const dir = join(tmpdir(), `if-boot-${randomBytes(6).toString('hex')}`);
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const result = bootstrap(dir, ['acme'], Date.now());
