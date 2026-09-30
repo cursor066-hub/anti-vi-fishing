@@ -48,7 +48,7 @@ There are no external URL fetch, plaintext-key extraction, raw SQL, universal ad
 | Surface | Endpoint | Roles | Notes |
 |---|---|---|---|
 | Evidence | `POST /v1/action-capsules/{id}/acquire-evidence` | operator, security | Live HTTP acquisition from registered issuer; 201 attaches envelope. |
-| Connectors | `GET /v1/connectors/status` · `POST /v1/connectors/{id}/drift-check` | authenticated / security, policy_admin | Registered issuer inventory; live-manifest drift audit. |
+| Connectors | `GET /v1/connectors/status` · `POST /v1/connectors/{id}/drift-check` · `POST /v1/config-drift/reassert` | authenticated / security, policy_admin / security | Registered issuer inventory; live-manifest drift audit; re-attest configuration after drift quarantine. |
 | Audit proofs | `GET /v1/audit/proofs/{seq}` · `GET /v1/audit/consistency?first=N` · `POST /v1/audit/verify-proof` · `GET /v1/audit/entries?cursor=&limit=` | operator, security, auditor / authenticated | Merkle inclusion and consistency proofs; cursor-paginated signed entries. |
 | Ceremonies | `GET|POST /v1/ceremonies` · `POST /v1/ceremonies/{id}/{acknowledge,split,reconstruct}` | security, custodian, policy_admin | Committed Shamir shares; quorum enforced. |
 | Keys | `GET /v1/keys` · `POST /v1/keys/rotate-prepare` · `GET /v1/keys/{id}/attest` | security, policy_admin / auditor | Metadata only; pending keys sign nothing until `key.rotate` verifies. |
