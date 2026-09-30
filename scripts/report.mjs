@@ -32,9 +32,12 @@ write('reports/test-summary.json', JSON.stringify(testSummary, null, 2) + '\n');
 write('reports/final-regression-summary.json', JSON.stringify({ ...testSummary, scope: 'final regression baseline' }, null, 2) + '\n');
 
 // ---- 2. Verifier outputs ----
-const nodeVerify = run(process.execPath, ['scripts/verify-export.mjs', 'reports/sample-audit.json', 'reports/sample-pinned-trust.json']);
+// Verifiers run against the PINNED committed bundle — sample-*.json churns
+// on every simulate run (fresh keys), so checking verifier output against it
+// can never be byte-stable (w8-tooling F10 follow-up).
+const nodeVerify = run(process.execPath, ['scripts/verify-export.mjs', 'reports/sample-audit.pinned.json', 'reports/sample-pinned-trust.pinned.json']);
 write('reports/verification-node.json', JSON.stringify({ verifier: 'scripts/verify-export.mjs (node:crypto)', exit: nodeVerify.status, output: (nodeVerify.stdout ?? '').trim() }, null, 2) + '\n');
-const bun = run('bun', ['scripts/verify-export-webcrypto.mjs', 'reports/sample-audit.json', 'reports/sample-pinned-trust.json']);
+const bun = run('bun', ['scripts/verify-export-webcrypto.mjs', 'reports/sample-audit.pinned.json', 'reports/sample-pinned-trust.pinned.json']);
 if (bun.error || bun.status === null) write('reports/verification-webcrypto.json', JSON.stringify({ verifier: 'scripts/verify-export-webcrypto.mjs (bun WebCrypto)', exit: null, output: 'bun not installed on this machine — verifier not run' }, null, 2) + '\n');
 else write('reports/verification-webcrypto.json', JSON.stringify({ verifier: 'scripts/verify-export-webcrypto.mjs (bun WebCrypto)', exit: bun.status, output: (bun.stdout ?? '').trim() }, null, 2) + '\n');
 const py = run('python3', ['scripts/verify-vectors.py']);

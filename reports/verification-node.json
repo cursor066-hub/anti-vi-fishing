@@ -1,5 +1,5 @@
 {
   "verifier": "scripts/verify-export.mjs (node:crypto)",
   "exit": 0,
-  "output": "{\n  \"valid\": true,\n  \"entries\": 156,\n  \"head\": \"52fd84ba80431179af52a630d0837a5ecc0f54159fe700da9154d96698649069\",\n  \"tenant_id\": \"acme\"\n}"
+  "output": "{\n  \"valid\": true,\n  \"entries\": 156,\n  \"head\": \"205a927ce554d8b6eb142fe9420856b32b70720862c2c7c64d3cfa52120b6945\",\n  \"tenant_id\": \"acme\"\n}"
 }
