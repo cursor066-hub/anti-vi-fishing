@@ -11,13 +11,17 @@ import { requireThat, InvariantError } from './errors.mjs';
 // purpose. Reconstructing the secret cryptographically requires >= threshold
 // distinct custodian shares — the approval record cannot bypass the math.
 
-export function createCeremony({ ceremony_id, tenant_id, purpose, threshold, custodians, valid_until, min_delay_ms = 0 }) {
-  fields({ ceremony_id, tenant_id, purpose, threshold, custodians, valid_until }, ['ceremony_id', 'tenant_id', 'purpose', 'threshold', 'custodians', 'valid_until'], ['min_delay_ms']);
+export function createCeremony({ ceremony_id, tenant_id, purpose, threshold, custodians, valid_until, min_delay_ms = 0, devices = {} }) {
+  fields({ ceremony_id, tenant_id, purpose, threshold, custodians, valid_until }, ['ceremony_id', 'tenant_id', 'purpose', 'threshold', 'custodians', 'valid_until'], ['min_delay_ms', 'devices']);
   identifier(ceremony_id); identifier(tenant_id, 'tenant'); text(purpose, 'purpose', 64);
   integer(threshold, 'threshold', 2, custodians.length);
   uniqueStrings(custodians, 'custodians', 16); integer(valid_until, 'valid until', 1); integer(min_delay_ms, 'minimum delay', 0, 30 * 24 * 3600 * 1000);
+  // KEY-012: when supplied, `devices` binds each custodian to the device that
+  // will present its share — unknown custodians or malformed ids are rejected.
+  requireThat(devices === null || typeof devices === 'object', 'INV-400-SCHEMA', 'devices must be a custodian→device map');
+  for (const [custodian, device] of Object.entries(devices ?? {})) { requireThat(custodians.includes(custodian), 'INV-400-SCHEMA', 'devices names a non-custodian'); identifier(device, 'device'); }
   return {
-    ceremony_id, tenant_id, purpose, threshold, custodians: [...custodians].sort(), valid_until, min_delay_ms,
+    ceremony_id, tenant_id, purpose, threshold, custodians: [...custodians].sort(), valid_until, min_delay_ms, devices,
     status: 'planned', acknowledgements: [], share_commitments: [], exceptions: [], notices: [], committed_at: null,
     artifact_digest: digest({ ceremony_id, tenant_id, purpose, threshold, custodians, valid_until, min_delay_ms })
   };

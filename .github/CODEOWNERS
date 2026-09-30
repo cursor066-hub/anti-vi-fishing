@@ -1,0 +1,13 @@
+# Verification-defining files require owner review: whoever can change what
+# "verified" means can change the meaning of green CI.
+.github/workflows/       @cursor066-hub
+scripts/check.mjs        @cursor066-hub
+scripts/manifest.mjs     @cursor066-hub
+scripts/traceability.py  @cursor066-hub
+scripts/release-check.mjs @cursor066-hub
+scripts/generate-vectors.mjs @cursor066-hub
+scripts/report.mjs       @cursor066-hub
+docs/production-acceptance.json @cursor066-hub
+MANIFEST.sha256          @cursor066-hub
+scripts/ai-eval.mjs      @cursor066-hub
+ai-eval/                 @cursor066-hub

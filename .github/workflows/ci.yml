@@ -5,9 +5,19 @@ on:
     branches: [main, 'devin/**']
   pull_request:
 
+# Least-privilege token: the pipeline only reads the checkout.
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: engineering-ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -18,14 +28,20 @@ jobs:
           python-version: '3.12'
       - uses: actions/setup-node@v4
         with:
-          node-version: '24.16.0'
-      - run: pip install 'cryptography>=3.4.8'
+          node-version: '24.19.0'
+      - run: pip install 'cryptography==46.0.7'
       - name: Static source checks
         run: node scripts/check.mjs
       - name: Test suite
         run: npm test
       - name: Simulation harness
         run: node scripts/simulate.mjs
+      # Verify the COMMITTED vectors first — a tampered checked-in vector set
+      # must fail before regeneration can erase it (release-audit H2).
+      - name: Committed conformance vectors verify
+        run: |
+          python3 scripts/verify-vectors.py
+          node scripts/verify-vectors-webcrypto.mjs
       - name: Cross-implementation conformance vectors
         run: npm run conformance
       - name: Independent export verifiers (node + bun)
@@ -33,10 +49,32 @@ jobs:
           node scripts/verify-export.mjs reports/sample-audit.json reports/sample-pinned-trust.json
           bun scripts/verify-export-webcrypto.mjs reports/sample-audit.json reports/sample-pinned-trust.json
           python3 scripts/canonical-vectors.py examples/canonical-vectors.json
-      - name: Benchmark (informational)
-        run: node scripts/benchmark.mjs
+      - name: Benchmark (asserted eval budget, informational runtime)
+        run: node scripts/benchmark.mjs --assert
+      - name: AI advisory golden eval
+        run: node scripts/ai-eval.mjs
       - name: Requirements traceability
         run: python3 scripts/traceability.py
-      - name: Production gate (expected BLOCKED, informational)
-        continue-on-error: true
-        run: node scripts/release-check.mjs
+      # Deterministic generated artifacts must match what is committed —
+      # a stale contract, ledger or vector set fails the build (release-audit H1).
+      # ES256 envelope vectors are ECDSA-nonced (regenerated per run, verified
+      # at committed state above); sample-* audit bundles mint fresh keys.
+      - name: Generated artifacts are not stale
+        run: |
+          node scripts/report.mjs --check-only
+          git diff --exit-code -- docs/ examples/ ai-eval/ vectors/canonical-vectors.json vectors/envelope-vectors.json vectors/keys.json reports/code-inventory.json reports/sbom.cdx.json reports/requirements-summary.json reports/VERIFICATION.md reports/verification-summary.json reports/test-summary.json reports/tests.tap reports/final-regression.tap reports/final-regression-summary.json reports/artifact-audit.json reports/source-check.json reports/production-gate.json
+      - name: Upload verification evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-evidence
+          path: reports/
+          retention-days: 30
+      # The production gate must fail (BLOCKED) — exit 0 is a broken gate,
+      # not a pass. Asserting the expected non-zero keeps the gate honest.
+      - name: Production gate remains honestly BLOCKED
+        run: |
+          set +e
+          node scripts/release-check.mjs
+          code=$?
+          set -e
+          test "$code" -eq 1

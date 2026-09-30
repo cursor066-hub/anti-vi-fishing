@@ -32,6 +32,24 @@ try {
   let allowed = 1, blocked = null;
   for (let i = 0; i < 60; i++) { h.advance(1001); try { const c = h.f.runtime.issue(h.p(), runtimeInput()); h.f.runtime.consume(h.p(), runtimeRequest(c)); allowed++; } catch (e) { blocked = e.code; break; } }
   scenario('Low-and-slow extraction across new capabilities', 'INV-429-BUDGET', () => blocked);
+  // A gate dead after the very first consume would still satisfy the
+  // throttle oracle — bound the useful work it must do first (release-audit M5).
+  scenario('Budget throttling engages only after real capacity', true, () => allowed > 1);
+  // NFR-OPS-005: staged canary rollout — a verified successor stages behind
+  // its not_before slot, the old constitution keeps serving through the
+  // window, then exactly one version promotes at activate_at.
+  const active = h.f.policy('acme'), canary = clone(active);
+  canary.version = 2; canary.policy_id = 'constitution:acme:v2'; canary.not_before = h.now() + 240000;
+  canary.rules['finance.payment.first'].max_quantity = 5;
+  const pc = h.proposed('policy.change', { policy: canary }, { action: { type: 'policy.change', target_resource: 'policy-root', purpose: 'Canary rollout' } });
+  h.f.simulate(h.p('policy-admin'), canary); h.advance(120001);
+  h.evidence(pc, { kind: 'governance_review' }); h.evidence(pc, { kind: 'governance_review', issuer: 'audit-committee' }); h.approve(pc, 3);
+  const pcCert = h.f.certificate(h.p(), pc.capsule.capsule_id);
+  scenario('Staged canary policy verifies and parks behind not_before', 'VERIFIED', () => h.f.execute(h.p(), pcCert).payload.status);
+  scenario('Old constitution keeps serving inside the stage window', 1, () => h.f.policy('acme').version);
+  h.advance(150000); h.proposed();
+  scenario('Exactly one version promotes at activate_at', 2, () => h.f.policy('acme').version);
+  scenario('Tightened rule applies after cutover', 5, () => h.f.policy('acme').rules['finance.payment.first'].max_quantity);
   h.f.revoke(h.p('security'), { kind: 'device', id: 'operator-device', reason: 'Synthetic endpoint agent loss' });
   scenario('Device quarantine prevents renewal', 'INV-403-QUARANTINE', () => h.f.runtime.issue(h.p(), runtimeInput()));
   const bundle = h.f.exportAudit(h.p('auditor'), 'Synthetic simulation evidence');

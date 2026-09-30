@@ -47,7 +47,15 @@ export const TRANSFORMS = {
   mask: (value, field) => value === null || value === undefined ? null : '\u2022\u2022\u2022\u2022' + String(value).slice(-2),
   tokenise: (value, field, ctx) => 'tok:' + createHmac('sha256', ctx.tenantKey).update(`${ctx.tenant}/${ctx.dataset}/${field}/${canonical(value)}`).digest('hex').slice(0, 24),
   drop: () => null,
-  constant: (value, field, ctx, arg) => arg ?? null
+  constant: (value, field, ctx, arg) => arg ?? null,
+  // Generalization: replace a numeric value with a fixed-size bucket range.
+  // Deterministic so the transformed output is recomputable by an assessor.
+  aggregate: (value, field, ctx, arg) => {
+    if (value === null || value === undefined) return null;
+    const size = Number.isSafeInteger(arg) && arg > 0 ? arg : 100;
+    const n = Number(value); if (!Number.isFinite(n)) return null;
+    const lo = Math.floor(n / size) * size; return `${lo}-${lo + size - 1}`;
+  }
 };
 export function applyTransforms(rows, transforms, ctx) {
   // transforms: {column: {op, arg?}} — returns new rows; never mutates source.

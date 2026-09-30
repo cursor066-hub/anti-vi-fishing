@@ -14,6 +14,9 @@ export const ISSUER_ROLES = {
   bank: { channel: 'authoritative', kinds: ['ownership', 'payment_confirmation'] },
   registry: { channel: 'authoritative', kinds: ['ownership', 'dataset_authority', 'identity_proof', 'legal_registry'] },
   governance: { channel: 'authoritative', kinds: ['governance_review'] },
+  // A second independent governance domain — independent_domains:2 must not
+  // be satisfiable by one issuer's key alone (issuerd-audit HIGH-1).
+  'audit-committee': { channel: 'authoritative', kinds: ['governance_review'] },
   hris: { channel: 'authoritative', kinds: ['identity_proof', 'recovery_authority'] },
   'device-attestation': { channel: 'device', kinds: ['device_health', 'workload_attestation'] },
   counterparty: { channel: 'counterparty', kinds: ['counterparty_credential', 'ownership'] },
@@ -35,6 +38,9 @@ export const ISSUER_RULES = {
     legal_registry: { lookup: 'entity:${claims.entity}', expect: { registration: '${claims.registration}' }, extract: ['jurisdiction', 'status'], ttl_ms: 86400000, confidence: 98 }
   },
   governance: {
+    governance_review: { lookup: 'review:${claims.ref}', expect: { approved: 'true' }, extract: ['quorum', 'decided_at'], ttl_ms: 86400000, confidence: 100 }
+  },
+  'audit-committee': {
     governance_review: { lookup: 'review:${claims.ref}', expect: { approved: 'true' }, extract: ['quorum', 'decided_at'], ttl_ms: 86400000, confidence: 100 }
   },
   hris: {
@@ -77,6 +83,9 @@ export function issuerRecords(tenant) {
     governance: {
       'review:REV-2026-001': { approved: 'true', quorum: 3, decided_at: 1788600000000 }
     },
+    'audit-committee': {
+      'review:REV-2026-002': { approved: 'true', quorum: 5, decided_at: 1788600000000 }
+    },
     hris: {
       'employee:operator': { status: 'active', proofing: 'high', employed_since: 1700000000000 },
       'recovery:CASE-001': { subject: 'operator', approved: 'true', approved_by: 'hris-board' }
@@ -100,12 +109,12 @@ export function issuerRecords(tenant) {
 }
 
 export function createConfiguration(tenantNames = ['acme'], now = Date.now(), { vault = null, issuerEndpoint = null } = {}) {
-  const config = { format: 'IF-CONFIG-1', profile: 'engineering', gate_id: 'local-software-gate', tenants: {} }, credentials = {}, custodianKeys = {}, issuerKeys = {}, componentSecrets = {};
+  const config = { format: 'IF-CONFIG-1', profile: 'engineering', gate_id: 'local-software-gate', tenants: {} }, credentials = {}, custodianKeys = {}, issuerKeys = {}, componentSecrets = {}, identityKeys = {};
   for (const tenant of tenantNames) {
     requireThat(/^[a-z][a-z0-9-]{1,31}$/.test(tenant), 'INV-400-SCHEMA', 'Tenant must use lowercase alphanumeric characters');
     const policy = defaultPolicy(tenant), identities = {}, auth = {}, identityPrivate = {};
     const roles = [['operator', ['operator']], ['security', ['security']], ['auditor', ['auditor']], ['policy-admin', ['policy_admin']], ...Array.from({ length: 5 }, (_, i) => [`custodian-${i + 1}`, ['approver', 'custodian']])];
-    credentials[tenant] = {}; custodianKeys[tenant] = {}; issuerKeys[tenant] = {}; componentSecrets[tenant] = {};
+    credentials[tenant] = {}; custodianKeys[tenant] = {}; issuerKeys[tenant] = {}; componentSecrets[tenant] = {}; identityKeys[tenant] = identityPrivate;
     for (const [subject, role] of roles) {
       const key = generateKey(), token = randomBytes(32).toString('base64url');
       identities[key.key_id] = { public_key: key.public_key, subject_id: subject, identity_class: 'workforce', roles: role, device_id: `${subject}-device`, failure_domain: `${tenant}-${subject}`, hardware_backed: false, health_expires_at: now + 86400000, grants: { resources: ['dataset-1', 'erp-service'], actions: ['data.read', 'service.connect'], destinations: ['customer-vault', 'erp-service'], columns: ['id', 'name', 'region'], row_ids: ['row-1', 'row-2', 'row-3'] } };
@@ -113,17 +122,18 @@ export function createConfiguration(tenantNames = ['acme'], now = Date.now(), { 
       if (role.includes('custodian')) custodianKeys[tenant][subject] = key;
     }
     const issuers = {};
-    const allKinds = [...new Set(Object.values(ISSUER_ROLES).flatMap(r => r.kinds))];
     for (const [name, role] of Object.entries(ISSUER_ROLES)) {
       const key = generateKey(); issuerKeys[tenant][name] = key;
-      // Dev/test config registers the full kind set per issuer (authoritative
-      // scoping is enforced by issuerd rules in real deployments: a daemon can
-      // only answer the kinds in its rules file). This preserves the fixture
-      // contract where any configured issuer may attest any kind.
-      // The issuance endpoint is authenticated by a per-issuer bearer token
-      // shared between the registered connector metadata and the daemon spec.
-      const issue_token = randomBytes(24).toString('base64url');
-      issuers[key.key_id] = { public_key: key.public_key, name, issuer_id: name, failure_domain: `${tenant}-${name}`, channel: role.channel, kinds: allKinds, version: '1.0.0', issue_token };
+      // Registered kinds are the issuer's own ceiling — a compromised issuer
+      // key can mint only its declared kinds, not universal evidence
+      // (EVD-001/CON-002; issuerd-audit HIGH-1). They mirror exactly what the
+      // issuer's rules file declares, so a first drift-check is clean rather
+      // than structurally drifted.
+      // Short-lived scoped credentials (IDN-009/CON-002): a write-scope
+      // issue_token for /issue and a read-scope read_token for manifest/
+      // health/listing; both expire within a day and rotate via config update.
+      const issue_token = randomBytes(24).toString('base64url'), read_token = randomBytes(24).toString('base64url'), token_expires_at = now + 86400000;
+      issuers[key.key_id] = { public_key: key.public_key, name, issuer_id: name, failure_domain: `${tenant}-${name}`, channel: role.channel, kinds: role.kinds, version: '1.0.0', issue_token, read_token, token_expires_at };
       if (issuerEndpoint) issuers[key.key_id].endpoint = `${issuerEndpoint}`;
     }
     // Dev Secure Perception component: generated per tenant; private material
@@ -136,7 +146,7 @@ export function createConfiguration(tenantNames = ['acme'], now = Date.now(), { 
     const audit = vault ? vault.generate(['audit', 'outcome', 'revocation', 'coverage', 'checkpoint', 'backup-manifest'], {}) : generateKey();
     config.tenants[tenant] = { encryption_key: randomBytes(32).toString('base64url'), watermark_key: randomBytes(32).toString('base64url'), keys: { execution: { key_id: execution.key_id, public_key: execution.public_key, custody: vault ? 'vault' : 'embedded', ...(vault ? {} : { private_key: execution.private_key }) }, audit: { key_id: audit.key_id, public_key: audit.public_key, custody: vault ? 'vault' : 'embedded', ...(vault ? {} : { private_key: audit.private_key }) } }, identities, issuers, components, auth, genesis_policy: policy, genesis_signatures: Object.values(custodianKeys[tenant]).slice(0, 3).map(k => signed(policy, k, 'root-policy')) };
   }
-  return { config, credentials, custodianKeys, issuerKeys, componentSecrets, vault };
+  return { config, credentials, custodianKeys, issuerKeys, componentSecrets, identityKeys, vault };
 }
 
 export function createDevComponent(name) {
@@ -164,9 +174,14 @@ export function bootstrap(directory, tenants = ['acme'], now = Date.now(), { iss
     const audit = setup.config.tenants[tenant].keys.audit;
     save(join(directory, `trust-public-${tenant}.json`), { [audit.key_id]: { public_key: audit.public_key }, attestor: setup.vault.attestorPublicKeys() });
     for (const [subject, key] of Object.entries(setup.custodianKeys[tenant])) save(join(signingDir, `${tenant}-${subject}.json`), key);
+    // Dev identity keys for request-intent signing (ACT-005): operators sign
+    // capsule-intent envelopes offline — the private halves live only in this
+    // 0700 directory, never in config or on the gate.
+    for (const [subject, key] of Object.entries(setup.identityKeys[tenant])) save(join(signingDir, `identity-${tenant}-${subject}.json`), key);
     for (const [name, role] of Object.entries(ISSUER_ROLES)) {
       const key = setup.issuerKeys[tenant][name];
-      const spec = { issuer: name, tenant, version: '1.0.0', channel: role.channel, key, kinds: ISSUER_RULES[name] ?? {}, records: records[name] ?? {}, issue_token: Object.values(setup.config.tenants[tenant].issuers).find(i => i.name === name)?.issue_token };
+      const registered = Object.values(setup.config.tenants[tenant].issuers).find(i => i.name === name);
+      const spec = { issuer: name, tenant, version: '1.0.0', channel: role.channel, key, kinds: ISSUER_RULES[name] ?? {}, records: records[name] ?? {}, issue_token: registered?.issue_token, read_token: registered?.read_token, token_expires_at: registered?.token_expires_at };
       save(join(issuerDir, `${tenant}-${name}.issuer.json`), spec);
     }
     // Dev secure-view component bundle for the operator console.

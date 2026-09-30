@@ -1,6 +1,5 @@
 {
-  "valid": true,
-  "entries": 142,
-  "head": "f7a5fe1e5bbe4c1d73e62a38ab41bfdb287baa237d2b4579ea2de2a8eec86078",
-  "tenant_id": "acme"
+  "verifier": "scripts/verify-export.mjs (node:crypto)",
+  "exit": 0,
+  "output": "{\n  \"valid\": true,\n  \"entries\": 156,\n  \"head\": \"4ae1da6ac5bc33e45c1f76260581fe4fa06b3ba0564a9141c1e1c7616ac262c8\",\n  \"tenant_id\": \"acme\"\n}"
 }

@@ -3,7 +3,7 @@ import { digest, clone } from './canonical.mjs';
 import { verifySigned } from './crypto.mjs';
 import { fields, identifier, text, integer, oneOf, uniqueStrings } from './schema.mjs';
 import { watermark, applyTransforms, reconstructionCheck } from './datagate.mjs';
-import { requireThat } from './errors.mjs';
+import { requireThat, InvariantError } from './errors.mjs';
 
 export class RuntimeGate {
   constructor(fabric) { this.f = fabric; }
@@ -37,10 +37,12 @@ export class RuntimeGate {
         requireThat(col !== 'id', 'INV-403-SCOPE', 'The row key column cannot be transformed', 403);
       }
       if (input.action === 'service.connect') {
-        requireThat(r.services.includes(input.resource) && input.destination === input.resource && !input.columns.length && !input.row_ids.length, 'INV-403-SCOPE', 'Network service scope denied', 403);
         // NET-001/002: workstation-class peers are never reachable through a
-        // service capability; east-west is default-deny by constitution.
+        // service capability; east-west is default-deny by constitution. This
+        // check precedes the services scope check so a peer-named resource
+        // reports the segmentation denial, not a generic scope one.
         requireThat(!(r.network?.deny_workstation_peers && /^ws-|^workstation-|^endpoint-/.test(input.resource)), 'INV-451-POLICY', 'Workstation peers are not a service destination', 451);
+        requireThat(r.services.includes(input.resource) && input.destination === input.resource && !input.columns.length && !input.row_ids.length, 'INV-403-SCOPE', 'Network service scope denied', 403);
       }
       requireThat(input.max_cost <= r.max_cost && input.ttl_ms <= policy.capability_ttl_ms && policy.expires_at > now && policy.not_before <= now, 'INV-403-SCOPE', 'Capability limit denied', 403);
       const payload = { ...clone(input), capability_id: randomUUID(), tenant_id: t, subject_id: principal.subject_id, policy_digest: digest(policy), policy_version: policy.version, issued_at: now, expires_at: Math.min(now + input.ttl_ms, policy.expires_at), gate_id: this.f.config.gate_id, runtime_policy: clone(r) };
@@ -54,7 +56,8 @@ export class RuntimeGate {
     fields(input, ['capability', 'device_id', 'resource', 'destination', 'action', 'purpose', 'columns', 'row_ids', 'request_id', 'protocol', 'port']);
     identifier(input.request_id); identifier(input.device_id); identifier(input.resource); text(input.destination, 'destination');
     uniqueStrings(input.columns, 'columns', 64); uniqueStrings(input.row_ids, 'row ids', 256);
-    return this.f.transaction(principal, now => {
+    try {
+      return this.f.transaction(principal, now => {
       const t = principal.tenant_id, policy = this.f.policy(t);
       const r0 = policy.runtime;
       oneOf(input.protocol, r0.network?.allowed_protocols ?? ['https'], 'protocol');
@@ -77,13 +80,16 @@ export class RuntimeGate {
       let constrained = false;
       if (cap.policy_digest !== digest(policy)) {
         const mode = policy.fail_modes?.[cap.action] ?? policy.fail_modes?.default ?? 'closed';
+        // Per-class staleness ceiling (NFR-AVL-004): stale_ms[class] tightens
+        // the global max_stale_ms window for that class only.
+        const staleWindow = policy.stale_ms?.[cap.action] ?? policy.stale_ms?.default ?? policy.max_stale_ms;
         if (mode === 'constrained') {
           // 'Constrained' (RUN-005): stale access is read-only at half the
           // capability budget — never writes, never full cost.
-          requireThat(cap.action === 'data.read' && now - cap.issued_at <= policy.max_stale_ms, 'INV-503-GATE', `Policy changed; fail mode for ${cap.action} is constrained`, 503);
+          requireThat(cap.action === 'data.read' && now - cap.issued_at <= staleWindow, 'INV-503-GATE', `Policy changed; fail mode for ${cap.action} is constrained`, 503);
           constrained = true;
         } else {
-          requireThat(mode === 'cached-allow' && now - cap.issued_at <= policy.max_stale_ms, 'INV-503-GATE', `Policy changed; fail mode for ${cap.action} is ${mode}`, 503);
+          requireThat(mode === 'cached-allow' && now - cap.issued_at <= staleWindow, 'INV-503-GATE', `Policy changed; fail mode for ${cap.action} is ${mode}`, 503);
         }
       }
       requireThat(this.f.store.get(t, 'capability', cap.capability_id), 'INV-401-CAPABILITY', 'Unknown capability', 401);
@@ -110,7 +116,7 @@ export class RuntimeGate {
         requireThat(dataset.classification === cap.classification && dataset.jurisdiction === cap.jurisdiction, 'INV-409-STATE', 'Dataset classification or jurisdiction changed', 409);
         // DAT-009: cumulative overlap/reconstruction check BEFORE release.
         recon = reconstructionCheck(this.f.store.db, this.f.target.db, { tenant: t, subject: cap.subject_id, dataset: cap.resource, rows: input.row_ids, columns: input.columns, now, policy: r.reconstruction });
-        requireThat(recon.allowed, 'INV-429-BUDGET', `Reconstruction limit reached (${recon.coverage_percent}% of dataset rows touched)`, 429, { row_count: recon.row_count, column_count: recon.column_count });
+        requireThat(recon.allowed, 'INV-429-BUDGET', `Reconstruction limit reached (${recon.coverage_percent}% of dataset rows touched)`, 429, { row_count: recon.row_count, column_count: recon.column_count, coverage_percent: recon.coverage_percent });
         rows = this.f.target.readDataset(t, cap.resource, input.columns, input.row_ids, input.row_ids.length);
         if (cap.transforms) rows = applyTransforms(rows, cap.transforms, { tenant: t, dataset: cap.resource, tenantKey: this.f.target.key(t).toString('base64url') });
         // DAT-011: attribution watermark on released rows — returned as
@@ -120,6 +126,24 @@ export class RuntimeGate {
       this.f.store.db.prepare('INSERT INTO usage VALUES(?,?,?,?,?,?,?)').run(t, cap.subject_id, cap.resource, now, cost, cap.capability_id, input.request_id);
       this.f.store.audit(t, 'RUNTIME_ALLOWED', principal.subject_id, cap.capability_id, { cost, resource: cap.resource, selection_digest: digest({ columns: input.columns, rows: input.row_ids }), request_id: input.request_id, watermarked: cap.action === 'data.read' }, now);
       return { decision: 'ALLOW', cost, remaining_capability_cost: cap.max_cost - used - cost, rows, watermarks, reconstruction: recon && { row_count: recon.row_count, coverage_percent: recon.coverage_percent }, attribution: { tenant_id: t, subject_id: principal.subject_id, request_id: input.request_id }, simulation: true, limitation: cap.action === 'service.connect' ? 'Software decision only; no packet or socket enforcement is provided.' : 'Reads the isolated synthetic dataset only.' };
-    });
+      });
+    } catch (e) {
+      if (e instanceof InvariantError) this.recordContainment(principal, input, e);
+      throw e;
+    }
+  }
+  // NET-010: every denied consume lands in the containment ledger — the
+  // incident report reconstructs the containment sequence from these records
+  // plus subject/device revocations (see fabric.containmentReport).
+  recordContainment(principal, input, e) {
+    try {
+      const t = principal.tenant_id, now = this.f.clock();
+      this.f.store.tx(() => this.f.store.put(t, 'containment', `deny:${input.request_id}:${e.code}`, {
+        contained_at: now, subject_id: principal.subject_id, device_id: input.device_id ?? null,
+        capability_id: input.capability?.payload?.capability_id ?? null, resource: input.resource ?? null,
+        destination: input.destination ?? null, action: input.action ?? null, code: e.code,
+        request_id: input.request_id, dropped_requests: 1,
+      }, now));
+    } catch { /* containment logging never masks the original denial */ }
   }
 }

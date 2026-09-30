@@ -52,9 +52,9 @@ test('HTTP: same-origin HttpOnly cookie session requires CSRF and logs out', asy
 test('HTTP: full propose -> evidence -> independent signatures -> ALLOW -> certificate -> execute -> audit', async t => {
   const h = await httpFixture(t), type = 'finance.beneficiary.create', resource = `new-${randomUUID()}`;
   const input = proposal(type, h.actor(), h.f.target.state('acme', resource), { vendor_id: 'vendor-1', bank_account: 'TESTBANK000004', currency: 'EUR' }, h.now(), { action: { type, target_resource: resource, purpose: 'API contract integration' } });
-  const created = await h.request('/v1/action-capsules', { method: 'POST', body: input, headers: { 'Idempotency-Key': randomUUID() } }); assert.equal(created.status, 201); const r = created.data, id = r.capsule.capsule_id;
+  const created = await h.request('/v1/action-capsules', { method: 'POST', body: { input, signature: signed(input, h.setup.identityKeys.acme.operator, 'capsule-intent') }, headers: { 'Idempotency-Key': randomUUID() } }); assert.equal(created.status, 201); const r = created.data, id = r.capsule.capsule_id;
   for (const issuer of ['bank', 'registry']) {
-    const payload = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: r.capsule_digest, kind: 'ownership', content_digest: 'a'.repeat(64), acquired_at: h.now(), expires_at: h.now() + 600000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'HTTP synthetic fixture', retention_until: h.now() + 900000 };
+    const payload = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: r.capsule_digest, kind: 'ownership', content_digest: 'a'.repeat(64), acquired_at: h.now(), expires_at: h.now() + 600000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'HTTP synthetic fixture', retention_until: h.now() + 900000, claims: { account: 'TESTBANK000004', owner_id: resource } };
     assert.equal((await h.request(`/v1/action-capsules/${id}/evidence`, { method: 'POST', body: signed(payload, h.setup.issuerKeys.acme[issuer], 'evidence') })).status, 201);
   }
   for (const subject of ['custodian-1', 'custodian-2']) {
@@ -104,4 +104,35 @@ test('UX-002 UX-003: UI state logic exposes no generic approval or executable no
 test('UX-007: static interface labels all named inputs and uses no unsafe DOM injection sink', () => {
   const html = readFileSync(new URL('../web/index.html', import.meta.url), 'utf8'), js = readFileSync(new URL('../web/app.js', import.meta.url), 'utf8');
   for (const m of html.matchAll(/<(?:input|select|textarea)\b[^>]*\bid="([^"]+)"/g)) assert.ok(html.includes(`for="${m[1]}"`), m[1]); assert.doesNotMatch(js, /\.innerHTML\s*=|insertAdjacentHTML|\beval\(/); assert.match(html, /not Secure Perception/); assert.match(html, /role="status"/);
+});
+
+test('UX-006 NET-010: /v1/approvals/batch and /v1/containment are real routes', async t => {
+  const h = await httpFixture(t);
+  const r1 = h.proposed(), r2 = h.proposed();
+  for (const r of [r1, r2]) { h.evidence(r); h.evidence(r, { issuer: 'registry' }); }
+  const subject = 'custodian-1', token = h.setup.credentials.acme[subject];
+  const signatures = [];
+  for (const r of [r1, r2]) {
+    const challenge = h.f.approvalChallenge(h.p(subject), r.capsule.capsule_id);
+    signatures.push(signed(challenge, h.setup.custodianKeys.acme[subject], 'action-approval'));
+  }
+  const ids = [r1.capsule.capsule_id, r2.capsule.capsule_id];
+  const ok = await h.request('/v1/approvals/batch', { method: 'POST', token, body: { capsule_ids: ids, signatures } });
+  assert.equal(ok.status, 201, JSON.stringify(ok.data)); assert.equal(ok.data.accepted, 2);
+  const missing = await h.request('/v1/approvals/batch', { method: 'POST', token, body: { capsule_ids: ids, signatures: [signatures[0]] } });
+  assert.equal(missing.status, 400);
+  const roles = await h.request('/v1/approvals/batch', { method: 'POST', token: h.setup.credentials.acme.operator, body: { capsule_ids: ids, signatures } });
+  assert.equal(roles.status, 403);
+  const report = await h.request('/v1/containment', { token: h.setup.credentials.acme.security });
+  assert.equal(report.status, 200); assert.ok(Array.isArray(report.data.sequence)); assert.equal(report.data.dropped_requests, 0); assert.match(report.data.limitation, /Software dataplane/);
+});
+
+test('RUN-006: rejection metrics count by reason code on the live HTTP surface', async t => {
+  const h = await httpFixture(t);
+  await h.request('/v1/action-capsules', { token: null }); // 401
+  await h.request('/v1/action-capsules/nope', { token: h.setup.credentials.acme.auditor }); // 403 role
+  const m = await h.request('/v1/metrics', { token: h.setup.credentials.acme.security });
+  assert.equal(m.status, 200);
+  assert.ok(m.data.unauthorised >= 1);
+  assert.ok(m.data.rejections['INV-403-ROLE'] >= 1, JSON.stringify(m.data.rejections));
 });

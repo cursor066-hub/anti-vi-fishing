@@ -12,6 +12,9 @@ import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fixture, hasCode } from './helpers.mjs';
+import { InvariantError } from '../src/errors.mjs';
+import { createConfiguration } from '../src/bootstrap.mjs';
+import { proposal } from '../src/schema.mjs';
 
 test('driftCheck: identical registered/observed manifests report no drift', () => {
   const registered = { connector_id: 'issuer:bank', version: '1.0.0', actions: ['bank.ownership', 'bank.balance'], channel: 'authoritative', key_id: 'k1' };
@@ -161,7 +164,7 @@ test('COV-004 CON-006: declared paths carry observation time and drift moves the
   const p2 = declarePath({ path_id: 'p2', action_type: 'finance.payment.first', target: 'other', environment: 'sim', connector_version: '1.0.0', owner: 'sec', status: 'MONITORED', max_age_ms: 1000, configuration_digest: digest({ a: 1 }) }, 100);
   assert.equal(p1.evidence_at, 100); // write-once-null bug fixed: observation time recorded
   const staled = applyDriftToPaths([p1, p2], pp => pp.target === 'bank-1');
-  assert.equal(staled, 1);
+  assert.deepEqual(staled.map(x => x.path_id), ['p1']);
   assert.equal(p1.status, 'UNKNOWN'); assert.equal(p1.evidence_at, null);
   assert.equal(p2.status, 'MONITORED');
 });
@@ -260,7 +263,7 @@ test('M1: key.rotate adopting a non-vault public key is rejected', t => {
   const prep = h.f.prepareRotation(h.p('security'), 'execution');
   const bogus = generateKey().public_key;
   const r = h.proposed('key.rotate', { key_class: 'execution', new_key_id: prep.key_id, new_public_key: bogus, ceremony_id: 'cer-1', revoke_old: false }, { action: { type: 'key.rotate', target_resource: 'key-registry', purpose: 'Rotation' } });
-  h.evidence(r, { kind: 'governance_review' }); h.evidence(r, { kind: 'governance_review', issuer: 'registry' });
+  h.evidence(r, { kind: 'governance_review' }); h.evidence(r, { kind: 'governance_review', issuer: 'audit-committee' });
   h.approve(r, 3); h.advance(60001);
   assert.throws(() => h.f.execute(h.p(), h.f.certificate(h.p(), r.capsule.capsule_id)), hasCode('INV-400-SCHEMA'));
   assert.equal(h.f.keys('acme').execution.key_id !== prep.key_id, true); // tenant key unchanged
@@ -382,7 +385,7 @@ test('audit: key.rotate requires an acknowledged ceremony', t => {
   const h = fixture(t);
   const prep = h.f.prepareRotation(h.p('security'), 'execution');
   const r = h.proposed('key.rotate', { key_class: 'execution', new_key_id: prep.key_id, new_public_key: prep.public_key, ceremony_id: 'cer-nonexistent', revoke_old: true }, { action: { type: 'key.rotate', target_resource: 'key-registry', purpose: 'Rotation' } });
-  h.evidence(r, { kind: 'governance_review' }); h.evidence(r, { kind: 'governance_review', issuer: 'registry' });
+  h.evidence(r, { kind: 'governance_review' }); h.evidence(r, { kind: 'governance_review', issuer: 'audit-committee' });
   h.approve(r, 3); h.advance(60001);
   const cert = h.f.certificate(h.p(), r.capsule.capsule_id);
   assert.throws(() => h.f.execute(h.p(), cert), hasCode('INV-409-STATE'));
@@ -618,7 +621,7 @@ test('POL-012 R2-17: no vendor-controlled credential can satisfy root-policy act
   const next = h.f.policy('acme'); const candidate = JSON.parse(JSON.stringify(next));
   candidate.version = 2; candidate.not_before = h.now(); candidate.max_capsule_ttl_ms = 1800000;
   const r = h.proposed('policy.change', { policy: candidate }, { action: { type: 'policy.change', target_resource: 'policy', purpose: 'Hardening' } });
-  h.evidence(r, { kind: 'governance_review' }); h.evidence(r, { kind: 'governance_review', issuer: 'registry' });
+  h.evidence(r, { kind: 'governance_review' }); h.evidence(r, { kind: 'governance_review', issuer: 'audit-committee' });
   // Every non-custodian principal approves — vendor/system/operator credentials
   // never count toward the custodian threshold.
   for (const subject of ['operator', 'auditor']) {
@@ -695,6 +698,20 @@ test('ACT-002 R2-24: the schema validator rejects a capsule missing a mandatory 
 
 test('ACT-005 R2-25: intent, authority and outcome are three distinct signed objects', t => {
   const h = fixture(t); const r = h.ready(); h.f.execute(h.p(), r.certificate);
+  // The stored capsule carries the actor-signed request intent — verified
+  // against the operator's registered identity key, distinct purpose from
+  // certificate and outcome.
+  const intent = r.record.capsule.request_intent;
+  assert.equal(intent.protected.purpose, 'capsule-intent');
+  const intentPayload = verifySigned(intent, { [intent.protected.key_id]: { public_key: Object.values(h.setup.config.tenants.acme.identities).find(i => i.subject_id === 'operator').public_key } }, 'capsule-intent');
+  const { request_intent: _ri, capsule_id: _ci, tenant_id: _ti, received_at: _ra, ...inputBack } = r.record.capsule;
+  assert.deepEqual(intentPayload, inputBack, 'intent payload is the exact canonical proposal input');
+  assert.throws(() => h.f.propose(h.p(), { nonce: 'x' }, 'k', null), hasCode('INV-400-SCHEMA'));
+  const input2 = proposal('finance.bank.change', h.actor(), h.f.target.state('acme', 'vendor-1'), { bank_account: 'TESTBANK000009', currency: 'EUR' }, h.now());
+  const foreign = signed(input2, h.setup.identityKeys.acme['custodian-1'], 'capsule-intent');
+  assert.throws(() => h.f.propose(h.p(), input2, 'k2', foreign), hasCode('INV-401-SIGNATURE'));
+  const mismatched = signed({ ...input2, quantity: 99 }, h.setup.identityKeys.acme.operator, 'capsule-intent');
+  assert.throws(() => h.f.propose(h.p(), input2, 'k3', mismatched), hasCode('INV-401-SIGNATURE'));
   const cert = r.certificate.payload, outcome = h.f.store.get('acme', 'outcome', cert.certificate_id);
   // Request intent: canonical capsule bound by digest; authority: signed
   // certificate; observed outcome: separately signed envelope.
@@ -858,4 +875,108 @@ test('AUD-010 R2-39: the auditor role gets read-only least-privilege views', t =
   assert.ok(h.f.store.auditPage('acme', { after: 0, limit: 10 }).entries.length > 0, 'auditor can read entries');
   assert.throws(() => h.f.approve(audit, { protected: { purpose: 'action-approval', key_id: 'x' }, payload: { capsule_id: 'x' }, signature: 'x' }), e => /^INV-4/.test(e.code));
   assert.throws(() => h.f.retentionSweep(audit), e => /^INV-4/.test(e.code));
+});
+
+test('CONC-A R2-40: a nested store.tx rollback cannot destroy outer-transaction writes', t => {
+  const h = fixture(t);
+  let threw = false;
+  h.f.store.tx(() => {
+    h.f.store.put('acme', 'scratch', 'outer', { v: 1 }, h.now());
+    try { h.f.store.tx(() => { h.f.store.put('acme', 'scratch', 'inner', { v: 2 }, h.now()); throw new Error('inner failure'); }); }
+    catch { threw = true; }
+  });
+  assert.equal(threw, true, 'inner failure propagated');
+  assert.equal(h.f.store.get('acme', 'scratch', 'outer').v, 1, 'outer write survived the inner rollback');
+  assert.equal(h.f.store.get('acme', 'scratch', 'inner') ?? null, null, 'inner write rolled back');
+});
+
+test('CONC-B R2-41: idempotent() refuses outside a transaction; reuse with a different hash rejects', t => {
+  const h = fixture(t);
+  assert.throws(() => h.f.store.idempotent('acme', 'scope', 'key-12345', 'h', () => 1), e => e.code === 'INV-500-STORE');
+  const first = h.f.store.tx(() => h.f.store.idempotent('acme', 'scope', 'key-12345', 'h1', () => 'r1'));
+  assert.equal(first, 'r1');
+  const replay = h.f.store.tx(() => h.f.store.idempotent('acme', 'scope', 'key-12345', 'h1', () => 'DIFFERENT'));
+  assert.equal(replay, 'r1', 'same key + same hash returns stored result');
+  assert.throws(() => h.f.store.tx(() => h.f.store.idempotent('acme', 'scope', 'key-12345', 'h2', () => 'r2')), e => e.code === 'INV-409-IDEMPOTENCY');
+});
+
+test('CONC-C R2-42: recoverClock revives the gate after a forward host-clock jump', t => {
+  const h = fixture(t);
+  h.advance(120000);
+  const healthy = h.ready();
+  assert.equal(h.f.execute(h.p(), healthy.certificate).payload.status, 'VERIFIED');
+  // Simulate a forward jump: poison the persisted clock beyond the injected clock.
+  h.f.store.tx(() => h.f.store.clock(h.now() + 3600000));
+  assert.throws(() => h.proposed(), e => e.code === 'INV-503-TIME');
+  // Even reassertConfig cannot run — it flows through transaction(); recoverClock can.
+  assert.throws(() => h.f.reassertConfig(h.p('security')), e => e.code === 'INV-503-TIME');
+  const rec = h.f.recoverClock(h.p('security'));
+  assert.equal(rec.recovered_at, h.now(), 'clock recovered to the honest host time');
+  // Gate lives again; the recovery is audited.
+  const types = h.f.store.auditPage('acme', { after: 0, limit: 200 }).entries.map(e => e.envelope.payload.type);
+  assert.ok(types.includes('CLOCK_RECOVERED'), 'recovery is on the signed ledger');
+});
+
+test('CONC-D R2-43: reconcile-superseded outcomes name their predecessor digest', t => {
+  const h = fixture(t);
+  const r = h.ready();
+  h.f.execute(h.p(), r.certificate, { fault: 'after-commit' });
+  const first = h.f.store.get('acme', 'outcome', r.certificate.payload.certificate_id);
+  assert.equal(first.payload.status, 'UNCERTAIN');
+  const second = h.f.reconcile(h.p(), r.certificate.payload.certificate_id);
+  assert.ok(second.payload.supersedes, 'superseding outcome names its predecessor');
+  const audited = h.f.store.auditPage('acme', { after: 0, limit: 200 }).entries.filter(e => e.envelope.payload.type === 'EXECUTION_OUTCOME' && e.envelope.payload.reference === r.certificate.payload.certificate_id);
+  assert.ok(audited.at(-1).envelope.payload.metadata.supersedes, 'audit chain carries the supersession pointer');
+});
+
+test('CONC-E R2-44: config drift quarantine is durable across Fabric instances', t => {
+  const h = fixture(t, ['acme']);
+  // A second Fabric instance on the same deployment directory whose config
+  // disagrees with the stored snapshot detects drift — and crucially the
+  // consequence (privilege withdrawal) is visible to the FIRST instance,
+  // which never performed the detection (concurrency-audit M4).
+  const tampered = JSON.parse(JSON.stringify(h.setup.config));
+  delete tampered.tenants.acme.issuers[Object.keys(tampered.tenants.acme.issuers)[0]];
+  const f2 = new Fabric(tampered, h.directory, () => h.now() + 1);
+  try {
+    assert.equal(Boolean(f2.store.get('acme', 'config-flag', 'drift')), true, 'drift flag persisted to the ledger');
+    // Instance A (h.f) has an EMPTY in-memory drift set — only the durable
+    // flag can block it.
+    assert.throws(() => h.proposed(), e => e.code === 'INV-403-QUARANTINE');
+    f2.reassertConfig({ tenant_id: 'acme', subject_id: 'security' });
+    assert.equal(f2.store.get('acme', 'config-flag', 'drift') ?? null, null, 'reassert clears the durable flag');
+  } finally { f2.close(); }
+});
+
+test('CONC-F R2-45: mid-flight certificate revocation is flagged on the recorded outcome', t => {
+  const h = fixture(t);
+  const r = h.ready();
+  // Revoke the certificate between reservation commit and dispatch.
+  const origExecute = h.f.target.execute.bind(h.f.target);
+  h.f.target.execute = (capsule, id, now, fault) => {
+    h.f.revoke(h.p('security'), { kind: 'certificate', id, reason: 'compromise suspected' });
+    return origExecute(capsule, id, now, fault);
+  };
+  const out = h.f.execute(h.p(), r.certificate);
+  assert.equal(out.payload.status, 'VERIFIED', 'the target really executed — recorded honestly');
+  assert.equal(out.payload.revoked_post_reservation, true, 'race is flagged on the signed outcome');
+  const types = h.f.store.auditPage('acme', { after: 0, limit: 300 }).entries.map(e => e.envelope.payload.type);
+  assert.ok(types.includes('EXECUTION_COMPLETED_POST_REVOCATION'), 'post-revocation completion is separately audited');
+});
+
+test('CONC-G R2-46: a wedged composite child is named in the parent outcome', t => {
+  const h = fixture(t);
+  const certOf = (type, requested) => { const r = h.proposed(type, requested); h.evidence(r); h.evidence(r, { issuer: 'registry' }); h.approve(r, 2); return { record: r, certificate: h.f.certificate(h.p(), r.capsule.capsule_id) }; };
+  const c1 = certOf('finance.beneficiary.create', { vendor_id: 'vendor-1', bank_account: 'TESTBANK000002', currency: 'EUR' });
+  const c2 = certOf('finance.beneficiary.create', { vendor_id: 'vendor-2', bank_account: 'TESTBANK000003', currency: 'EUR' });
+  const composite = h.proposed('action.composite', { children: [c1.record.capsule.capsule_id, c2.record.capsule.capsule_id] }, { action: { type: 'action.composite', target_resource: 'composite-ledger', purpose: 'pair' } });
+  h.approve(composite, 2);
+  const parentCert = h.f.certificate(h.p(), composite.capsule.capsule_id);
+  const orig = h.f.target.execute.bind(h.f.target);
+  let calls = 0;
+  h.f.target.execute = (capsule, id, now, fault) => { calls += 1; if (calls === 2) throw new Error('child dispatch lost mid-flight'); return orig(capsule, id, now, fault); };
+  const out = h.f.execute(h.p(), parentCert);
+  assert.equal(out.payload.status, 'COMPENSATED');
+  assert.ok(Array.isArray(out.payload.wedged_children) && out.payload.wedged_children.includes(c2.record.capsule.capsule_id), 'wedged child is named, not understated');
+  assert.deepEqual(out.payload.children, [c1.record.capsule.capsule_id], 'children list stays in execution order');
 });

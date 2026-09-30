@@ -6,7 +6,7 @@ import { digest, clone, canonical } from './canonical.mjs';
 import { verifySigned } from './crypto.mjs';
 import { KeyVault } from './keystore.mjs';
 import { merkleRoot, inclusionProof, consistencyProof, verifyInclusion } from './merkle.mjs';
-import { httpJson, driftCheck } from './connectors.mjs';
+import { httpJson, postOnce, readWithRetry, driftCheck } from './connectors.mjs';
 import { createCeremony, acknowledge, commitShares, splitSecret, reconstructSecret, ceremonyReport } from './ceremony.mjs';
 import { decodeShare, encodeShare } from './shamir.mjs';
 import { SUITES } from './crypto.mjs';
@@ -14,7 +14,7 @@ import { openSession, releaseFields, workspaceFallback } from './secureview.mjs'
 import { extract, explain, classifyIntent } from './advisory.mjs';
 import { fields, text, identifier, integer, uniqueStrings, validateProposal } from './schema.mjs';
 import { evaluatePolicy, validatePolicy, policyDiff } from './policy.mjs';
-import { declarePath, coverageManifest, applyDriftToPaths } from './coverage.mjs';
+import { declarePath, coverageManifest, applyDriftToPaths, coverageAt } from './coverage.mjs';
 import { watermark } from './datagate.mjs';
 import { requireThat, InvariantError } from './errors.mjs';
 import { join } from 'node:path';
@@ -71,7 +71,8 @@ export class Fabric {
       if (!existing) this.store.tx(() => { this.store.put(tenant, 'config-snapshot', 'current', { digest: configDigest, taken_at: this.clock(), sections }, this.clock()); this.store.audit(tenant, 'CONFIG_SNAPSHOT', 'system', 'config', { config_digest: configDigest }, this.clock()); });
       else if (existing.digest !== configDigest) {
         const changed = existing.sections ? Object.keys(sections).filter(k => existing.sections[k] !== sections[k]) : ['unknown'];
-        this._configDrift.add(tenant); this.store.tx(() => this.store.audit(tenant, 'CONFIG_DRIFT', 'system', 'config', { expected: existing.digest, observed: configDigest, changed_sections: changed, consequence: 'gate-privileges-withdrawn' }, this.clock()));
+        this._configDrift.add(tenant);
+        this.store.tx(() => { this.store.put(tenant, 'config-flag', 'drift', { detected_at: this.clock(), expected: existing.digest, observed: configDigest }, this.clock()); this.store.audit(tenant, 'CONFIG_DRIFT', 'system', 'config', { expected: existing.digest, observed: configDigest, changed_sections: changed, consequence: 'gate-privileges-withdrawn' }, this.clock()); });
       }
     } } catch (error) { this.close(); throw error; }
   }
@@ -165,9 +166,26 @@ export class Fabric {
       const changed = existing?.sections ? Object.keys(sections).filter(k => existing.sections[k] !== sections[k]) : [];
       this.store.put(t, 'config-snapshot', 'current', { digest: digestNow, taken_at: now, sections }, now);
       this._configDrift.delete(t);
+      if (this.store.get(t, 'config-flag', 'drift')) this.store.remove(t, 'config-flag', 'drift');
       this.store.audit(t, 'CONFIG_REASSERTED', p.subject_id, 'config', { config_digest: digestNow, changed_sections: changed }, now);
       return { reasserted: true, config_digest: digestNow, changed_sections: changed };
     }, { allowDuringDrift: true });
+  }
+  // Clock recovery (concurrency-audit L6): the ledger clock is monotone and a
+  // forward host-clock jump would otherwise wedge every tenant permanently —
+  // transaction() itself throws INV-503-TIME before it can run recovery. This
+  // deliberately bypasses transaction() and requires a security actor; the
+  // recovery is audited. It can only move the clock forward to the host's
+  // current time, never back.
+  recoverClock(p) {
+    this.authorize(p, ['security', 'policy_admin']);
+    return this.store.tx(() => {
+      const now = this.clock();
+      const prior = this.store.db.prepare('SELECT last FROM clock WHERE id=1').get()?.last ?? null;
+      this.store.clock(now, { recovery: true });
+      this.store.audit(p.tenant_id, 'CLOCK_RECOVERED', p.subject_id, 'local-gate', { prior_last: prior, recovered_at: now }, now);
+      return { recovered_at: now, prior_last: prior };
+    });
   }
   identity(p) {
     const identity = Object.values(this.tenant(p.tenant_id).identities).find(x => x.subject_id === p.subject_id);
@@ -220,16 +238,26 @@ export class Fabric {
     return null;
   }
   transaction(principal, fn, { allowDuringDrift = false } = {}) {
-    this.authorize(principal, ['operator', 'approver', 'custodian', 'security', 'auditor', 'policy_admin', 'workload']);
-    // RUN-010: a drifting gate configuration withdraws privileges until a
-    // security actor re-attests the observed config snapshot.
-    requireThat(allowDuringDrift || !this._configDrift.has(principal.tenant_id), 'INV-403-QUARANTINE', 'Configuration drift withdrew gate privileges pending security re-attestation', 403);
-    try { return this.store.tx(() => { const now = this.clock(); this.store.clock(now); this.activateDuePolicies(principal.tenant_id, now); return fn(now); }); }
+    try {
+      this.authorize(principal, ['operator', 'approver', 'custodian', 'security', 'auditor', 'policy_admin', 'workload']);
+      // RUN-010: a drifting gate configuration withdraws privileges until a
+      // security actor re-attests the observed config snapshot.
+      // Drift quarantine is durable (a 'config-flag' record), not just the
+      // in-memory set — a second Fabric instance on the same deployment
+      // cannot transact through a drift it never noticed (concurrency-audit M4).
+      requireThat(allowDuringDrift || (!this._configDrift.has(principal.tenant_id) && !this.store.get(principal.tenant_id, 'config-flag', 'drift')), 'INV-403-QUARANTINE', 'Configuration drift withdrew gate privileges pending security re-attestation', 403);
+      return this.store.tx(() => { const now = this.clock(); this.store.clock(now); this.activateDuePolicies(principal.tenant_id, now); return fn(now); });
+    }
     catch (error) {
       if (error instanceof InvariantError && error.code !== 'INV-503-TIME') {
-        this.store.tx(() => { const now = this.clock(); this.store.clock(now); this.store.audit(principal.tenant_id, 'SECURITY_OPERATION_REJECTED', principal.subject_id, 'local-gate', { code: error.code }, now); });
+        // A failing rejection-audit tx must not mask the original error (L1).
+        try { this.store.tx(() => { const now = this.clock(); this.store.clock(now); this.store.audit(principal.tenant_id, 'SECURITY_OPERATION_REJECTED', principal.subject_id, 'local-gate', { code: error.code }, now); }); } catch { /* ledger unavailable — surface the real rejection */ }
+        throw error;
       }
-      throw error;
+      if (error instanceof InvariantError) throw error;
+      // RUN-009: infrastructure failures get a stable documented code instead
+      // of leaking driver internals (e.g. node:sqlite ERR_INVALID_STATE).
+      throw new InvariantError('INV-503-GATE', 'Internal gate failure', 503);
     }
   }
   revoked(tenant, kind, id) { return Boolean(this.store.get(tenant, 'revocation', `${kind}:${id}`)); }
@@ -245,15 +273,24 @@ export class Fabric {
     requireThat(identity && identity.device_id === device && identity.health_expires_at > now, 'INV-403-HEALTH', 'Configured device health evidence expired or mismatched', 403);
   }
   getCapsule(p, id) { this.authorize(p, ['operator', 'approver', 'custodian', 'security', 'policy_admin']); return this.store.must(p.tenant_id, 'capsule', identifier(id)); }
-  propose(p, input, idempotencyKey) {
+  propose(p, input, idempotencyKey, requestIntent = null) {
     this.authorize(p, ['operator', 'workload', 'policy_admin']); validateProposal(input);
     requireThat(input.actor.subject_id === p.subject_id && input.actor.identity_class === this.identity(p).identity_class, 'INV-403-ACTOR', 'Actor must match authenticated identity', 403);
+    // ACT-005: request intent is its own signed object, distinct from the
+    // authorised action (certificate) and the observed outcome. It must be a
+    // 'capsule-intent' envelope over the exact proposal input, signed by the
+    // actor's registered identity key — a bearer token alone never mints a
+    // request record someone could disown.
+    requireThat(requestIntent, 'INV-401-SIGNATURE', 'A signed request-intent envelope over the proposal input is required', 401);
+    const identityEntry = Object.entries(this.tenant(p.tenant_id).identities).find(([, v]) => v.subject_id === p.subject_id);
+    const intentPayload = verifySigned(requestIntent, { [identityEntry[0]]: { public_key: identityEntry[1].public_key } }, 'capsule-intent');
+    requireThat(digest(intentPayload) === digest(input), 'INV-401-SIGNATURE', 'Request intent does not cover the proposed capsule exactly', 401);
     return this.transaction(p, now => this.store.idempotent(p.tenant_id, 'propose', idempotencyKey, digest(input), () => {
       const policy = this.policy(p.tenant_id); this.assertHealthy(p.tenant_id, p.subject_id, input.actor.device_id, now);
       requireThat(input.created_at <= now + 5000 && input.created_at >= now - 300000 && input.expires_at > now && input.expires_at - input.created_at <= policy.max_capsule_ttl_ms, 'INV-400-SCHEMA', 'Capsule timing invalid');
       const prior = this.store.db.prepare('SELECT capsule FROM nonces WHERE tenant=? AND nonce=?').get(p.tenant_id, input.nonce);
       requireThat(!prior, 'INV-409-REPLAY', 'Nonce is already bound to another action', 409);
-      const capsule = { ...clone(input), capsule_id: randomUUID(), tenant_id: p.tenant_id, received_at: now };
+      const capsule = { ...clone(input), request_intent: clone(requestIntent), capsule_id: randomUUID(), tenant_id: p.tenant_id, received_at: now };
       const record = { capsule, capsule_digest: digest(capsule), status: 'CANONICALISED', evidence: [], approvals: [], decision: null, certificate_id: null, created_at: now };
       this.store.db.prepare('INSERT INTO nonces VALUES(?,?,?)').run(p.tenant_id, input.nonce, capsule.capsule_id);
       this.store.insert(p.tenant_id, 'capsule', capsule.capsule_id, record, now);
@@ -285,7 +322,24 @@ export class Fabric {
       this.assertHealthy(t, record.capsule.actor.subject_id, record.capsule.actor.device_id, now);
       const payload = this.verifyEvidenceEnvelope(t, envelope);
       requireThat(!this.revoked(t, 'issuer', envelope.protected.key_id) && !this.revoked(t, 'key', envelope.protected.key_id) && !this.revoked(t, 'evidence', payload.evidence_id), 'INV-401-EVIDENCE', 'Evidence source revoked', 401);
+      // A connector whose observed manifest drifted from registration stops
+      // being trusted for new evidence until a clean re-check clears the flag
+      // (CON-006; issuerd-audit MED-2).
+      requireThat(!this.store.get(t, 'issuer-drift', envelope.protected.key_id), 'INV-403-QUARANTINE', 'Issuer connector drifted — evidence suspended pending revalidation', 403);
       requireThat(payload.tenant_id === t && payload.capsule_digest === record.capsule_digest, 'INV-403-SCOPE', 'Evidence scope mismatch', 403);
+      // HIGH-2: supporting evidence must describe THIS action's content, not
+      // merely be a true statement of the right kind. Policy-declared
+      // bindings map claim fields to capsule paths (requested_state/
+      // target_resource/actor). Only 'supports' envelopes are bound — a
+      // 'conflict' answer deliberately carries minimal claims and can never
+      // satisfy a requirement, so it stays attachable as denial evidence.
+      if (payload.claim === 'supports') {
+        const bindings = (this.policy(t).rules[record.capsule.action.type]?.evidence_bindings ?? {})[payload.kind] ?? {};
+        for (const [claimField, path] of Object.entries(bindings)) {
+          const expected = path.split('.').reduce((o, k) => o?.[k], record.capsule);
+          requireThat(expected !== undefined && String(payload.claims?.[claimField]) === String(expected), 'INV-403-SCOPE', `Evidence claims do not describe this action (claims.${claimField} must equal ${path})`, 403);
+        }
+      }
       requireThat(payload.dependencies.every(dep => record.evidence.includes(dep)), 'INV-400-SCHEMA', 'Dependencies must already belong to this action');
       requireThat(record.evidence.length < 32, 'INV-429-CAPACITY', 'Evidence set limit reached', 429);
       const issuer = this.tenant(t).issuers[envelope.protected.key_id];
@@ -303,6 +357,10 @@ export class Fabric {
     identifier(payload.evidence_id); text(payload.kind, 'evidence kind'); text(payload.provenance, 'provenance', 2048); uniqueStrings(payload.dependencies, 'dependencies', 32);
     const now = this.clock();
     integer(payload.confidence, 'confidence', 0, 100); integer(payload.acquired_at, 'acquisition time', 1, now + 5000); integer(payload.expires_at, 'evidence expiry', now + 1); integer(payload.retention_until, 'retention', payload.expires_at);
+    // AUD-006: the envelope cannot claim a retention window past the policy
+    // ceiling for its evidence class.
+    const retention = this.policy(t).retention;
+    if (retention) { const ceiling = payload.acquired_at + (retention.per_kind?.[payload.kind] ?? retention.default_ms); requireThat(payload.retention_until <= ceiling, 'INV-400-SCHEMA', `Retention exceeds the policy ceiling for kind ${payload.kind}`, 400); }
     requireThat(typeof payload.advisory === 'boolean' && ['supports', 'conflict'].includes(payload.claim) && /^[a-f0-9]{64}$/.test(payload.content_digest), 'INV-400-SCHEMA', 'Invalid evidence claim');
     return payload;
   }
@@ -320,21 +378,43 @@ export class Fabric {
     const [key_id, issuer] = entry;
     requireThat(issuer.endpoint, 'INV-412-EVIDENCE', 'Issuer has no live endpoint; attach a pre-signed envelope instead', 412);
     requireThat(!this.revoked(t, 'issuer', key_id) && !this.revoked(t, 'key', key_id), 'INV-401-EVIDENCE', 'Evidence source revoked', 401);
+    requireThat(!this.store.get(t, 'issuer-drift', key_id), 'INV-403-QUARANTINE', 'Issuer connector drifted — acquisition suspended pending revalidation', 403);
+    // The fabric — not the caller — derives the claims that bind the evidence
+    // to this action's declared content, so a caller cannot query the issuer
+    // about an unrelated entity and attach the answer (HIGH-2).
+    const bindings = (this.policy(t).rules[record.capsule.action.type]?.evidence_bindings ?? {})[input.kind] ?? {};
+    const claims = { ...(input.claims ?? {}) };
+    for (const [claimField, path] of Object.entries(bindings)) {
+      const expected = path.split('.').reduce((o, k) => o?.[k], record.capsule);
+      requireThat(expected !== undefined, 'INV-400-SCHEMA', `Action lacks the field the evidence binding requires (${path})`, 400);
+      claims[claimField] = expected;
+    }
     let envelope;
+    const callStarted = Date.now();
     try {
-      const res = await httpJson(`${issuer.endpoint}/v1/issuers/${issuer.name ?? input.issuer}/issue`, { method: 'POST', headers: issuer.issue_token ? { Authorization: `Bearer ${issuer.issue_token}` } : undefined, body: { tenant_id: t, capsule_digest: record.capsule_digest, kind: input.kind, subject_id: input.subject_id ?? p.subject_id, claims: input.claims, dependencies: input.dependencies ?? [] }, timeout_ms: 10000 });
+      const res = await postOnce(`${issuer.endpoint}/v1/issuers/${issuer.name ?? input.issuer}/issue`, { tenant_id: t, capsule_digest: record.capsule_digest, kind: input.kind, subject_id: input.subject_id ?? p.subject_id, claims, dependencies: input.dependencies ?? [] }, { headers: issuer.issue_token ? { Authorization: `Bearer ${issuer.issue_token}` } : undefined, timeout_ms: 10000 });
       requireThat(res.status === 201, 'INV-503-EVIDENCE-SOURCE', `Issuer refused (${res.status})`, 503);
       envelope = res.data;
+      this.recordIssuerCall(key_id, Date.now() - callStarted, false);
     } catch (e) {
-      const err = new InvariantError('INV-503-EVIDENCE-SOURCE', `Evidence source unavailable or refused: ${e.code ?? 'transport'}`, 503);
+      this.recordIssuerCall(key_id, Date.now() - callStarted, true);
+      const err = new InvariantError('INV-503-EVIDENCE-SOURCE', `Evidence source unavailable or refused: ${e instanceof InvariantError ? e.code : 'transport'}`, 503);
       this.store.tx(() => this.store.audit(t, 'EVIDENCE_ACQUISITION_FAILED', p.subject_id, capsule_id, { issuer: input.issuer, kind: input.kind, code: e.code ?? 'transport' }, this.clock()));
       throw err;
     }
     return this.attachEvidence(p, capsule_id, envelope);
   }
+  // CON-009: live issuer call telemetry — latency and error counts are
+  // process-local, honest in-memory counters surfaced via connectorStatus.
+  recordIssuerCall(key_id, latency_ms, failed) {
+    const map = this.issuerMetrics ??= {};
+    const m = map[key_id] ??= { calls: 0, errors: 0, total_latency_ms: 0, last_error_at: null };
+    m.calls++; m.total_latency_ms += latency_ms;
+    if (failed) { m.errors++; m.last_error_at = this.clock(); }
+  }
   connectorStatus(p) {
     this.authorize(p, ['operator', 'security', 'policy_admin', 'auditor']);
-    const issuers = Object.entries(this.tenant(p.tenant_id).issuers).map(([key_id, v]) => ({ key_id, name: v.name ?? null, channel: v.channel, failure_domain: v.failure_domain, endpoint: v.endpoint ?? null, revoked: this.revoked(p.tenant_id, 'issuer', key_id) || this.revoked(p.tenant_id, 'key', key_id) }));
+    const issuers = Object.entries(this.tenant(p.tenant_id).issuers).map(([key_id, v]) => { const m = this.issuerMetrics?.[key_id] ?? { calls: 0, errors: 0, total_latency_ms: 0, last_error_at: null }; return { key_id, name: v.name ?? null, channel: v.channel, failure_domain: v.failure_domain, endpoint: v.endpoint ?? null, revoked: this.revoked(p.tenant_id, 'issuer', key_id) || this.revoked(p.tenant_id, 'key', key_id), metrics: { calls: m.calls, errors: m.errors, mean_latency_ms: m.calls ? Math.round(m.total_latency_ms / m.calls) : null, last_error_at: m.last_error_at } }; });
     return { gate: this.config.gate_id, target: this.target.manifest(), issuers, profile: 'engineering' };
   }
   async checkIssuerDrift(p, key_id) {
@@ -342,24 +422,43 @@ export class Fabric {
     const issuer = this.tenant(p.tenant_id).issuers[key_id];
     requireThat(issuer?.endpoint, 'INV-404-NOT-FOUND', 'Issuer endpoint not found', 404);
     let observed;
-    try { const res = await httpJson(`${issuer.endpoint}/v1/issuers/${issuer.name}/manifest?tenant=${p.tenant_id}`, { method: 'GET', timeout_ms: 10000, headers: issuer.issue_token ? { Authorization: `Bearer ${issuer.issue_token}` } : undefined }); requireThat(res.status === 200, 'INV-503-CONNECTOR', `Manifest fetch refused (${res.status})`, 503); observed = res.data; } catch (e) {
-      return this.transaction(p, now => { this.store.audit(p.tenant_id, 'CONNECTOR_DRIFT', p.subject_id, key_id, { drifted: 'unreachable', code: e.code ?? 'transport' }, now); return { drifted: true, changes: [{ field: 'endpoint', detail: 'unreachable' }], checked_at: now }; });
+    const callStarted = Date.now();
+    try { const res = await readWithRetry(`${issuer.endpoint}/v1/issuers/${issuer.name}/manifest?tenant=${p.tenant_id}`, { timeout_ms: 10000, retries: 2, headers: (issuer.read_token ?? issuer.issue_token) ? { Authorization: `Bearer ${issuer.read_token ?? issuer.issue_token}` } : undefined }); observed = res.data; this.recordIssuerCall(key_id, Date.now() - callStarted, false); } catch (e) {
+      this.recordIssuerCall(key_id, Date.now() - callStarted, true);
+      return this.transaction(p, now => { this.store.put(p.tenant_id, 'issuer-drift', key_id, { drifted_at: now, changes: [{ field: 'endpoint', detail: 'unreachable' }] }, now); this.store.audit(p.tenant_id, 'CONNECTOR_DRIFT', p.subject_id, key_id, { drifted: 'unreachable', code: e.code ?? 'transport' }, now); return { drifted: true, changes: [{ field: 'endpoint', detail: 'unreachable' }], checked_at: now }; });
     }
-    const observedPayload = verifySigned(observed, { [key_id]: issuer }, 'connector-manifest');
-    this.assertSuiteAllowed(p.tenant_id, observed.protected.suite);
-    requireThat(observedPayload.expires_at > this.clock(), 'INV-401-CONNECTOR', 'Connector manifest expired', 401);
+    let observedPayload;
+    try {
+      observedPayload = verifySigned(observed, { [key_id]: issuer }, 'connector-manifest');
+      this.assertSuiteAllowed(p.tenant_id, observed.protected.suite);
+      fields(observedPayload, ['connector_id', 'version', 'domain', 'actions', 'permissions', 'limitations', 'idempotency', 'coverage_implications', 'issued_at', 'expires_at']);
+      requireThat(observedPayload.expires_at > this.clock(), 'INV-401-CONNECTOR', 'Connector manifest expired', 401);
+      requireThat(Number.isSafeInteger(observedPayload.issued_at) && observedPayload.issued_at <= this.clock() + 300000, 'INV-401-CONNECTOR', 'Connector manifest issued-at is implausible', 401);
+    } catch (e) {
+      // A tampered or mis-signed manifest must leave an audit trail —
+      // endpoint-controlled probing must not be unaudited (LOW-5).
+      if (e instanceof InvariantError) {
+        try { this.store.tx(() => this.store.audit(p.tenant_id, 'CONNECTOR_DRIFT', p.subject_id, key_id, { drifted: 'manifest_invalid', code: e.code }, this.clock())); } catch { /* ledger unavailable */ }
+      }
+      throw e;
+    }
     const registered = { connector_id: `issuer:${issuer.name}`, version: issuer.version ?? '1.0.0', actions: issuer.kinds, channel: issuer.channel, key_id };
     const result = driftCheck(registered, { connector_id: observedPayload.connector_id, version: observedPayload.version, actions: observedPayload.actions, channel: observedPayload.domain, key_id: observed.protected.key_id }, this.clock());
     return this.transaction(p, now => {
+      // A clean re-check clears the suspension; a drifted one records it and
+      // stops the issuer's evidence until then (MED-2).
+      this.store.remove(p.tenant_id, 'issuer-drift', key_id);
       if (!result.drifted) return result;
+      this.store.put(p.tenant_id, 'issuer-drift', key_id, { drifted_at: now, changes: result.changes }, now);
       // COV-004/CON-006 consequence: paths depending on the drifted connector
       // lose their observation evidence and fall to UNKNOWN until revalidated.
+      // Each transition emits a coverage event and an owner task (COV-005/009).
       const paths = this.store.list(p.tenant_id, 'coverage', 10000);
-      const staled = applyDriftToPaths(paths, path => path.target === issuer.name || path.connector_id === `issuer:${issuer.name}`);
-      for (const path of paths) if (path.status === 'UNKNOWN' && path.evidence_at === null) this.store.put(p.tenant_id, 'coverage', path.path_id, path, now);
-      this.store.audit(p.tenant_id, 'CONNECTOR_DRIFT', p.subject_id, key_id, { changes: result.changes, configuration_digest: result.configuration_digest, coverage_paths_staled: staled }, now);
-      if (staled) this.store.audit(p.tenant_id, 'COVERAGE_STALED', p.subject_id, key_id, { paths: staled }, now);
-      return { ...result, coverage_paths_staled: staled };
+      const transitioned = applyDriftToPaths(paths, path => path.target === issuer.name || path.connector_id === `issuer:${issuer.name}`);
+      for (const path of transitioned) this.coverageTransition(p.tenant_id, path, 'UNKNOWN', `connector-drift:${key_id}`, now);
+      this.store.audit(p.tenant_id, 'CONNECTOR_DRIFT', p.subject_id, key_id, { changes: result.changes, configuration_digest: result.configuration_digest, coverage_paths_staled: transitioned.length }, now);
+      if (transitioned.length) this.store.audit(p.tenant_id, 'COVERAGE_STALED', p.subject_id, key_id, { paths: transitioned.map(x => x.path_id) }, now);
+      return { ...result, coverage_paths_staled: transitioned.length };
     });
   }
   approvalChallenge(p, id) {
@@ -372,20 +471,8 @@ export class Fabric {
   approve(p, envelope) {
     this.authorize(p, ['approver', 'custodian']);
     return this.transaction(p, now => {
-      const t = p.tenant_id, payload = verifySigned(envelope, this.identities(t), 'action-approval');
-      this.assertHealthy(t, p.subject_id, this.identity(p).device_id, now);
-      this.assertSuiteAllowed(t, envelope.protected.suite);
-      fields(payload, ['tenant_id', 'capsule_id', 'capsule_digest', 'evidence_graph_digest', 'policy_digest', 'signer_id', 'approved_at', 'expires_at']);
-      requireThat(payload.tenant_id === t && payload.signer_id === envelope.protected.key_id, 'INV-403-SCOPE', 'Approval scope mismatch', 403);
-      const identity = this.identities(t)[payload.signer_id]; requireThat(identity.subject_id === p.subject_id, 'INV-403-SCOPE', 'Approval signer does not match authenticated identity', 403);
-      const record = this.store.must(t, 'capsule', payload.capsule_id); this.ensureMutable(record);
-      requireThat(identity.subject_id !== record.capsule.actor.subject_id, 'INV-403-SEPARATION', 'An initiator cannot approve their own action', 403);
-      requireThat(payload.capsule_digest === record.capsule_digest && payload.evidence_graph_digest === this.graph(t, record).digest && payload.policy_digest === digest(this.policy(t)), 'INV-409-STATE', 'Approval no longer matches action, evidence or policy', 409);
-      integer(payload.approved_at, 'approval time', now - 300000, now + 5000); integer(payload.expires_at, 'approval expiry', now + 1, Math.min(record.capsule.expires_at, payload.approved_at + 300000));
-      requireThat(!record.approvals.some(a => a.payload.signer_id === payload.signer_id), 'INV-409-REPLAY', 'Signer already approved this action', 409);
-      record.approvals.push(clone(envelope)); this.store.put(t, 'capsule', payload.capsule_id, record, now);
-      this.store.audit(t, 'EXACT_ACTION_APPROVED', p.subject_id, payload.capsule_id, { approval_digest: digest(envelope), signer_id: payload.signer_id }, now);
-      return { accepted: true, software_key: !identity.hardware_backed, approvals: record.approvals.length };
+      const identity = this.identity(p), capsuleId = verifySigned(envelope, this.identities(p.tenant_id), 'action-approval').capsule_id, accepted = this.approveInner(p, capsuleId, envelope, now);
+      return { accepted: true, software_key: !identity.hardware_backed, approvals: accepted.approvals };
     });
   }
   evaluation(t, record, now, policy = this.policy(t)) {
@@ -504,47 +591,70 @@ export class Fabric {
     // irreversible effects.
     const t = p.tenant_id;
     const children = capsule.requested_state.children;
-    const executed = [];
+    const executed = [], wedged = [];
     const bail = (reason) => {
       const compensations = [];
-      for (const done of executed.reverse()) compensations.push({ capsule_id: done.child.capsule.capsule_id, ...this.target.compensate(done.child.capsule, done.prior, now) });
-      return this.finishComposite(p, cert, capsule, executed, 'COMPENSATED', reason, compensations, now);
+      // Compensation runs in reverse EXECUTION order; the executed array
+      // itself must keep dispatch order for the signed ledger (M2).
+      for (const done of [...executed].reverse()) compensations.push({ capsule_id: done.child.capsule.capsule_id, ...this.target.compensate(done.child.capsule, done.prior, this.clock()) });
+      return this.finishComposite(p, cert, capsule, executed, 'COMPENSATED', reason, compensations, this.clock(), wedged);
     };
     for (const childId of children) {
-      let child, childCert;
+      let child, childCert, childNow;
       try {
         this.store.tx(() => {
+          // Per-child authority is evaluated against a FRESH clock reading,
+          // not the parent reservation time — wall clock may have advanced
+          // across earlier child dispatches (concurrency-audit M1).
+          childNow = this.clock(); this.store.clock(childNow);
           child = this.store.must(t, 'capsule', childId);
           const childStored = this.store.must(t, 'certificate', child.certificate_id);
           childCert = childStored.envelope.payload;
-          requireThat(!this.revoked(t, 'key', childStored.envelope.protected.key_id) && !this.revoked(t, 'certificate', childCert.certificate_id) && childCert.issued_at <= now && childCert.expires_at > now, 'INV-401-CERTIFICATE', 'Child certificate expired or revoked', 401);
+          requireThat(!this.revoked(t, 'key', childStored.envelope.protected.key_id) && !this.revoked(t, 'certificate', childCert.certificate_id) && childCert.issued_at <= childNow && childCert.expires_at > childNow, 'INV-401-CERTIFICATE', 'Child certificate expired or revoked', 401);
           requireThat(!childStored.consumed && child.status === 'CERTIFIED', 'INV-409-REPLAY', 'Child certificate consumed or action cancelled', 409);
           requireThat(child.capsule_digest === childCert.capsule_digest && this.graph(t, child).digest === childCert.evidence_graph_digest && digest(this.policy(t)) === childCert.policy_digest, 'INV-409-STATE', 'Child action, evidence or policy changed', 409);
-          requireThat(this.evaluation(t, child, now).decision === 'ALLOW', 'INV-412-EVIDENCE', 'Child execution predicates no longer hold', 412);
-          this.assertHealthy(t, child.capsule.actor.subject_id, child.capsule.actor.device_id, now);
+          requireThat(this.evaluation(t, child, childNow).decision === 'ALLOW', 'INV-412-EVIDENCE', 'Child execution predicates no longer hold', 412);
+          this.assertHealthy(t, child.capsule.actor.subject_id, child.capsule.actor.device_id, childNow);
           const state = this.target.state(t, child.capsule.action.target_resource);
           requireThat(state.version === child.capsule.current_state.version && state.digest === child.capsule.current_state.digest, 'INV-409-STATE', 'Child target state changed', 409);
           childStored.consumed = true; childStored.status = 'EXECUTING'; childStored.transaction_id = childCert.certificate_id;
           child.status = 'EXECUTING';
-          this.store.put(t, 'certificate', childCert.certificate_id, childStored, now); this.store.put(t, 'capsule', childId, child, now);
-          this.store.audit(t, 'EXECUTION_RESERVED', p.subject_id, childCert.certificate_id, { capsule_digest: childCert.capsule_digest, composite_child_of: cert.certificate_id }, now);
+          this.store.put(t, 'certificate', childCert.certificate_id, childStored, childNow); this.store.put(t, 'capsule', childId, child, childNow);
+          this.store.audit(t, 'EXECUTION_RESERVED', p.subject_id, childCert.certificate_id, { capsule_digest: childCert.capsule_digest, composite_child_of: cert.certificate_id }, childNow);
         });
       } catch (e) { return bail(`CHILD_REVALIDATION_FAILED:${e.code ?? 'UNKNOWN'}`); }
-      let raw;
-      try {
-        raw = this.target.execute(child.capsule, childCert.certificate_id, now, fault);
-        // A child's reply earns VERIFIED only under the same response rules as
-        // a standalone execution (runtime-audit F-2).
-        requireThat(this._validateTargetResponse(child, childCert, raw, now).valid, 'INV-409-STATE', 'Child target response invalid');
-      } catch (e) { return bail(`CHILD_EXECUTION_FAILED:${e.code ?? 'UNKNOWN'}`); }
+      let raw, dispatchError = null;
+      try { raw = this.target.execute(child.capsule, childCert.certificate_id, childNow, fault); }
+      catch (e) { dispatchError = e; }
+      if (dispatchError instanceof InvariantError) {
+        // A deterministic refusal is a FAILED child outcome, honestly
+        // recorded — same rule as a standalone execution (runtime-audit F-9).
+        try { this.finish(p, childCert, null, 'FAILED', dispatchError.code ?? 'INV-500'); } catch { /* bail must proceed regardless */ }
+        return bail(`CHILD_EXECUTION_FAILED:${dispatchError.code ?? 'UNKNOWN'}`);
+      }
+      if (dispatchError) {
+        // The reservation committed but the dispatch did not conclude: the
+        // child is honestly wedged (EXECUTING, reconcilable later) and the
+        // parent outcome must name it rather than understate the loss (M2).
+        wedged.push(childId);
+        return bail(`CHILD_EXECUTION_FAILED:${dispatchError.code ?? 'UNKNOWN'}`);
+      }
+      // A child's reply earns VERIFIED only under the same response rules as
+      // a standalone execution (runtime-audit F-2).
+      if (!this._validateTargetResponse(child, childCert, raw, this.clock()).valid) {
+        wedged.push(childId);
+        return bail('CHILD_EXECUTION_FAILED:TARGET_RESPONSE_INVALID');
+      }
       executed.push({ child, raw, prior: child.capsule.current_state.material_fields });
     }
-    return this.finishComposite(p, cert, capsule, executed, 'VERIFIED', 'CHILDREN_VERIFIED', [], now);
+    return this.finishComposite(p, cert, capsule, executed, 'VERIFIED', 'CHILDREN_VERIFIED', [], this.clock());
   }
-  finishComposite(p, cert, capsule, executed, status, reason, compensations, execNow) {
+  finishComposite(p, cert, capsule, executed, status, reason, compensations, execNow, wedged = []) {
     const post = [];
     const envelope = this.transaction(p, now => {
       const t = p.tenant_id, r = this.store.must(t, 'capsule', cert.capsule_id), stored = this.store.must(t, 'certificate', cert.certificate_id);
+      const existing = this.store.get(t, 'outcome', cert.certificate_id);
+      requireThat(!existing || !['VERIFIED', 'FAILED', 'COMPENSATED'].includes(existing.payload.status), 'INV-409-STATE', 'A terminal execution outcome cannot be overwritten', 409);
       for (const done of executed) {
         const childRecord = this.store.must(t, 'capsule', done.child.capsule.capsule_id), childStored = this.store.must(t, 'certificate', done.child.certificate_id);
         childRecord.status = status === 'VERIFIED' ? 'VERIFIED' : 'COMPENSATED';
@@ -555,11 +665,11 @@ export class Fabric {
         // may not attest an effect that never happened (runtime-audit F-2).
         if (status === 'VERIFIED') this._applyVerifiedEffects(p, t, childRecord, childStored.envelope.payload, done.raw, now, post);
       }
-      const payload = { certificate_id: cert.certificate_id, capsule_digest: cert.capsule_digest, target_transaction_id: cert.certificate_id, observed_state_digest: digest({ children: executed.map(e => e.child.capsule.capsule_id), compensations }), status, reason, execution_time: execNow, reconciliation_evidence: digest(executed.map(e => e.raw)), simulation: true, output: null, composite: true, children: executed.map(e => e.child.capsule.capsule_id), compensations };
+      const payload = { certificate_id: cert.certificate_id, capsule_digest: cert.capsule_digest, target_transaction_id: cert.certificate_id, observed_state_digest: digest({ children: executed.map(e => e.child.capsule.capsule_id), compensations }), status, reason, execution_time: execNow, reconciliation_evidence: digest(executed.map(e => e.raw)), simulation: true, output: null, composite: true, children: executed.map(e => e.child.capsule.capsule_id), wedged_children: wedged.length ? wedged : null, compensations, supersedes: existing ? digest(existing) : null };
       const envelope = this.signAudit(t, payload, 'outcome');
       this.store.put(t, 'outcome', cert.certificate_id, envelope, now); stored.status = status; r.status = status;
       this.store.put(t, 'certificate', cert.certificate_id, stored, now); this.store.put(t, 'capsule', cert.capsule_id, r, now);
-      this.store.audit(t, 'EXECUTION_OUTCOME', p.subject_id, cert.certificate_id, { status, reason, outcome_digest: digest(envelope), composite: true }, now);
+      this.store.audit(t, 'EXECUTION_OUTCOME', p.subject_id, cert.certificate_id, { status, reason, outcome_digest: digest(envelope), composite: true, wedged_children: wedged.length ? wedged : null, supersedes: existing ? digest(existing) : null }, now);
       return envelope;
     });
     for (const fn of post) fn();
@@ -680,11 +790,17 @@ export class Fabric {
       const { valid } = this._validateTargetResponse(r, cert, raw, now);
       if (status === 'VERIFIED' && !valid) { status = 'UNCERTAIN'; reason = 'TARGET_RESPONSE_INVALID'; }
       const extras = valid ? this._applyVerifiedEffects(p, t, r, cert, raw, now, post) : null;
-      const payload = { certificate_id: cert.certificate_id, capsule_digest: cert.capsule_digest, target_transaction_id: cert.certificate_id, observed_state_digest: valid ? raw.observed_state_digest : null, status, reason, execution_time: valid ? raw.execution_time : now, reconciliation_evidence: valid ? digest(raw) : null, simulation: true, output: valid ? raw.output : null, watermarks: extras?.watermarks ?? null };
+      // H1: revocation cannot abort a committed reservation — it stops NEW
+      // reservations. A revocation that landed between reservation and this
+      // finish is recorded and flagged rather than hidden, so the ledger
+      // shows the race instead of pretending it never happened.
+      const revokedMidFlight = this.revoked(t, 'certificate', cert.certificate_id) || this.revoked(t, 'key', stored.envelope.protected.key_id);
+      const payload = { certificate_id: cert.certificate_id, capsule_digest: cert.capsule_digest, target_transaction_id: cert.certificate_id, observed_state_digest: valid ? raw.observed_state_digest : null, status, reason, execution_time: valid ? raw.execution_time : now, reconciliation_evidence: valid ? digest(raw) : null, simulation: true, output: valid ? raw.output : null, watermarks: extras?.watermarks ?? null, revoked_post_reservation: revokedMidFlight || null, supersedes: existing ? digest(existing) : null };
       const envelope = this.signAudit(t, payload, 'outcome');
       this.store.put(t, 'outcome', cert.certificate_id, envelope, now); stored.status = status; r.status = status;
       this.store.put(t, 'certificate', cert.certificate_id, stored, now); this.store.put(t, 'capsule', cert.capsule_id, r, now);
-      this.store.audit(t, 'EXECUTION_OUTCOME', p.subject_id, cert.certificate_id, { status, reason, outcome_digest: digest(envelope) }, now);
+      this.store.audit(t, 'EXECUTION_OUTCOME', p.subject_id, cert.certificate_id, { status, reason, outcome_digest: digest(envelope), supersedes: existing ? digest(existing) : null, revoked_post_reservation: revokedMidFlight || null }, now);
+      if (revokedMidFlight) this.store.audit(t, 'EXECUTION_COMPLETED_POST_REVOCATION', p.subject_id, cert.certificate_id, { status, outcome_digest: digest(envelope) }, now);
       return envelope;
     });
     for (const fn of post) fn();
@@ -708,7 +824,14 @@ export class Fabric {
     });
   }
   revoke(p, input) {
-    this.authorize(p, ['security']); fields(input, ['kind', 'id', 'reason']); text(input.reason, 'revocation reason'); identifier(input.id);
+    this.authorize(p, ['security']); fields(input, ['kind', 'id', 'reason'], ['remediation_service']); text(input.reason, 'revocation reason'); identifier(input.id);
+    // NET-005/006: quarantine remediation may only invoke services named in
+    // the policy allowlist — the dispatch itself stays an external system,
+    // the contract enforced here is that arbitrary services cannot be asked.
+    if (input.remediation_service !== undefined) {
+      text(input.remediation_service, 'remediation service');
+      requireThat(this.policy(p.tenant_id).runtime.remediation_services.includes(input.remediation_service), 'INV-403-SCOPE', 'Remediation service is not in the policy allowlist', 403);
+    }
     requireThat(['certificate', 'evidence', 'issuer', 'key', 'subject', 'device', 'capability', 'grant', 'token'].includes(input.kind), 'INV-400-SCHEMA', 'Unsupported revocation type');
     return this.transaction(p, now => {
       // Revocation must name a live authority — revoking a nonexistent id
@@ -729,6 +852,7 @@ export class Fabric {
       if (input.kind === 'grant') this.target.revokeGrant(t, input.id);
       const payload = { ...clone(input), tenant_id: t, revoked_at: now, actor: p.subject_id, propagation: 'local-synchronous', remote_propagation: 'NOT_IMPLEMENTED' };
       this.store.put(t, 'revocation', `${input.kind}:${input.id}`, payload, now);
+      if (input.remediation_service) this.store.audit(t, 'REMEDIATION_REQUESTED', p.subject_id, `${input.kind}:${input.id}`, { service: input.remediation_service, dispatched: false, channel: 'external-system-not-integrated' }, now);
       this.store.audit(t, 'AUTHORITY_REVOKED', p.subject_id, `${input.kind}:${input.id}`, { reason_digest: digest(input.reason) }, now);
       return this.signAudit(p.tenant_id, payload, 'revocation');
     });
@@ -753,11 +877,49 @@ export class Fabric {
       this.store.insert(p.tenant_id, 'simulation', result.simulation_id, result, now); this.store.audit(p.tenant_id, 'POLICY_SIMULATED', p.subject_id, result.simulation_id, { candidate_digest: digest(candidate), result_digest: digest(result) }, now); return result;
     });
   }
+  // Every coverage state change passes through here so the coverage-event
+  // history and owner tasks can never disagree with the stored path.
+  coverageTransition(tenant, path, to, cause, now) {
+    path.status = to; if (to === 'UNKNOWN') path.evidence_at = null;
+    this.store.put(tenant, 'coverage', path.path_id, path, now);
+    this.store.insert(tenant, 'coverage-event', `${path.path_id}:${now}:${cause}`, { type: 'transitioned', path_id: path.path_id, to, evidence_at: path.evidence_at, at: now, cause }, now);
+    // Owner tasks exist only for degradation to UNKNOWN — a promotion is a
+    // resolution, not a new obligation.
+    if (to === 'UNKNOWN') this.store.insert(tenant, 'coverage-task', `${cause}:${path.path_id}`, { path_id: path.path_id, owner: path.owner, cause, opened_at: now, status: 'open', required_action: 'attach independently executed technical validation evidence' }, now);
+  }
   coverage(p) { this.authorize(p, ['operator', 'approver', 'custodian', 'security', 'auditor', 'policy_admin']); return coverageManifest(p.tenant_id, this.store.list(p.tenant_id, 'coverage'), this.clock(), payload => this.signAudit(p.tenant_id, payload, 'coverage')); }
+  // COV-009: what the coverage record showed at an arbitrary past instant —
+  // answered from the coverage-event log, not the current mutable state.
+  coverageAt(p, at) {
+    this.authorize(p, ['operator', 'approver', 'custodian', 'security', 'auditor', 'policy_admin']);
+    const atTime = integer(Number(at), 'at', 1, 1e14);
+    return { at: atTime, paths: coverageAt(this.store.list(p.tenant_id, 'coverage-event', 100000), atTime) };
+  }
   declareCoverage(p, input) {
     this.authorize(p, ['security']); return this.transaction(p, now => {
       const path = declarePath(input, now); this.store.put(p.tenant_id, 'coverage', path.path_id, path, now);
+      this.store.insert(p.tenant_id, 'coverage-event', `${path.path_id}:${now}:declared`, { type: 'declared', path_id: path.path_id, path, at: now }, now);
+      if (path.status === 'UNKNOWN') this.store.insert(p.tenant_id, 'coverage-task', `declared-unknown:${path.path_id}`, { path_id: path.path_id, owner: path.owner, cause: 'declared-unknown', opened_at: now, status: 'open', required_action: 'attach independently executed technical validation evidence' }, now);
       this.store.audit(p.tenant_id, 'COVERAGE_DECLARED', p.subject_id, path.path_id, { digest: digest(path), status: path.status }, now); return path;
+    });
+  }
+  // COV-010: technical validation attaches an independently executed bypass
+  // test result to a path — the only way a path can claim stronger than
+  // MONITORED is a verified evidence envelope, never a checkbox.
+  technicalValidation(p, path_id, envelope) {
+    this.authorize(p, ['security']); return this.transaction(p, now => {
+      const path = this.store.must(p.tenant_id, 'coverage', identifier(path_id));
+      // The evidence schema is reused; its capsule_digest field binds the
+      // validation to this path (digest(path)) rather than to an action.
+      const payload = this.verifyEvidenceEnvelope(p.tenant_id, envelope);
+      requireThat(payload.capsule_digest === digest(path), 'INV-400-SCHEMA', 'Validation evidence must bind this path');
+      path.technical_validation = { evidence_id: payload.evidence_id, issuer: envelope.protected.key_id, at: now, outcome: payload.claim };
+      if (path.status === 'UNKNOWN') { path.evidence_at = now; this.coverageTransition(p.tenant_id, path, 'MONITORED', 'technical-validation', now); }
+      else this.store.put(p.tenant_id, 'coverage', path.path_id, path, now);
+      this.store.insert(p.tenant_id, 'coverage-event', `${path.path_id}:${now}:validation`, { type: 'technical_validation', path_id: path.path_id, validation: path.technical_validation, at: now }, now);
+      this.store.remove(p.tenant_id, 'coverage-task', `declared-unknown:${path.path_id}`);
+      this.store.audit(p.tenant_id, 'COVERAGE_TECHNICAL_VALIDATION', p.subject_id, path.path_id, { issuer: envelope.protected.key_id }, now);
+      return path;
     });
   }
   // AUD-003/005/010 + transparency: the audit log is a hash-chained signed log
@@ -788,7 +950,97 @@ export class Fabric {
   }
   exportAudit(p, purpose) {
     this.authorize(p, ['auditor', 'security']); text(purpose, 'audit export purpose', 256);
-    return this.transaction(p, now => { this.store.audit(p.tenant_id, 'AUDIT_ACCESSED', p.subject_id, 'tenant-log', { purpose_digest: digest(purpose) }, now); return this.store.auditExport(p.tenant_id, now); });
+    return this.transaction(p, now => {
+      this.store.audit(p.tenant_id, 'AUDIT_ACCESSED', p.subject_id, 'tenant-log', { purpose_digest: digest(purpose) }, now);
+      return this.store.auditExport(p.tenant_id, now);
+    });
+  }
+  // AUD-010: least-privilege audit views. An operational principal (operator
+  // without an assessor role) receives only the digest level of every entry —
+  // sequence, chain hash, action type, actor, timestamp — not the signed
+  // payload body. Auditors and security receive the full signed envelope:
+  // independent verification IS the auditor's necessary information. Merkle
+  // integrity checks still work on the scoped view — the hash column is the
+  // payload digest.
+  auditDigestOnly(p) {
+    const identity = this.identity(p);
+    const roles = this.grantsFor(p.tenant_id, p.subject_id, this.clock()).roles ?? identity.roles;
+    return !roles.some(r => ['auditor', 'security', 'policy_admin'].includes(r));
+  }
+  auditEntryScoped(entry) {
+    const payload = entry.envelope?.payload ?? {};
+    return { sequence: entry.sequence, hash: entry.hash, payload_digest: entry.hash, type: payload.type ?? null, actor: payload.actor ?? null, reference: payload.reference ?? null, at: payload.time ?? null, digest_only: true };
+  }
+  auditPageScoped(p, options = {}) {
+    this.authorize(p, ['operator', 'security', 'auditor', 'policy_admin']);
+    const page = this.store.auditPage(p.tenant_id, options);
+    // AUD-010: named domain projections filter the verified page. Integrity
+    // verification runs on the unfiltered page before projection.
+    if (options.view !== undefined) {
+      const PROJECTIONS = {
+        finance: ['CAPSULE_PROPOSED', 'EVIDENCE_ATTACHED', 'EXACT_ACTION_APPROVED', 'BATCH_APPROVED', 'CERTIFICATE_ISSUED', 'EXECUTION_RESERVED', 'EXECUTION_OUTCOME', 'EXECUTION_DRY_RUN', 'ACTION_CANCELLED', 'EXECUTION_COMPLETED_POST_REVOCATION', 'POLICY_EVALUATED'],
+        privacy: ['RETENTION_DELETED', 'RETENTION_HOLD_CHANGED', 'CAPABILITY_ISSUED', 'RUNTIME_ALLOWED', 'PERCEPTION_SESSION', 'PERCEPTION_RELEASE', 'PERCEPTION_FALLBACK', 'AUDIT_ACCESSED'],
+        technical: ['CONFIG_DRIFT', 'CONFIG_REASSERTED', 'CONFIG_SNAPSHOT', 'CONNECTOR_DRIFT', 'COVERAGE_DECLARED', 'COVERAGE_STALED', 'COVERAGE_TECHNICAL_VALIDATION', 'CLOCK_RECOVERED', 'KEY_ROTATED', 'ROTATION_PREPARED', 'CEREMONY_PLANNED', 'CEREMONY_ACKNOWLEDGED', 'CEREMONY_SHARES_COMMITTED', 'CEREMONY_RECONSTRUCTED', 'EVIDENCE_ACQUISITION_FAILED', 'REMEDIATION_REQUESTED', 'JIT_GRANT_ISSUED', 'RECOVERY_NOTICE_ISSUED', 'POLICY_GENESIS', 'POLICY_STAGED', 'POLICY_SIMULATED', 'POLICY_SUPERSEDED', 'EMERGENCY_POLICY_ACTIVATED', 'AI_ADVISORY', 'SECURITY_OPERATION_REJECTED', 'AUTHORITY_REVOKED'],
+      };
+      requireThat(Object.hasOwn(PROJECTIONS, options.view), 'INV-400-SCHEMA', `Unknown audit projection ${options.view}`);
+      const types = new Set(PROJECTIONS[options.view]);
+      page.entries = page.entries.filter(e => types.has(e.envelope.payload.type));
+    }
+    if (this.auditDigestOnly(p)) page.entries = page.entries.map(e => this.auditEntryScoped(e));
+    return page;
+  }
+  // UX-006: batch approval. Every capsule in the batch is individually
+  // bound — each envelope must carry that capsule's own digests; a count or
+  // set mismatch (hidden addition or omission) rejects the whole batch
+  // atomically, and any single invalid approval aborts it.
+  batchApprove(p, input) {
+    this.authorize(p, ['approver', 'custodian']);
+    fields(input, ['capsule_ids', 'signatures']);
+    requireThat(Array.isArray(input.capsule_ids) && input.capsule_ids.length >= 2 && input.capsule_ids.length <= 32, 'INV-400-SCHEMA', 'Batch must contain 2-32 actions');
+    requireThat(Array.isArray(input.signatures) && input.signatures.length === input.capsule_ids.length, 'INV-400-SCHEMA', 'Signature count must equal the declared action set');
+    requireThat(new Set(input.capsule_ids).size === input.capsule_ids.length, 'INV-400-SCHEMA', 'Duplicate capsule in batch');
+    for (const id of input.capsule_ids) identifier(id, 'capsule id');
+    return this.transaction(p, now => {
+      const accepted = [], constraints = [];
+      for (const capsuleId of input.capsule_ids) {
+        const record = this.store.must(p.tenant_id, 'capsule', capsuleId);
+        const matched = input.signatures.filter(sig => sig?.payload?.capsule_id === capsuleId);
+        requireThat(matched.length === 1, 'INV-400-SCHEMA', `Batch must carry exactly one approval per declared action: ${capsuleId}`, 400);
+        accepted.push(this.approveInner(p, capsuleId, matched[0], now));
+        constraints.push(this.policy(p.tenant_id).rules[record.capsule.action.type]?.approval_threshold ?? null);
+      }
+      this.store.audit(p.tenant_id, 'BATCH_APPROVED', p.subject_id, 'batch', { capsule_ids: input.capsule_ids, count: accepted.length }, now);
+      return { accepted: accepted.length, capsule_ids: input.capsule_ids, aggregate_constraints: constraints };
+    });
+  }
+  // The shared per-capsule approval check used by approve() and batchApprove.
+  approveInner(p, capsuleId, envelope, now) {
+    const t = p.tenant_id, payload = verifySigned(envelope, this.identities(t), 'action-approval');
+    requireThat(payload.capsule_id === capsuleId, 'INV-403-SCOPE', 'Approval payload does not bind the declared action', 403);
+    this.assertHealthy(t, p.subject_id, this.identity(p).device_id, now);
+    this.assertSuiteAllowed(t, envelope.protected.suite);
+    fields(payload, ['tenant_id', 'capsule_id', 'capsule_digest', 'evidence_graph_digest', 'policy_digest', 'signer_id', 'approved_at', 'expires_at']);
+    requireThat(payload.tenant_id === t && payload.signer_id === envelope.protected.key_id, 'INV-403-SCOPE', 'Approval scope mismatch', 403);
+    const identity = this.identities(t)[payload.signer_id]; requireThat(identity.subject_id === p.subject_id, 'INV-403-SCOPE', 'Approval signer does not match authenticated identity', 403);
+    const record = this.store.must(t, 'capsule', capsuleId); this.ensureMutable(record);
+    requireThat(identity.subject_id !== record.capsule.actor.subject_id, 'INV-403-SEPARATION', 'An initiator cannot approve their own action', 403);
+    requireThat(payload.capsule_digest === record.capsule_digest && payload.evidence_graph_digest === this.graph(t, record).digest && payload.policy_digest === digest(this.policy(t)), 'INV-409-STATE', 'Approval no longer matches action, evidence or policy', 409);
+    integer(payload.approved_at, 'approval time', now - 300000, now + 5000); integer(payload.expires_at, 'approval expiry', now + 1, Math.min(record.capsule.expires_at, payload.approved_at + 300000));
+    requireThat(!record.approvals.some(a => a.payload.signer_id === payload.signer_id), 'INV-409-REPLAY', 'Signer already approved this action', 409);
+    record.approvals.push(clone(envelope)); this.store.put(t, 'capsule', capsuleId, record, now);
+    this.store.audit(t, 'EXACT_ACTION_APPROVED', p.subject_id, capsuleId, { approval_digest: digest(envelope), signer_id: payload.signer_id }, now);
+    return { capsule_id: capsuleId, signer_id: payload.signer_id, approvals: record.approvals.length };
+  }
+  // NET-010: reconstruct the containment sequence for incident analysis —
+  // denied consumes (rate/budget/quarantine/scope) interleaved with
+  // subject/device revocations, ordered by time.
+  containmentReport(p) {
+    this.authorize(p, ['operator', 'security', 'auditor', 'policy_admin']);
+    const t = p.tenant_id;
+    const denials = this.store.list(t, 'containment', 10000).map(c => ({ kind: 'denied_consume', at: c.contained_at, code: c.code, subject_id: c.subject_id, capability_id: c.capability_id, resource: c.resource, request_id: c.request_id }));
+    const quarantines = this.store.list(t, 'revocation', 10000).filter(r => ['subject', 'device'].includes(r.kind)).map(r => ({ kind: 'revocation', at: r.revoked_at, revoked: `${r.kind}:${r.id}`, by: r.actor }));
+    const sequence = [...denials, ...quarantines].sort((a, b) => a.at - b.at);
+    return { sequence, dropped_requests: denials.length, affected_capabilities: [...new Set(denials.map(d => d.capability_id).filter(Boolean))], quarantined: quarantines.map(q => q.revoked), limitation: 'Software dataplane telemetry only; packet-level counters require a real network path.' };
   }
   retention(p, input) {
     this.authorize(p, ['security']); fields(input, ['evidence_id', 'legal_hold']); identifier(input.evidence_id); requireThat(typeof input.legal_hold === 'boolean', 'INV-400-SCHEMA', 'Legal hold must be boolean');

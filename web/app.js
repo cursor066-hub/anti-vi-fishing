@@ -13,10 +13,39 @@ export function typedValue(value, rule) {
 export function csvSelection(value) { const items = value.split(',').map(x => x.trim()).filter(Boolean); if (!items.length || new Set(items).size !== items.length) throw new Error('Provide a nonempty list without duplicates.'); return items; }
 export function fieldsMap(value) { const out = {}; for (const pair of csvSelection(value)) { const i = pair.indexOf('='); if (i <= 0) throw new Error('Enter fields as name=value pairs, comma-separated.'); out[pair.slice(0, i).trim()] = pair.slice(i + 1).trim(); } return out; }
 export function formatQuantity(c) { if (c.action.type === 'finance.payment.first') return `${c.requested_state.currency} ${(c.quantity / 100).toFixed(2)} (${c.quantity} minor units)`; return `${c.quantity} unit${c.quantity === 1 ? '' : 's'}`; }
+// Exact in-browser replica of src/canonical.mjs (IF-CJSON-1): NFC strings,
+// ASCII object keys, safe integers only, sorted keys, strict key charset.
+export function canonicalJson(value, depth = 0) {
+  if (depth > 32) throw new Error('Maximum nesting depth exceeded');
+  if (value === null || typeof value === 'boolean') return JSON.stringify(value);
+  if (typeof value === 'number') { if (!Number.isSafeInteger(value) || Object.is(value, -0)) throw new Error('Only safe non-negative-zero integers are supported'); return String(value); }
+  if (typeof value === 'string') { if (value !== value.normalize('NFC') || /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(value)) throw new Error('Strings must be valid NFC Unicode'); if (value.length > 65536) throw new Error('String too long'); return JSON.stringify(value); }
+  if (Array.isArray(value)) { if (value.length > 10000) throw new Error('Array too long'); return '[' + value.map(v => canonicalJson(v, depth + 1)).join(',') + ']'; }
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value).sort(); if (keys.length > 256) throw new Error('Object too large');
+    return '{' + keys.map(k => { if (!/^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}$/.test(k) || ['__proto__', 'prototype', 'constructor'].includes(k)) throw new Error('Unsupported object key'); return JSON.stringify(k) + ':' + canonicalJson(value[k], depth + 1); }).join(',') + '}';
+  }
+  throw new Error('Unsupported canonical value');
+}
+// Signs an IF-CJSON-1 'capsule-intent' envelope in the browser via WebCrypto
+// Ed25519 — identical message bytes to src/crypto.mjs signed(). The private
+// key never leaves this page context.
+export async function signIntent(payload, keyFile) {
+  const protectedHeader = { profile: 'IF-CJSON-1', suite: keyFile.suite ?? 'Ed25519', key_id: keyFile.key_id, purpose: 'capsule-intent' };
+  if (protectedHeader.suite !== 'Ed25519') throw new Error('Browser signing supports Ed25519 identity keys; use the CLI signer for ES256.');
+  const message = new TextEncoder().encode(canonicalJson({ protected: protectedHeader, payload }));
+  const der = Uint8Array.from(atob(keyFile.private_key.replace(/-----[^-]+-----|\s/g, '')), c => c.charCodeAt(0));
+  let key;
+  try { key = await crypto.subtle.importKey('pkcs8', der, { name: 'Ed25519' }, false, ['sign']); }
+  catch { throw new Error('This browser lacks WebCrypto Ed25519 support — sign with the CLI instead.'); }
+  const sig = await crypto.subtle.sign({ name: 'Ed25519' }, key, message);
+  const b64 = btoa(String.fromCharCode(...new Uint8Array(sig))).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+  return { protected: protectedHeader, payload, signature: b64 };
+}
 
 if (typeof document !== 'undefined') {
   const $ = id => document.getElementById(id);
-  const state = { me: null, csrf: null, schemas: [], policy: null, selected: null, currentState: null, currentResource: null, offset: 0, pageCount: 0, runtime: null };
+  const state = { me: null, csrf: null, schemas: [], policy: null, selected: null, currentState: null, currentResource: null, offset: 0, pageCount: 0, runtime: null, identityKey: null };
   function notify(message, error = false) { const el = $('notice'); el.hidden = false; el.textContent = message; el.dataset.error = String(error); if (error) el.setAttribute('role', 'alert'); else el.setAttribute('role', 'status'); }
   async function api(path, { method = 'GET', body, headers = {} } = {}) {
     const response = await fetch(path, { method, credentials: 'same-origin', headers: { ...headers, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(state.csrf ? { 'X-CSRF-Token': state.csrf } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
@@ -75,7 +104,10 @@ if (typeof document !== 'undefined') {
     state.schemas = await api('/v1/schemas'); $('action-type').replaceChildren(new Option('Choose action type', '')); for (const s of state.schemas.filter(s => s.type.startsWith('finance.'))) $('action-type').append(new Option(s.type, s.type));
     const canActions = state.me.roles.some(r => ['operator', 'approver', 'custodian', 'security', 'policy_admin'].includes(r));
     const admin = state.me.roles.some(r => ['security', 'policy_admin', 'custodian'].includes(r));
-    const access = { actions: canActions, propose: state.me.roles.includes('operator'), coverage: true, policy: state.me.roles.some(r => ['policy_admin', 'security'].includes(r)), runtime: state.me.roles.includes('operator'), audit: state.me.roles.some(r => ['auditor', 'security'].includes(r)), keys: state.me.roles.some(r => ['security', 'policy_admin', 'auditor'].includes(r)), ceremonies: admin, connectors: canActions || state.me.roles.includes('auditor'), proofs: canActions || state.me.roles.includes('auditor'), perception: state.me.roles.includes('operator'), grants: canActions || state.me.roles.includes('auditor') };
+    const has = (...r) => state.me.roles.some(x => r.includes(x));
+    // Affordances mirror the server's own authorization sets — a nav entry is
+    // hidden exactly when every API call under it would 403 (UX-004).
+    const access = { actions: canActions, propose: state.me.roles.includes('operator'), coverage: true, policy: has('policy_admin', 'security'), runtime: has('operator', 'workload'), audit: has('auditor', 'security', 'operator', 'policy_admin'), keys: has('security', 'policy_admin'), ceremonies: admin, connectors: has('operator', 'security', 'policy_admin', 'auditor'), proofs: has('operator', 'security', 'auditor'), perception: has('operator', 'approver', 'custodian', 'security'), grants: has('operator', 'security', 'auditor') };
     document.querySelectorAll('nav button').forEach(b => { b.hidden = !access[b.dataset.view]; });
     if (canActions) { show('actions'); await loadList(); } else { show('audit'); }
     notify('Connected to the isolated engineering workspace. Targets and evidence issuers are synthetic.');
@@ -85,6 +117,12 @@ if (typeof document !== 'undefined') {
   handle('refresh', 'click', loadList); handle('previous', 'click', async () => { state.offset = Math.max(0, state.offset - 25); await loadList(); }); handle('next', 'click', async () => { state.offset += 25; await loadList(); }); handle('back-actions', 'click', async () => { show('actions'); await loadList(); });
   $('action-type').addEventListener('change', renderRequested); $('resource').addEventListener('input', () => { state.currentState = null; state.currentResource = null; });
   handle('load-state', 'click', async () => { if (!$('resource').checkValidity() || !$('resource').value) throw new Error('Enter a valid target resource identifier.'); const resource = $('resource').value; state.currentState = await api(`/v1/resources/${encodeURIComponent(resource)}`); state.currentResource = resource; $('state-preview').textContent = JSON.stringify(state.currentState, null, 2); });
+  handle('identity-key-file', 'change', async e => {
+    const file = e.target.files[0]; if (!file) { state.identityKey = null; return; }
+    const key = JSON.parse(await file.text());
+    if (typeof key?.private_key !== 'string' || typeof key?.key_id !== 'string' || !key.private_key.includes('PRIVATE KEY')) throw new Error('Select an identity key file generated by bootstrap (identity-<tenant>-<subject>.json).');
+    state.identityKey = key; notify(`Identity key ${key.key_id} loaded — the private key stays in this page.`);
+  });
   handle('propose-form', 'submit', async () => {
     if (!state.currentState || state.currentResource !== $('resource').value) throw new Error('Read current target state for this exact resource first.');
     const schema = state.schemas.find(s => s.type === $('action-type').value), requested = {}; for (const input of $('requested-fields').querySelectorAll('input')) requested[input.name] = typedValue(input.value, input.dataset.rule);

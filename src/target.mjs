@@ -13,7 +13,7 @@ import { requireThat, InvariantError } from './errors.mjs';
 export class SimulatedTarget {
   constructor(path, tenantKeys) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 }); this.db = new DatabaseSync(path); chmodSync(path, 0o600); this.keys = tenantKeys;
-    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; PRAGMA secure_delete=ON;
+    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=30000; PRAGMA secure_delete=ON;
       CREATE TABLE IF NOT EXISTS resources(tenant TEXT, id TEXT, version INTEGER, value TEXT, PRIMARY KEY(tenant,id));
       CREATE TABLE IF NOT EXISTS transactions(tenant TEXT,id TEXT,value TEXT,PRIMARY KEY(tenant,id));
       CREATE TABLE IF NOT EXISTS dataset_rows(tenant TEXT, dataset TEXT, row_id TEXT, data TEXT, PRIMARY KEY(tenant,dataset,row_id));
@@ -24,6 +24,12 @@ export class SimulatedTarget {
       CREATE INDEX IF NOT EXISTS grants_subject ON grants(tenant);`);
   }
   close() { this.db.close(); }
+  tx(fn) {
+    if (this.db.isTransaction) return fn();
+    this.db.exec('BEGIN IMMEDIATE');
+    try { const r = fn(); this.db.exec('COMMIT'); return r; }
+    catch (e) { this.db.exec('ROLLBACK'); throw e; }
+  }
   key(tenant) { requireThat(this.keys[tenant], 'INV-404-NOT-FOUND', 'Resource not found', 404); return Buffer.from(this.keys[tenant], 'base64url'); }
   _readResource(tenant, id) {
     const row = this.db.prepare('SELECT version,value FROM resources WHERE tenant=? AND id=?').get(tenant, id);
@@ -42,21 +48,28 @@ export class SimulatedTarget {
       .map(r => ({ id: r.row_id, ...decrypt(r.data, this.key(tenant), `${tenant}/dataset/${dataset}/${r.row_id}`) }));
   }
   // Provisioning/fault harness only: not reachable through the HTTP API.
+  // The versioned read-modify-write runs in a transaction like every other
+  // mutation — a parallel seed can never produce a lost update (concurrency
+  // audit L3).
   seed(tenant, id, fields) {
     const { rows, ...meta } = fields;
-    const state = this._readResource(tenant, id);
-    this.db.prepare('INSERT INTO resources VALUES(?,?,?,?) ON CONFLICT(tenant,id) DO UPDATE SET version=excluded.version,value=excluded.value').run(tenant, id, state.version + 1, encrypt(meta, this.key(tenant), `${tenant}/resource/${id}`));
-    if (Array.isArray(rows)) {
-      this.db.prepare('DELETE FROM dataset_rows WHERE tenant=? AND dataset=?').run(tenant, id);
-      for (const row of rows) {
-        const { id: row_id, ...data } = row;
-        this.db.prepare('INSERT INTO dataset_rows VALUES(?,?,?,?)').run(tenant, id, row_id, encrypt(data, this.key(tenant), `${tenant}/dataset/${id}/${row_id}`));
+    return this.tx(() => {
+      const state = this._readResource(tenant, id);
+      this.db.prepare('INSERT INTO resources VALUES(?,?,?,?) ON CONFLICT(tenant,id) DO UPDATE SET version=excluded.version,value=excluded.value').run(tenant, id, state.version + 1, encrypt(meta, this.key(tenant), `${tenant}/resource/${id}`));
+      if (Array.isArray(rows)) {
+        this.db.prepare('DELETE FROM dataset_rows WHERE tenant=? AND dataset=?').run(tenant, id);
+        for (const row of rows) {
+          const { id: row_id, ...data } = row;
+          this.db.prepare('INSERT INTO dataset_rows VALUES(?,?,?,?)').run(tenant, id, row_id, encrypt(data, this.key(tenant), `${tenant}/dataset/${id}/${row_id}`));
+        }
       }
-    }
+    });
   }
   seedSecret(tenant, secret_id, fields) {
-    const state = this.db.prepare('SELECT version FROM secrets_registry WHERE tenant=? AND secret_id=?').get(tenant, secret_id);
-    this.db.prepare('INSERT INTO secrets_registry VALUES(?,?,?,?) ON CONFLICT(tenant,secret_id) DO UPDATE SET version=excluded.version,value=excluded.value').run(tenant, secret_id, (state?.version ?? 0) + 1, encrypt(fields, this.key(tenant), `${tenant}/secret/${secret_id}`));
+    return this.tx(() => {
+      const state = this.db.prepare('SELECT version FROM secrets_registry WHERE tenant=? AND secret_id=?').get(tenant, secret_id);
+      this.db.prepare('INSERT INTO secrets_registry VALUES(?,?,?,?) ON CONFLICT(tenant,secret_id) DO UPDATE SET version=excluded.version,value=excluded.value').run(tenant, secret_id, (state?.version ?? 0) + 1, encrypt(fields, this.key(tenant), `${tenant}/secret/${secret_id}`));
+    });
   }
   secret(tenant, secret_id) {
     const row = this.db.prepare('SELECT version,value FROM secrets_registry WHERE tenant=? AND secret_id=?').get(tenant, secret_id);
@@ -169,9 +182,13 @@ export class SimulatedTarget {
     if (!compensatable.includes(type)) {
       return { compensated: false, reason: 'NON_COMPENSATABLE_EFFECT', note: 'Effect cannot be reversed; a separately authorised remedy action is required.' };
     }
-    const state = this.state(tenant, id);
-    this.db.prepare('UPDATE resources SET version=?, value=? WHERE tenant=? AND id=?').run(state.version + 1, encrypt({ ...priorState, compensated_at: now, compensation_of: digest(capsule) }, this.key(tenant), `${tenant}/resource/${id}`), tenant, id);
-    return { compensated: true, restored_version: state.version + 1 };
+    // Read-modify-write inside one tx — a second concurrent compensation
+    // cannot lose-update the version counter (concurrency-audit L3).
+    return this.tx(() => {
+      const state = this.state(tenant, id);
+      this.db.prepare('UPDATE resources SET version=?, value=? WHERE tenant=? AND id=?').run(state.version + 1, encrypt({ ...priorState, compensated_at: now, compensation_of: digest(capsule) }, this.key(tenant), `${tenant}/resource/${id}`), tenant, id);
+      return { compensated: true, restored_version: state.version + 1 };
+    });
   }
   manifest() {
     return { connector_id: 'controlled-sqlite-target', version: '1.1.0', environment: 'simulation', production_supported: false, credentials: 'customer-local software encryption key; no external target credentials', idempotency: 'durable unique transaction id; mutating timeout never retried automatically', permissions: ['local simulated resource read', 'local simulated resource mutation', 'verified dataset query plans', 'registered compensation for non-monetary mutations'], limitations: ['No bank/ERP API integration', 'No target-wide bypass guarantee', 'No hardware-backed credential isolation', 'No actual network/cloud/identity/secret/backup mutation', 'Composite atomicity is compensation-based, not transactional'], upgrade_rule: 'coverage becomes UNKNOWN until compatibility and bypass tests pass' };

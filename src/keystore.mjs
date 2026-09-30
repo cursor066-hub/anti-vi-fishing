@@ -1,5 +1,5 @@
 import { createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify, randomBytes, createHmac } from 'node:crypto';
-import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync, renameSync, rmSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { canonical, digest } from './canonical.mjs';
 import { encrypt, decrypt, SUITES, verifySuite, signSuite } from './crypto.mjs';
@@ -109,8 +109,11 @@ export class KeyVault {
     // public_key metadata without breaking authentication (crypto-audit H-2).
     state.mac = stateMac(this.masterKey, state);
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    writeFileSync(path, canonical(state) + '\n', { mode: 0o600 });
-    chmodSync(path, 0o600);
+    // Atomic write: temp + rename so a crash mid-save cannot leave a torn
+    // vault file that fails MAC/parse at next open (concurrency-audit L5).
+    const tmp = `${path}.${randomBytes(6).toString('hex')}.tmp`;
+    try { writeFileSync(tmp, canonical(state) + '\n', { mode: 0o600 }); chmodSync(tmp, 0o600); renameSync(tmp, path); }
+    catch (e) { rmSync(tmp, { force: true }); throw e; }
   }
   static load(path, masterKey) {
     const { mac, ...state } = JSON.parse(readFileSync(path, 'utf8'));

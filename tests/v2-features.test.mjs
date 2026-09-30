@@ -19,7 +19,7 @@ import { httpJson } from '../src/connectors.mjs';
 
 // ---------- Shamir threshold ----------
 
-test('KEY-006: Shamir k-of-n reconstructs only at quorum; wrong shares fail', () => {
+test('KEY-002: Shamir k-of-n reconstructs only at quorum; wrong shares fail', () => {
   const secret = randomBytes(32);
   const shares = split(secret, 5, 3);
   assert.equal(shares.length, 5);
@@ -124,7 +124,7 @@ function policyChange(h, next, approvals = 3) {
   h.f.simulate(h.p('policy-admin'), next); // simulation of the exact candidate is mandatory
   h.advance(120001); // policy.change cooldown counts from proposal time
   h.evidence(r, { kind: 'governance_review' });
-  h.evidence(r, { kind: 'governance_review', issuer: 'registry' });
+  h.evidence(r, { kind: 'governance_review', issuer: 'audit-committee' });
   h.approve(r, approvals);
   return { r, cert: h.f.certificate(h.p(), r.capsule.capsule_id) };
 }
@@ -154,11 +154,9 @@ test('POL-013: emergency policy with sufficient custodians activates', t => {
   assert.equal(h.f.execute(h.p(), cert).payload.status, 'VERIFIED');
   assert.equal(h.f.policy('acme').version, 2);
   const weak = clone(h.f.policy('acme')); weak.version = 3; weak.policy_id = 'x'; weak.emergency_of = 2; weak.expires_at = h.now() + 3600000; weak.not_before = 1; weak.rules['data.export'].approval_threshold = 0;
-  const r2 = h.proposed('policy.change', { policy: weak }, { action: { type: 'policy.change', target_resource: 'policy-root', purpose: 'Weaken' } });
-  h.f.simulate(h.p('policy-admin'), weak); h.advance(120001);
-  h.evidence(r2, { kind: 'governance_review' }); h.evidence(r2, { kind: 'governance_review', issuer: 'registry' });
-  h.approve(r2, 4);
-  assert.equal(h.f.evaluate(h.p(), r2.capsule.capsule_id).decision, 'DENY');
+  // DAT-008: a zero-approval export path is unconstitutional — the candidate
+  // is refused at simulation, before any evaluation can even consider it.
+  assert.throws(() => h.f.simulate(h.p('policy-admin'), weak), hasCode('INV-400-SCHEMA'));
 });
 
 test('POL-013: emergency policy without the extra custodian is denied', t => {
@@ -182,7 +180,7 @@ test('KEY-004 KEY-005: prepareRotation creates pending vault key; verified rotat
   const c = h.f.createCeremony(h.p('security'), { ceremony_id: 'cer-rot-1', purpose: 'execution key rotation', threshold: 2, custodians, valid_until: h.now() + 3600000 });
   for (const subject of custodians) h.f.acknowledgeCeremony(h.p(subject), signAcknowledgement(c, subject, h.setup.custodianKeys.acme[subject], h.now()));
   const r = h.proposed('key.rotate', { key_class: 'execution', new_key_id: prep.key_id, new_public_key: prep.public_key, ceremony_id: 'cer-rot-1', revoke_old: true }, { action: { type: 'key.rotate', target_resource: 'key-registry', purpose: 'Rotation' } });
-  h.evidence(r, { kind: 'governance_review' }); h.evidence(r, { kind: 'governance_review', issuer: 'registry' });
+  h.evidence(r, { kind: 'governance_review' }); h.evidence(r, { kind: 'governance_review', issuer: 'audit-committee' });
   h.approve(r, 3);
   h.advance(60001); // key.rotate cooldown
   const cert = h.f.certificate(h.p(), r.capsule.capsule_id);

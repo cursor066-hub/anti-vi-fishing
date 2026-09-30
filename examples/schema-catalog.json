@@ -312,5 +312,180 @@
       ],
       "minor_units_per_major": 100
     }
+  },
+  "identity.jit.grant": {
+    "id": "if:identity.jit.grant:1",
+    "version": 1,
+    "type": "identity.jit.grant",
+    "requested": {
+      "subject_id": "id",
+      "resources": "strings",
+      "actions": "strings",
+      "destinations": "strings",
+      "columns": "strings",
+      "row_ids": "strings",
+      "ttl_ms": "positive",
+      "reason": "text",
+      "roles": "strings"
+    },
+    "validation_profile": "IF-ACTION-1",
+    "currency_profile": {
+      "codes": [
+        "EUR",
+        "USD",
+        "GBP",
+        "CHF",
+        "CAD",
+        "AUD",
+        "NZD",
+        "SGD"
+      ],
+      "minor_units_per_major": 100
+    }
+  },
+  "key.rotate": {
+    "id": "if:key.rotate:1",
+    "version": 1,
+    "type": "key.rotate",
+    "requested": {
+      "key_class": "text",
+      "new_key_id": "id",
+      "new_public_key": "pem",
+      "ceremony_id": "id",
+      "revoke_old": "boolean"
+    },
+    "validation_profile": "IF-ACTION-1",
+    "currency_profile": {
+      "codes": [
+        "EUR",
+        "USD",
+        "GBP",
+        "CHF",
+        "CAD",
+        "AUD",
+        "NZD",
+        "SGD"
+      ],
+      "minor_units_per_major": 100
+    }
+  },
+  "key.ceremony": {
+    "id": "if:key.ceremony:1",
+    "version": 1,
+    "type": "key.ceremony",
+    "requested": {
+      "ceremony_id": "id",
+      "purpose": "text",
+      "threshold": "positive",
+      "custodians": "strings"
+    },
+    "validation_profile": "IF-ACTION-1",
+    "currency_profile": {
+      "codes": [
+        "EUR",
+        "USD",
+        "GBP",
+        "CHF",
+        "CAD",
+        "AUD",
+        "NZD",
+        "SGD"
+      ],
+      "minor_units_per_major": 100
+    }
+  },
+  "action.composite": {
+    "id": "if:action.composite:1",
+    "version": 1,
+    "type": "action.composite",
+    "requested": {
+      "children": "strings"
+    },
+    "validation_profile": "IF-ACTION-1",
+    "currency_profile": {
+      "codes": [
+        "EUR",
+        "USD",
+        "GBP",
+        "CHF",
+        "CAD",
+        "AUD",
+        "NZD",
+        "SGD"
+      ],
+      "minor_units_per_major": 100
+    }
+  },
+  "ai.model.deploy": {
+    "id": "if:ai.model.deploy:1",
+    "version": 1,
+    "type": "ai.model.deploy",
+    "requested": {
+      "model_id": "id",
+      "model_version": "text",
+      "eval_report_digest": "hash"
+    },
+    "validation_profile": "IF-ACTION-1",
+    "currency_profile": {
+      "codes": [
+        "EUR",
+        "USD",
+        "GBP",
+        "CHF",
+        "CAD",
+        "AUD",
+        "NZD",
+        "SGD"
+      ],
+      "minor_units_per_major": 100
+    }
+  },
+  "legal.contract.execute": {
+    "id": "if:legal.contract.execute:1",
+    "version": 1,
+    "type": "legal.contract.execute",
+    "requested": {
+      "contract_id": "id",
+      "counterparty": "id",
+      "amount_minor": "positive",
+      "currency": "currency"
+    },
+    "validation_profile": "IF-ACTION-1",
+    "currency_profile": {
+      "codes": [
+        "EUR",
+        "USD",
+        "GBP",
+        "CHF",
+        "CAD",
+        "AUD",
+        "NZD",
+        "SGD"
+      ],
+      "minor_units_per_major": 100
+    }
+  },
+  "security.case.investigate": {
+    "id": "if:security.case.investigate:1",
+    "version": 1,
+    "type": "security.case.investigate",
+    "requested": {
+      "case_id": "id",
+      "scope": "strings"
+    },
+    "validation_profile": "IF-ACTION-1",
+    "currency_profile": {
+      "codes": [
+        "EUR",
+        "USD",
+        "GBP",
+        "CHF",
+        "CAD",
+        "AUD",
+        "NZD",
+        "SGD"
+      ],
+      "minor_units_per_major": 100
+    }
   }
 }

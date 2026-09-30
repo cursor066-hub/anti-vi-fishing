@@ -24,7 +24,7 @@ test('RUN-004: runtime issuer-key revocation and active-policy change invalidate
 test('DAT-001 COM-009: exact data export cannot return extra columns from downstream', t => {
   const h = fixture(t), input = { dataset: 'dataset-1', columns: ['id', 'name'], row_ids: ['row-1'], max_rows: 1, classification: 'internal', jurisdiction: 'EU' };
   const r = h.proposed('data.export', input, { action: { type: 'data.export', target_resource: 'dataset-1', purpose: 'Operations' }, destination: 'customer-vault' });
-  h.evidence(r, { kind: 'dataset_authority' }); const cert = h.f.certificate(h.p(), r.capsule.capsule_id), original = h.f.target.execute.bind(h.f.target);
+  h.evidence(r, { kind: 'dataset_authority' }); h.approve(r, 1); const cert = h.f.certificate(h.p(), r.capsule.capsule_id), original = h.f.target.execute.bind(h.f.target);
   h.f.target.execute = (...args) => { const output = original(...args); output.output[0].passport = 'SYNTHETIC-EXFILTRATION'; return output; };
   assert.equal(h.f.execute(h.p(), cert).payload.status, 'UNCERTAIN');
 });
@@ -61,7 +61,7 @@ test('POL-001 POL-002 POL-015: exact inputs and trusted test time produce identi
 });
 test('CON-004 COM-012: missing data-output fields return UNCERTAIN rather than an exception after dispatch', t => {
   const h = fixture(t), r = h.proposed('data.export', { dataset: 'dataset-1', columns: ['id'], row_ids: ['row-1'], max_rows: 1, classification: 'internal', jurisdiction: 'EU' }, { action: { type: 'data.export', target_resource: 'dataset-1', purpose: 'Operations' }, destination: 'customer-vault' });
-  h.evidence(r, { kind: 'dataset_authority' }); const certificate = h.f.certificate(h.p(), r.capsule.capsule_id), original = h.f.target.execute.bind(h.f.target);
+  h.evidence(r, { kind: 'dataset_authority' }); h.approve(r, 1); const certificate = h.f.certificate(h.p(), r.capsule.capsule_id), original = h.f.target.execute.bind(h.f.target);
   h.f.target.execute = (...args) => { const raw = original(...args); delete raw.output; return raw; };
   assert.equal(h.f.execute(h.p(), certificate).payload.status, 'UNCERTAIN');
   const cert = certificate.payload;

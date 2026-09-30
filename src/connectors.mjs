@@ -30,6 +30,7 @@ export function verifyManifest(envelope, issuers, now) {
   const m = verifySigned(envelope, issuers, 'connector-manifest');
   fields(m, ['connector_id', 'version', 'domain', 'actions', 'permissions', 'limitations', 'idempotency', 'coverage_implications', 'issued_at', 'expires_at']);
   requireThat(m.expires_at > now, 'INV-401-CONNECTOR', 'Connector manifest expired', 401);
+  integer(m.issued_at, 'issued', 1, now + 300000);
   return m;
 }
 
@@ -96,10 +97,18 @@ export function driftCheck(registered, observed, now) {
   const sorted = a => [...(a ?? [])].sort();
   cmp('connector_id', registered.connector_id, observed.connector_id);
   cmp('version', registered.version, observed.version);
-  cmp('actions', sorted(registered.actions), sorted(observed.actions));
+  // Registered actions are the TRUST CEILING: an observed manifest claiming a
+  // kind outside registration is drift (authority escalation). An observed
+  // manifest offering fewer than registered is reduced capability, recorded
+  // as an informational change — not a security drift (a deliberately narrow
+  // issuer must not self-report drift by construction).
+  const added = (observed.actions ?? []).filter(a => !(registered.actions ?? []).includes(a));
+  const removed = (registered.actions ?? []).filter(a => !(observed.actions ?? []).includes(a));
+  if (added.length) changes.push({ field: 'actions', was: sorted(registered.actions), now: sorted(observed.actions), escalated: added });
+  else if (removed.length) changes.push({ field: 'actions_reduced', was: sorted(registered.actions), now: sorted(observed.actions), informational: true });
   cmp('channel', registered.channel, observed.channel);
   cmp('key_id', registered.key_id, observed.key_id);
   const configDigest = digest({ connector_id: observed.connector_id ?? null, version: observed.version ?? null, actions: observed.actions ?? [], permissions: observed.permissions ?? [] });
-  const drifted = changes.length > 0;
+  const drifted = changes.some(c => !c.informational);
   return { drifted, changes, configuration_digest: configDigest, checked_at: now, action: drifted ? 'coverage->UNKNOWN pending compatibility, security and bypass revalidation' : 'none' };
 }

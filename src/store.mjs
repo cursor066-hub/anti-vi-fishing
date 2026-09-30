@@ -5,19 +5,23 @@ import { randomBytes } from 'node:crypto';
 import { encrypt, decrypt, verifySigned } from './crypto.mjs';
 import { merkleRoot } from './merkle.mjs';
 import { canonical, digest } from './canonical.mjs';
-import { requireThat } from './errors.mjs';
+import { requireThat, InvariantError } from './errors.mjs';
 
 export class Store {
   constructor(path, tenantKeys, auditSigners) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(path); chmodSync(path, 0o600);
     this.tenantKeys = tenantKeys;
+    this._sp = 0;
     // auditSigners[tenant] = {key_id, public_key, sign(payload) -> envelope}.
     // Signing runs inside the keystore; the store never sees private material.
     this.auditSigners = auditSigners;
     // secure_delete=ON zeroes freed pages, so a deleted DEK row leaves no
     // recoverable copy in the database file itself.
-    this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA secure_delete=ON;');
+    // busy_timeout bounds queueing behind a contending writer at 30s; a
+    // contender that still loses gets INV-503-LEDGER, not a raw sqlite error
+    // (concurrency-audit H2). Long writers should stay chunked regardless.
+    this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=30000; PRAGMA secure_delete=ON;');
     // Crash window (crypto-audit M-4): if the process died between a shred's
     // committed DELETE and the post-commit TRUNCATE, wrapped-DEK copies stay
     // reachable in the WAL. Truncating at open bounds that residue to uptime.
@@ -54,8 +58,20 @@ export class Store {
   }
   close() { this.db.close(); }
   tx(fn) {
-    this.db.exec('BEGIN IMMEDIATE');
+    // Nested calls run under a SAVEPOINT: a callee's ROLLBACK can then never
+    // destroy the outer transaction's writes (concurrency-audit L2).
+    if (this.db.isTransaction) {
+      const sp = `sp_${++this._sp}`;
+      this.db.exec(`SAVEPOINT ${sp}`);
+      try {
+        const result = fn();
+        if (result && typeof result.then === 'function') throw new Error('Transactions must be synchronous');
+        this.db.exec(`RELEASE ${sp}`);
+        return result;
+      } catch (e) { this.db.exec(`ROLLBACK TO ${sp}; RELEASE ${sp}`); throw e; }
+    }
     try {
+      this.db.exec('BEGIN IMMEDIATE');
       const result = fn();
       if (result && typeof result.then === 'function') throw new Error('Transactions must be synchronous');
       this.db.exec('COMMIT');
@@ -63,7 +79,13 @@ export class Store {
       // the log — runs outside the transaction, where SQLite allows it.
       this.checkpoint();
       return result;
-    } catch (e) { this.db.exec('ROLLBACK'); throw e; }
+    } catch (e) {
+      if (this.db.isTransaction) this.db.exec('ROLLBACK');
+      // A lost busy-timeout race must surface as a fabric error, not a raw
+      // SQLITE_BUSY leaking internals (concurrency-audit H2).
+      if (e?.errcode === 5 || /database is locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
+      throw e;
+    }
   }
   key(tenant) {
     requireThat(this.tenantKeys[tenant], 'INV-404-NOT-FOUND', 'Resource not found', 404);
@@ -125,10 +147,10 @@ export class Store {
     const r = this.db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
     if (!r.busy && r.checkpointed >= r.log) this._shredded = false;
   }
-  clock(now) {
+  clock(now, { recovery = false } = {}) {
     requireThat(Number.isSafeInteger(now) && now > 0, 'INV-503-TIME', 'Clock unavailable', 503);
     const row = this.db.prepare('SELECT last FROM clock WHERE id=1').get();
-    requireThat(!row || now >= row.last, 'INV-503-TIME', 'Clock regression; security operations halted', 503);
+    requireThat(recovery || !row || now >= row.last, 'INV-503-TIME', 'Clock regression; security operations halted', 503);
     this.db.prepare('INSERT INTO clock VALUES(1,?) ON CONFLICT(id) DO UPDATE SET last=excluded.last').run(now);
   }
   audit(tenant, type, actor, reference, metadata, now) {
@@ -174,6 +196,9 @@ export class Store {
     return { format: 'IF-AUDIT-1', public_keys, prior_checkpoint, checkpoint, entries: rows };
   }
   idempotent(tenant, scope, key, requestHash, fn) {
+    // SELECT-then-INSERT is atomic only inside a transaction — refuse to run
+    // outside one rather than silently depending on the caller (L4).
+    requireThat(this.db.isTransaction, 'INV-500-STORE', 'idempotent() must run inside store.tx()', 500);
     requireThat(typeof key === 'string' && /^[A-Za-z0-9_-]{8,128}$/.test(key), 'INV-400-SCHEMA', 'An 8–128 character Idempotency-Key is required');
     const row = this.db.prepare('SELECT hash,result FROM idempotency WHERE tenant=? AND scope=? AND key=?').get(tenant, scope, key);
     if (row) {

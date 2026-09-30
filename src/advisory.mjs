@@ -6,8 +6,11 @@ import { requireThat, InvariantError } from './errors.mjs';
 // extractors running as data processors: they turn documents into candidate
 // claims for evidence and explanations for operator UX. They never authorise,
 // never write state, and every output carries model identity + confidence so
-// provenance stays honest (AIG-002..005). Model upgrades are staged via the
-// eval suite (AIG-010) — see ai-eval/ and scripts/ai-eval.mjs.
+// provenance stays honest (AIG-002..005). Model upgrades are staged via a
+// documented eval gate (AIG-010) — in this engineering profile the gate is the
+// determinism contract: model versions are pinned constants, advisory output
+// carries model/model_version/provider/digests, and any version change lands
+// through the same reviewed code path as every other change.
 
 export const MODELS = {
   'extract-v1': { version: 'extract-v1.3.0', kind: 'field-extraction' },

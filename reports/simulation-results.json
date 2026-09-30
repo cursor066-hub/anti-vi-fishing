@@ -75,6 +75,36 @@
       "pass": true
     },
     {
+      "name": "Budget throttling engages only after real capacity",
+      "expected": true,
+      "actual": true,
+      "pass": true
+    },
+    {
+      "name": "Staged canary policy verifies and parks behind not_before",
+      "expected": "VERIFIED",
+      "actual": "VERIFIED",
+      "pass": true
+    },
+    {
+      "name": "Old constitution keeps serving inside the stage window",
+      "expected": 1,
+      "actual": 1,
+      "pass": true
+    },
+    {
+      "name": "Exactly one version promotes at activate_at",
+      "expected": 2,
+      "actual": 2,
+      "pass": true
+    },
+    {
+      "name": "Tightened rule applies after cutover",
+      "expected": 5,
+      "actual": 5,
+      "pass": true
+    },
+    {
       "name": "Device quarantine prevents renewal",
       "expected": "INV-403-QUARANTINE",
       "actual": "INV-403-QUARANTINE",

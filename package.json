@@ -4,15 +4,18 @@
   "private": true,
   "type": "module",
   "description": "Exact-action authorization, software gates and verifiable evidence; engineering release, not production certified",
-  "engines": { "node": ">=24.16.0 <25" },
+  "engines": {
+    "node": ">=24.16.0 <25"
+  },
   "scripts": {
-    "test": "node --test --test-concurrency=1 tests/*.test.mjs",
+    "test": "node --test --test-concurrency=1 'tests/**/*.test.mjs'",
     "check": "node scripts/check.mjs",
     "simulate": "node scripts/simulate.mjs",
     "benchmark": "node scripts/benchmark.mjs",
     "start": "node src/cli.mjs serve",
     "verify": "node scripts/verify-export.mjs",
     "conformance": "node scripts/generate-vectors.mjs && node scripts/verify-vectors-webcrypto.mjs && python3 scripts/verify-vectors.py",
-    "release:check": "node scripts/release-check.mjs"
+    "release:check": "node scripts/release-check.mjs",
+    "report": "node scripts/report.mjs"
   }
 }
