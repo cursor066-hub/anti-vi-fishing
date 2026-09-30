@@ -1997,112 +1997,160 @@ ok 333 - w6-F7: issuerd never signs unverified caller claims
   duration_ms: 0
   type: 'test'
   ...
+# Subtest: DEK F1: retention sweep survives a re-minted tombstone id
+ok 334 - DEK F1: retention sweep survives a re-minted tombstone id
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: DEK F5: undecryptable residue is shredded by the sweep, not kept forever
+ok 335 - DEK F5: undecryptable residue is shredded by the sweep, not kept forever
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: DEK F6: record AAD is injective — transplanted ciphertext never decrypts
+ok 336 - DEK F6: record AAD is injective — transplanted ciphertext never decrypts
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: DEK F2: deployment config carries data keys wrapped under the vault master key
+ok 337 - DEK F2: deployment config carries data keys wrapped under the vault master key
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: P-3: a release cannot cite a capsule belonging to another actor
+ok 338 - P-3: a release cannot cite a capsule belonging to another actor
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: P-8: fallback release validates and binds citations
+ok 339 - P-8: fallback release validates and binds citations
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: DEK F4: deleted dataset rows do not linger in the target WAL
+ok 340 - DEK F4: deleted dataset rows do not linger in the target WAL
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: A-1: extraction honours the canonical-covered document limit
+ok 341 - A-1: extraction honours the canonical-covered document limit
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
 # Subtest: w7-clock F1: recoverClock records the discontinuity and un-wedges the gate
-ok 334 - w7-clock F1: recoverClock records the discontinuity and un-wedges the gate
+ok 342 - w7-clock F1: recoverClock records the discontinuity and un-wedges the gate
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-clock F2: succession certificates survive an expired active policy
-ok 335 - w7-clock F2: succession certificates survive an expired active policy
+ok 343 - w7-clock F2: succession certificates survive an expired active policy
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-clock F3: token revocation kills its cookie sessions immediately
-ok 336 - w7-clock F3: token revocation kills its cookie sessions immediately
+ok 344 - w7-clock F3: token revocation kills its cookie sessions immediately
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-console F4: logout kills every sibling session of the same token
-ok 337 - w7-console F4: logout kills every sibling session of the same token
+ok 345 - w7-console F4: logout kills every sibling session of the same token
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-console F1: per-tenant session cap fires before the global cap
-ok 338 - w7-console F1: per-tenant session cap fires before the global cap
+ok 346 - w7-console F1: per-tenant session cap fires before the global cap
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-backup F1: the manifest must verify under an external trust anchor, not keys inside the artifact
-ok 339 - w7-backup F1: the manifest must verify under an external trust anchor, not keys inside the artifact
+ok 347 - w7-backup F1: the manifest must verify under an external trust anchor, not keys inside the artifact
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-backup F4: wal sidecars and symlinked artifacts are rejected
-ok 340 - w7-backup F4: wal sidecars and symlinked artifacts are rejected
+ok 348 - w7-backup F4: wal sidecars and symlinked artifacts are rejected
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-backup F3/F7: committed audit heads catch truncation and a dropped audit table
-ok 341 - w7-backup F3/F7: committed audit heads catch truncation and a dropped audit table
+ok 349 - w7-backup F3/F7: committed audit heads catch truncation and a dropped audit table
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-backup F6: traversal entries inside a signed payload are rejected
-ok 342 - w7-backup F6: traversal entries inside a signed payload are rejected
+ok 350 - w7-backup F6: traversal entries inside a signed payload are rejected
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-backup F5: a torn cross-database snapshot fails the referential check
-ok 343 - w7-backup F5: a torn cross-database snapshot fails the referential check
+ok 351 - w7-backup F5: a torn cross-database snapshot fails the referential check
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-seam F1: technicalValidation enforces advisory/confidence/channel/kind bars and persists evidence
-ok 344 - w7-seam F1: technicalValidation enforces advisory/confidence/channel/kind bars and persists evidence
+ok 352 - w7-seam F1: technicalValidation enforces advisory/confidence/channel/kind bars and persists evidence
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-seam F2/F10: history replays in order and revalidation extends coverage
-ok 345 - w7-seam F2/F10: history replays in order and revalidation extends coverage
+ok 353 - w7-seam F2/F10: history replays in order and revalidation extends coverage
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-seam F3: drifted issuer evidence stops counting at evaluation
-ok 346 - w7-seam F3: drifted issuer evidence stops counting at evaluation
+ok 354 - w7-seam F3: drifted issuer evidence stops counting at evaluation
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-seam F4: stale-digest acks excluded from quorum; custodian re-acks
-ok 347 - w7-seam F4: stale-digest acks excluded from quorum; custodian re-acks
+ok 355 - w7-seam F4: stale-digest acks excluded from quorum; custodian re-acks
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-seam F5/F7: ceremony spent at reservation; revoke_old honored
-ok 348 - w7-seam F5/F7: ceremony spent at reservation; revoke_old honored
+ok 356 - w7-seam F5/F7: ceremony spent at reservation; revoke_old honored
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-seam F6: nested composite child escrows CHILD_TYPE
-ok 349 - w7-seam F6: nested composite child escrows CHILD_TYPE
+ok 357 - w7-seam F6: nested composite child escrows CHILD_TYPE
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-seam F9: wedged composite reconciles composite-aware
-ok 350 - w7-seam F9: wedged composite reconciles composite-aware
+ok 358 - w7-seam F9: wedged composite reconciles composite-aware
   ---
   duration_ms: 0
   type: 'test'
   ...
-1..350
-# tests 350
+1..358
+# tests 358
 # suites 0
-# pass 350
+# pass 358
 # fail 0
 # cancelled 0
 # skipped 0

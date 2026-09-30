@@ -27,7 +27,13 @@ export class SimulatedTarget {
   tx(fn) {
     if (this.db.isTransaction) return fn();
     this.db.exec('BEGIN IMMEDIATE');
-    try { const r = fn(); this.db.exec('COMMIT'); return r; }
+    try {
+      const r = fn(); this.db.exec('COMMIT');
+      // Deleted ciphertext must not linger in the WAL — any armed delete
+      // truncates the log right at the commit boundary (DEK-audit F4).
+      if (this._deleted) { this._deleted = false; this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); }
+      return r;
+    }
     catch (e) { this.db.exec('ROLLBACK'); throw e; }
   }
   key(tenant) { requireThat(this.keys[tenant], 'INV-404-NOT-FOUND', 'Resource not found', 404); return Buffer.from(this.keys[tenant], 'base64url'); }
@@ -64,6 +70,7 @@ export class SimulatedTarget {
       const state = this._readResource(tenant, id);
       this.db.prepare('INSERT INTO resources VALUES(?,?,?,?) ON CONFLICT(tenant,id) DO UPDATE SET version=excluded.version,value=excluded.value').run(tenant, id, state.version + 1, encrypt(meta, this.key(tenant), `${tenant}/resource/${id}`));
       if (Array.isArray(rows)) {
+        this._deleted = true;
         this.db.prepare('DELETE FROM dataset_rows WHERE tenant=? AND dataset=?').run(tenant, id);
         for (const row of rows) {
           const { id: row_id, ...data } = row;

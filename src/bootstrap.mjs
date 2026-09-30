@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync, existsSync, chmodSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomBytes, generateKeyPairSync } from 'node:crypto';
-import { generateKey, signed } from './crypto.mjs';
+import { generateKey, signed, encrypt } from './crypto.mjs';
 import { hashBytes, canonical, digest } from './canonical.mjs';
 import { defaultPolicy } from './policy.mjs';
 import { KeyVault } from './keystore.mjs';
@@ -160,7 +160,14 @@ export function createConfiguration(tenantNames = ['acme'], now = Date.now(), { 
     // Purpose-bound at creation — no 'any' wildcard signing authority.
     const execution = vault ? vault.generate(['action-certificate', 'capability'], { tenant_id: tenant }) : generateKey();
     const audit = vault ? vault.generate(['audit', 'outcome', 'revocation', 'coverage', 'checkpoint', 'backup-manifest'], { tenant_id: tenant }) : generateKey();
-    config.tenants[tenant] = { encryption_key: randomBytes(32).toString('base64url'), watermark_key: randomBytes(32).toString('base64url'), keys: { execution: { key_id: execution.key_id, public_key: execution.public_key, custody: vault ? 'vault' : 'embedded', ...(vault ? {} : { private_key: execution.private_key }) }, audit: { key_id: audit.key_id, public_key: audit.public_key, custody: vault ? 'vault' : 'embedded', ...(vault ? {} : { private_key: audit.private_key }) } }, identities, issuers, components, auth, genesis_policy: policy, genesis_signatures: Object.values(custodianKeys[tenant]).slice(0, 3).map(k => signed(policy, k, 'root-policy')) };
+    // Data keys ride under the same AES-256-GCM wrap as vault entries when a
+    // vault exists — config.json alone can never decrypt stored records
+    // (DEK-audit F2). The embedded-custody profile (no vault, dev fixtures
+    // only) keeps plaintext fields for compatibility.
+    const dataKeys = vault
+      ? { encryption_key_wrapped: encrypt(randomBytes(32).toString('base64url'), vault.masterKey, `data-key/${tenant}/encryption`), watermark_key_wrapped: encrypt(randomBytes(32).toString('base64url'), vault.masterKey, `data-key/${tenant}/watermark`) }
+      : { encryption_key: randomBytes(32).toString('base64url'), watermark_key: randomBytes(32).toString('base64url') };
+    config.tenants[tenant] = { ...dataKeys, keys: { execution: { key_id: execution.key_id, public_key: execution.public_key, custody: vault ? 'vault' : 'embedded', ...(vault ? {} : { private_key: execution.private_key }) }, audit: { key_id: audit.key_id, public_key: audit.public_key, custody: vault ? 'vault' : 'embedded', ...(vault ? {} : { private_key: audit.private_key }) } }, identities, issuers, components, auth, genesis_policy: policy, genesis_signatures: Object.values(custodianKeys[tenant]).slice(0, 3).map(k => signed(policy, k, 'root-policy')) };
   }
   return { config, credentials, custodianKeys, issuerKeys, componentSecrets, identityKeys, vault };
 }

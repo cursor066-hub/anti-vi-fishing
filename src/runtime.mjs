@@ -123,7 +123,7 @@ export class RuntimeGate {
         if (cap.transforms) rows = applyTransforms(rows, cap.transforms, { tenant: t, dataset: cap.resource, tenantKey: this.f.target.key(t).toString('base64url') });
         // DAT-011: attribution watermark on released rows — returned as
         // separate marks, never injected into the authorised columns.
-        watermarks = watermark(rows, { tenant: t, dataset: cap.resource, subject: cap.subject_id, requestId: input.request_id, tenantWatermarkKey: this.f.tenant(t).watermark_key ?? this.f.tenant(t).encryption_key }).watermarks;
+        watermarks = watermark(rows, { tenant: t, dataset: cap.resource, subject: cap.subject_id, requestId: input.request_id, tenantWatermarkKey: this.f.dataKey(t, 'watermark') ?? this.f.dataKey(t, 'encryption') }).watermarks;
       }
       this.f.store.db.prepare('INSERT INTO usage VALUES(?,?,?,?,?,?,?)').run(t, cap.subject_id, cap.resource, now, cost, cap.capability_id, input.request_id);
       this.f.store.audit(t, 'RUNTIME_ALLOWED', principal.subject_id, cap.capability_id, { cost, resource: cap.resource, selection_digest: digest({ columns: input.columns, rows: input.row_ids }), request_id: input.request_id, watermarked: cap.action === 'data.read' }, now);

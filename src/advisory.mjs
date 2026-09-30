@@ -35,7 +35,10 @@ const PATTERNS = [
 // produce a wrong field candidate — which the evidence issuer later confirms
 // or conflicts (INV-412 / EVD-007).
 export function extract(documentText, model = 'extract-v1') {
-  text(documentText, 'document', 1_000_000);
+  // 64 KiB — the canonical ceiling every audit digest can cover; advertising
+  // more than the envelope records would make the limit unservable
+  // (w6-perception A-1).
+  text(documentText, 'document', 65536);
   const m = MODELS[model]; requireThat(m && m.kind === 'field-extraction', 'INV-400-SCHEMA', 'Unknown extraction model');
   const candidates = [];
   for (const p of PATTERNS) {
@@ -44,7 +47,10 @@ export function extract(documentText, model = 'extract-v1') {
     }
   }
   candidates.sort((a, b) => a.field.localeCompare(b.field) || a.span[0] - b.span[0]);
-  return { model: m.version, document_digest: digest(documentText), candidates, advisory: true };
+  // Bounded below the canonical array ceiling — output_digest must never
+  // fail on the very output it commits to (w6-perception A-1).
+  const truncated = candidates.length > 8192;
+  return { model: m.version, document_digest: digest(documentText), candidates: candidates.slice(0, 8192), ...(truncated ? { truncated: true } : {}), advisory: true };
 }
 
 const REASON_TEXT = {

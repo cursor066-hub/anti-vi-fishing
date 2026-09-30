@@ -7,6 +7,13 @@ import { merkleRoot } from './merkle.mjs';
 import { canonical, digest } from './canonical.mjs';
 import { requireThat, InvariantError } from './errors.mjs';
 
+// Record/dek AAD is an injective tuple encoding — distinct (kind,id)
+// pairs can never collide on one encryption context (DEK-audit F6):
+// '/'-delimited strings would alias (kind='x',id='a/b') with
+// (kind='x/a',id='b').
+const recAad = (tenant, kind, id) => canonical({ tenant, kind, id });
+const dekAad = (tenant, kind, id) => canonical({ tenant, kind, id, dek: true });
+
 export class Store {
   constructor(path, tenantKeys, auditSigners) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -93,28 +100,34 @@ export class Store {
   }
   dek(tenant, kind, id) {
     const row = this.db.prepare('SELECT wrapped FROM deks WHERE tenant=? AND kind=? AND id=?').get(tenant, kind, id);
-    return row ? Buffer.from(decrypt(row.wrapped, this.key(tenant), `${tenant}/${kind}/${id}/dek`), 'base64url') : null;
+    return row ? Buffer.from(decrypt(row.wrapped, this.key(tenant), dekAad(tenant, kind, id)), 'base64url') : null;
   }
   get(tenant, kind, id) {
     const row = this.db.prepare('SELECT value FROM records WHERE tenant=? AND kind=? AND id=?').get(tenant, kind, id);
     if (!row) return null;
     // Records written before per-record DEKs fall back to the tenant key.
-    return decrypt(row.value, this.dek(tenant, kind, id) ?? this.key(tenant), `${tenant}/${kind}/${id}`);
+    return decrypt(row.value, this.dek(tenant, kind, id) ?? this.key(tenant), recAad(tenant, kind, id));
   }
   must(tenant, kind, id) {
     const row = this.get(tenant, kind, id); requireThat(row, 'INV-404-NOT-FOUND', 'Resource not found', 404); return row;
   }
   put(tenant, kind, id, value, at) {
-    const dek = randomBytes(32), aad = `${tenant}/${kind}/${id}`;
-    this.db.prepare('INSERT INTO records VALUES(?,?,?,?,?) ON CONFLICT(tenant,kind,id) DO UPDATE SET value=excluded.value').run(tenant, kind, id, encrypt(value, dek, aad), at);
-    this.db.prepare('INSERT INTO deks VALUES(?,?,?,?) ON CONFLICT(tenant,kind,id) DO UPDATE SET wrapped=excluded.wrapped').run(tenant, kind, id, encrypt(dek.toString('base64url'), this.key(tenant), `${aad}/dek`));
+    // An overwrite supersedes the previous ciphertext and wrapped DEK — arm
+    // the WAL checkpoint so the old material is truncated at commit instead
+    // of lingering in the log until a shred (DEK-audit F3).
+    if (this.db.prepare('SELECT 1 FROM records WHERE tenant=? AND kind=? AND id=?').get(tenant, kind, id)
+      || this.db.prepare('SELECT 1 FROM deks WHERE tenant=? AND kind=? AND id=?').get(tenant, kind, id)) this._shredded = true;
+    const dek = randomBytes(32);
+    this.db.prepare('INSERT INTO records VALUES(?,?,?,?,?) ON CONFLICT(tenant,kind,id) DO UPDATE SET value=excluded.value').run(tenant, kind, id, encrypt(value, dek, recAad(tenant, kind, id)), at);
+    this.db.prepare('INSERT INTO deks VALUES(?,?,?,?) ON CONFLICT(tenant,kind,id) DO UPDATE SET wrapped=excluded.wrapped').run(tenant, kind, id, encrypt(dek.toString('base64url'), this.key(tenant), dekAad(tenant, kind, id)));
+    if (!this.db.isTransaction) this.checkpoint();
   }
   insert(tenant, kind, id, value, at) {
     requireThat(!this.get(tenant, kind, id), 'INV-409-CONFLICT', 'Record already exists', 409); this.put(tenant, kind, id, value, at);
   }
   list(tenant, kind, limit = 500, offset = 0) {
     return this.db.prepare('SELECT id,value FROM records WHERE tenant=? AND kind=? ORDER BY created DESC,id LIMIT ? OFFSET ?').all(tenant, kind, limit, offset)
-      .map(row => decrypt(row.value, this.dek(tenant, kind, row.id) ?? this.key(tenant), `${tenant}/${kind}/${row.id}`));
+      .map(row => decrypt(row.value, this.dek(tenant, kind, row.id) ?? this.key(tenant), recAad(tenant, kind, row.id)));
   }
   // Id-only enumeration: sweeps must not let one undecryptable row wedge the
   // whole pass (store-audit MED-3) — callers isolate failures per id.
@@ -202,7 +215,7 @@ export class Store {
     // pinned anchor requires an external copy of a checkpoint, which
     // verifyAudit(priorCheckpoint) accepts; this closes the common case.
     const priorRow = this.db.prepare("SELECT id,value FROM records WHERE tenant=? AND kind='audit-checkpoint' ORDER BY created DESC LIMIT 1").get(tenant);
-    const prior_checkpoint = priorRow ? decrypt(priorRow.value, this.dek(tenant, 'audit-checkpoint', priorRow.id) ?? this.key(tenant), `${tenant}/audit-checkpoint/${priorRow.id}`) : null;
+    const prior_checkpoint = priorRow ? decrypt(priorRow.value, this.dek(tenant, 'audit-checkpoint', priorRow.id) ?? this.key(tenant), recAad(tenant, 'audit-checkpoint', priorRow.id)) : null;
     if (now !== null) this.put(tenant, 'audit-checkpoint', `cp-${checkpoint.payload.size}`, checkpoint, now);
     return { format: 'IF-AUDIT-1', public_keys, prior_checkpoint, checkpoint, entries: rows };
   }

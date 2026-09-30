@@ -127,5 +127,8 @@ export function workspaceFallback(release, policy, now) {
   requireThat(sp.fallback === 'controlled-workspace', 'INV-451-POLICY', 'Policy denies unencrypted release fallback', 451);
   const allowed = releaseAllowlist(policy);
   if (allowed) for (const f of Object.keys(release.fields)) requireThat(allowed.includes(f), 'INV-451-POLICY', `Field ${f} not releasable under perception policy`, 451);
-  return { mode: 'controlled-workspace', assurance: ASSURANCE.workspace, production: false, binding: { purpose: release.purpose, fields: Object.keys(release.fields).sort(), reason: release.reason ?? null, issued_at: now }, data: release.fields };
+  // Citations are validated by the caller before this runs — they ride in
+  // the labeled binding so a fallback release is not a free-floating claim
+  // (w6-perception P-8).
+  return { mode: 'controlled-workspace', assurance: ASSURANCE.workspace, production: false, binding: { purpose: release.purpose, fields: Object.keys(release.fields).sort(), capsule_id: release.capsule_id ?? null, evidence_ref: release.evidence_ref ?? null, reason: release.reason ?? null, issued_at: now }, data: release.fields };
 }

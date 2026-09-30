@@ -3,7 +3,7 @@ import { Store } from './store.mjs';
 import { SimulatedTarget } from './target.mjs';
 import { RuntimeGate } from './runtime.mjs';
 import { digest, clone, canonical } from './canonical.mjs';
-import { verifySigned } from './crypto.mjs';
+import { verifySigned, decrypt } from './crypto.mjs';
 import { KeyVault } from './keystore.mjs';
 import { merkleRoot, inclusionProof, consistencyProof, verifyInclusion } from './merkle.mjs';
 import { httpJson, postOnce, readWithRetry, driftCheck } from './connectors.mjs';
@@ -28,7 +28,7 @@ export class Fabric {
     const encryption = {}, auditSigners = {};
     this.vault = vault ?? this._openVault();
     for (const [tenant, t] of Object.entries(config.tenants)) {
-      encryption[tenant] = t.encryption_key;
+      encryption[tenant] = this.dataKey(tenant, 'encryption');
       for (const klass of ['execution', 'audit']) {
         const key = t.keys[klass];
         // Embedded-custody keys are imported purpose-bound and non-exportable
@@ -148,6 +148,15 @@ export class Fabric {
   }
   close() { this.target.close(); this.store.close(); }
   tenant(t) { const row = this.config.tenants[t]; requireThat(row, 'INV-404-NOT-FOUND', 'Resource not found', 404); return row; }
+  // Tenant data keys are stored wrapped under the vault master key in real
+  // deployments (encryption_key_wrapped / watermark_key_wrapped); the
+  // embedded-custody dev profile falls back to the plaintext fields
+  // (DEK-audit F2).
+  dataKey(t, kind) {
+    const row = this.tenant(t), wrapped = row[`${kind}_key_wrapped`];
+    if (wrapped) return decrypt(wrapped, this.vault.masterKey, `data-key/${t}/${kind}`);
+    return row[`${kind}_key`];
+  }
   keys(t) { return this.tenant(t).keys; }
   // Verification keys for execution signatures: current plus retired keys so
   // certificates issued before rotation still verify within their TTL.
@@ -959,7 +968,7 @@ export class Fabric {
       const weight = this.policy(t).runtime.sensitivity_weights[dataset.classification] ?? 1;
       const cost = requested.row_ids.length * requested.columns.length * weight;
       this.store.db.prepare('INSERT INTO usage VALUES(?,?,?,?,?,?,?)').run(t, subject, requested.dataset, now, cost, `cert:${cert.certificate_id}`, cert.certificate_id);
-      return { watermarks: watermark(raw.output ?? [], { tenant: t, dataset: requested.dataset, subject, requestId: cert.certificate_id, tenantWatermarkKey: this.tenant(t).watermark_key ?? this.tenant(t).encryption_key }).watermarks };
+      return { watermarks: watermark(raw.output ?? [], { tenant: t, dataset: requested.dataset, subject, requestId: cert.certificate_id, tenantWatermarkKey: this.dataKey(t, 'watermark') ?? this.dataKey(t, 'encryption') }).watermarks };
     }
     return null;
   }
@@ -995,7 +1004,9 @@ export class Fabric {
   reconcile(p, id) {
     this.authorize(p, ['operator', 'security', 'policy_admin']); const t = p.tenant_id, stored = this.store.must(t, 'certificate', id);
     const current = this.store.get(t, 'outcome', id);
-    if (current && ['VERIFIED', 'FAILED'].includes(current.payload.status)) return current;
+    // COMPENSATED is terminal too — reconcile returns any settled outcome
+    // instead of throwing where VERIFIED/FAILED simply answer (w7-seam F8).
+    if (current && ['VERIFIED', 'FAILED', 'COMPENSATED'].includes(current.payload.status)) return current;
     requireThat(stored.consumed, 'INV-409-STATE', 'Execution has not started', 409);
     const cert = stored.envelope.payload, raw = this.target.outcome(t, id);
     const record = this.store.must(t, 'capsule', cert.capsule_id);
@@ -1300,8 +1311,12 @@ export class Fabric {
       // exception (store-audit MED-3). Any residue is honestly flagged.
       const evidenceIds = this.store.ids(p.tenant_id, 'evidence', 20000), capsuleIds = this.store.ids(p.tenant_id, 'capsule', 20000);
       const items = [], records = [], corrupt = [];
-      for (const id of evidenceIds) { try { items.push(this.store.must(p.tenant_id, 'evidence', id)); } catch { corrupt.push(`evidence:${id}`); } }
-      for (const id of capsuleIds) { try { records.push(this.store.must(p.tenant_id, 'capsule', id)); } catch { corrupt.push(`capsule:${id}`); } }
+      for (const id of evidenceIds) { try { items.push(this.store.must(p.tenant_id, 'evidence', id)); } catch { corrupt.push(['evidence', id]); } }
+      for (const id of capsuleIds) { try { records.push(this.store.must(p.tenant_id, 'capsule', id)); } catch { corrupt.push(['capsule', id]); } }
+      // Undecryptable residue is itself erased — a corrupt row can never
+      // become readable again, so keeping it only leaks ciphertext
+      // indefinitely (DEK-audit F5).
+      for (const [kind, id] of corrupt) this.store.shred(p.tenant_id, kind, id);
       const truncated = evidenceIds.length === 20000 || capsuleIds.length === 20000;
       let deleted = 0, held = 0;
       // Conservative batch boundary: do not erase if a reference could be outside this scan.
@@ -1311,11 +1326,14 @@ export class Fabric {
         const activeReference = records.some(r => r.evidence.includes(e.payload.evidence_id) && !['VERIFIED', 'FAILED', 'DENY', 'CANCELLED', 'COMPENSATED'].includes(r.status)) || this.store.list(p.tenant_id, 'coverage', 10000, 0).some(c => c.technical_validation?.evidence_id === e.payload.evidence_id);
         if (e.legal_hold || activeReference) { held++; continue; }
         const original_digest = digest(e.envelope);
-        this.store.insert(p.tenant_id, 'evidence-tombstone', e.payload.evidence_id, { evidence_id: e.payload.evidence_id, original_digest, deleted_at: now }, now);
+        // put(), not insert(): an issuer may legitimately re-mint a shredded
+        // evidence_id — a stale tombstone must then be overwritten, or the
+        // sweep wedges permanently on INV-409-CONFLICT (DEK-audit F1).
+        this.store.put(p.tenant_id, 'evidence-tombstone', e.payload.evidence_id, { evidence_id: e.payload.evidence_id, original_digest, deleted_at: now }, now);
         this.store.shred(p.tenant_id, 'evidence', e.payload.evidence_id); deleted++;
         this.store.audit(p.tenant_id, 'RETENTION_DELETED', p.subject_id, e.payload.evidence_id, { original_digest, crypto_shred: true }, now);
       }
-      return { deleted, held, corrupt: corrupt.length, corrupt_ids: corrupt.slice(0, 64), complete_payload_erasure: false, truncated: false, limitation: 'Record DEKs are destroyed and the WAL truncated; ciphertext remaining in pre-erasure backups or external copies is not reachable by this operation.' };
+      return { deleted, held, corrupt: corrupt.length, corrupt_ids: corrupt.slice(0, 64).map(([k, i]) => `${k}:${i}`), corrupt_shredded: corrupt.length, complete_payload_erasure: false, truncated: false, limitation: 'Record DEKs are destroyed and the WAL truncated; ciphertext remaining in pre-erasure backups or external copies is not reachable by this operation.' };
     });
     if (result.deleted) this.store.checkpoint();
     return result;
@@ -1461,25 +1479,32 @@ export class Fabric {
       // Release provenance must be real: a cited capsule or evidence record
       // that does not exist would write forged authority into the signed
       // audit trail (runtime-audit F-6).
-      // A cited capsule or evidence record must exist, be live, and
-      // semantically cover this release — existence alone would let any
-      // real object launder the provenance of sealed fields (w6 P-3).
       requireThat(release && typeof release === 'object' && !Array.isArray(release) && release.fields && typeof release.fields === 'object' && !Array.isArray(release.fields), 'INV-400-SCHEMA', 'Invalid release', 400);
       text(release.purpose, 'purpose', 512);
-      let cited = null;
-      if (release.capsule_id !== undefined) {
-        cited = this.store.get(t, 'capsule', identifier(release.capsule_id, 'capsule'));
-        requireThat(cited && cited.capsule.expires_at > now, 'INV-404-NOT-FOUND', 'Release cites no live capsule', 404);
-      }
-      if (release.evidence_ref !== undefined) {
-        const ev = this.store.get(t, 'evidence', identifier(release.evidence_ref, 'evidence'));
-        requireThat(ev, 'INV-404-NOT-FOUND', 'Release cites nonexistent evidence', 404);
-        if (cited) requireThat(ev.envelope?.payload?.capsule_digest === cited.capsule_digest, 'INV-403-SCOPE', 'Evidence does not support the cited capsule', 403);
-      }
+      this._releaseCitation(t, release, p, now);
       const result = releaseFields(session, release, this.policy(t), now);
       this.store.audit(t, 'PERCEPTION_RELEASE', p.subject_id, session_id, { fields: result.binding.fields, assurance: result.assurance, capsule_id: release.capsule_id ?? null }, now);
       return result;
     });
+  }
+  // A cited capsule or evidence record must exist, be live, belong to the
+  // releasing actor, and bind to each other — existence alone would let any
+  // real object launder the provenance of sealed fields (w6 P-3). Shared by
+  // the sealed release and the labeled fallback so neither path can mint a
+  // free-floating citation (w6-perception P-8).
+  _releaseCitation(t, release, p, now) {
+    let cited = null;
+    if (release.capsule_id !== undefined) {
+      cited = this.store.get(t, 'capsule', identifier(release.capsule_id, 'capsule'));
+      requireThat(cited && cited.capsule.expires_at > now, 'INV-404-NOT-FOUND', 'Release cites no live capsule', 404);
+      requireThat(cited.capsule.actor.subject_id === p.subject_id, 'INV-403-SCOPE', 'Release cites a capsule belonging to another actor', 403);
+    }
+    if (release.evidence_ref !== undefined) {
+      const ev = this.store.get(t, 'evidence', identifier(release.evidence_ref, 'evidence'));
+      requireThat(ev, 'INV-404-NOT-FOUND', 'Release cites nonexistent evidence', 404);
+      if (cited) requireThat(ev.envelope?.payload?.capsule_digest === cited.capsule_digest, 'INV-403-SCOPE', 'Evidence does not support the cited capsule', 403);
+    }
+    return cited;
   }
   perceptionFallback(p, release) {
     this.authorize(p, ['operator', 'approver', 'custodian', 'security']);
@@ -1488,6 +1513,7 @@ export class Fabric {
     text(release.purpose, 'purpose');
     return this.transaction(p, now => {
       this.assertHealthy(p.tenant_id, p.subject_id, this.identity(p).device_id, now);
+      this._releaseCitation(p.tenant_id, release, p, now);
       const result = workspaceFallback(release, this.policy(p.tenant_id), now);
       this.store.audit(p.tenant_id, 'PERCEPTION_FALLBACK', p.subject_id, 'workspace', { fields: result.binding.fields, assurance: result.assurance }, now);
       return result;

@@ -2,12 +2,12 @@
   "generated_by": "scripts/report.mjs",
   "files": {
     "src/advisory.mjs": {
-      "lines": 94,
-      "bytes": 5969
+      "lines": 100,
+      "bytes": 6395
     },
     "src/bootstrap.mjs": {
-      "lines": 233,
-      "bytes": 19356
+      "lines": 240,
+      "bytes": 19954
     },
     "src/canonical.mjs": {
       "lines": 85,
@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 1529,
-      "bytes": 129115
+      "lines": 1555,
+      "bytes": 130750
     },
     "src/issuerd.mjs": {
       "lines": 295,
@@ -70,24 +70,24 @@
       "bytes": 9766
     },
     "src/secureview.mjs": {
-      "lines": 132,
-      "bytes": 9969
+      "lines": 135,
+      "bytes": 10232
     },
     "src/server.mjs": {
       "lines": 276,
-      "bytes": 28879
+      "bytes": 28909
     },
     "src/shamir.mjs": {
       "lines": 83,
       "bytes": 3566
     },
     "src/store.mjs": {
-      "lines": 243,
-      "bytes": 16959
+      "lines": 256,
+      "bytes": 17837
     },
     "src/target.mjs": {
-      "lines": 215,
-      "bytes": 16023
+      "lines": 222,
+      "bytes": 16318
     },
     "web/app.js": {
       "lines": 216,
@@ -245,6 +245,10 @@
       "lines": 122,
       "bytes": 8534
     },
+    "tests/w7-dek.test.mjs": {
+      "lines": 106,
+      "bytes": 6307
+    },
     "tests/w7-fix.test.mjs": {
       "lines": 221,
       "bytes": 14600
@@ -254,6 +258,6 @@
       "bytes": 12964
     }
   },
-  "total_files": 63,
-  "total_lines": 10251
+  "total_files": 64,
+  "total_lines": 10419
 }
