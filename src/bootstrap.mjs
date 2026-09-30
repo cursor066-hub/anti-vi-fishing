@@ -180,8 +180,10 @@ export function bootstrap(directory, tenants = ['acme'], now = Date.now(), { iss
   const vault = new KeyVault(masterKey);
   const setup = createConfiguration(tenants, now, { vault, issuerEndpoint: `http://127.0.0.1:${issuerPort}` });
   const save = (path, value) => writeFileSync(path, canonical(value) + '\n', { mode: 0o600, flag: 'wx' });
-  save(join(directory, 'master.key'), { format: 'IF-MASTERKEY-1', warning: 'software vault master key; protect per the deployment runbook', master_key: masterKey });
   vault.save(join(directory, 'keystore.json'));
+  // master.key is written last — it is the commit marker that proves the
+  // keystore it names was fully persisted (w6-ceremony F12).
+  save(join(directory, 'master.key'), { format: 'IF-MASTERKEY-1', warning: 'software vault master key; protect per the deployment runbook', master_key: masterKey });
   save(join(directory, 'config.json'), setup.config); save(join(directory, 'access-tokens.json'), setup.credentials);
   const signingDir = join(directory, 'offline-custodians'); mkdirSync(signingDir, { mode: 0o700 });
   const issuerDir = join(directory, 'issuers'); mkdirSync(issuerDir, { mode: 0o700 });

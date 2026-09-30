@@ -6,16 +6,16 @@
       "bytes": 5969
     },
     "src/bootstrap.mjs": {
-      "lines": 231,
-      "bytes": 19180
+      "lines": 233,
+      "bytes": 19318
     },
     "src/canonical.mjs": {
       "lines": 85,
       "bytes": 4386
     },
     "src/ceremony.mjs": {
-      "lines": 99,
-      "bytes": 6793
+      "lines": 121,
+      "bytes": 8817
     },
     "src/cli.mjs": {
       "lines": 51,
@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 1266,
-      "bytes": 108406
+      "lines": 1363,
+      "bytes": 116190
     },
     "src/issuerd.mjs": {
       "lines": 286,
@@ -58,24 +58,24 @@
       "bytes": 6684
     },
     "src/policy.mjs": {
-      "lines": 326,
-      "bytes": 34349
+      "lines": 328,
+      "bytes": 34636
     },
     "src/runtime.mjs": {
-      "lines": 150,
-      "bytes": 14314
+      "lines": 152,
+      "bytes": 14353
     },
     "src/schema.mjs": {
       "lines": 84,
       "bytes": 9766
     },
     "src/secureview.mjs": {
-      "lines": 120,
-      "bytes": 8755
+      "lines": 132,
+      "bytes": 9969
     },
     "src/server.mjs": {
       "lines": 254,
-      "bytes": 26621
+      "bytes": 26577
     },
     "src/shamir.mjs": {
       "lines": 83,
@@ -171,7 +171,7 @@
     },
     "tests/adversarial.test.mjs": {
       "lines": 132,
-      "bytes": 7613
+      "bytes": 7610
     },
     "tests/canonical.test.mjs": {
       "lines": 31,
@@ -182,16 +182,16 @@
       "bytes": 1894
     },
     "tests/extended-security.test.mjs": {
-      "lines": 78,
-      "bytes": 7806
+      "lines": 97,
+      "bytes": 9341
     },
     "tests/helpers.mjs": {
-      "lines": 64,
-      "bytes": 5856
+      "lines": 74,
+      "bytes": 6871
     },
     "tests/http-concurrency-ui.test.mjs": {
-      "lines": 219,
-      "bytes": 19402
+      "lines": 239,
+      "bytes": 20643
     },
     "tests/issuerd.test.mjs": {
       "lines": 108,
@@ -199,11 +199,11 @@
     },
     "tests/ledger2.test.mjs": {
       "lines": 411,
-      "bytes": 28971
+      "bytes": 29115
     },
     "tests/ledger3.test.mjs": {
-      "lines": 332,
-      "bytes": 21660
+      "lines": 386,
+      "bytes": 25399
     },
     "tests/lifecycle.test.mjs": {
       "lines": 125,
@@ -214,22 +214,30 @@
       "bytes": 534
     },
     "tests/regression.test.mjs": {
-      "lines": 990,
-      "bytes": 68146
+      "lines": 1022,
+      "bytes": 70873
     },
     "tests/runtime-audit.test.mjs": {
       "lines": 83,
       "bytes": 10498
     },
     "tests/v2-features.test.mjs": {
-      "lines": 345,
-      "bytes": 23216
+      "lines": 350,
+      "bytes": 23598
+    },
+    "tests/w5-mutations.test.mjs": {
+      "lines": 194,
+      "bytes": 13515
+    },
+    "tests/w5-negatives.test.mjs": {
+      "lines": 184,
+      "bytes": 12697
     },
     "tests/w5-schema.test.mjs": {
       "lines": 92,
       "bytes": 5988
     }
   },
-  "total_files": 57,
-  "total_lines": 8597
+  "total_files": 59,
+  "total_lines": 9252
 }

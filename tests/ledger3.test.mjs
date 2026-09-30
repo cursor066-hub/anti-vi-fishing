@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { fixture, hasCode, runtimeInput, runtimeRequest } from './helpers.mjs';
 import { generateKey, signed, verifySigned } from '../src/crypto.mjs';
 import { digest } from '../src/canonical.mjs';
-
 // Wave-4 promotions: each test exercises the engineering-profile acceptance of
 // a requirement previously held PARTIAL.
 
@@ -101,10 +101,11 @@ test('NET-007: local capability enforcement keeps working without further contro
 test('NET-006 NET-009: a peer-class resource is never a service destination', t => {
   const h = fixture(t);
   for (const res of ['ws-alice', 'workstation-7', 'endpoint-janedoe']) {
-    // Peer-class resources are refused at whichever layer sees them first —
-    // the identity grant scope or the explicit segmentation deny.
+    // Peer-class resources report the segmentation denial specifically —
+    // the peer check precedes identity grant scope so the class is
+    // distinguishable from an ordinary scope refusal.
     assert.throws(() => h.f.runtime.issue(h.p(), runtimeInput({ action: 'service.connect', resource: res, destination: res, columns: [], row_ids: [] })),
-      e => ['INV-451-POLICY', 'INV-403-SCOPE'].includes(e.code));
+      hasCode('INV-451-POLICY'));
   }
   // An unlisted service is scope-denied even with a non-peer name...
   assert.throws(() => h.f.runtime.issue(h.p(), runtimeInput({ action: 'service.connect', resource: 'rogue-svc', destination: 'rogue-svc', columns: [], row_ids: [] })), hasCode('INV-403-SCOPE'));
@@ -167,7 +168,16 @@ test('NFR-SEC-006: crypto agility is configurable and both suites sign/verify', 
   assert.throws(() => h.f.verifyEvidenceEnvelope('acme', env), hasCode('INV-451-POLICY'));
 });
 
-test('NFR-PERF-004: the integrated load test met the >=100 evaluations/second target', () => {
+test('NFR-PERF-004: the integrated evaluation path sustains >=100 decisions/second in-process', t => {
+  const h = fixture(t); const r = h.ready().record;
+  const record = h.f.getCapsule(h.p(), r.capsule.capsule_id);
+  // Run the real evaluation path (policy + graph + audit write) and measure.
+  const iterations = 200, started = process.hrtime.bigint();
+  for (let i = 0; i < iterations; i++) h.f.evaluation('acme', record, h.now());
+  const seconds = Number(process.hrtime.bigint() - started) / 1e9;
+  const ops = iterations / seconds;
+  assert.ok(ops >= 100, `in-process evaluation throughput ${ops.toFixed(0)}/s < 100/s`);
+  // The committed benchmark artifact must corroborate the same claim.
   const bench = JSON.parse(readFileSync('reports/benchmark.json', 'utf8'));
   assert.equal(bench.asserted_targets.integrated_100_evaluations_per_second, true);
   assert.ok(bench.integrated_evaluation_with_sqlite_audit.operations_per_second >= 100);
@@ -249,17 +259,27 @@ test('NFR-USA-004: a recorded decision replays deterministically from stored inp
   assert.ok(rec.decision.policy_digest && rec.decision.reasons !== undefined);
 });
 
-test('NFR-TST-001: every requirement row carries a verification method', () => {
+test('NFR-TST-001: every requirement row carries a verification method, and every VERIFIED id is exercised by a tagged test', () => {
   // Quote-aware CSV row parse — a naive split(',') miscounts cells when a
   // quoted field contains a comma.
   const parseRow = line => { const cells = []; let cur = '', q = false; for (let i = 0; i < line.length; i++) { const c = line[i]; if (q) { if (c === '"') { if (line[i + 1] === '"') { cur += '"'; i++; } else q = false; } else cur += c; } else if (c === '"') q = true; else if (c === ',') { cells.push(cur); cur = ''; } else cur += c; } cells.push(cur); return cells; };
   const rows = readFileSync('docs/requirements.csv', 'utf8').trim().split('\n').map(parseRow);
-  const methodIdx = rows[0].indexOf('verification_method'), idIdx = rows[0].indexOf('id');
-  assert.ok(methodIdx > 0 && idIdx >= 0);
+  const methodIdx = rows[0].indexOf('verification_method'), idIdx = rows[0].indexOf('id'), statusIdx = rows[0].indexOf('status'), limIdx = rows[0].indexOf('limitations');
+  assert.ok(methodIdx > 0 && idIdx >= 0 && statusIdx > 0 && limIdx > 0);
   assert.equal(rows.length - 1, 211);
+  const testCorpus = readdirSync('tests').filter(f => f.endsWith('.test.mjs')).map(f => readFileSync(`tests/${f}`, 'utf8')).join('\n');
   for (const cells of rows.slice(1)) {
-    assert.ok(cells.length > methodIdx, `short row: ${cells[0]}`);
-    assert.ok(cells[methodIdx].trim().length > 0, `empty verification_method in ${cells[idIdx]}`);
+    const id = cells[idIdx];
+    assert.ok(cells.length > methodIdx, `short row: ${id}`);
+    assert.ok(cells[methodIdx].trim().length > 0, `empty verification_method in ${id}`);
+    if (cells[statusIdx] === 'VERIFIED_IN_ENGINEERING_PROFILE') {
+      // VERIFIED means a test tagged with this id exists — the row must not
+      // be honourable on prose alone.
+      assert.ok(testCorpus.includes(id), `${id} is VERIFIED but no test file mentions it`);
+    } else {
+      // Every non-verified row must carry an honest limitation gap.
+      assert.ok(cells[limIdx].trim().length > 0, `${id} non-verified row lacks a limitations statement`);
+    }
   }
 });
 
@@ -293,10 +313,13 @@ test('UX-003: no detail-free approval path exists — approvals bind to the revi
   const h = fixture(t); const rec = h.proposed();
   const other = h.proposed();
   const c = h.f.approvalChallenge(h.p('custodian-1'), rec.capsule.capsule_id);
-  const env = signed(c, h.setup.custodianKeys.acme['custodian-1'], 'approval');
-  env.payload.capsule_id = other.capsule.capsule_id;
-  const env2 = signed(env.payload, h.setup.custodianKeys.acme['custodian-1'], 'approval');
-  assert.throws(() => h.f.approve(h.p('custodian-1'), env2), e => e.code.startsWith('INV-'));
+  // Rebinding the signed approval to a different capsule fails on the
+  // stored-capsule digest comparison, not on signature validity.
+  const rebound = signed({ ...c, capsule_id: other.capsule.capsule_id }, h.setup.custodianKeys.acme['custodian-1'], 'action-approval');
+  assert.throws(() => h.f.approve(h.p('custodian-1'), rebound), hasCode('INV-409-STATE'));
+  // A mutated digest on the correct capsule_id dies on the same binding check.
+  const tampered = signed({ ...c, capsule_digest: 'f'.repeat(64) }, h.setup.custodianKeys.acme['custodian-1'], 'action-approval');
+  assert.throws(() => h.f.approve(h.p('custodian-1'), tampered), hasCode('INV-409-STATE'));
 });
 
 test('AIG-005: the advisory plane processes content locally — no outbound training path', t => {
@@ -320,6 +343,37 @@ test('NFR-MNT-005: connector manifests carry a signed deprecation lifecycle enfo
   assert.equal(verifyManifest(signedManifest(dep, key), issuers, now).lifecycle.superseded_by, 'erp-2');
   const dead = { ...base, lifecycle: { deprecated_at: now - 2000, end_of_support_at: now - 1000, superseded_by: 'erp-2' } };
   assert.throws(() => verifyManifest(signedManifest(dead, key), issuers, now), hasCode('INV-410-CONNECTOR'));
+});
+
+test('PER-008: residual visual-exfiltration risks are documented honestly', () => {
+  const sec = readFileSync('docs/SECURITY.md', 'utf8');
+  assert.match(sec, /residual risk/i);
+  for (const risk of ['External camera', 'memorisation', 'compromised']) assert.ok(sec.toLowerCase().includes(risk.toLowerCase()), `residual risk missing: ${risk}`);
+  // Every "prevention" mention must appear inside an honest disclaimer.
+  assert.match(sec, /does not\s+prevent all visual exfiltration/i);
+  assert.match(sec, /must never present[\s\S]*prevention of all visual exfiltration/i);
+});
+
+test('AIG-010: the AI advisory plane has a versioned regression suite that is executed', t => {
+  const eval_ = spawnSync(process.execPath, ['scripts/ai-eval.mjs'], { encoding: 'utf8' });
+  assert.equal(eval_.status, 0, eval_.stderr);
+  const report = JSON.parse(eval_.stdout);
+  assert.equal(report.suite, 'IF-AI-EVAL-1');
+  assert.ok(report.cases >= 5 && report.pass === report.cases && report.fail === 0, JSON.stringify(report));
+});
+
+test('NFR-OPS-004: customer-visible incidents carry a detection→containment→recovery→root-cause template', () => {
+  const rb = readFileSync('docs/RUNBOOKS.md', 'utf8');
+  for (const phase of ['contain', 'recover', 'root cause', 'corrective']) assert.ok(rb.toLowerCase().includes(phase), `incident template missing phase: ${phase}`);
+});
+
+test('NFR-OPS-005: staged rollout and rollback are drilled in the simulation suite', () => {
+  const sim = readFileSync('scripts/simulate.mjs', 'utf8');
+  assert.match(sim, /canary/i);
+  const results = JSON.parse(readFileSync('reports/simulation-results.json', 'utf8'));
+  const canary = (results.scenarios ?? []).filter(x => /canary|staged|cutover|promot/i.test(x.name ?? ''));
+  assert.ok(canary.length >= 3, 'canary/staging/rollback scenarios missing from simulation results');
+  assert.ok(canary.every(x => x.pass === true), JSON.stringify(canary));
 });
 
 test('NFR-TST-002: release acceptance includes adversarial bypass testing, executed by the gate', t => {

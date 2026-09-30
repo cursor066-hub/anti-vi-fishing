@@ -11,11 +11,28 @@ import { homedir } from 'node:os';
 // Locate the independent WebCrypto verifier runtime: PATH, the conventional
 // ~/.bun install, or an explicit BUN_BIN override.
 const bun = process.env.BUN_BIN ?? (existsSync(join(homedir(), '.bun/bin/bun')) ? join(homedir(), '.bun/bin/bun') : 'bun');
+const bunAvailable = spawnSync(bun, ['--version'], { encoding: 'utf8' }).status === 0;
 
 test('COM-002: all independently signed certificate binding mutations still fail registered-authority equality', t => {
   const h = fixture(t), { certificate } = h.ready();
   const mutations = { capsule_digest: '0'.repeat(64), policy_version: 999, evidence_graph_digest: '0'.repeat(64), target_gate_id: 'different-gate', nonce: 'different-nonce-long', expires_at: certificate.payload.expires_at + 1000, signer_set: [], constraints: { destination: 'EVILBANK9999' } };
   for (const [key, value] of Object.entries(mutations)) { const cert = signed({ ...certificate.payload, [key]: value }, h.setup.config.tenants.acme.keys.execution, 'action-certificate'); assert.throws(() => h.f.execute(h.p(), cert), e => ['INV-401-CERTIFICATE', 'INV-403-SCOPE'].includes(e.code), key); }
+  // Semantic arms — the presented envelope stays cryptographically valid
+  // while the stored/live state it binds to moves out from under it.
+  const { certificate: c2 } = h.ready();
+  h.f.store.put('acme', 'policy', 'active', { ...h.f.policy('acme'), version: 99 }, h.now());
+  assert.throws(() => h.f.execute(h.p(), c2), hasCode('INV-409-STATE'), 'policy digest drift kills execution');
+});
+test('COM-002: expiry, revocation and live re-evaluation each kill execution independently', t => {
+  const h = fixture(t);
+  const { certificate: cExpired } = h.ready(); h.advance(120001);
+  assert.throws(() => h.f.execute(h.p(), cExpired), hasCode('INV-401-CERTIFICATE'), 'expired certificate');
+  const { certificate: cRevoked } = h.ready();
+  h.f.revoke(h.p('security'), { kind: 'certificate', id: cRevoked.payload.certificate_id, reason: 'compromise drill' });
+  assert.throws(() => h.f.execute(h.p(), cRevoked), hasCode('INV-401-CERTIFICATE'), 'revoked certificate');
+  const { record: r3, certificate: c3 } = h.ready();
+  h.f.revoke(h.p('security'), { kind: 'subject', id: r3.capsule.actor.subject_id, reason: 'initiator compromise drill' });
+  assert.throws(() => h.f.execute(h.p(), c3), e => ['INV-412-EVIDENCE', 'INV-403-QUARANTINE', 'INV-401-AUTH'].includes(e.code), 'live re-evaluation/health fails');
 });
 test('RUN-004: runtime issuer-key revocation and active-policy change invalidate cached token', t => {
   const h = fixture(t), cap = h.f.runtime.issue(h.p(), runtimeInput()); h.f.revoke(h.p('security'), { kind: 'key', id: cap.protected.key_id, reason: 'Execution key compromise drill' });
@@ -42,7 +59,9 @@ test('AIG-006: source prose cannot override typed policy fields', t => {
 test('KEY-010 NFR-MNT-002: independent verifiers reject signed-log tampering and duplicate JSON keys', t => {
   const h = fixture(t); h.proposed(); const bundle = h.f.exportAudit(h.p('auditor'), 'Verifier adversarial test'), file = join(h.directory, 'audit.json'), trust = join(h.directory, 'trust.json');
   writeFileSync(file, JSON.stringify(bundle)); writeFileSync(trust, JSON.stringify(bundle.public_keys));
-  for (const [command, script] of [[process.execPath, 'scripts/verify-export.mjs'], [bun, 'scripts/verify-export-webcrypto.mjs']]) {
+  // Node verifier always runs; the WebCrypto leg needs a present bun runtime.
+  const verifiers = [[process.execPath, 'scripts/verify-export.mjs'], ...(bunAvailable ? [[bun, 'scripts/verify-export-webcrypto.mjs']] : [])];
+  for (const [command, script] of verifiers) {
     const valid = spawnSync(command, [script, file, trust], { encoding: 'utf8' }); assert.equal(valid.status, 0, valid.stderr);
     const changed = clone(bundle); changed.entries[0].envelope.payload.metadata.policy_digest = 'f'.repeat(64); writeFileSync(file, JSON.stringify(changed));
     assert.equal(spawnSync(command, [script, file, trust]).status, 1);

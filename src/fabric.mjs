@@ -86,10 +86,15 @@ export class Fabric {
   _reconcileLedger() {
     let dirty = false;
     for (const tenant of Object.keys(this.config.tenants)) {
-      for (const rot of this.store.list(tenant, 'key-rotation', 1000)) {
+      // Rotation history is newest-first; only the newest record per class
+      // may restore a key pointer. Applying every record converged the class
+      // to the OLDEST rotation — and resurrected revoked keys (w6 F1).
+      const latestByClass = new Map();
+      for (const rot of this.store.list(tenant, 'key-rotation', 1000)) if (!latestByClass.has(rot.key_class)) latestByClass.set(rot.key_class, rot);
+      for (const rot of latestByClass.values()) {
         if (this.tenant(tenant).keys[rot.key_class]?.key_id === rot.new_key_id) continue;
         const entry = this.vault.keys.get(rot.new_key_id);
-        if (entry && entry.public_key === rot.new_public_key) {
+        if (entry && !entry.revoked && entry.public_key === rot.new_public_key) {
           if (entry.pending) this.vault.activate(rot.new_key_id);
           const previous = this.tenant(tenant).keys[rot.key_class];
           this.tenant(tenant).keys[rot.key_class] = { key_id: rot.new_key_id, public_key: rot.new_public_key };
@@ -108,15 +113,35 @@ export class Fabric {
   }
   _openVault() {
     const storePath = join(this.directory, 'keystore.json'), masterPath = join(this.directory, 'master.key');
+    // master.key is the commit marker written last: a keystore without it
+    // means a crash mid-persist — refuse rather than silently regenerate.
+    if (existsSync(storePath) && !existsSync(masterPath)) throw new InvariantError('INV-503-CONFIG', 'Keystore exists but master key is missing — refusing to silently regenerate', 503);
     if (existsSync(storePath)) return KeyVault.load(storePath, JSON.parse(readFileSync(masterPath, 'utf8')).master_key);
     return new KeyVault(randomBytes(32).toString('base64url'));
   }
   persistVault() {
     mkdirSync(this.directory, { recursive: true, mode: 0o700 });
+    // Write order: keystore first, master.key last — the master file is the
+    // commit marker, so a crash mid-write can never pair a stale master key
+    // with a keystore it did not wrap (w6-ceremony F12).
+    this.vault.save(join(this.directory, 'keystore.json'));
     if (!existsSync(join(this.directory, 'master.key'))) {
       writeFileSync(join(this.directory, 'master.key'), canonical({ format: 'IF-MASTERKEY-1', warning: 'software vault master key; custody is the operator\'s responsibility', master_key: this.vault.masterKey.toString('base64url') }) + '\n', { mode: 0o600 });
     }
-    this.vault.save(join(this.directory, 'keystore.json'));
+  }
+  // Live, failure-domain-deduplicated custodian consent for a ceremony:
+  // acknowledgements from revoked identities or from the same failure
+  // domain do not count toward quorum (w6 F7/F9).
+  custodianQuorum(t, ceremony) {
+    const bySubject = new Map(Object.values(this.identities(t)).map(i => [i.subject_id, i]));
+    const domains = new Set(), live = new Set();
+    for (const a of ceremony.acknowledgements) {
+      const identity = bySubject.get(a.payload.custodian);
+      if (!identity || identity.revoked) continue;
+      live.add(a.payload.custodian);
+      domains.add(identity.failure_domain ?? a.payload.custodian);
+    }
+    return { count: ceremony.acknowledgements.length, live: domains.size, custodians: live };
   }
   close() { this.target.close(); this.store.close(); }
   tenant(t) { const row = this.config.tenants[t]; requireThat(row, 'INV-404-NOT-FOUND', 'Resource not found', 404); return row; }
@@ -138,10 +163,10 @@ export class Fabric {
     this.assertSuiteAllowed(t, this.vault.entry(key_id).suite ?? 'Ed25519');
     return this.vault.envelope(key_id, purpose, payload);
   }
-  signAudit(t, payload, purpose = 'audit') {
-    const key_id = this.keys(t).audit.key_id;
-    this.assertSuiteAllowed(t, this.vault.entry(key_id).suite ?? 'Ed25519');
-    return this.vault.envelope(key_id, purpose, payload);
+  signAudit(t, payload, purpose = 'audit', key_id = null) {
+    const kid = key_id ?? this.keys(t).audit.key_id;
+    this.assertSuiteAllowed(t, this.vault.entry(kid).suite ?? 'Ed25519');
+    return this.vault.envelope(kid, purpose, payload);
   }
   assertSuiteAllowed(t, suite) {
     requireThat((this.policy(t).algorithms?.allowed_suites ?? ['Ed25519']).includes(suite), 'INV-451-POLICY', 'Signature suite retired by constitution', 451);
@@ -756,25 +781,43 @@ export class Fabric {
       // The pending vault key is activated only after the rotation capsule is
       // VERIFIED; the retiring key stays verifiable but can no longer sign.
       const req = r.capsule.requested_state;
-      // The ledger records what the vault does: the advertised public key
-      // must be the real pending vault key, not a caller-supplied value.
-      requireThat(req.new_public_key === this.vault.publicKey(req.new_key_id), 'INV-400-SCHEMA', 'new_public_key does not match the pending vault key');
+      // Rotation activates only a genuinely pending, unrevoked vault key
+      // whose purpose covers the class it will serve — everything is checked
+      // inside the transaction so the vault can never diverge from a
+      // committed VERIFIED outcome (w6 F2/F4).
+      const entry = this.vault.keys.get(req.new_key_id);
+      requireThat(entry && entry.pending && !entry.revoked, 'INV-409-STATE', 'Rotation target is not a pending vault key', 409);
+      requireThat(req.new_public_key === entry.public_key, 'INV-400-SCHEMA', 'new_public_key does not match the pending vault key');
+      const needed = this._keyPurposes[req.key_class] ?? [];
+      const offered = Array.isArray(entry.purpose) ? entry.purpose : [entry.purpose];
+      requireThat(entry.purpose === 'any' || needed.every(x => offered.includes(x)), 'INV-403-SCOPE', 'Rotation key purpose does not cover the target class', 403);
       if (req.ceremony_id) {
         const ceremony = this.store.get(t, 'ceremony', req.ceremony_id);
-        // The named ceremony must exist and have its custodian quorum
-        // acknowledged — a rotation cannot cite a ceremonial fig leaf.
-        requireThat(ceremony && ceremony.valid_until > now && ceremony.acknowledgements.length >= ceremony.threshold, 'INV-409-STATE', 'key.rotate requires a ceremony acknowledged by its custodian quorum', 409);
+        // A cited ceremony must be a live key.rotate ceremony bound to THIS
+        // class and key, consented by a live cross-domain custodian quorum,
+        // and consumable exactly once (w6 F3/F7/F9).
+        requireThat(ceremony && ceremony.status !== 'completed' && ceremony.valid_until > now && ceremony.purpose === 'key.rotate' && !ceremony.rotation_consumed, 'INV-409-STATE', 'key.rotate requires a live, unconsumed key.rotate ceremony', 409);
+        requireThat(ceremony.rotation?.key_class === req.key_class && ceremony.rotation?.new_key_id === req.new_key_id, 'INV-403-SCOPE', 'Ceremony is not bound to this rotation', 403);
+        requireThat(this.custodianQuorum(t, ceremony).live >= ceremony.threshold, 'INV-409-STATE', 'Ceremony lacks a live custodian quorum across failure domains', 409);
+        ceremony.rotation_consumed = r.capsule.capsule_id;
+        this.store.put(t, 'ceremony', ceremony.ceremony_id, ceremony, now);
       }
       const klass = req.key_class, previous = this.keys(t)[klass];
-      this.store.put(t, 'key-rotation', req.new_key_id, { new_key_id: req.new_key_id, new_public_key: req.new_public_key, key_class: klass, previous_key_id: previous.key_id, previous_public_key: previous.public_key, revoke_old: req.revoke_old === true, rotated_at: now, capsule_id: r.capsule.capsule_id }, now);
+      // Activation, repointing and retiring run inside the transaction; only
+      // the vault file write stays post-commit. The rotation's own outcome is
+      // signed by the retiring key — it was the authoritative signer when the
+      // action verified — then its private half is revoked post-commit (w6
+      // F2/F11).
+      this.vault.activate(req.new_key_id);
+      this.tenant(t).keys[klass] = { key_id: req.new_key_id, public_key: req.new_public_key };
+      this.tenant(t).keys.retired = [...(this.tenant(t).keys.retired ?? []), { key_class: klass, key_id: previous.key_id, public_key: previous.public_key, retired_at: now }];
+      this.store.put(t, 'key-rotation', req.new_key_id, { new_key_id: req.new_key_id, new_public_key: req.new_public_key, key_class: klass, previous_key_id: previous.key_id, previous_public_key: previous.public_key, revoke_old: true, rotated_at: now, capsule_id: r.capsule.capsule_id }, now);
       this.store.audit(t, 'KEY_ROTATED', p.subject_id, req.new_key_id, { key_class: klass, previous_key_id: previous.key_id, ceremony_id: req.ceremony_id }, now);
-      post.push(() => {
-        this.vault.activate(req.new_key_id);
-        this.tenant(t).keys[klass] = { key_id: req.new_key_id, public_key: req.new_public_key };
-        this.tenant(t).keys.retired = [...(this.tenant(t).keys.retired ?? []), { key_class: klass, key_id: previous.key_id, public_key: previous.public_key, retired_at: now }];
-        if (req.revoke_old) this.vault.revoke(previous.key_id);
-        this.persistVault();
-      });
+      post.push(() => { this.vault.revoke(previous.key_id); this.persistVault(); });
+      // Only an audit-class rotation changes the outcome signer; other
+      // classes leave the audit key untouched.
+      if (klass === 'audit') return { outcome_key_id: previous.key_id };
+      return null;
     }
     if (type === 'identity.jit.grant') {
       const req = r.capsule.requested_state;
@@ -815,7 +858,7 @@ export class Fabric {
       // shows the race instead of pretending it never happened.
       const revokedMidFlight = this.revoked(t, 'certificate', cert.certificate_id) || this.revoked(t, 'key', stored.envelope.protected.key_id);
       const payload = { certificate_id: cert.certificate_id, capsule_digest: cert.capsule_digest, target_transaction_id: cert.certificate_id, observed_state_digest: valid ? raw.observed_state_digest : null, status, reason, execution_time: valid ? raw.execution_time : now, reconciliation_evidence: valid ? digest(raw) : null, simulation: true, output: valid ? raw.output : null, watermarks: extras?.watermarks ?? null, revoked_post_reservation: revokedMidFlight || null, supersedes: existing ? digest(existing) : null };
-      const envelope = this.signAudit(t, payload, 'outcome');
+      const envelope = this.signAudit(t, payload, 'outcome', extras?.outcome_key_id ?? null);
       this.store.put(t, 'outcome', cert.certificate_id, envelope, now); stored.status = status; r.status = status;
       this.store.put(t, 'certificate', cert.certificate_id, stored, now); this.store.put(t, 'capsule', cert.capsule_id, r, now);
       this.store.audit(t, 'EXECUTION_OUTCOME', p.subject_id, cert.certificate_id, { status, reason, outcome_digest: digest(envelope), supersedes: existing ? digest(existing) : null, revoked_post_reservation: revokedMidFlight || null }, now);
@@ -860,7 +903,11 @@ export class Fabric {
         certificate: () => this.store.get(t, 'certificate', input.id),
         evidence: () => this.store.get(t, 'evidence', input.id),
         issuer: () => this.tenant(t).issuers[input.id],
-        key: () => this.vault.entry(input.id) || this.identities(t)[input.id] || this.tenant(t).issuers[input.id],
+        // A revocable key is a vault entry, an identity, an issuer — or a
+        // perception component signing key, which must also be revocable
+        // (w6-perception P-2). vault.entry throws on unknown ids; probe the
+        // map directly instead.
+        key: () => this.vault.keys.get(input.id) || this.identities(t)[input.id] || this.tenant(t).issuers[input.id] || Object.values(this.perceptionComponents[t] ?? {}).find(c => c.signing.key_id === input.id),
         subject: () => Object.values(this.tenant(t).identities).some(i => i.subject_id === input.id),
         device: () => Object.values(this.tenant(t).identities).some(i => i.device_id === input.id),
         capability: () => this.store.get(t, 'capability', input.id),
@@ -1113,9 +1160,15 @@ export class Fabric {
   createCeremony(p, input) {
     this.authorize(p, ['security', 'custodian']);
     return this.transaction(p, now => {
-      const ceremony = createCeremony({ ...input, tenant_id: p.tenant_id });
-      this.store.insert(p.tenant_id, 'ceremony', ceremony.ceremony_id, ceremony, now);
-      this.store.audit(p.tenant_id, 'CEREMONY_PLANNED', p.subject_id, ceremony.ceremony_id, { digest: ceremony.artifact_digest, threshold: ceremony.threshold }, now);
+      const t = p.tenant_id;
+      this.assertHealthy(t, p.subject_id, this.identity(p).device_id, now);
+      // The key.ceremony rule's cooldown is the floor for the recovery delay
+      // — ceremonies are never instant-reconstructible (w6-ceremony F13).
+      const floor = this.policy(t).rules['key.ceremony']?.cooldown_ms ?? 0;
+      requireThat((input.min_delay_ms ?? 0) >= floor, 'INV-400-SCHEMA', `Ceremony min_delay_ms must be at least ${floor}`, 400);
+      const ceremony = createCeremony({ ...input, tenant_id: t });
+      this.store.insert(t, 'ceremony', ceremony.ceremony_id, ceremony, now);
+      this.store.audit(t, 'CEREMONY_PLANNED', p.subject_id, ceremony.ceremony_id, { digest: ceremony.artifact_digest, threshold: ceremony.threshold }, now);
       return ceremony;
     });
   }
@@ -1123,13 +1176,19 @@ export class Fabric {
     this.authorize(p, ['custodian']);
     return this.transaction(p, now => {
       const t = p.tenant_id, payload = verifySigned(envelope, this.identities(t), 'ceremony-acknowledgement');
+      this.assertHealthy(t, p.subject_id, this.identity(p).device_id, now);
       this.assertSuiteAllowed(t, envelope.protected.suite);
       fields(payload, ['ceremony_id', 'artifact_digest', 'custodian', 'acknowledged_at']);
       const ceremony = this.store.must(t, 'ceremony', identifier(payload.ceremony_id));
       requireThat(payload.custodian === p.subject_id && payload.artifact_digest === ceremony.artifact_digest, 'INV-403-SCOPE', 'Acknowledgement scope mismatch', 403);
       // The signing key must belong to the claimed custodian identity — the
       // same binding rule approvals enforce (HTTP-audit finding).
-      requireThat(this.identities(t)[envelope.protected.key_id]?.subject_id === p.subject_id, 'INV-403-SCOPE', 'Acknowledgement signer does not match the custodian identity', 403);
+      const ackIdentity = this.identities(t)[envelope.protected.key_id];
+      requireThat(ackIdentity?.subject_id === p.subject_id, 'INV-403-SCOPE', 'Acknowledgement signer does not match the custodian identity', 403);
+      // Ceremony-bound device pinning: when the ceremony declared which
+      // device a custodian acknowledges from, the live identity must match
+      // (w6 F7).
+      if (ceremony.devices?.[p.subject_id]) requireThat(ackIdentity.device_id === ceremony.devices[p.subject_id], 'INV-403-SCOPE', 'Acknowledgement device does not match the ceremony binding', 403);
       requireThat(Math.abs(payload.acknowledged_at - now) <= 300000, 'INV-409-STATE', 'Acknowledgement timestamp outside window', 409);
       acknowledge(ceremony, p.subject_id, envelope, now);
       this.store.put(t, 'ceremony', ceremony.ceremony_id, ceremony, now);
@@ -1140,6 +1199,7 @@ export class Fabric {
   commitCeremonyShares(p, ceremony_id, shares) {
     this.authorize(p, ['security', 'custodian']);
     return this.transaction(p, now => {
+      this.assertHealthy(p.tenant_id, p.subject_id, this.identity(p).device_id, now);
       const ceremony = this.store.must(p.tenant_id, 'ceremony', identifier(ceremony_id));
       commitShares(ceremony, shares, now);
       this.store.put(p.tenant_id, 'ceremony', ceremony.ceremony_id, ceremony, now);
@@ -1151,20 +1211,30 @@ export class Fabric {
   reconstructCeremony(p, ceremony_id, encodedShares) {
     this.authorize(p, ['security', 'custodian']);
     return this.transaction(p, now => {
-      const ceremony = this.store.must(p.tenant_id, 'ceremony', identifier(ceremony_id));
-      requireThat(ceremony.acknowledgements.length >= ceremony.threshold, 'INV-409-STATE', 'Ceremony lacks custodian acknowledgements', 409);
+      const t = p.tenant_id, ceremony = this.store.must(t, 'ceremony', identifier(ceremony_id));
+      this.assertHealthy(t, p.subject_id, this.identity(p).device_id, now);
+      // The consent quorum and the share quorum are one set: every presented
+      // share must belong to a custodian who acknowledged the committed
+      // artifact, and the acknowledgements themselves must span distinct
+      // failure domains with all custodians still live (w6 F5/F7/F9).
+      requireThat(this.custodianQuorum(t, ceremony).live >= ceremony.threshold, 'INV-409-STATE', 'Ceremony lacks a live custodian quorum across failure domains', 409);
+      const acked = new Set(ceremony.acknowledgements.map(a => a.payload.custodian));
       const shares = encodedShares.map(s => decodeShare(s));
+      for (const s of shares) requireThat(acked.has(ceremony.custodians[s.x - 1]), 'INV-403-ROLE', 'Share presented for a custodian who did not acknowledge', 403);
       const { secret, artifact } = reconstructSecret(ceremony, shares, now);
-      this.store.put(p.tenant_id, 'ceremony', ceremony.ceremony_id, ceremony, now);
-      this.store.audit(p.tenant_id, 'CEREMONY_RECONSTRUCTED', p.subject_id, ceremony.ceremony_id, { quorum: artifact.quorum, purpose: ceremony.purpose }, now);
-      return { artifact, reconstructed: true, secret_digest: digest({ secret: Buffer.from(secret).toString('base64url') }), note: 'Secret reconstructed under ceremony quorum; raw material is not returned by this endpoint.' };
+      this.store.put(t, 'ceremony', ceremony.ceremony_id, ceremony, now);
+      // The reconstructed secret's digest goes on the audit record so the
+      // ledger can prove WHICH secret the quorum reconstructed (w6 F6).
+      const secret_digest = digest({ secret: Buffer.from(secret).toString('base64url') });
+      this.store.audit(t, 'CEREMONY_RECONSTRUCTED', p.subject_id, ceremony.ceremony_id, { quorum: artifact.quorum, purpose: ceremony.purpose, secret_digest }, now);
+      return { artifact, reconstructed: true, secret_digest, note: 'Secret reconstructed under ceremony quorum; raw material is not returned by this endpoint.' };
     });
   }
   splitCeremonySecret(p, ceremony_id, secretB64) {
     this.authorize(p, ['security', 'custodian']);
     return this.transaction(p, now => {
       const ceremony = this.store.must(p.tenant_id, 'ceremony', identifier(ceremony_id));
-      requireThat(ceremony.status === 'planned' || ceremony.status === 'committed', 'INV-409-STATE', 'Ceremony already completed', 409);
+      requireThat(ceremony.status === 'planned', 'INV-409-STATE', 'Shares were already committed for this ceremony', 409);
       const secret = Buffer.from(secretB64, 'base64url');
       requireThat(secret.length >= 16 && secret.length <= 512, 'INV-400-SCHEMA', 'Secret size out of bounds');
       const shares = splitSecret(secret, ceremony);
@@ -1193,8 +1263,15 @@ export class Fabric {
     this.authorize(p, ['operator', 'approver', 'custodian', 'security']);
     return this.transaction(p, now => {
       const t = p.tenant_id;
-      const component = this.perceptionComponents[t]?.[attestation?.payload?.component];
-      requireThat(component, 'INV-401-ATTESTATION', 'Unknown perception component', 401);
+      // Prototype-safe lookup: a caller-controlled component name must not
+      // resolve built-in object members (w6-perception P-1).
+      const components = this.perceptionComponents[t] ?? {}, componentName = attestation?.payload?.component;
+      requireThat(typeof componentName === 'string' && Object.hasOwn(components, componentName), 'INV-401-ATTESTATION', 'Unknown perception component', 401);
+      const component = components[componentName];
+      // A component whose signing credential was revoked cannot attest —
+      // revocation of component key_ids is honoured here, not only in the
+      // class-key machinery (w6-perception P-2).
+      requireThat(!this.revoked(t, 'key', component.signing.key_id), 'INV-401-ATTESTATION', 'Component signing key revoked', 401);
       const session = openSession(component, attestation, this.policy(t), now);
       this.assertHealthy(t, p.subject_id, this.identity(p).device_id, now);
       // Replay guard: an attestation nonce may mint exactly one session.
@@ -1218,8 +1295,21 @@ export class Fabric {
       // Release provenance must be real: a cited capsule or evidence record
       // that does not exist would write forged authority into the signed
       // audit trail (runtime-audit F-6).
-      if (release.capsule_id !== undefined) requireThat(this.store.get(t, 'capsule', release.capsule_id), 'INV-404-NOT-FOUND', 'Release cites a nonexistent capsule', 404);
-      if (release.evidence_ref !== undefined) requireThat(this.store.get(t, 'evidence', release.evidence_ref), 'INV-404-NOT-FOUND', 'Release cites nonexistent evidence', 404);
+      // A cited capsule or evidence record must exist, be live, and
+      // semantically cover this release — existence alone would let any
+      // real object launder the provenance of sealed fields (w6 P-3).
+      requireThat(release && typeof release === 'object' && !Array.isArray(release) && release.fields && typeof release.fields === 'object' && !Array.isArray(release.fields), 'INV-400-SCHEMA', 'Invalid release', 400);
+      text(release.purpose, 'purpose', 512);
+      let cited = null;
+      if (release.capsule_id !== undefined) {
+        cited = this.store.get(t, 'capsule', identifier(release.capsule_id, 'capsule'));
+        requireThat(cited && cited.capsule.expires_at > now, 'INV-404-NOT-FOUND', 'Release cites no live capsule', 404);
+      }
+      if (release.evidence_ref !== undefined) {
+        const ev = this.store.get(t, 'evidence', identifier(release.evidence_ref, 'evidence'));
+        requireThat(ev, 'INV-404-NOT-FOUND', 'Release cites nonexistent evidence', 404);
+        if (cited) requireThat(ev.envelope?.payload?.capsule_digest === cited.capsule_digest, 'INV-403-SCOPE', 'Evidence does not support the cited capsule', 403);
+      }
       const result = releaseFields(session, release, this.policy(t), now);
       this.store.audit(t, 'PERCEPTION_RELEASE', p.subject_id, session_id, { fields: result.binding.fields, assurance: result.assurance, capsule_id: release.capsule_id ?? null }, now);
       return result;
@@ -1241,13 +1331,16 @@ export class Fabric {
   // Every call is audited with model identity; outputs are advisory:true and
   // cannot create evidence or authority by themselves.
   advise(p, input) {
-    this.authorize(p, ['operator', 'security', 'policy_admin', 'approver', 'custodian']);
-    fields(input, ['operation'], ['document', 'decision', 'kind_hint', 'capsule_id']);
+    this.authorize(p, ['operator', 'security', 'policy_admin', 'approver', 'custodian', 'auditor']);
+    fields(input, ['operation'], ['document', 'capsule_id']);
     return this.transaction(p, now => {
       this.assertHealthy(p.tenant_id, p.subject_id, this.identity(p).device_id, now);
       requireThat(this.policy(p.tenant_id).mode !== 'disabled', 'INV-451-POLICY', 'Advisory plane disabled', 451);
       let out;
-      if (input.operation === 'extract') out = extract(text(input.document, 'document', 1000000));
+      // Documents are capped at the canonical ceiling (64 KiB) — a value the
+      // audit digest can always cover, so advertised limits never exceed the
+      // envelope that records them (w6-perception A-1).
+      if (input.operation === 'extract') out = extract(text(input.document, 'document', 65536));
       // explain narrates a STORED decision only — a caller cannot mint an
       // official-looking explanation for a verdict that never happened
       // (runtime-audit F-13).
@@ -1255,10 +1348,14 @@ export class Fabric {
         const record = this.store.must(p.tenant_id, 'capsule', identifier(input.capsule_id ?? ''));
         requireThat(record.decision, 'INV-409-STATE', 'Action has no recorded decision to explain', 409);
         out = explain(record.decision);
+        // The audit digest commits to the stored decision that was actually
+        // explained — never to a caller-supplied one (w6-perception A-2).
+        this.store.audit(p.tenant_id, 'AI_ADVISORY', p.subject_id, out.model, { operation: input.operation, model: out.model, model_version: out.model_version ?? out.model, provider: out.provider ?? 'local-deterministic', prompt_digest: digest({ operation: input.operation, capsule_id: input.capsule_id, decision: record.decision }), tool_context_digest: digest(input), output_digest: digest(out), advisory: true }, now);
+        return out;
       }
-      else if (input.operation === 'intent') out = classifyIntent(text(input.document, 'request text', 100000));
+      else if (input.operation === 'intent') out = classifyIntent(text(input.document, 'request text', 65536));
       else throw new InvariantError('INV-400-SCHEMA', 'Unsupported advisory operation');
-      this.store.audit(p.tenant_id, 'AI_ADVISORY', p.subject_id, out.model, { operation: input.operation, model: out.model, model_version: out.model_version ?? out.model, provider: out.provider ?? 'local-deterministic', prompt_digest: digest({ operation: input.operation, document: input.document ?? null, decision: input.decision ?? null }), tool_context_digest: digest(input), output_digest: digest(out), advisory: true }, now);
+      this.store.audit(p.tenant_id, 'AI_ADVISORY', p.subject_id, out.model, { operation: input.operation, model: out.model, model_version: out.model_version ?? out.model, provider: out.provider ?? 'local-deterministic', prompt_digest: digest({ operation: input.operation, document: input.document ?? null }), tool_context_digest: digest(input), output_digest: digest(out), advisory: true }, now);
       return out;
     });
   }

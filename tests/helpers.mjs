@@ -46,17 +46,27 @@ export function fixture(t, tenants = ['acme', 'globex']) {
     const key = setup.issuerKeys[tenant][issuer], envelope = signed(payload, key, 'evidence');
     f.attachEvidence(p('operator', tenant), record.capsule.capsule_id, envelope); return envelope;
   }
-  function approve(record, count = 2) {
-    for (let i = 1; i <= count; i++) {
-      const principal = p(`custodian-${i}`, record.capsule.tenant_id), challenge = f.approvalChallenge(principal, record.capsule.capsule_id);
-      f.approve(principal, signed(challenge, setup.custodianKeys[record.capsule.tenant_id][principal.subject_id], 'action-approval'));
+  function approve(record, countOrSigners = 2) {
+    const subjects = Array.isArray(countOrSigners) ? countOrSigners : Array.from({ length: countOrSigners }, (_, i) => `custodian-${i + 1}`);
+    for (const subject of subjects) {
+      const principal = p(subject, record.capsule.tenant_id), challenge = f.approvalChallenge(principal, record.capsule.capsule_id);
+      f.approve(principal, signed(challenge, setup.identityKeys[record.capsule.tenant_id][subject], 'action-approval'));
     }
+  }
+  // An approval envelope built as `subject` without the role-gated challenge
+  // route — the object a compromised or ineligible credential would present.
+  function approvalEnvelope(record, subject, mutate = {}) {
+    const tenant = record.capsule.tenant_id, key = setup.identityKeys[tenant][subject];
+    const [keyId] = Object.entries(f.identities(tenant)).find(([, v]) => v.subject_id === subject);
+    const stored = f.store.must(tenant, 'capsule', record.capsule.capsule_id);
+    const payload = { tenant_id: tenant, capsule_id: record.capsule.capsule_id, capsule_digest: stored.capsule_digest, evidence_graph_digest: f.graph(tenant, stored).digest, policy_digest: digest(f.policy(tenant)), signer_id: keyId, approved_at: time, expires_at: Math.min(time + 300000, stored.capsule.expires_at), ...mutate };
+    return signed(payload, key, 'action-approval');
   }
   function ready(record = proposed(), options = {}) {
     const kind = options.kind ?? 'ownership'; evidence(record, { kind }); evidence(record, { issuer: 'registry', kind }); approve(record, options.approvals ?? 2);
     return { record, certificate: f.certificate(p('operator', record.capsule.tenant_id), record.capsule.capsule_id) };
   }
-  return { f, setup, directory, p, actor, proposed, evidence, approve, ready, close, now: () => time, advance: ms => { time += ms; }, clone };
+  return { f, setup, directory, p, actor, proposed, evidence, approve, approvalEnvelope, ready, close, now: () => time, advance: ms => { time += ms; }, clone };
 }
 export const hasCode = code => e => e?.code === code;
 export function runtimeInput(overrides = {}) { return { device_id: 'operator-device', resource: 'dataset-1', destination: 'customer-vault', action: 'data.read', purpose: 'operations', columns: ['id', 'name'], row_ids: ['row-1'], classification: 'internal', jurisdiction: 'EU', max_cost: 1000, ttl_ms: 60000, ...overrides }; }

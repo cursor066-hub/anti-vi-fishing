@@ -220,7 +220,7 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       if ((m = /^\/v1\/keys\/([A-Za-z0-9_.:-]+)\/attest$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['security', 'auditor']); requireThat(fabric.vault.keys.has(m[1]), 'INV-404-NOT-FOUND', 'Key not found', 404); return send(200, fabric.vault.attest(m[1])); }
       if (path === '/v1/secure-perception/sessions' && req.method === 'POST') { const input = await body(req); fields(input, ['attestation']); return send(201, fabric.perceptionSession(p, input.attestation)); }
       if (path === '/v1/secure-perception/release' && req.method === 'POST') { const input = await body(req); fields(input, ['session_id', 'fields', 'purpose'], ['capsule_id', 'evidence_ref']); const { session_id, ...release } = input; return send(200, fabric.perceptionRelease(p, session_id, release)); }
-      if (path === '/v1/secure-perception/fallback' && req.method === 'POST') { const input = await body(req); fields(input, ['fields', 'purpose'], ['reason', 'session_id', 'capsule_id', 'evidence_ref']); return send(200, fabric.perceptionFallback(p, input)); }
+      if (path === '/v1/secure-perception/fallback' && req.method === 'POST') { const input = await body(req); fields(input, ['fields', 'purpose'], ['reason']); return send(200, fabric.perceptionFallback(p, input)); }
       if (path === '/v1/advisory' && req.method === 'POST') return send(200, fabric.advise(p, object(await body(req))));
       // A real path with the wrong method is a 405, not an ambiguous 404 —
       // keeps the contract honest for method-probing clients (w5-http L-6).

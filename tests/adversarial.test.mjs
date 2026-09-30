@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fixture } from './helpers.mjs';
+import { fixture, hasCode } from './helpers.mjs';
 import { createHash } from 'node:crypto';
 import { canonical, parseStrict } from '../src/canonical.mjs';
 import { verifySigned, signed } from '../src/crypto.mjs';
@@ -88,9 +88,9 @@ test('ADV: capsule approval replay — the same signed approval cannot be resubm
 test('ADV: certificate cannot mint twice or execute past expiry', t => {
   const h = fixture(t);
   const { record, certificate } = h.ready();
-  assert.throws(() => h.f.certificate(h.p('operator'), record.capsule.capsule_id), (e) => e.code?.startsWith('INV-'));
+  assert.throws(() => h.f.certificate(h.p('operator'), record.capsule.capsule_id), hasCode('INV-409-STATE'));
   h.advance(120001);
-  assert.throws(() => h.f.execute(h.p('operator'), certificate), (e) => e.code?.startsWith('INV-'));
+  assert.throws(() => h.f.execute(h.p('operator'), certificate), hasCode('INV-401-CERTIFICATE'));
 });
 
 test('ADV: issuer registry — ambiguous bare names resolve only via tenant key', t => {

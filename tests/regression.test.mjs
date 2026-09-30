@@ -188,15 +188,18 @@ test('RUN-010: config drift withdraws gate privileges until security re-attestat
 test('Recovery delay blocks reconstruction and per-custodian notices are issued', t => {
   const h = fixture(t);
   const custodians = ['custodian-1', 'custodian-2', 'custodian-3'];
-  const c = h.f.createCeremony(h.p('security'), { ceremony_id: 'cer-delay', purpose: 'root recovery', threshold: 2, custodians, valid_until: h.now() + 3600000, min_delay_ms: 60000 });
-  for (const s of custodians.slice(0, 2)) h.f.acknowledgeCeremony(h.p(s), signAcknowledgement(c, s, h.setup.custodianKeys.acme[s], h.now()));
+  const c = h.f.createCeremony(h.p('security'), { ceremony_id: 'cer-delay', purpose: 'root recovery', threshold: 2, custodians, valid_until: h.now() + 3600000, min_delay_ms: 120000 });
   const split = h.f.splitCeremonySecret(h.p('security'), 'cer-delay', randomBytes(32).toString('base64url'));
+  // Acknowledgements bind the committed artifact — they are collected after
+  // share commitment so the digest they sign covers the exact shares.
+  const committed = h.f.store.must('acme', 'ceremony', 'cer-delay');
+  for (const s of custodians.slice(0, 2)) h.f.acknowledgeCeremony(h.p(s), signAcknowledgement(committed, s, h.setup.custodianKeys.acme[s], h.now()));
   // Notices issued for every custodian at commit time.
   const notices = h.f.store.auditPage('acme').entries.filter(a => a.envelope.payload.type === 'RECOVERY_NOTICE_ISSUED');
   assert.equal(notices.length, 3);
   // Reconstruct inside the delay window is rejected.
   assert.throws(() => h.f.reconstructCeremony(h.p('security'), 'cer-delay', [split.shares[0].share, split.shares[1].share]), hasCode('INV-409-STATE'));
-  h.advance(60001);
+  h.advance(120001);
   const rec = h.f.reconstructCeremony(h.p('security'), 'cer-delay', [split.shares[0].share, split.shares[1].share]);
   assert.equal(rec.reconstructed, true);
 });
@@ -239,7 +242,7 @@ test('AIG-009: disabling the advisory plane preserves enforcement (no degradatio
   const h = fixture(t);
   const policy = clone(h.f.policy('acme')); policy.mode = 'disabled';
   h.f.store.put('acme', 'policy', 'active', policy, h.now());
-  assert.throws(() => h.f.advise(h.p(), { operation: 'explain', decision: {} }), hasCode('INV-451-POLICY'));
+  assert.throws(() => h.f.advise(h.p(), { operation: 'explain', capsule_id: 'none' }), hasCode('INV-451-POLICY'));
   const r = h.ready(); // enforcement path unaffected by advisory plane being off
   assert.equal(h.f.execute(h.p(), r.certificate).payload.status, 'VERIFIED');
 });
@@ -622,13 +625,20 @@ test('POL-012 R2-17: no vendor-controlled credential can satisfy root-policy act
   candidate.version = 2; candidate.not_before = h.now(); candidate.max_capsule_ttl_ms = 1800000;
   const r = h.proposed('policy.change', { policy: candidate }, { action: { type: 'policy.change', target_resource: 'policy', purpose: 'Hardening' } });
   h.evidence(r, { kind: 'governance_review' }); h.evidence(r, { kind: 'governance_review', issuer: 'audit-committee' });
-  // Every non-custodian principal approves — vendor/system/operator credentials
-  // never count toward the custodian threshold.
-  for (const subject of ['operator', 'auditor']) {
-    try { h.approve(r, 1, subject); } catch { /* non-custodian approvals rejected outright */ }
+  // Vendor/system credentials cannot mint approvals: the challenge route is
+  // role-gated, and a hand-forged envelope still dies on the role gate and the
+  // signer-identity binding.
+  for (const subject of ['operator', 'auditor', 'security', 'policy-admin']) {
+    assert.throws(() => h.f.approvalChallenge(h.p(subject), r.capsule.capsule_id), hasCode('INV-403-ROLE'), subject);
+    const forged = h.approvalEnvelope(r, subject);
+    assert.throws(() => h.f.approve(h.p(subject), forged), hasCode('INV-403-ROLE'), subject);
   }
+  const record = h.f.getCapsule(h.p(), r.capsule.capsule_id);
+  assert.equal(record.approvals.length, 0, 'no forged approval may be recorded');
+  h.approve(r, 1); // one legitimate custodian — below the policy.change quorum of 3
   const decision = h.f.evaluate(h.p(), r.capsule.capsule_id);
-  assert.notEqual(decision.decision, 'ALLOW', 'root policy must never activate on non-custodian signatures');
+  assert.equal(decision.decision, 'ESCROW');
+  assert.ok(decision.reasons.some(x => x.code === 'APPROVAL_THRESHOLD' || x.code === 'SIMULATION_REQUIRED'), JSON.stringify(decision.reasons));
 });
 
 test('COM-014 KEY-009 R2-18: 3-of-5 custodian threshold holds; any 3 shares reconstruct, 2 cannot', async t => {
@@ -661,14 +671,22 @@ test('RUN-004 R2-20: subject revocation propagates synchronously — the next ca
 test('RUN-009 R2-21: denial, throttling, quarantine and infrastructure failure are distinguishable', t => {
   const h = fixture(t);
   const codes = new Set();
-  // Policy denial
+  // A policy DENY is a decision object with machine-readable reasons, not an
+  // INV-* transport error.
   const denied = h.proposed('cloud.firewall.change', { protocol: 'tcp', port: 22, source_cidr: '0.0.0.0/0', service_id: 'database' });
-  assert.equal(h.f.evaluate(h.p(), denied.capsule.capsule_id).decision, 'DENY');
-  // Quarantine
+  const denial = h.f.evaluate(h.p(), denied.capsule.capsule_id);
+  assert.equal(denial.decision, 'DENY'); assert.ok(denial.reasons.length >= 1 && denial.reasons[0].code.length > 3);
+  // Distinct failure classes yield distinct INV-* codes.
   h.f.revoke(h.p('security'), { kind: 'device', id: 'operator-device', reason: 'drill' });
-  try { h.f.runtime.issue(h.p(), runtimeInput()); } catch (e) { codes.add(e.code); }
-  // Codes must be distinct, namespaced and documented
-  assert.ok([...codes].every(c => /^INV-[45][0-9]{2}-[A-Z-]+$/.test(c)), 'error codes must follow the INV-status-class taxonomy');
+  try { h.f.runtime.issue(h.p(), runtimeInput()); } catch (e) { codes.add(e.code); } // quarantine
+  try { h.f.propose(h.p(), { nonce: 'x' }, 'k', null); } catch (e) { codes.add(e.code); } // schema
+  try { h.f.revoke(h.p(), { kind: 'key', id: 'x', reason: 'y' }); } catch (e) { codes.add(e.code); } // role
+  try { h.f.getCapsule(h.p('security'), 'no-such-capsule'); } catch (e) { codes.add(e.code); } // not-found
+  assert.ok(codes.size >= 4, `expected >=4 distinct failure codes, got ${[...codes]}`);
+  assert.ok([...codes].every(c => /^INV-[45][0-9]{2}-[A-Z-]+$/.test(c)), `error codes must follow the INV-status-class taxonomy: ${[...codes]}`);
+  // The taxonomy classes are distinguishable: quarantine, schema, role and
+  // lookup failures never collapse into one code.
+  assert.ok([...codes].some(c => c.includes('QUARANTINE')) && [...codes].some(c => c.includes('SCHEMA')) && [...codes].some(c => c.includes('ROLE')) && [...codes].some(c => c.includes('NOT-FOUND')), JSON.stringify([...codes]));
 });
 
 test('DAT-006 R2-22: adversarial input cannot escape row/column constraints', t => {
@@ -689,7 +707,6 @@ test('DAT-010 R2-23: access logs record policy metadata and digests, not plainte
 
 test('ACT-002 R2-24: the schema validator rejects a capsule missing a mandatory field', t => {
   const h = fixture(t);
-  const input = h.proposed().input ?? h.proposed;
   const p = h.proposed(); // build a valid capsule then strip a field
   const broken = JSON.parse(JSON.stringify(p.capsule));
   delete broken.nonce; delete broken.actor;
@@ -749,7 +766,20 @@ test('EVD-004 EVD-010 R2-28: policy selects evidence per domain and provenance d
   const advisory = envelopes.filter(e => e.payload.advisory).length;
   assert.ok(envelopes.every(e => typeof e.payload.provenance === 'string' && e.payload.provenance.length > 0), 'provenance is recorded per envelope');
   assert.ok(advisory >= 1, 'AI extraction path is marked advisory');
-  assert.equal(h.f.evaluation('acme', record, h.now()).decision !== 'DENY' || true, true);
+  // Advisory/communication-channel evidence must not satisfy the independent-
+  // domain requirement: strip the registry envelope and the escrow reason
+  // must cite evidence independence, never approvals.
+  const solo = h.proposed();
+  h.evidence(solo); // bank only
+  h.evidence(solo, { issuer: 'email', advisory: true });
+  const evalSolo = h.f.evaluation('acme', h.f.getCapsule(h.p(), solo.capsule.capsule_id), h.now());
+  assert.equal(evalSolo.decision, 'ESCROW');
+  assert.ok(evalSolo.reasons.some(x => x.code === 'EVIDENCE_INDEPENDENCE' || x.code === 'EVIDENCE_UNVERIFIABLE'), JSON.stringify(evalSolo.reasons));
+  // With the second real domain attached the action passes evidence checks —
+  // the residual escrow is the approval quorum, proving domain selection.
+  const decision = h.f.evaluation('acme', record, h.now());
+  assert.equal(decision.decision, 'ESCROW');
+  assert.ok(!decision.reasons.some(x => x.code.startsWith('EVIDENCE')), JSON.stringify(decision.reasons));
 });
 
 test('EVD-006 EVD-007 R2-29: evidence is purpose-limited, minimised and ages per action class', t => {
@@ -807,14 +837,16 @@ test('KEY-007 R2-34: a purpose-bound key cannot sign outside its purpose', t => 
 
 test('KEY-012 R2-35: a ceremony is documented, witnessed and reproducible', t => {
   const h = fixture(t); const custodians = ['custodian-1', 'custodian-2', 'custodian-3'];
-  const c = h.f.createCeremony(h.p('security'), { ceremony_id: 'cer-doc-1', purpose: 'documented drill', threshold: 2, custodians, valid_until: h.now() + 3600000 });
+  const c = h.f.createCeremony(h.p('security'), { ceremony_id: 'cer-doc-1', purpose: 'documented drill', threshold: 2, custodians, valid_until: h.now() + 3600000, min_delay_ms: 120000 });
   assert.equal(c.status, 'planned'); assert.equal(c.custodians.length, 3);
-  for (const subject of custodians.slice(0, 2)) {
-    const ack = signAcknowledgement(c, subject, h.setup.custodianKeys.acme[subject], h.now());
-    h.f.acknowledgeCeremony(h.p(subject), ack);
-  }
   const secret = randomBytes(32).toString('base64url');
   const split = h.f.splitCeremonySecret(h.p('security'), 'cer-doc-1', secret);
+  const committed = h.f.store.must('acme', 'ceremony', 'cer-doc-1');
+  for (const subject of custodians.slice(0, 2)) {
+    const ack = signAcknowledgement(committed, subject, h.setup.custodianKeys.acme[subject], h.now());
+    h.f.acknowledgeCeremony(h.p(subject), ack);
+  }
+  h.advance(120001);
   const report = h.f.reconstructCeremony(h.p('security'), 'cer-doc-1', [split.shares[0].share, split.shares[1].share]);
   assert.equal(report.reconstructed, true);
   assert.deepEqual(report.artifact.quorum, [1, 2]);

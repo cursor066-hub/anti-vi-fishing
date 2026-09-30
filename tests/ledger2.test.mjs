@@ -101,7 +101,7 @@ test('KEY-005: rotating the audit key Ed25519 -> ES256 keeps old entries verifia
   const oldHead = h.f.store.auditHashes('acme').at(-1);
   const pending = h.f.vault.generate(['audit', 'outcome', 'revocation', 'coverage', 'checkpoint', 'backup-manifest'], { suite: 'ES256', pending: true });
   const custodians = ['custodian-1', 'custodian-2'];
-  const c = h.f.createCeremony(h.p('security'), { ceremony_id: 'cer-es256', purpose: 'audit suite migration', threshold: 2, custodians, valid_until: h.now() + 3600000 });
+  const c = h.f.createCeremony(h.p('security'), { ceremony_id: 'cer-es256', purpose: 'key.rotate', threshold: 2, custodians, valid_until: h.now() + 3600000, min_delay_ms: 120000, rotation: { key_class: 'audit', new_key_id: pending.key_id } });
   for (const subject of custodians) h.f.acknowledgeCeremony(h.p(subject), signAcknowledgement(c, subject, h.setup.custodianKeys.acme[subject], h.now()));
   const r = h.proposed('key.rotate', { key_class: 'audit', new_key_id: pending.key_id, new_public_key: pending.public_key, ceremony_id: 'cer-es256', revoke_old: false }, { action: { type: 'key.rotate', target_resource: 'key-registry', purpose: 'Suite migration' } });
   h.evidence(r, { kind: 'governance_review' }); h.evidence(r, { kind: 'governance_review', issuer: 'audit-committee' });
@@ -303,7 +303,7 @@ test('DAT-008: exports always require an approval — zero threshold is constitu
   const { validatePolicy, defaultPolicy } = await import('../src/policy.mjs');
   const p = defaultPolicy('acme'); assert.equal(p.rules['data.export'].approval_threshold, 1);
   p.rules['data.export'].approval_threshold = 0;
-  assert.throws(() => validatePolicy(p));
+  assert.throws(() => validatePolicy(p), hasCode('INV-400-SCHEMA'));
   const h = fixture(t);
   const r = h.proposed('data.export', { dataset: 'dataset-1', columns: ['id'], row_ids: ['row-1'], max_rows: 1, classification: 'internal', jurisdiction: 'EU' }, { action: { type: 'data.export', target_resource: 'dataset-1', purpose: 'Operations' }, destination: 'customer-vault' });
   h.evidence(r, { kind: 'dataset_authority' });
@@ -347,9 +347,9 @@ test('COV-005 COV-009: stale evidence ages a MONITORED path back to UNKNOWN', t 
 
 test('KEY-012: ceremony devices are member-validated and recorded', t => {
   const h = fixture(t);
-  const r = h.f.createCeremony(h.p('security'), { ceremony_id: 'cer-dev', purpose: 'key.recovery', threshold: 2, custodians: ['custodian-1', 'custodian-2', 'custodian-3'], valid_until: h.now() + 3600000, devices: { 'custodian-1': 'custodian-1-device' } });
+  const r = h.f.createCeremony(h.p('security'), { ceremony_id: 'cer-dev', purpose: 'key.recovery', threshold: 2, custodians: ['custodian-1', 'custodian-2', 'custodian-3'], valid_until: h.now() + 3600000, min_delay_ms: 120000, devices: { 'custodian-1': 'custodian-1-device' } });
   assert.equal(r.devices['custodian-1'], 'custodian-1-device');
-  assert.throws(() => h.f.createCeremony(h.p('security'), { ceremony_id: 'cer-dev-2', purpose: 'key.recovery', threshold: 2, custodians: ['custodian-1', 'custodian-2', 'custodian-3'], valid_until: h.now() + 3600000, devices: { 'not-a-custodian': 'x' } }), hasCode('INV-400-SCHEMA'));
+  assert.throws(() => h.f.createCeremony(h.p('security'), { ceremony_id: 'cer-dev-2', purpose: 'key.recovery', threshold: 2, custodians: ['custodian-1', 'custodian-2', 'custodian-3'], valid_until: h.now() + 3600000, min_delay_ms: 120000, devices: { 'not-a-custodian': 'x' } }), hasCode('INV-400-SCHEMA'));
 });
 
 test('COV-001 COV-005 COV-009 COV-010: path classes, owner tasks, history replay, technical validation', t => {

@@ -31,20 +31,32 @@ export function openSession(component, attestation, policy, now) {
   verifySigned(attestation, { [component.signing.key_id]: { public_key: component.signing.public_key } }, 'component-attestation');
   const sp = policy.secure_perception ?? {};
   requireThat(sp.enabled !== false, 'INV-451-POLICY', 'Secure Perception is disabled by policy', 451);
+  // The assurance bar is enforced at the session point, not only at policy
+  // validation — an unvalidated policy write cannot silently lower it
+  // (w6-perception P-10).
+  requireThat(sp.required_assurance !== 'hardware-enclave', 'INV-451-INTEGRITY', 'Hardware-enclave assurance cannot be served by the software profile', 451);
   requireThat((sp.allowed_firmware ?? []).includes(attestation.payload.firmware_version), 'INV-401-ATTESTATION', 'Component firmware not trusted by policy', 401);
+  // Attestation claims are not decorative: this profile serves only
+  // dev-attested software, so a claim of anything stronger is refused rather
+  // than silently downgraded (w6-perception P-6).
+  requireThat(attestation.payload.assurance === undefined || attestation.payload.assurance === ASSURANCE.dev, 'INV-401-ATTESTATION', 'Attestation claims an assurance level this profile cannot honor', 401);
+  requireThat(attestation.payload.production !== true, 'INV-401-ATTESTATION', 'Attestation claims production status this profile cannot honor', 401);
   // Attestations must be fresh and nonce-bound: expiry is mandatory, the
   // nonce must be a 64-hex value, and when policy pins a nonce it must match
   // exactly. Fabric additionally rejects nonce reuse across sessions
   // (replay), so a captured attestation cannot mint a second session.
   requireThat(/^[a-f0-9]{64}$/.test(attestation.payload.nonce ?? ''), 'INV-400-SCHEMA', 'Bad attestation nonce');
-  requireThat(Number.isSafeInteger(attestation.payload.expires_at) && attestation.payload.expires_at > now, 'INV-401-ATTESTATION', 'Attestation expired or missing expiry', 401);
+  // Attestation expiry is bounded in BOTH directions: expired tickets fail,
+  // and a caller-set far-future expiry may not outlive the session horizon
+  // the policy grants (w6-perception P-9).
+  requireThat(Number.isSafeInteger(attestation.payload.expires_at) && attestation.payload.expires_at > now && attestation.payload.expires_at <= now + (sp.session_ttl_ms ?? 300000), 'INV-401-ATTESTATION', 'Attestation expired or outlives the session horizon', 401);
   requireThat(!sp.nonce || attestation.payload.nonce === sp.nonce, 'INV-400-SCHEMA', 'Attestation nonce does not match policy');
   const server = generateKeyPairSync('ec', { namedCurve: 'P-256' });
   const session = {
     session_id: 'sv-' + digest({ component: attestation.payload.component, now, salt: randomBytes(8).toString('hex') }).slice(0, 24),
     component: attestation.payload.component, firmware_version: attestation.payload.firmware_version,
     component_public: component.signing.public_key, component_ecdh: component.ecdh_public,
-    assurance: ASSURANCE.dev, production: false, expires_at: now + (sp.session_ttl_ms ?? 300000),
+    assurance: ASSURANCE.dev, production: false, expires_at: Math.min(now + (sp.session_ttl_ms ?? 300000), attestation.payload.expires_at),
     nonce: attestation.payload.nonce ?? null,
     _server_private: server.privateKey, server_ephemeral: server.publicKey.export({ type: 'spki', format: 'pem' })
   };

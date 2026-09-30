@@ -122,7 +122,8 @@ export function validatePolicy(p) {
   }
   fields(p.staged_policy, ['min_delay_ms', 'emergency_extra_custodians', 'emergency_max_ttl_ms']);
   integer(p.staged_policy.min_delay_ms, 'staged delay', 0, 604800000); integer(p.staged_policy.emergency_extra_custodians, 'emergency custodians', 0, 5); integer(p.staged_policy.emergency_max_ttl_ms, 'emergency ttl', 1000, 2592000000);
-  fields(p.secure_perception, ['enabled', 'allowed_firmware', 'session_ttl_ms', 'release_fields', 'fallback', 'required_assurance']);
+  fields(p.secure_perception, ['enabled', 'allowed_firmware', 'session_ttl_ms', 'release_fields', 'fallback', 'required_assurance'], ['nonce']);
+  if (p.secure_perception.nonce !== undefined) requireThat(/^[a-f0-9]{64}$/.test(p.secure_perception.nonce), 'INV-400-SCHEMA', 'secure_perception.nonce must be a 64-hex attestation pin');
   requireThat(typeof p.secure_perception.enabled === 'boolean' && Array.isArray(p.secure_perception.allowed_firmware), 'INV-400-SCHEMA', 'Invalid secure perception policy');
   oneOf(p.secure_perception.fallback, ['controlled-workspace', 'denied'], 'perception fallback');
   oneOf(p.secure_perception.required_assurance, ['dev-attested-software', 'workspace-unattested', 'hardware-enclave'], 'required assurance');
@@ -189,6 +190,7 @@ export function emergencyWeakening(base, next) {
   if (bs.fallback === 'denied' && ns.fallback !== 'denied') return 'secure_perception.fallback';
   const assuranceRank = { 'workspace-unattested': 0, 'dev-attested-software': 1, 'hardware-enclave': 2 };
   if (assuranceRank[ns.required_assurance] < assuranceRank[bs.required_assurance]) return 'secure_perception.required_assurance';
+  if (ns.session_ttl_ms > bs.session_ttl_ms) return 'secure_perception.session_ttl_ms';
   if (bs.release_fields !== '*' && ns.release_fields !== '*' && !subset(ns.release_fields, bs.release_fields)) return 'secure_perception.release_fields';
   if (bs.release_fields !== '*' && ns.release_fields === '*') return 'secure_perception.release_fields';
   if (!subset(ns.allowed_firmware, bs.allowed_firmware)) return 'secure_perception.allowed_firmware';

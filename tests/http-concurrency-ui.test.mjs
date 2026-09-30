@@ -216,3 +216,23 @@ test('w5-M8: a wrong method on a documented path is a 405 on every route', async
     assert.equal(r.status, 405, `${wrong} ${path}`); assert.equal(r.data.error.code, 'INV-405-METHOD');
   }
 });
+
+test('HTTP: refusal responses carry the INV-* reason code, not just a status', async t => {
+  const h = await httpFixture(t); const r = h.proposed();
+  const cases = [
+    ['/v1/me', { headers: { Host: 'evil.example' } }, 400, 'INV-400-HOST'],
+    ['/v1/me', { headers: { Origin: 'https://evil.example' } }, 403, 'INV-403-ORIGIN'],
+    ['/v1/me', { method: 'DELETE' }, 405, 'INV-405-METHOD'],
+    ['/v1/action-capsules', { method: 'POST', body: '{', headers: { 'Content-Type': 'text/plain' } }, 415, 'INV-415-CONTENT'],
+    ['/v1/action-capsules/' + r.capsule.capsule_id + '/outcome', {}, 404, 'INV-404-NOT-FOUND'],
+    ['/v1/me', { token: 'forged-token' }, 401, 'INV-401-AUTH'],
+  ];
+  for (const [path, opts, status, code] of cases) {
+    const res = await h.request(path, opts);
+    assert.equal(res.status, status, `${path}: ${status}`);
+    assert.equal(res.data?.error?.code, code, `${path}: ${code}`);
+  }
+  // Oversized body announces its limit before a byte is read.
+  const big = await h.request('/v1/action-capsules', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': String(2 * 1048576) }, body: null });
+  assert.equal(big.status, 413); assert.equal(big.data?.error?.code, 'INV-413-BODY');
+});

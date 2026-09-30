@@ -177,7 +177,7 @@ test('KEY-004 KEY-005: prepareRotation creates pending vault key; verified rotat
   assert.throws(() => h.f.vault.sign(prep.key_id, 'any', 'x'), hasCode('INV-401-SIGNATURE'));
   const oldKey = h.setup.config.tenants.acme.keys.execution.key_id;
   const custodians = ['custodian-1', 'custodian-2'];
-  const c = h.f.createCeremony(h.p('security'), { ceremony_id: 'cer-rot-1', purpose: 'execution key rotation', threshold: 2, custodians, valid_until: h.now() + 3600000 });
+  const c = h.f.createCeremony(h.p('security'), { ceremony_id: 'cer-rot-1', purpose: 'key.rotate', threshold: 2, custodians, valid_until: h.now() + 3600000, min_delay_ms: 120000, rotation: { key_class: 'execution', new_key_id: prep.key_id } });
   for (const subject of custodians) h.f.acknowledgeCeremony(h.p(subject), signAcknowledgement(c, subject, h.setup.custodianKeys.acme[subject], h.now()));
   const r = h.proposed('key.rotate', { key_class: 'execution', new_key_id: prep.key_id, new_public_key: prep.public_key, ceremony_id: 'cer-rot-1', revoke_old: true }, { action: { type: 'key.rotate', target_resource: 'key-registry', purpose: 'Rotation' } });
   h.evidence(r, { kind: 'governance_review' }); h.evidence(r, { kind: 'governance_review', issuer: 'audit-committee' });
@@ -217,16 +217,19 @@ test('IDN-004: verified identity.jit.grant mints a time-bounded grant usable by 
 test('KEY-007 KEY-008: ceremony create → custodian acks → share split → quorum reconstruction', t => {
   const h = fixture(t);
   const custodians = ['custodian-1', 'custodian-2', 'custodian-3'];
-  const c = h.f.createCeremony(h.p('security'), { ceremony_id: 'cer-001', purpose: 'master key rotation', threshold: 2, custodians, valid_until: h.now() + 3600000 });
+  const c = h.f.createCeremony(h.p('security'), { ceremony_id: 'cer-001', purpose: 'master key rotation', threshold: 2, custodians, valid_until: h.now() + 3600000, min_delay_ms: 120000 });
   assert.equal(c.status, 'planned');
-  for (const subject of custodians.slice(0, 2)) {
-    const ack = signAcknowledgement(c, subject, h.setup.custodianKeys.acme[subject], h.now());
-    h.f.acknowledgeCeremony(h.p(subject), ack);
-  }
-  const report = h.f.acknowledgeCeremony;
   const secret = randomBytes(32).toString('base64url');
   const splitResult = h.f.splitCeremonySecret(h.p('security'), 'cer-001', secret);
   assert.equal(splitResult.shares.length, 3);
+  // Acks are collected against the committed artifact — the digest they sign
+  // covers the share commitments.
+  const committed = h.f.store.must('acme', 'ceremony', 'cer-001');
+  for (const subject of custodians.slice(0, 2)) {
+    const ack = signAcknowledgement(committed, subject, h.setup.custodianKeys.acme[subject], h.now());
+    h.f.acknowledgeCeremony(h.p(subject), ack);
+  }
+  h.advance(120001);
   const rec = h.f.reconstructCeremony(h.p('security'), 'cer-001', [splitResult.shares[0].share, splitResult.shares[1].share]);
   assert.equal(rec.reconstructed, true);
   assert.equal(rec.artifact.quorum.length, 2);
@@ -235,13 +238,15 @@ test('KEY-007 KEY-008: ceremony create → custodian acks → share split → qu
 test('KEY-008: reconstruction below quorum fails', t => {
   const h = fixture(t);
   const custodians = ['custodian-1', 'custodian-2', 'custodian-3'];
-  const c = h.f.createCeremony(h.p('security'), { ceremony_id: 'cer-002', purpose: 'x', threshold: 3, custodians, valid_until: h.now() + 3600000 });
-  for (const subject of custodians) {
-    const ack = signAcknowledgement(c, subject, h.setup.custodianKeys.acme[subject], h.now());
-    h.f.acknowledgeCeremony(h.p(subject), ack);
-  }
+  const c = h.f.createCeremony(h.p('security'), { ceremony_id: 'cer-002', purpose: 'x', threshold: 3, custodians, valid_until: h.now() + 3600000, min_delay_ms: 120000 });
   const secret = randomBytes(32).toString('base64url');
   const s = h.f.splitCeremonySecret(h.p('security'), 'cer-002', secret);
+  const committed = h.f.store.must('acme', 'ceremony', 'cer-002');
+  for (const subject of custodians) {
+    const ack = signAcknowledgement(committed, subject, h.setup.custodianKeys.acme[subject], h.now());
+    h.f.acknowledgeCeremony(h.p(subject), ack);
+  }
+  h.advance(120001);
   assert.throws(() => h.f.reconstructCeremony(h.p('security'), 'cer-002', [s.shares[0].share, s.shares[1].share]), hasCode('INV-403-ROLE'));
 });
 

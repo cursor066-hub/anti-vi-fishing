@@ -21,6 +21,13 @@ export class RuntimeGate {
       this.f.assertHealthy(t, principal.subject_id, input.device_id, now);
       // Effective grants = static grants ∪ active JIT action-grants (IDN).
       const grants = this.f.grantsFor(t, principal.subject_id, now);
+      // NET-001/002: workstation-class peers are never reachable through a
+      // service capability; east-west is default-deny by constitution. This
+      // precedes grant-scope checks so a peer-named destination reports the
+      // segmentation denial, not a generic scope one.
+      if (input.action === 'service.connect') {
+        requireThat(!(r.network?.deny_workstation_peers && /^ws-|^workstation-|^endpoint-/.test(input.resource)), 'INV-451-POLICY', 'Workstation peers are not a service destination', 451);
+      }
       requireThat(identity.device_id === input.device_id && grants.resources.includes(input.resource) && grants.actions.includes(input.action), 'INV-403-SCOPE', 'Capability scope denied', 403);
       requireThat(r.destinations.includes(input.destination) && grants.destinations.includes(input.destination) && r.purposes.includes(input.purpose) && r.classifications.includes(input.classification) && r.jurisdictions.includes(input.jurisdiction), 'INV-403-SCOPE', 'Capability context denied', 403);
       requireThat(input.columns.every(c => grants.columns.includes(c) && !r.forbidden_columns.includes(c) && r.allowed_columns.includes(c)) && input.row_ids.every(id => grants.row_ids.includes(id)), 'INV-403-SCOPE', 'Dataset selection denied', 403);
@@ -37,11 +44,6 @@ export class RuntimeGate {
         requireThat(col !== 'id', 'INV-403-SCOPE', 'The row key column cannot be transformed', 403);
       }
       if (input.action === 'service.connect') {
-        // NET-001/002: workstation-class peers are never reachable through a
-        // service capability; east-west is default-deny by constitution. This
-        // check precedes the services scope check so a peer-named resource
-        // reports the segmentation denial, not a generic scope one.
-        requireThat(!(r.network?.deny_workstation_peers && /^ws-|^workstation-|^endpoint-/.test(input.resource)), 'INV-451-POLICY', 'Workstation peers are not a service destination', 451);
         requireThat(r.services.includes(input.resource) && input.destination === input.resource && !input.columns.length && !input.row_ids.length, 'INV-403-SCOPE', 'Network service scope denied', 403);
       }
       requireThat(input.max_cost <= r.max_cost && input.ttl_ms <= policy.capability_ttl_ms && policy.expires_at > now && policy.not_before <= now, 'INV-403-SCOPE', 'Capability limit denied', 403);
