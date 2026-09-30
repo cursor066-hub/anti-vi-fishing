@@ -118,8 +118,8 @@
       "bytes": 17866
     },
     "scripts/generate-vectors.mjs": {
-      "lines": 133,
-      "bytes": 9938
+      "lines": 143,
+      "bytes": 10622
     },
     "scripts/manifest.mjs": {
       "lines": 90,
@@ -335,5 +335,5 @@
     }
   },
   "total_files": 83,
-  "total_lines": 14714
+  "total_lines": 14724
 }
