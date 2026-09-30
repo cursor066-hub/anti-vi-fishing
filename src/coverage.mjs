@@ -11,12 +11,17 @@ export function declarePath(input, now) {
   fields(input, ['path_id', 'action_type', 'target', 'environment', 'connector_version', 'owner', 'status', 'max_age_ms', 'configuration_digest'], ['path_class']);
   for (const f of ['path_id', 'target', 'owner']) identifier(input[f], f);
   for (const f of ['action_type', 'environment', 'connector_version']) text(input[f], f, 128);
-  oneOf(input.status, ['MONITORED', 'UNKNOWN'], 'manually declared status'); integer(input.max_age_ms, 'maximum evidence age', 1000, 2592000000);
+  // Full SRS taxonomy (COV-002): ENFORCED is reserved to independently
+  // validated paths (set only by technical-validation transitions), UNCOVERED
+  // is an honest "known unprotected" declaration distinct from UNKNOWN
+  // ("status not established").
+  oneOf(input.status, ['MONITORED', 'UNKNOWN', 'UNCOVERED'], 'manually declared status'); integer(input.max_age_ms, 'maximum evidence age', 1000, 2592000000);
   oneOf(input.path_class ?? 'api', PATH_CLASSES, 'path class');
   requireThat(/^[a-f0-9]{64}$/.test(input.configuration_digest), 'INV-400-SCHEMA', 'Configuration digest is required');
-  // Declaration counts as the latest observation: staleness and drift can
-  // later move the path to UNKNOWN when evidence_at ages out or is cleared.
-  return { ...input, path_class: input.path_class ?? 'api', declared_at: now, evidence_at: now, evidence_digest: null, technical_validation: null };
+  // Declaration counts as the latest observation for observed states;
+  // UNCOVERED carries no observation and never silently upgrades.
+  const observed = input.status !== 'UNCOVERED';
+  return { ...input, path_class: input.path_class ?? 'api', declared_at: now, evidence_at: observed ? now : null, evidence_digest: null, technical_validation: null };
 }
 // A drifted or stale connector invalidates dependent paths: their status
 // moves to UNKNOWN until evidence is re-attached. Returns the transitioned
@@ -29,6 +34,7 @@ export function applyDriftToPaths(paths, matcher) {
 // Effective status at a point in time: staleness is computed, not stored,
 // so 'MONITORED' cannot be asserted after evidence has aged out.
 export function effectiveStatus(path, now) {
+  if (path.status === 'UNCOVERED') return 'UNCOVERED';
   return path.evidence_at !== null && now - path.evidence_at > path.max_age_ms ? 'UNKNOWN' : path.status;
 }
 // COV-009: reconstruct path status at an arbitrary historical instant from
@@ -50,7 +56,7 @@ export function coverageAt(events, now) {
   return out;
 }
 export function coverageManifest(tenant, paths, now, sign) {
-  const effective = paths.map(p => ({ ...p, effective_status: effectiveStatus(p, now), next_action: p.status === 'ENFORCED' ? 'Revalidate before evidence expires; verify all bypass paths.' : 'Attach independently executed technical bypass evidence.' }));
+  const effective = paths.map(p => ({ ...p, effective_status: effectiveStatus(p, now), next_action: p.status === 'ENFORCED' ? 'Revalidate before evidence expires; verify all bypass paths.' : p.status === 'UNCOVERED' ? 'Close this path or bring it under enforced coverage; it is declared unprotected.' : 'Attach independently executed technical bypass evidence.' }));
   // This distribution provides a simulator, not target-wide total mediation.
   return sign({ tenant_id: tenant, issued_at: now, profile: 'software-engineering', guarantee: false, assurance: 'NO_PRODUCTION_ENFORCEMENT_GUARANTEE', reason: 'Real target coverage and independent bypass assessment have not been supplied.', paths: effective, scope_digest: digest(effective) }, 'coverage');
 }

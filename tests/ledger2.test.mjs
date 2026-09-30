@@ -365,3 +365,22 @@ test('UX-010: digest-only scoping hides payload bodies from unprivileged roles',
   const full = h.f.auditPageScoped(h.p('auditor'), { limit: 5 });
   assert.ok(full.entries.every(e => e.envelope?.payload?.type));
 });
+
+test('COV-002: the UNCOVERED label is representable, creates an owner task and never reads as observed', t => {
+  const h = fixture(t); h.ready();
+  h.f.declareCoverage(h.p('security'), { path_id: 'path-legacy', action_type: 'finance.bank.change', target: 'erp-service', environment: 'simulation', connector_version: '1.0.0', owner: 'sec-team', status: 'UNCOVERED', path_class: 'batch', max_age_ms: 60000, configuration_digest: digest({ cfg: 1 }) });
+  const path = h.f.store.must('acme', 'coverage', 'path-legacy');
+  assert.equal(path.status, 'UNCOVERED');
+  // UNCOVERED declares "known unprotected" — it must not carry a fresh
+  // observation timestamp and must not age into MONITORED.
+  assert.equal(path.evidence_at, null);
+  const manifest = h.f.coverage(h.p('auditor'));
+  const row = manifest.payload.paths.find(p => p.path_id === 'path-legacy');
+  assert.equal(row.effective_status, 'UNCOVERED');
+  assert.match(row.next_action, /unprotected/);
+  const tasks = h.f.store.list('acme', 'coverage-task', 100, 0);
+  assert.ok(tasks.some(x => x.path_id === 'path-legacy' && x.cause === 'declared-uncovered' && x.status === 'open'));
+  // History replay reports the same status at the query instant.
+  const history = h.f.coverageAt(h.p('auditor'), h.now() + 86400000);
+  assert.equal(history.paths['path-legacy'].status, 'UNCOVERED');
+});

@@ -136,3 +136,28 @@ test('RUN-006: rejection metrics count by reason code on the live HTTP surface',
   assert.ok(m.data.unauthorised >= 1);
   assert.ok(m.data.rejections['INV-403-ROLE'] >= 1, JSON.stringify(m.data.rejections));
 });
+
+test('UX-007: the controlled-workspace fallback succeeds end-to-end when policy permits', async t => {
+  const h = await httpFixture(t);
+  // Default policy permits 'controlled-workspace': the operator sees plaintext
+  // fields over the normal channel, honestly labelled non-production.
+  const out = await h.request('/v1/secure-perception/fallback', { method: 'POST', body: { fields: { account: 'TEST-1', amount: 50 }, purpose: 'review', reason: 'secure display unavailable' } });
+  assert.equal(out.status, 200, JSON.stringify(out.data));
+  assert.equal(out.data.mode, 'controlled-workspace');
+  assert.equal(out.data.production, false);
+  assert.equal(out.data.assurance, 'workspace-unattested');
+  assert.equal(out.data.data.account, 'TEST-1');
+  assert.deepEqual(out.data.binding.fields, ['account', 'amount']);
+});
+
+test('AUD-009: security evidence continues while optional analytics is disabled', async t => {
+  const h = await httpFixture(t);
+  // Product analytics is off by design; the required security evidence (the
+  // signed audit chain) is unaffected.
+  const metrics = await h.request('/v1/metrics', { token: h.setup.credentials.acme.security });
+  assert.equal(metrics.status, 200);
+  assert.equal(metrics.data.analytics_enabled, false);
+  const audit = await h.request('/v1/audit/entries?limit=5', { token: h.setup.credentials.acme.auditor });
+  assert.equal(audit.status, 200);
+  assert.ok(audit.data.entries.length >= 1);
+});

@@ -26,8 +26,8 @@
       "bytes": 7097
     },
     "src/coverage.mjs": {
-      "lines": 57,
-      "bytes": 3896
+      "lines": 63,
+      "bytes": 4385
     },
     "src/crypto.mjs": {
       "lines": 77,
@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 1228,
-      "bytes": 103510
+      "lines": 1232,
+      "bytes": 104318
     },
     "src/issuerd.mjs": {
       "lines": 245,
@@ -147,7 +147,7 @@
     },
     "scripts/traceability.py": {
       "lines": 54,
-      "bytes": 11980
+      "bytes": 12652
     },
     "scripts/verify-export-webcrypto.mjs": {
       "lines": 61,
@@ -190,16 +190,20 @@
       "bytes": 5471
     },
     "tests/http-concurrency-ui.test.mjs": {
-      "lines": 139,
-      "bytes": 14711
+      "lines": 164,
+      "bytes": 16160
     },
     "tests/issuerd.test.mjs": {
       "lines": 108,
       "bytes": 8572
     },
     "tests/ledger2.test.mjs": {
-      "lines": 368,
-      "bytes": 25260
+      "lines": 387,
+      "bytes": 26608
+    },
+    "tests/ledger3.test.mjs": {
+      "lines": 258,
+      "bytes": 16448
     },
     "tests/lifecycle.test.mjs": {
       "lines": 102,
@@ -222,6 +226,6 @@
       "bytes": 22419
     }
   },
-  "total_files": 55,
-  "total_lines": 7758
+  "total_files": 56,
+  "total_lines": 8070
 }

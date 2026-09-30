@@ -883,9 +883,11 @@ export class Fabric {
     path.status = to; if (to === 'UNKNOWN') path.evidence_at = null;
     this.store.put(tenant, 'coverage', path.path_id, path, now);
     this.store.insert(tenant, 'coverage-event', `${path.path_id}:${now}:${cause}`, { type: 'transitioned', path_id: path.path_id, to, evidence_at: path.evidence_at, at: now, cause }, now);
-    // Owner tasks exist only for degradation to UNKNOWN — a promotion is a
-    // resolution, not a new obligation.
+    // Owner tasks exist only for degraded/unprotected states — a promotion
+    // is a resolution, not a new obligation. UNCOVERED means the path is
+    // declared unprotected: the owner must close it or enforce it.
     if (to === 'UNKNOWN') this.store.insert(tenant, 'coverage-task', `${cause}:${path.path_id}`, { path_id: path.path_id, owner: path.owner, cause, opened_at: now, status: 'open', required_action: 'attach independently executed technical validation evidence' }, now);
+    if (to === 'UNCOVERED') this.store.insert(tenant, 'coverage-task', `${cause}:${path.path_id}`, { path_id: path.path_id, owner: path.owner, cause, opened_at: now, status: 'open', required_action: 'close this declared-unprotected path or bring it under enforced coverage' }, now);
   }
   coverage(p) { this.authorize(p, ['operator', 'approver', 'custodian', 'security', 'auditor', 'policy_admin']); return coverageManifest(p.tenant_id, this.store.list(p.tenant_id, 'coverage'), this.clock(), payload => this.signAudit(p.tenant_id, payload, 'coverage')); }
   // COV-009: what the coverage record showed at an arbitrary past instant —
@@ -900,6 +902,7 @@ export class Fabric {
       const path = declarePath(input, now); this.store.put(p.tenant_id, 'coverage', path.path_id, path, now);
       this.store.insert(p.tenant_id, 'coverage-event', `${path.path_id}:${now}:declared`, { type: 'declared', path_id: path.path_id, path, at: now }, now);
       if (path.status === 'UNKNOWN') this.store.insert(p.tenant_id, 'coverage-task', `declared-unknown:${path.path_id}`, { path_id: path.path_id, owner: path.owner, cause: 'declared-unknown', opened_at: now, status: 'open', required_action: 'attach independently executed technical validation evidence' }, now);
+      if (path.status === 'UNCOVERED') this.store.insert(p.tenant_id, 'coverage-task', `declared-uncovered:${path.path_id}`, { path_id: path.path_id, owner: path.owner, cause: 'declared-uncovered', opened_at: now, status: 'open', required_action: 'close this declared-unprotected path or bring it under enforced coverage' }, now);
       this.store.audit(p.tenant_id, 'COVERAGE_DECLARED', p.subject_id, path.path_id, { digest: digest(path), status: path.status }, now); return path;
     });
   }
@@ -918,6 +921,7 @@ export class Fabric {
       else this.store.put(p.tenant_id, 'coverage', path.path_id, path, now);
       this.store.insert(p.tenant_id, 'coverage-event', `${path.path_id}:${now}:validation`, { type: 'technical_validation', path_id: path.path_id, validation: path.technical_validation, at: now }, now);
       this.store.remove(p.tenant_id, 'coverage-task', `declared-unknown:${path.path_id}`);
+      this.store.remove(p.tenant_id, 'coverage-task', `declared-uncovered:${path.path_id}`);
       this.store.audit(p.tenant_id, 'COVERAGE_TECHNICAL_VALIDATION', p.subject_id, path.path_id, { issuer: envelope.protected.key_id }, now);
       return path;
     });
