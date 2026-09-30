@@ -7,10 +7,13 @@ import { requireThat } from './errors.mjs';
 
 const EXP = new Uint8Array(512), LOG = new Uint8Array(256);
 (() => {
+  // Generator is x+1 (0x03), the primitive element of GF(2^8) under 0x11b;
+  // x (0x02) has order 51 and cannot generate the full field.
   let x = 1;
   for (let i = 0; i < 255; i++) {
     EXP[i] = x; LOG[x] = i;
-    x <<= 1; if (x & 0x100) x ^= 0x11b;
+    let x2 = x << 1; if (x2 & 0x100) x2 ^= 0x11b;
+    x = x2 ^ x; // multiply by 3: x*2 ^ x
   }
   for (let i = 255; i < 512; i++) EXP[i] = EXP[i - 255];
 })();

@@ -30,7 +30,7 @@ const types = {
   'backup.delete': { backup_id: 'id', recovery_set: 'id' },
   'policy.change': { policy: 'object' },
   'identity.jit.grant': { subject_id: 'id', resources: 'strings', actions: 'strings', destinations: 'strings', columns: 'strings', row_ids: 'strings', ttl_ms: 'positive', reason: 'text' },
-  'key.rotate': { key_class: 'text', new_key_id: 'id', new_public_key: 'text', ceremony_id: 'id', revoke_old: 'boolean' },
+  'key.rotate': { key_class: 'text', new_key_id: 'id', new_public_key: 'pem', ceremony_id: 'id', revoke_old: 'boolean' },
   'key.ceremony': { ceremony_id: 'id', purpose: 'text', threshold: 'positive', custodians: 'strings' },
   'action.composite': { children: 'strings' },
   'ai.model.deploy': { model_id: 'id', model_version: 'text', eval_report_digest: 'hash' },
@@ -51,6 +51,7 @@ export function validateRequested(type, requested) {
     if (rule === 'account') requireThat(typeof v === 'string' && /^[A-Z0-9-]{6,64}$/.test(v), 'INV-400-SCHEMA', 'Account must use exact uppercase canonical characters');
     if (rule === 'hash') requireThat(typeof v === 'string' && /^[a-f0-9]{64}$/.test(v), 'INV-400-SCHEMA', `${key} must be a SHA-256 digest`);
     if (rule === 'object') requireThat(v && typeof v === 'object' && !Array.isArray(v), 'INV-400-SCHEMA', `${key} must be an object`);
+    if (rule === 'pem') requireThat(typeof v === 'string' && /^-----BEGIN [A-Z ]+-----[A-Za-z0-9+/=\n]+-----END [A-Z ]+-----\s*$/.test(v) && v.length <= 8192, 'INV-400-SCHEMA', `${key} must be a PEM block`);
   }
   if (type === 'data.export') requireThat(requested.columns.length && requested.row_ids.length && requested.max_rows >= requested.row_ids.length, 'INV-400-SCHEMA', 'Export requires explicit nonempty fields and rows within ceiling');
   if (type === 'cloud.firewall.change') { integer(requested.port, 'port', 1, 65535); oneOf(requested.protocol, ['tcp', 'udp'], 'protocol'); }

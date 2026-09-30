@@ -70,19 +70,27 @@ export function inclusionProof(hashes, index) {
     if (index < mid) { path.push({ side: 'right', hash: subtreeRoot(hashes, mid, hi) }); hi = mid; }
     else { path.push({ side: 'left', hash: subtreeRoot(hashes, lo, mid) }); lo = mid; }
   }
-  return path;
+  return path.reverse(); // leaf-sibling first, root-sibling last (RFC 6962 audit path order)
 }
 
 export function verifyInclusion(entryHash, index, size, path, expectedRoot) {
-  requireThat(isDigest(entryHash) && isDigest(expectedRoot) && Number.isSafeInteger(index) && index >= 0 && index < size, 'INV-400-MERKLE', 'Malformed inclusion inputs');
-  let acc = leaf(entryHash), pos = index, span = size, i = 0;
-  while (span > 1) {
-    const k = split(span);
+  requireThat(isDigest(entryHash) && isDigest(expectedRoot) && Array.isArray(path) && Number.isSafeInteger(index) && index >= 0 && index < size, 'INV-400-MERKLE', 'Malformed inclusion inputs');
+  // RFC 6962 §2.1.1: fn = index of the leaf, sn = index of the last leaf.
+  let acc = leaf(entryHash), fn = index, sn = size - 1, i = 0;
+  while (sn > 0) {
     requireThat(i < path.length, 'INV-409-MERKLE', 'Inclusion proof does not verify', 409);
     const step = path[i++];
     requireThat(step && isDigest(step.hash) && ['left', 'right'].includes(step.side), 'INV-400-MERKLE', 'Malformed inclusion step');
-    if (pos < k) { requireThat(step.side === 'right', 'INV-409-MERKLE', 'Inclusion proof does not verify', 409); acc = node(acc, step.hash); span = k; }
-    else { requireThat(step.side === 'left', 'INV-409-MERKLE', 'Inclusion proof does not verify', 409); acc = node(step.hash, acc); pos -= k; span -= k; }
+    if (fn % 2 === 1 || fn === sn) {
+      // acc is the right child, or the leftmost node of an uneven split
+      requireThat(step.side === 'left', 'INV-409-MERKLE', 'Inclusion proof does not verify', 409);
+      acc = node(step.hash, acc);
+      while (fn % 2 === 0 && fn !== 0) { fn >>= 1; sn >>= 1; }
+    } else {
+      requireThat(step.side === 'right', 'INV-409-MERKLE', 'Inclusion proof does not verify', 409);
+      acc = node(acc, step.hash);
+    }
+    fn >>= 1; sn >>= 1;
   }
   requireThat(i === path.length && acc === expectedRoot, 'INV-409-MERKLE', 'Inclusion proof does not verify', 409);
   return true;

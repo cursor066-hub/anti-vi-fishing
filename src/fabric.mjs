@@ -200,7 +200,7 @@ export class Fabric {
   }
   verifyEvidenceEnvelope(t, envelope) {
     const payload = verifySigned(envelope, this.tenant(t).issuers, 'evidence');
-    fields(payload, ['evidence_id', 'tenant_id', 'capsule_digest', 'kind', 'content_digest', 'acquired_at', 'expires_at', 'confidence', 'advisory', 'claim', 'dependencies', 'provenance', 'retention_until']);
+    fields(payload, ['evidence_id', 'tenant_id', 'capsule_digest', 'kind', 'content_digest', 'acquired_at', 'expires_at', 'confidence', 'advisory', 'claim', 'dependencies', 'provenance', 'retention_until'], ['claims', 'issuer_version']);
     identifier(payload.evidence_id); text(payload.kind, 'evidence kind'); text(payload.provenance, 'provenance', 2048); uniqueStrings(payload.dependencies, 'dependencies', 32);
     const now = this.clock();
     integer(payload.confidence, 'confidence', 0, 100); integer(payload.acquired_at, 'acquisition time', 1, now + 5000); integer(payload.expires_at, 'evidence expiry', now + 1); integer(payload.retention_until, 'retention', payload.expires_at);
@@ -222,7 +222,9 @@ export class Fabric {
     requireThat(!this.revoked(t, 'issuer', key_id) && !this.revoked(t, 'key', key_id), 'INV-401-EVIDENCE', 'Evidence source revoked', 401);
     let envelope;
     try {
-      envelope = await httpJson(`${issuer.endpoint}/v1/issuers/${issuer.name ?? input.issuer}/issue`, { method: 'POST', body: { tenant_id: t, capsule_digest: record.capsule_digest, kind: input.kind, subject_id: input.subject_id ?? p.subject_id, claims: input.claims, dependencies: input.dependencies ?? [] }, timeout_ms: 10000 });
+      const res = await httpJson(`${issuer.endpoint}/v1/issuers/${issuer.name ?? input.issuer}/issue`, { method: 'POST', body: { tenant_id: t, capsule_digest: record.capsule_digest, kind: input.kind, subject_id: input.subject_id ?? p.subject_id, claims: input.claims, dependencies: input.dependencies ?? [] }, timeout_ms: 10000 });
+      requireThat(res.status === 201, 'INV-503-EVIDENCE-SOURCE', `Issuer refused (${res.status})`, 503);
+      envelope = res.data;
     } catch (e) {
       const err = new InvariantError('INV-503-EVIDENCE-SOURCE', `Evidence source unavailable or refused: ${e.code ?? 'transport'}`, 503);
       this.store.tx(() => this.store.audit(t, 'EVIDENCE_ACQUISITION_FAILED', p.subject_id, capsule_id, { issuer: input.issuer, kind: input.kind, code: e.code ?? 'transport' }, this.clock()));
@@ -437,11 +439,13 @@ export class Fabric {
       if (valid && r.capsule.action.type === 'policy.change') {
         const next = r.capsule.requested_state.policy, active = this.policy(t);
         requireThat(next.version === active.version + 1, 'INV-409-STATE', 'Policy activation sequence changed', 409);
-        const staged = r.capsule.requested_state.staged;
-        if (staged) {
-          requireThat(Number.isSafeInteger(staged.activate_at) && staged.activate_at >= now + (active.staged_policy?.min_delay_ms ?? 0) && staged.activate_at <= r.capsule.expires_at + 2592000000, 'INV-400-SCHEMA', 'Staged activation time is invalid');
-          this.store.put(t, 'policy', 'staged', { policy: next, activate_at: staged.activate_at, staged_at: now, capsule_id: r.capsule.capsule_id }, now);
-          this.store.audit(t, 'POLICY_STAGED', p.subject_id, next.policy_id, { activate_at: staged.activate_at, version: next.version }, now);
+        // POL-013: a successor policy whose not_before lies in the future is
+        // stored as 'staged' and promoted by activateDuePolicies() when the
+        // trusted clock reaches it — never by a write to 'active'.
+        if (next.not_before > now) {
+          requireThat(next.not_before >= now + (active.staged_policy?.min_delay_ms ?? 0), 'INV-400-SCHEMA', 'Staged activation violates min delay');
+          this.store.put(t, 'policy', 'staged', { policy: next, activate_at: next.not_before, staged_at: now, capsule_id: r.capsule.capsule_id }, now);
+          this.store.audit(t, 'POLICY_STAGED', p.subject_id, next.policy_id, { activate_at: next.not_before, version: next.version }, now);
         } else {
           this.store.put(t, 'policy', 'active', next, now);
           this.store.put(t, 'policy-history', `v${next.version}`, { activated_at: now, digest: digest(next), staged: false, emergency: next.emergency_of !== undefined }, now);
@@ -640,7 +644,7 @@ export class Fabric {
     this.authorize(p, ['security', 'custodian']);
     requireThat(['execution', 'audit'].includes(key_class), 'INV-400-SCHEMA', 'key_class must be execution or audit');
     return this.transaction(p, now => {
-      const pending = this.vault.generate(`${key_class}-signing`, { pending: true });
+      const pending = this.vault.generate('any', { pending: true });
       this.persistVault();
       this.store.audit(p.tenant_id, 'ROTATION_PREPARED', p.subject_id, pending.key_id, { key_class, ceremony_bound: true }, now);
       return { key_id: pending.key_id, public_key: pending.public_key, key_class, status: 'pending', note: 'Key generated inside the vault; it cannot sign until a verified key.rotate action activates it.' };

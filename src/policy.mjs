@@ -16,7 +16,7 @@ export function defaultPolicy(tenant) {
   rules['legal.contract.execute'].evidence_kinds = ['counterparty_credential', 'legal_registry'];
   rules['security.case.investigate'] = { ...clone(standard), evidence_kinds: ['governance_review'], approval_threshold: 1 };
   rules['ai.model.deploy'].evidence_kinds = ['test_result', 'governance_review'];
-  rules['action.composite'] = { ...clone(standard), evidence_kinds: [], approval_threshold: 2, max_quantity: 16 };
+  rules['action.composite'] = { ...clone(standard), evidence_kinds: [], independent_domains: 0, approval_threshold: 2, max_quantity: 16 };
   rules['key.rotate'] = { ...clone(standard), evidence_kinds: ['governance_review'], approval_threshold: 3, approval_role: 'custodian', cooldown_ms: 60000 };
   rules['key.ceremony'] = { ...clone(standard), evidence_kinds: ['governance_review'], approval_threshold: 3, approval_role: 'custodian', cooldown_ms: 120000 };
   for (const t of ['backup.delete', 'policy.change']) { rules[t].approval_threshold = 3; rules[t].approval_role = 'custodian'; rules[t].evidence_kinds = ['governance_review']; rules[t].cooldown_ms = 120000; }
@@ -40,7 +40,7 @@ export function validatePolicy(p) {
   fields(p.rules, Object.keys(defaultPolicy(p.tenant_id).rules));
   for (const [type, r] of Object.entries(p.rules)) {
     fields(r, ['evidence_kinds', 'independent_domains', 'approval_threshold', 'approval_role', 'cooldown_ms', 'max_quantity', 'require_hardware', 'destinations', 'forbidden_fields', 'max_evidence_age_ms']);
-    uniqueStrings(r.evidence_kinds, 'evidence kinds', 10); integer(r.independent_domains, 'independent domains', 1, 10); integer(r.approval_threshold, 'threshold', type === 'data.export' ? 0 : ['policy.change', 'backup.delete'].includes(type) ? 3 : 1, 5);
+    uniqueStrings(r.evidence_kinds, 'evidence kinds', 10); integer(r.independent_domains, 'independent domains', type === 'action.composite' ? 0 : 1, 10); integer(r.approval_threshold, 'threshold', type === 'data.export' ? 0 : ['policy.change', 'backup.delete'].includes(type) ? 3 : 1, 5);
     oneOf(r.approval_role, ['approver', 'custodian'], 'approval role');
     if (['policy.change', 'backup.delete'].includes(type)) requireThat(r.approval_role === 'custodian', 'INV-451-POLICY', 'Root actions require customer custodians', 451);
     integer(r.cooldown_ms, 'cooldown', ['policy.change', 'backup.delete'].includes(type) ? 120000 : 0, 604800000);
