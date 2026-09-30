@@ -88,6 +88,56 @@
    "expect": "reject"
   },
   {
+   "name": "empty-object",
+   "text": "{}",
+   "expect": "accept"
+  },
+  {
+   "name": "empty-array",
+   "text": "[]",
+   "expect": "accept"
+  },
+  {
+   "name": "nested-accept",
+   "text": "{\"a\":{\"b\":[1,-2,\"x\",true,null]}}",
+   "expect": "accept"
+  },
+  {
+   "name": "neg-leading-zero",
+   "text": "-01",
+   "expect": "reject"
+  },
+  {
+   "name": "trailing-dot",
+   "text": "1.",
+   "expect": "reject"
+  },
+  {
+   "name": "dup-key-nested",
+   "text": "{\"a\":{\"b\":1,\"b\":2}}",
+   "expect": "reject"
+  },
+  {
+   "name": "dup-key-sibling",
+   "text": "{\"a\":1,\"b\":2,\"a\":3}",
+   "expect": "reject"
+  },
+  {
+   "name": "constructor-key",
+   "text": "{\"constructor\":1}",
+   "expect": "reject"
+  },
+  {
+   "name": "bigint-max",
+   "text": "9007199254740991",
+   "expect": "accept"
+  },
+  {
+   "name": "hex-number",
+   "text": "0x10",
+   "expect": "reject"
+  },
+  {
    "name": "depth-31",
    "text": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]",
    "expect": "accept",
