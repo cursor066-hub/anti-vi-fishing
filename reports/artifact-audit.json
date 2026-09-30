@@ -1,7 +1,7 @@
 {
   "check_exit": 1,
   "report": {
-    "syntax_files": 73,
+    "syntax_files": 74,
     "syntax_and_focused_source_checks": false,
     "security_certification": false
   },

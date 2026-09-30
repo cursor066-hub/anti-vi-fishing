@@ -141,7 +141,12 @@ export class KeyVault {
     // Master without keystore is a stale-commit-marker state — refuse, do
     // not silently re-key (w9-schema F-4).
     if (!existsSync(storePath) && existsSync(masterPath)) throw new InvariantError('INV-503-CONFIG', 'Master key exists but keystore is missing — refusing to silently re-key', 503);
-    if (existsSync(storePath) && existsSync(masterPath)) return KeyVault.load(storePath, JSON.parse(readFileSync(masterPath, 'utf8')).master_key);
+    if (existsSync(storePath) && existsSync(masterPath)) {
+      // A corrupt master file is a config failure with an INV code, not a
+      // raw parser exception escaping the taxonomy (w11-fixverify R4).
+      const master = (() => { try { return JSON.parse(readFileSync(masterPath, 'utf8')); } catch { throw new InvariantError('INV-503-CONFIG', 'master.key is unreadable or corrupt', 503); } })();
+      return KeyVault.load(storePath, master.master_key);
+    }
     const masterKey = randomBytes(32).toString('base64url');
     return new KeyVault(masterKey);
   }

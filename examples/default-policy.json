@@ -418,7 +418,9 @@
   },
   "max_stale_ms": 300000,
   "stale_ms": {
-    "default": 300000
+    "default": 300000,
+    "data.read": 300000,
+    "service.connect": 300000
   },
   "staged_policy": {
     "min_delay_ms": 60000,

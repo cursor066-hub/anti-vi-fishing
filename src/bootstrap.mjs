@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync, existsSync, chmodSync, readFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, lstatSync, chmodSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomBytes, generateKeyPairSync } from 'node:crypto';
 import { generateKey, signed, encrypt } from './crypto.mjs';
@@ -179,7 +179,11 @@ export function createDevComponent(name) {
 
 export function bootstrap(directory, tenants = ['acme'], now = Date.now(), { issuerPort = 8090 } = {}) {
   directory = resolve(directory);
-  requireThat(!existsSync(directory), 'INV-409-CONFLICT', 'Refusing to overwrite an existing deployment directory — if this is an incomplete bootstrap, remove it and retry', 409);
+  // Occupied includes dangling symlinks: existsSync follows the link and
+  // misses a broken one, which would then fail deep in mkdir with a raw
+  // system error instead of this refusal (w11-fixverify R5).
+  const occupied = (() => { try { lstatSync(directory); return true; } catch { return false; } })();
+  requireThat(!occupied, 'INV-409-CONFLICT', 'Refusing to overwrite an existing deployment directory — if this is an incomplete bootstrap, remove it and retry', 409);
   mkdirSync(directory, { recursive: true, mode: 0o700 }); chmodSync(directory, 0o700);
   // Deployment path: keys are generated INSIDE the software vault; config.json
   // on disk carries only public material (KEY-001/002 for this profile).
@@ -246,7 +250,12 @@ export function seedSyntheticResources(fabric, tenants) {
 // inside tenant() would authenticate into a phantom tenant.
 export function loadConfiguration(directory) {
   const config = parseStrict(readFileSync(join(resolve(directory), 'config.json'), 'utf8'));
-  for (const t of Object.keys(config.tenants ?? {}))
+  // Row shape, not just names: a non-object tenants map or non-object rows
+  // load silently and then 500 on first tenant lookup (w11-fixverify R6).
+  requireThat(config.tenants && typeof config.tenants === 'object' && !Array.isArray(config.tenants), 'INV-503-CONFIG', 'config.tenants must be an object map', 503);
+  for (const [t, row] of Object.entries(config.tenants)) {
     requireThat(/^[a-z][a-z0-9-]{1,31}$/.test(t) && !Object.hasOwn(Object.prototype, t) && !['constructor', 'watch', 'unwatch', 'prototype'].includes(t), 'INV-503-CONFIG', `Illegal tenant name ${t}`, 503);
+    requireThat(row && typeof row === 'object' && !Array.isArray(row), 'INV-503-CONFIG', `Tenant ${t} must be an object`, 503);
+  }
   return config;
 }

@@ -37,7 +37,10 @@ export function createCeremony({ ceremony_id, tenant_id, purpose, threshold, cus
 
 export function acknowledge(ceremony, custodian, ackEnvelope, now) {
   requireThat(ceremony.custodians.includes(custodian), 'INV-403-ROLE', 'Not a ceremony custodian', 403);
-  requireThat(ceremony.status !== 'completed', 'INV-409-STATE', 'Ceremony already completed', 409);
+  requireThat(ceremony.status !== 'completed' && ceremony.status !== 'aborted', 'INV-409-STATE', 'Ceremony is closed to further consent', 409);
+  // Consent on a lapsed ceremony is dead weight — it can never reconstruct
+  // (w11-approval F7).
+  requireThat(ceremony.valid_until > now, 'INV-409-STATE', 'Ceremony validity has lapsed', 409);
   // A custodian who attested a superseded artifact digest must be able to
   // re-acknowledge the rebound artifact — only same-digest consent is a
   // duplicate (w7-seam F4).
@@ -108,7 +111,10 @@ export function reconstructSecret(ceremony, presentedShares, now) {
   const shares = [...byIndex.values()];
   requireThat(shares.length >= ceremony.threshold, 'INV-403-ROLE', 'Duplicate shares do not count toward threshold', 403);
   const secret = reconstruct(shares.slice(0, ceremony.threshold));
-  const artifact = { ceremony_id: ceremony.ceremony_id, quorum: shares.map(s => s.x).sort((a, b) => a - b), reconstructed_at: now, purpose: ceremony.purpose };
+  // The audit artifact names only the shares the threshold actually
+  // consumed — listing every presented share would overstate participation
+  // (w11-approval F7).
+  const artifact = { ceremony_id: ceremony.ceremony_id, quorum: shares.slice(0, ceremony.threshold).map(s => s.x).sort((a, b) => a - b), reconstructed_at: now, purpose: ceremony.purpose };
   ceremony.status = 'completed';
   return { secret, artifact };
 }

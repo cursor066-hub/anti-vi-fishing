@@ -6,16 +6,16 @@
       "bytes": 6489
     },
     "src/bootstrap.mjs": {
-      "lines": 253,
-      "bytes": 21131
+      "lines": 262,
+      "bytes": 21894
     },
     "src/canonical.mjs": {
       "lines": 111,
       "bytes": 6040
     },
     "src/ceremony.mjs": {
-      "lines": 124,
-      "bytes": 9054
+      "lines": 130,
+      "bytes": 9497
     },
     "src/cli.mjs": {
       "lines": 85,
@@ -34,32 +34,32 @@
       "bytes": 5165
     },
     "src/datagate.mjs": {
-      "lines": 124,
-      "bytes": 8833
+      "lines": 128,
+      "bytes": 9102
     },
     "src/errors.mjs": {
       "lines": 10,
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 1853,
-      "bytes": 157139
+      "lines": 1911,
+      "bytes": 161248
     },
     "src/issuerd.mjs": {
-      "lines": 400,
-      "bytes": 29234
+      "lines": 411,
+      "bytes": 30389
     },
     "src/keystore.mjs": {
-      "lines": 157,
-      "bytes": 11462
+      "lines": 162,
+      "bytes": 11780
     },
     "src/merkle.mjs": {
       "lines": 121,
       "bytes": 6684
     },
     "src/policy.mjs": {
-      "lines": 354,
-      "bytes": 36873
+      "lines": 357,
+      "bytes": 37208
     },
     "src/runtime.mjs": {
       "lines": 161,
@@ -74,8 +74,8 @@
       "bytes": 10232
     },
     "src/server.mjs": {
-      "lines": 298,
-      "bytes": 30615
+      "lines": 300,
+      "bytes": 30758
     },
     "src/shamir.mjs": {
       "lines": 83,
@@ -115,7 +115,7 @@
     },
     "scripts/generate-contracts.mjs": {
       "lines": 102,
-      "bytes": 17735
+      "bytes": 17866
     },
     "scripts/generate-vectors.mjs": {
       "lines": 133,
@@ -179,7 +179,7 @@
     },
     "tests/adversarial.test.mjs": {
       "lines": 132,
-      "bytes": 7646
+      "bytes": 7640
     },
     "tests/canonical.test.mjs": {
       "lines": 31,
@@ -245,6 +245,10 @@
       "lines": 238,
       "bytes": 15457
     },
+    "tests/w11-approval.test.mjs": {
+      "lines": 236,
+      "bytes": 15468
+    },
     "tests/w5-mutations.test.mjs": {
       "lines": 194,
       "bytes": 13489
@@ -262,8 +266,8 @@
       "bytes": 13827
     },
     "tests/w6-tenancy.test.mjs": {
-      "lines": 125,
-      "bytes": 9213
+      "lines": 126,
+      "bytes": 9313
     },
     "tests/w7-dek.test.mjs": {
       "lines": 117,
@@ -314,6 +318,6 @@
       "bytes": 6229
     }
   },
-  "total_files": 78,
-  "total_lines": 13099
+  "total_files": 79,
+  "total_lines": 13434
 }

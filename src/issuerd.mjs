@@ -2,7 +2,7 @@
 import http from 'node:http';
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, existsSync, statSync, lstatSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { randomUUID, randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomUUID, randomBytes, timingSafeEqual, createPrivateKey, createPublicKey } from 'node:crypto';
 import { canonical, digest, hashBytes, parseStrict } from './canonical.mjs';
 import { signed, verifySigned } from './crypto.mjs';
 import { fields, text, identifier, integer, uniqueStrings } from './schema.mjs';
@@ -36,6 +36,11 @@ export function loadIssuers(directory) {
     requireThat(spec.kinds && typeof spec.kinds === 'object' && !Array.isArray(spec.kinds), 'INV-400-SCHEMA', 'Issuer kinds must be an object');
     requireThat(spec.records && typeof spec.records === 'object' && !Array.isArray(spec.records), 'INV-400-SCHEMA', 'Issuer records must be an object');
     requireThat(spec.key && typeof spec.key.key_id === 'string' && typeof spec.key.public_key === 'string' && typeof spec.key.private_key === 'string', 'INV-400-SCHEMA', 'Issuer key must carry key_id, public_key and private_key');
+    // The declared keypair must actually be a keypair: the private half
+    // parses and derives the advertised public half, same consistency bar
+    // the vault applies per entry (w11-fixverify R3).
+    const derivedPublic = (() => { try { return createPublicKey(createPrivateKey(spec.key.private_key)).export({ type: 'spki', format: 'pem' }).trim(); } catch { return null; } })();
+    requireThat(derivedPublic !== null && derivedPublic === spec.key.public_key.trim(), 'INV-400-SCHEMA', 'Issuer key public/private material is inconsistent');
     for (const [kind, rule] of Object.entries(spec.kinds)) { identifier(kind, 'kind'); requireThat(rule && typeof rule === 'object' && !Array.isArray(rule), 'INV-400-SCHEMA', `Kind rule ${kind} must be an object`); }
     if (spec.token_expires_at !== undefined) requireThat(Number.isSafeInteger(spec.token_expires_at), 'INV-400-SCHEMA', 'token_expires_at must be an integer epoch-ms');
     // A malformed *_token_digest must fail at boot: bearerMatches compares
@@ -138,7 +143,6 @@ export function answerQuery(issuer, request, now) {
   // query parameter) is caller input and must never be echoed under the
   // signature — only the record's own subject or a claim the caller
   // supplied inside the claim block counts (w9-schema F-3).
-  const resolvedSubject = record.subject_id ?? request.claims?.subject_id;
   // Only fields the issuer verified may appear under the signature: expect/
   // extract fields, the resolved subject, and claims bound into the lookup
   // template — a 'supports' answer proves that exact identifier resolved to
@@ -148,6 +152,13 @@ export function answerQuery(issuer, request, now) {
   // match echoes claims the lookup never bound, a narrower one silently
   // drops nested paths (w6-fix F7).
   if (claim === 'supports') for (const m of rule.lookup.matchAll(/\$\{claims\.([a-z0-9_.]+)\}/g)) { const v = m[1].split('.').reduce((o, k) => o?.[k], request.claims ?? {}); if (v !== undefined) lookupBound[m[1]] = v; }
+  // subject_id may only be echoed when the issuer actually verified it —
+  // the record's own field, a caller claim the lookup template bound, or a
+  // caller claim an expect rule checked against the record (a mismatch there
+  // already produced 'conflict'). An unbound claims.subject_id is caller
+  // input, not a verified identity (w11-fixverify R1).
+  const expectBoundSubject = Object.values(rule.expect ?? {}).some(v => typeof v === 'string' && v.includes('${claims.subject_id}'));
+  const resolvedSubject = record.subject_id ?? (Object.hasOwn(lookupBound, 'subject_id') || expectBoundSubject ? request.claims?.subject_id : undefined);
   const revealed = claim === 'conflict' ? {} : { ...lookupBound, ...extracted, ...(resolvedSubject === undefined ? {} : { subject_id: resolvedSubject }) };
   return signed({ ...base, claim, content_digest: digest({ issuer: issuer.issuer, key, record }), claims: revealed, provenance: prov('*'), issuer_version: issuer.version }, issuer.key, 'evidence');
 }

@@ -87,10 +87,13 @@ export function validatePolicy(p) {
     // actor's identity must carry.
     if (r.identity_classes !== undefined) { uniqueStrings(r.identity_classes, 'identity classes', 8); for (const c of r.identity_classes) oneOf(c, ['workforce', 'workload', 'device', 'counterparty'], 'identity class'); }
     if (r.min_proofing !== undefined) oneOf(r.min_proofing, ['low', 'medium', 'high'], 'minimum proofing');
-    uniqueStrings(r.evidence_kinds, 'evidence kinds', 10); integer(r.independent_domains, 'independent domains', type === 'action.composite' ? 0 : 1, 10); integer(r.approval_threshold, 'threshold', ['policy.change', 'backup.delete'].includes(type) ? 3 : 1, 5);
+    uniqueStrings(r.evidence_kinds, 'evidence kinds', 10); integer(r.independent_domains, 'independent domains', type === 'action.composite' ? 0 : 1, 10); integer(r.approval_threshold, 'threshold', ['policy.change', 'backup.delete', 'key.rotate', 'key.ceremony'].includes(type) ? 3 : 1, 5);
     oneOf(r.approval_role, ['approver', 'custodian'], 'approval role');
-    if (['policy.change', 'backup.delete'].includes(type)) requireThat(r.approval_role === 'custodian', 'INV-451-POLICY', 'Root actions require customer custodians', 451);
-    integer(r.cooldown_ms, 'cooldown', ['policy.change', 'backup.delete'].includes(type) ? 120000 : 0, 604800000);
+    // KEY-009 root-risk actions sit under the same constitutional floor as
+    // the constitution itself — a ratified amendment may never drop rotation
+    // or recovery to a single non-custodian approval (w11-approval F5).
+    if (['policy.change', 'backup.delete', 'key.rotate', 'key.ceremony'].includes(type)) requireThat(r.approval_role === 'custodian', 'INV-451-POLICY', 'Root actions require customer custodians', 451);
+    integer(r.cooldown_ms, 'cooldown', { 'policy.change': 120000, 'backup.delete': 120000, 'key.rotate': 60000, 'key.ceremony': 120000 }[type] ?? 0, 604800000);
     integer(r.max_quantity, 'maximum quantity', 1, 1_000_000_000_000); requireThat(typeof r.require_hardware === 'boolean', 'INV-400-SCHEMA', 'Hardware requirement must be boolean');
     uniqueStrings(r.destinations, 'destinations'); uniqueStrings(r.forbidden_fields, 'forbidden fields'); integer(r.max_evidence_age_ms, 'evidence age', 1000, 2592000000);
   }

@@ -35,6 +35,7 @@ export const ROUTE_METHODS = new Map(Object.entries({
   '/v1/retention/hold': 'POST', '/v1/retention/sweep': 'POST', '/v1/metrics': 'GET',
   '/v1/ceremonies': 'GET,POST', '/v1/ceremonies/{id}/acknowledge': 'POST',
   '/v1/ceremonies/{id}/split': 'POST', '/v1/ceremonies/{id}/reconstruct': 'POST',
+  '/v1/ceremonies/{id}/abort': 'POST',
   '/v1/keys': 'GET', '/v1/keys/rotate-prepare': 'POST', '/v1/keys/{id}/attest': 'GET',
   '/v1/config-drift': 'GET', '/v1/config-drift/reassert': 'POST', '/v1/clock/recover': 'POST',
   '/v1/secure-perception/sessions': 'POST', '/v1/secure-perception/release': 'POST',
@@ -249,9 +250,10 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       if (path === '/v1/audit/verify-proof' && req.method === 'POST') { fabric.authorize(p, ['operator', 'security', 'auditor']); const i = await body(req); fields(i, ['proof']); const hashes = fabric.store.auditHashes(p.tenant_id); return send(200, { valid: fabric.verifyAuditProof(p.tenant_id, i.proof, { root: merkleRoot(hashes), size: hashes.length }) }); }
       if (path === '/v1/ceremonies' && req.method === 'GET') { fabric.authorize(p, ['security', 'custodian', 'policy_admin']); return send(200, { items: fabric.store.list(p.tenant_id, 'ceremony', 100, 0).map(c => ({ ceremony_id: c.ceremony_id, status: c.status, purpose: c.purpose })) }); }
       if (path === '/v1/ceremonies' && req.method === 'POST') return send(201, fabric.createCeremony(p, object(await body(req))));
-      if ((m = /^\/v1\/ceremonies\/([A-Za-z0-9_.:-]+)\/(acknowledge|split|reconstruct)$/.exec(path)) && req.method === 'POST') {
+      if ((m = /^\/v1\/ceremonies\/([A-Za-z0-9_.:-]+)\/(acknowledge|split|reconstruct|abort)$/.exec(path)) && req.method === 'POST') {
         const input = await body(req);
         if (m[2] === 'acknowledge') return send(200, fabric.acknowledgeCeremony(p, object(input)));
+        if (m[2] === 'abort') { object(input); return send(200, fabric.abortCeremony(p, m[1])); }
         if (m[2] === 'split') { fields(input, ['secret']); return send(200, fabric.splitCeremonySecret(p, m[1], input.secret)); }
         fields(input, ['shares']); return send(200, fabric.reconstructCeremony(p, m[1], input.shares));
       }

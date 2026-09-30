@@ -118,7 +118,8 @@ test('w6-F7: issuerd never signs unverified caller claims', t => {
   assert.equal(env.payload.claims.ssn, undefined);
   assert.equal(env.payload.claims.fabricated, undefined);
   assert.equal(env.payload.claims.account, 'TESTBANK000001', 'lookup-bound identifier is proven');
-  // claims.subject_id (bound to the capsule actor at attach time) outranks
-  // the independently supplied request.subject_id.
-  assert.equal(env.payload.claims.subject_id, 'operator');
+  // claims.subject_id is caller input on a kind whose lookup never verified
+  // it — the record carries no subject and neither the lookup nor an expect
+  // rule bound it, so it must not be echoed under the signature at all.
+  assert.equal(env.payload.claims.subject_id, undefined);
 });

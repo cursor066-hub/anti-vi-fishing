@@ -2289,6 +2289,60 @@
         ]
       }
     },
+    "/v1/ceremonies/{id}/abort": {
+      "post": {
+        "operationId": "post_v1_ceremonies_id_abort",
+        "summary": "Abort a live ceremony (security officer or member custodian)",
+        "description": "Roles: security, custodian. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Empty"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
     "/v1/keys": {
       "get": {
         "operationId": "get_v1_keys",

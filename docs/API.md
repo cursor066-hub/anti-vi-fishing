@@ -55,7 +55,7 @@ There are no external URL fetch, plaintext-key extraction, raw SQL, universal ad
 | Evidence | `POST /v1/action-capsules/{id}/acquire-evidence` | operator, security | Live HTTP acquisition from registered issuer; 201 attaches envelope. |
 | Connectors | `GET /v1/connectors` · `GET /v1/connectors/status` · `POST /v1/connectors/{id}/drift-check` · `POST /v1/config-drift/reassert` | authenticated / operator, security, policy_admin, auditor / security, policy_admin / security | Registered issuer inventory; live-manifest drift audit; re-attest configuration after drift quarantine. |
 | Audit proofs | `GET /v1/audit/proofs/{sequence}` · `GET /v1/audit/consistency?first=N` · `POST /v1/audit/verify-proof` · `GET /v1/audit/entries?cursor=&limit=` | operator, security, auditor (entries: +policy_admin) | Merkle inclusion and consistency proofs; cursor-paginated signed entries. |
-| Ceremonies | `GET|POST /v1/ceremonies` · `POST /v1/ceremonies/{id}/{acknowledge,split,reconstruct}` | security, custodian, policy_admin | Committed Shamir shares; quorum enforced. |
+| Ceremonies | `GET|POST /v1/ceremonies` · `POST /v1/ceremonies/{id}/{acknowledge,split,reconstruct,abort}` | security, custodian, policy_admin | Committed Shamir shares; quorum enforced. Abort retires a live ceremony. |
 | Keys | `GET /v1/keys` · `POST /v1/keys/rotate-prepare` · `GET /v1/keys/{id}/attest` | security, policy_admin / auditor | Metadata only; pending keys sign nothing until `key.rotate` verifies. |
 | Grants | `GET /v1/grants?subject=` | operator, security, auditor | Active JIT grants; expired/revoked excluded. |
 | Policy | `GET /v1/policy/history` | operator, security, auditor, policy_admin | Version history + staged pending policy. |

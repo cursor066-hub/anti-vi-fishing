@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { fixture, hasCode } from './helpers.mjs';
 import { createHash } from 'node:crypto';
 import { canonical, parseStrict } from '../src/canonical.mjs';
-import { verifySigned, signed } from '../src/crypto.mjs';
+import { verifySigned, signed, generateKey } from '../src/crypto.mjs';
 import { inclusionProof, verifyInclusion, merkleRoot } from '../src/merkle.mjs';
 import { split, reconstruct, encodeShare, decodeShare } from '../src/shamir.mjs';
 import { loadIssuers } from '../src/issuerd.mjs';
@@ -97,7 +97,7 @@ test('ADV: issuer registry — ambiguous bare names resolve only via tenant key'
   const dir = mkdtempSync(join(tmpdir(), 'issuers-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   for (const tenant of ['acme', 'globex']) {
-    const spec = { issuer: 'bank', tenant, version: '1.0.0', channel: 'authoritative', key: { key_id: `${tenant}-k`, public_key: 'pk', private_key: 'sk' }, kinds: {}, records: {} };
+    const spec = { issuer: 'bank', tenant, version: '1.0.0', channel: 'authoritative', key: { ...generateKey(), key_id: `${tenant}-k` }, kinds: {}, records: {} };
     writeFileSync(join(dir, `${tenant}-bank.issuer.json`), JSON.stringify(spec), { mode: 0o600 });
   }
   const issuers = loadIssuers(dir);

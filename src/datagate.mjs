@@ -66,6 +66,10 @@ export function applyTransforms(rows, transforms, ctx) {
     // not resolve an inherited member into TRANSFORMS[t.op] and crash the
     // gate (w10-fixverify F-9).
     const t = Object.hasOwn(transforms, k) ? transforms[k] : undefined;
+    // The op itself must resolve a real transform — an inherited member
+    // name ('hasOwnProperty', 'valueOf') never computes a transform
+    // (w11-fixverify R2).
+    requireThat(!t || Object.hasOwn(TRANSFORMS, t.op), 'INV-400-SCHEMA', 'Unknown transform op');
     return [k, t ? TRANSFORMS[t.op](v, k, ctx, t.arg) : v];
   })));
 }
