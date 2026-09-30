@@ -72,7 +72,11 @@ export async function httpJson(url, { method = 'GET', body, timeout_ms = 10000, 
           catch { throw new InvariantError('INV-502-CONNECTOR', 'Connector returned invalid UTF-8', 502); }
           requireThat(size <= 1048576, 'INV-413-CONNECTOR', 'Connector response too large', 413);
           requireThat((res.headers['content-type'] ?? '').split(';')[0] === 'application/json', 'INV-502-CONNECTOR', 'Connector returned non-JSON', 502);
-          const data = parseStrict(textBody);
+          // Malformed JSON is an upstream failure too — INV-502, never the
+          // caller-fault INV-400 a parseStrict throw would surface
+          // (w10-fixverify F-10).
+          let data;
+          try { data = parseStrict(textBody); } catch { throw new InvariantError('INV-502-CONNECTOR', 'Connector returned malformed JSON', 502); }
           resolve({ status: res.statusCode, data });
         } catch (e) { reject(e); }
       });

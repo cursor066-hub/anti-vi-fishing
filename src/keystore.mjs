@@ -138,6 +138,9 @@ export class KeyVault {
   static open(directory) {
     const storePath = `${directory}/keystore.json`, masterPath = `${directory}/master.key`;
     if (existsSync(storePath) && !existsSync(masterPath)) throw new InvariantError('INV-503-CONFIG', 'Keystore exists but master key is missing — refusing to silently regenerate', 503);
+    // Master without keystore is a stale-commit-marker state — refuse, do
+    // not silently re-key (w9-schema F-4).
+    if (!existsSync(storePath) && existsSync(masterPath)) throw new InvariantError('INV-503-CONFIG', 'Master key exists but keystore is missing — refusing to silently re-key', 503);
     if (existsSync(storePath) && existsSync(masterPath)) return KeyVault.load(storePath, JSON.parse(readFileSync(masterPath, 'utf8')).master_key);
     const masterKey = randomBytes(32).toString('base64url');
     return new KeyVault(masterKey);

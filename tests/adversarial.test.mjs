@@ -97,7 +97,7 @@ test('ADV: issuer registry — ambiguous bare names resolve only via tenant key'
   const dir = mkdtempSync(join(tmpdir(), 'issuers-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   for (const tenant of ['acme', 'globex']) {
-    const spec = { issuer: 'bank', tenant, version: '1.0.0', channel: 'authoritative', key: { key_id: `${tenant}-k`, public_key: 'pk' }, kinds: {}, records: {} };
+    const spec = { issuer: 'bank', tenant, version: '1.0.0', channel: 'authoritative', key: { key_id: `${tenant}-k`, public_key: 'pk', private_key: 'sk' }, kinds: {}, records: {} };
     writeFileSync(join(dir, `${tenant}-bank.issuer.json`), JSON.stringify(spec), { mode: 0o600 });
   }
   const issuers = loadIssuers(dir);

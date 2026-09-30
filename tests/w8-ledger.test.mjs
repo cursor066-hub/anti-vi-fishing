@@ -30,7 +30,7 @@ const serve = async (t, spec, clock) => {
 test('COV-004: a live manifest drift drops the dependent path to UNKNOWN and opens an owner task', async t => {
   const h = fixture(t, ['acme']);
   const [bankKeyId, bank] = bankEntry(h);
-  const baseSpec = { issuer: 'bank', tenant: 'acme', channel: 'authoritative', key: h.setup.issuerKeys.acme['bank'], kinds: ISSUER_RULES.bank, records: [], issue_token: bank.issue_token, read_token: bank.read_token };
+  const baseSpec = { issuer: 'bank', tenant: 'acme', channel: 'authoritative', key: h.setup.issuerKeys.acme['bank'], kinds: ISSUER_RULES.bank, records: {}, issue_token: bank.issue_token, read_token: bank.read_token };
   bank.endpoint = `http://127.0.0.1:${(await serve(t, { ...baseSpec, version: '1.0.0' }, () => h.now())).server.address().port}`;
   declareBankPath(h);
   const clean = await h.f.checkIssuerDrift(h.p('security'), bankKeyId);

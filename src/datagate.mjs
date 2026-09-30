@@ -60,7 +60,10 @@ export const TRANSFORMS = {
 export function applyTransforms(rows, transforms, ctx) {
   // transforms: {column: {op, arg?}} — returns new rows; never mutates source.
   return rows.map(row => Object.fromEntries(Object.entries(row).map(([k, v]) => {
-    const t = transforms[k];
+    // Own-property only: a column named 'constructor'/'watch' must miss,
+    // not resolve an inherited member into TRANSFORMS[t.op] and crash the
+    // gate (w10-fixverify F-9).
+    const t = Object.hasOwn(transforms, k) ? transforms[k] : undefined;
     return [k, t ? TRANSFORMS[t.op](v, k, ctx, t.arg) : v];
   })));
 }

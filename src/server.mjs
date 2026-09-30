@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
@@ -41,8 +41,14 @@ export const ROUTE_METHODS = new Map(Object.entries({
   '/v1/secure-perception/fallback': 'POST', '/v1/advisory': 'POST',
 }).map(([k, v]) => [k, v.split(',')]));
 
-export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin = `http://127.0.0.1:${port}`, tenantSessionCap = 250, trustProxy = false } = {}) {
+export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin = `http://127.0.0.1:${port}`, tenantSessionCap = 250, trustProxy = false, proxySecret = null } = {}) {
   requireThat(['127.0.0.1', '::1'].includes(host), 'INV-503-RELEASE', 'Engineering HTTP service must bind to loopback', 503);
+  // --trust-proxy without a shared proxy secret is vacuous: the daemon only
+  // binds loopback, so EVERY peer is "a trusted loopback peer" and any local
+  // process could rotate X-Forwarded-For to sidestep every rate bucket
+  // (w10-fixverify F-2). The proxy must authenticate its XFF claims with the
+  // X-Fabric-Proxy header matching proxySecret.
+  requireThat(!trustProxy || typeof proxySecret === 'string' && proxySecret.length >= 16, 'INV-503-CONFIG', '--trust-proxy requires a --proxy-secret of at least 16 characters', 503);
   const web = fileURLToPath(new URL('../web/', import.meta.url));
   const sessions = new Map(), rate = new Map();
   const metrics = { requests: 0, errors: 0, unauthorised: 0, rejections: {}, tenants: {} };
@@ -126,13 +132,16 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
     const send = (status, data, type = 'application/json; charset=utf-8') => { const bodyOut = type.startsWith('application/json') ? canonical(data) : data; res.writeHead(status, { 'Content-Type': type }); res.end(bodyOut); };
     try {
       // Bucket identity: the socket peer, or the first X-Forwarded-For hop
-      // when --trust-proxy is set AND the peer is loopback — the shipped
-      // nginx pairs all real clients onto 127.0.0.1, so socket-keyed
-      // buckets collapse to one global bucket behind it (w9-deploy F3). A
-      // direct non-loopback client can never spoof the header.
+      // when --trust-proxy is set AND the peer is loopback AND the request
+      // carries the proxy secret — loopback contains every local process,
+      // not just the reverse proxy, so the peer address alone proves
+      // nothing (w10-fixverify F-2). Digests keep the comparison
+      // fixed-length for timingSafeEqual.
       const peer = req.socket.remoteAddress;
-      const clientIp = trustProxy && ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(peer)
-        ? (req.headers['x-forwarded-for']?.split(',')[0]?.trim() || peer) : peer;
+      const presented = req.headers['x-fabric-proxy'];
+      const proxyOk = trustProxy && ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(peer)
+        && typeof presented === 'string' && timingSafeEqual(Buffer.from(digest(presented)), Buffer.from(digest(proxySecret)));
+      const clientIp = proxyOk ? (req.headers['x-forwarded-for']?.split(',')[0]?.trim() || peer) : peer;
       // Rate-limit before any request validation — malformed traffic must
       // consume the budget too (w9-deploy F9).
       rateLimit(`ip:${clientIp}`, 600);

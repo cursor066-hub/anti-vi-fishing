@@ -6,8 +6,8 @@
       "bytes": 6489
     },
     "src/bootstrap.mjs": {
-      "lines": 243,
-      "bytes": 20351
+      "lines": 253,
+      "bytes": 21131
     },
     "src/canonical.mjs": {
       "lines": 111,
@@ -18,12 +18,12 @@
       "bytes": 9054
     },
     "src/cli.mjs": {
-      "lines": 77,
-      "bytes": 6456
+      "lines": 85,
+      "bytes": 7186
     },
     "src/connectors.mjs": {
-      "lines": 135,
-      "bytes": 8710
+      "lines": 139,
+      "bytes": 9012
     },
     "src/coverage.mjs": {
       "lines": 70,
@@ -34,24 +34,24 @@
       "bytes": 5165
     },
     "src/datagate.mjs": {
-      "lines": 105,
-      "bytes": 7182
+      "lines": 108,
+      "bytes": 7407
     },
     "src/errors.mjs": {
       "lines": 10,
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 1778,
-      "bytes": 150035
+      "lines": 1786,
+      "bytes": 150821
     },
     "src/issuerd.mjs": {
-      "lines": 356,
-      "bytes": 25572
+      "lines": 400,
+      "bytes": 29234
     },
     "src/keystore.mjs": {
-      "lines": 154,
-      "bytes": 11157
+      "lines": 157,
+      "bytes": 11462
     },
     "src/merkle.mjs": {
       "lines": 121,
@@ -74,8 +74,8 @@
       "bytes": 10232
     },
     "src/server.mjs": {
-      "lines": 289,
-      "bytes": 29790
+      "lines": 298,
+      "bytes": 30615
     },
     "src/shamir.mjs": {
       "lines": 83,
@@ -86,8 +86,8 @@
       "bytes": 19020
     },
     "src/target.mjs": {
-      "lines": 236,
-      "bytes": 17500
+      "lines": 250,
+      "bytes": 18686
     },
     "web/app.js": {
       "lines": 216,
@@ -179,7 +179,7 @@
     },
     "tests/adversarial.test.mjs": {
       "lines": 132,
-      "bytes": 7627
+      "bytes": 7646
     },
     "tests/canonical.test.mjs": {
       "lines": 31,
@@ -237,6 +237,10 @@
       "lines": 350,
       "bytes": 23668
     },
+    "tests/w10-fixverify.test.mjs": {
+      "lines": 238,
+      "bytes": 15457
+    },
     "tests/w5-mutations.test.mjs": {
       "lines": 194,
       "bytes": 13489
@@ -290,8 +294,8 @@
       "bytes": 7577
     },
     "tests/w9-deploy.test.mjs": {
-      "lines": 143,
-      "bytes": 9985
+      "lines": 145,
+      "bytes": 10150
     },
     "tests/w9-fixverify.test.mjs": {
       "lines": 74,
@@ -300,8 +304,12 @@
     "tests/w9-network.test.mjs": {
       "lines": 188,
       "bytes": 12714
+    },
+    "tests/w9-schema.test.mjs": {
+      "lines": 98,
+      "bytes": 6229
     }
   },
-  "total_files": 75,
-  "total_lines": 12333
+  "total_files": 77,
+  "total_lines": 12774
 }

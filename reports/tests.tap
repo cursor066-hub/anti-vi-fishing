@@ -1691,845 +1691,975 @@ ok 282 - NFR-SEC-004 KEY-002 CON-007: bootstrap writes vault + master key; confi
   duration_ms: 0
   type: 'test'
   ...
+# Subtest: w10 F-1: issuerd serves an IPv6 bind without the URL-constructor crash
+ok 283 - w10 F-1: issuerd serves an IPv6 bind without the URL-constructor crash
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w10 F-8: issuerd rejects a bare-address Host
+ok 284 - w10 F-8: issuerd rejects a bare-address Host
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w10 F-13: issuerd refuses absolute-form and query-mismatched request targets
+ok 285 - w10 F-13: issuerd refuses absolute-form and query-mismatched request targets
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w10 F-3: loadIssuers refuses malformed token digests at boot
+ok 286 - w10 F-3: loadIssuers refuses malformed token digests at boot
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w10 F-5: a tokened issuer credential cannot mint through an open issuer
+ok 287 - w10 F-5: a tokened issuer credential cannot mint through an open issuer
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w10 F-6: a tenant literally named 'null' cannot be reached without the tenant param
+ok 288 - w10 F-6: a tenant literally named 'null' cannot be reached without the tenant param
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w10 F-9: proto-named transform keys miss the transform lookup instead of crashing
+ok 289 - w10 F-9: proto-named transform keys miss the transform lookup instead of crashing
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# {"error":"INV-503-CONFIG","message":"fabric.db-wal must not be readable by group or other users"}
+# {"error":"INV-503-CONFIG","message":"fabric.db-wal must not be readable by group or other users"}
+# {"error":"INV-503-CONFIG","message":"fabric.db-wal must not be readable by group or other users"}
+# {"error":"INV-503-CONFIG","message":"fabric.db-wal must not be readable by group or other users"}
+# Subtest: w10 F-10: connector malformed JSON is INV-502-CONNECTOR, not a caller fault
+ok 290 - w10 F-10: connector malformed JSON is INV-502-CONNECTOR, not a caller fault
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w10 F-12: loadConfiguration enforces strict grammar and refuses proto-named tenants
+ok 291 - w10 F-12: loadConfiguration enforces strict grammar and refuses proto-named tenants
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w10 F-4: serve refuses group-readable custodian/component/issuer files
+ok 292 - w10 F-4: serve refuses group-readable custodian/component/issuer files
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w10 F-2: --trust-proxy without a proxy secret is a startup error
+ok 293 - w10 F-2: --trust-proxy without a proxy secret is a startup error
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w10 F-2: X-Forwarded-For without the secret falls back to the socket peer
+ok 294 - w10 F-2: X-Forwarded-For without the secret falls back to the socket peer
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w10 NB-4: capsule-depth refusal names the storable bound at admission
+ok 295 - w10 NB-4: capsule-depth refusal names the storable bound at admission
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w10 NB-2: the prototype-member blacklist is a literal set in canonical.mjs
+ok 296 - w10 NB-2: the prototype-member blacklist is a literal set in canonical.mjs
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w10 B3: a perception attestation nonce replays exactly once
+ok 297 - w10 B3: a perception attestation nonce replays exactly once
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
 # Subtest: E1: two custodians sharing one failure domain cannot satisfy the independent-domain quorum
-ok 283 - E1: two custodians sharing one failure domain cannot satisfy the independent-domain quorum
+ok 298 - E1: two custodians sharing one failure domain cannot satisfy the independent-domain quorum
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: E2: an envelope claiming a signer_id other than its signing key is refused
-ok 284 - E2: an envelope claiming a signer_id other than its signing key is refused
+ok 299 - E2: an envelope claiming a signer_id other than its signing key is refused
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: E3: evidence bound to capsule A cannot be attached to capsule B
-ok 285 - E3: evidence bound to capsule A cannot be attached to capsule B
+ok 300 - E3: evidence bound to capsule A cannot be attached to capsule B
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: E4: evidence acquired more than 7 days ago is refused
-ok 286 - E4: evidence acquired more than 7 days ago is refused
+ok 301 - E4: evidence acquired more than 7 days ago is refused
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: E5: an approval signed outside the 300-second freshness window is refused
-ok 287 - E5: an approval signed outside the 300-second freshness window is refused
+ok 302 - E5: an approval signed outside the 300-second freshness window is refused
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: E6: a second first-payment to the same beneficiary is a FAILED outcome, never VERIFIED
-ok 288 - E6: a second first-payment to the same beneficiary is a FAILED outcome, never VERIFIED
+ok 303 - E6: a second first-payment to the same beneficiary is a FAILED outcome, never VERIFIED
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: E7: creating an already-existing resource is a FAILED outcome, never silent idempotency
-ok 289 - E7: creating an already-existing resource is a FAILED outcome, never silent idempotency
+ok 304 - E7: creating an already-existing resource is a FAILED outcome, never silent idempotency
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: E8: a capability minted on an internal dataset dies when the dataset is reclassified
-ok 290 - E8: a capability minted on an internal dataset dies when the dataset is reclassified
+ok 305 - E8: a capability minted on an internal dataset dies when the dataset is reclassified
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: E9: the 33rd evidence attachment on one capsule is refused
-ok 291 - E9: the 33rd evidence attachment on one capsule is refused
+ok 306 - E9: the 33rd evidence attachment on one capsule is refused
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: E10: evidence dependencies must already be attached to this capsule
-ok 292 - E10: evidence dependencies must already be attached to this capsule
+ok 307 - E10: evidence dependencies must already be attached to this capsule
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: M-issuer-version: an envelope claiming a different issuer version than registered is refused
-ok 293 - M-issuer-version: an envelope claiming a different issuer version than registered is refused
+ok 308 - M-issuer-version: an envelope claiming a different issuer version than registered is refused
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: M-policy-digest: an approval bound to a stale policy digest is refused
-ok 294 - M-policy-digest: an approval bound to a stale policy digest is refused
+ok 309 - M-policy-digest: an approval bound to a stale policy digest is refused
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: M-created-at: a capsule whose declared creation time lies outside the window is refused
-ok 295 - M-created-at: a capsule whose declared creation time lies outside the window is refused
+ok 310 - M-created-at: a capsule whose declared creation time lies outside the window is refused
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: M-ceremony-floor: reconstruction with zero custodian acknowledgements is refused
-ok 296 - M-ceremony-floor: reconstruction with zero custodian acknowledgements is refused
+ok 311 - M-ceremony-floor: reconstruction with zero custodian acknowledgements is refused
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: M-ceremony-gate: key.rotate citing an unacknowledged ceremony is refused at application time
-ok 297 - M-ceremony-gate: key.rotate citing an unacknowledged ceremony is refused at application time
+ok 312 - M-ceremony-gate: key.rotate citing an unacknowledged ceremony is refused at application time
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: M-nonce-replay: an attestation nonce mints exactly one perception session
-ok 298 - M-nonce-replay: an attestation nonce mints exactly one perception session
+ok 313 - M-nonce-replay: an attestation nonce mints exactly one perception session
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: M-audit-cursor: a page cursor that does not resolve to a stored row is refused
-ok 299 - M-audit-cursor: a page cursor that does not resolve to a stored row is refused
+ok 314 - M-audit-cursor: a page cursor that does not resolve to a stored row is refused
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: M-ghost-change: bank.change on a nonexistent resource is a FAILED outcome
-ok 300 - M-ghost-change: bank.change on a nonexistent resource is a FAILED outcome
+ok 315 - M-ghost-change: bank.change on a nonexistent resource is a FAILED outcome
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: D5/E-fanout: consuming a capability on a fifth distinct resource trips the fan-out ceiling
-ok 301 - D5/E-fanout: consuming a capability on a fifth distinct resource trips the fan-out ceiling
+ok 316 - D5/E-fanout: consuming a capability on a fifth distinct resource trips the fan-out ceiling
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: fabric: actor field must equal the authenticated subject
-ok 302 - fabric: actor field must equal the authenticated subject
+ok 317 - fabric: actor field must equal the authenticated subject
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: fabric: a capsule without request intent is refused
-ok 303 - fabric: a capsule without request intent is refused
+ok 318 - fabric: a capsule without request intent is refused
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: fabric: supporting evidence whose claims do not describe this action is refused
-ok 304 - fabric: supporting evidence whose claims do not describe this action is refused
+ok 319 - fabric: supporting evidence whose claims do not describe this action is refused
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: fabric: an attestation for an unknown perception component is refused
-ok 305 - fabric: an attestation for an unknown perception component is refused
+ok 320 - fabric: an attestation for an unknown perception component is refused
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: runtime: data.read with empty rows or columns is refused
-ok 306 - runtime: data.read with empty rows or columns is refused
+ok 321 - runtime: data.read with empty rows or columns is refused
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: runtime: capability limits beyond policy ceilings are refused
-ok 307 - runtime: capability limits beyond policy ceilings are refused
+ok 322 - runtime: capability limits beyond policy ceilings are refused
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: runtime: consuming a forged capability envelope is refused
-ok 308 - runtime: consuming a forged capability envelope is refused
+ok 323 - runtime: consuming a forged capability envelope is refused
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: target: secret.use refuses undeclared operations and workload mismatch
-ok 309 - target: secret.use refuses undeclared operations and workload mismatch
+ok 324 - target: secret.use refuses undeclared operations and workload mismatch
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: store: a newer on-disk schema version is refused at open
-ok 310 - store: a newer on-disk schema version is refused at open
+ok 325 - store: a newer on-disk schema version is refused at open
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: store: exported audit with a non-monotonic entry time fails continuity
-ok 311 - store: exported audit with a non-monotonic entry time fails continuity
+ok 326 - store: exported audit with a non-monotonic entry time fails continuity
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: store: exported audit with an inconsistent checkpoint fails
-ok 312 - store: exported audit with an inconsistent checkpoint fails
+ok 327 - store: exported audit with an inconsistent checkpoint fails
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: schema: account charset, nonce length, payment and export invariants are enforced
-ok 313 - schema: account charset, nonce length, payment and export invariants are enforced
+ok 328 - schema: account charset, nonce length, payment and export invariants are enforced
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: POL-008: a staged policy activates, then a fresh capsule is evaluated and executed under it
-ok 314 - POL-008: a staged policy activates, then a fresh capsule is evaluated and executed under it
+ok 329 - POL-008: a staged policy activates, then a fresh capsule is evaluated and executed under it
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: fabric: approveInner rejects an envelope bound to a different capsule
-ok 315 - fabric: approveInner rejects an envelope bound to a different capsule
+ok 330 - fabric: approveInner rejects an envelope bound to a different capsule
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: fabric: a ceremony acknowledgement cannot name another custodian
-ok 316 - fabric: a ceremony acknowledgement cannot name another custodian
+ok 331 - fabric: a ceremony acknowledgement cannot name another custodian
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w5-F1: text fields reject invisible and bidi format characters
-ok 317 - w5-F1: text fields reject invisible and bidi format characters
+ok 332 - w5-F1: text fields reject invisible and bidi format characters
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w5-F2: key_id "__proto__" resolves to nothing, not Object.prototype
-ok 318 - w5-F2: key_id "__proto__" resolves to nothing, not Object.prototype
+ok 333 - w5-F2: key_id "__proto__" resolves to nothing, not Object.prototype
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w5-F3: issuer credential rotation does not invalidate the evidence graph
-ok 319 - w5-F3: issuer credential rotation does not invalidate the evidence graph
+ok 334 - w5-F3: issuer credential rotation does not invalidate the evidence graph
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w5-F4: rotation keeps the class purpose binding (no "any" fallback)
-ok 320 - w5-F4: rotation keeps the class purpose binding (no "any" fallback)
+ok 335 - w5-F4: rotation keeps the class purpose binding (no "any" fallback)
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w5-F6: a reported-but-unwritten state cannot certify VERIFIED
-ok 321 - w5-F6: a reported-but-unwritten state cannot certify VERIFIED
+ok 336 - w5-F6: a reported-but-unwritten state cannot certify VERIFIED
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w5-F7: secret.use binds the secrets-registry row, not a resource row
-ok 322 - w5-F7: secret.use binds the secrets-registry row, not a resource row
+ok 337 - w5-F7: secret.use binds the secrets-registry row, not a resource row
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w5-F8/F9: derived times use the gate clock; INV-5xx outcomes are UNCERTAIN
-ok 323 - w5-F8/F9: derived times use the gate clock; INV-5xx outcomes are UNCERTAIN
+ok 338 - w5-F8/F9: derived times use the gate clock; INV-5xx outcomes are UNCERTAIN
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w6-fix F1: request_intent payloads carry row digests, never raw rows
-ok 324 - w6-fix F1: request_intent payloads carry row digests, never raw rows
+ok 339 - w6-fix F1: request_intent payloads carry row digests, never raw rows
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w6-fix F2: fabricated snapshots on ghost resources and secrets are denied
-ok 325 - w6-fix F2: fabricated snapshots on ghost resources and secrets are denied
+ok 340 - w6-fix F2: fabricated snapshots on ghost resources and secrets are denied
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w6-fix F6: denied exports do not burn the reconstruction budget
-ok 326 - w6-fix F6: denied exports do not burn the reconstruction budget
+ok 341 - w6-fix F6: denied exports do not burn the reconstruction budget
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w6-fix F4: revoked keys cannot sign; revoked pending keys cannot activate
-ok 327 - w6-fix F4: revoked keys cannot sign; revoked pending keys cannot activate
+ok 342 - w6-fix F4: revoked keys cannot sign; revoked pending keys cannot activate
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w6-fix F4b: a revoked pending rotation key is unactivatable
-ok 328 - w6-fix F4b: a revoked pending rotation key is unactivatable
+ok 343 - w6-fix F4b: a revoked pending rotation key is unactivatable
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w6-fix F5: legacy untagged vault keys resolve through tenant bindings
-ok 329 - w6-fix F5: legacy untagged vault keys resolve through tenant bindings
+ok 344 - w6-fix F5: legacy untagged vault keys resolve through tenant bindings
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w6-fix F7: issuerd claim-binding grammar matches interpolation exactly
-ok 330 - w6-fix F7: issuerd claim-binding grammar matches interpolation exactly
+ok 345 - w6-fix F7: issuerd claim-binding grammar matches interpolation exactly
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w6-fix F3: stored outcomes serve row digests, not raw exports
-ok 331 - w6-fix F3: stored outcomes serve row digests, not raw exports
+ok 346 - w6-fix F3: stored outcomes serve row digests, not raw exports
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w6-fix F9: session logins are attributed to the resolved tenant
-ok 332 - w6-fix F9: session logins are attributed to the resolved tenant
+ok 347 - w6-fix F9: session logins are attributed to the resolved tenant
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w6-F1: capsule views and certificates carry row digests, never raw rows
-ok 333 - w6-F1: capsule views and certificates carry row digests, never raw rows
+ok 348 - w6-F1: capsule views and certificates carry row digests, never raw rows
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w6-F3: certified key.rotate cannot activate another tenant's pending key
-ok 334 - w6-F3: certified key.rotate cannot activate another tenant's pending key
+ok 349 - w6-F3: certified key.rotate cannot activate another tenant's pending key
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w6-F4: revoking another tenant's vault key is an INV-404, not a silent no-op
-ok 335 - w6-F4: revoking another tenant's vault key is an INV-404, not a silent no-op
+ok 350 - w6-F4: revoking another tenant's vault key is an INV-404, not a silent no-op
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w6-F5: an export that crosses the reconstruction budget fails with output suppressed
-ok 336 - w6-F5: an export that crosses the reconstruction budget fails with output suppressed
+ok 351 - w6-F5: an export that crosses the reconstruction budget fails with output suppressed
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w6-F2: /v1/keys and attest expose only the caller's own vault entries
-ok 337 - w6-F2: /v1/keys and attest expose only the caller's own vault entries
+ok 352 - w6-F2: /v1/keys and attest expose only the caller's own vault entries
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w6-F7: issuerd never signs unverified caller claims
-ok 338 - w6-F7: issuerd never signs unverified caller claims
+ok 353 - w6-F7: issuerd never signs unverified caller claims
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: DEK F1: retention sweep survives a re-minted tombstone id
-ok 339 - DEK F1: retention sweep survives a re-minted tombstone id
+ok 354 - DEK F1: retention sweep survives a re-minted tombstone id
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: DEK F5: undecryptable residue is shredded by the sweep, not kept forever
-ok 340 - DEK F5: undecryptable residue is shredded by the sweep, not kept forever
+ok 355 - DEK F5: undecryptable residue is shredded by the sweep, not kept forever
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: DEK F6: record AAD is injective — transplanted ciphertext never decrypts
-ok 341 - DEK F6: record AAD is injective — transplanted ciphertext never decrypts
+ok 356 - DEK F6: record AAD is injective — transplanted ciphertext never decrypts
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: DEK F2: deployment config carries data keys wrapped under the vault master key
-ok 342 - DEK F2: deployment config carries data keys wrapped under the vault master key
+ok 357 - DEK F2: deployment config carries data keys wrapped under the vault master key
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: P-3: a release cannot cite a capsule belonging to another actor
-ok 343 - P-3: a release cannot cite a capsule belonging to another actor
+ok 358 - P-3: a release cannot cite a capsule belonging to another actor
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: P-8: fallback release validates and binds citations
-ok 344 - P-8: fallback release validates and binds citations
+ok 359 - P-8: fallback release validates and binds citations
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: DEK F4: deleted dataset rows do not linger in the target WAL
-ok 345 - DEK F4: deleted dataset rows do not linger in the target WAL
+ok 360 - DEK F4: deleted dataset rows do not linger in the target WAL
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: A-1: extraction honours the canonical-covered document limit
-ok 346 - A-1: extraction honours the canonical-covered document limit
+ok 361 - A-1: extraction honours the canonical-covered document limit
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-clock F1: recoverClock records the discontinuity and un-wedges the gate
-ok 347 - w7-clock F1: recoverClock records the discontinuity and un-wedges the gate
+ok 362 - w7-clock F1: recoverClock records the discontinuity and un-wedges the gate
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-clock F2: succession certificates survive an expired active policy
-ok 348 - w7-clock F2: succession certificates survive an expired active policy
+ok 363 - w7-clock F2: succession certificates survive an expired active policy
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-clock F3: token revocation kills its cookie sessions immediately
-ok 349 - w7-clock F3: token revocation kills its cookie sessions immediately
+ok 364 - w7-clock F3: token revocation kills its cookie sessions immediately
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-console F4: logout kills every sibling session of the same token
-ok 350 - w7-console F4: logout kills every sibling session of the same token
+ok 365 - w7-console F4: logout kills every sibling session of the same token
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-console F1: per-tenant session cap fires before the global cap
-ok 351 - w7-console F1: per-tenant session cap fires before the global cap
+ok 366 - w7-console F1: per-tenant session cap fires before the global cap
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-backup F1: the manifest must verify under an external trust anchor, not keys inside the artifact
-ok 352 - w7-backup F1: the manifest must verify under an external trust anchor, not keys inside the artifact
+ok 367 - w7-backup F1: the manifest must verify under an external trust anchor, not keys inside the artifact
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-backup F4: wal sidecars and symlinked artifacts are rejected
-ok 353 - w7-backup F4: wal sidecars and symlinked artifacts are rejected
+ok 368 - w7-backup F4: wal sidecars and symlinked artifacts are rejected
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-backup F3/F7: committed audit heads catch truncation and a dropped audit table
-ok 354 - w7-backup F3/F7: committed audit heads catch truncation and a dropped audit table
+ok 369 - w7-backup F3/F7: committed audit heads catch truncation and a dropped audit table
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-backup F6: traversal entries inside a signed payload are rejected
-ok 355 - w7-backup F6: traversal entries inside a signed payload are rejected
+ok 370 - w7-backup F6: traversal entries inside a signed payload are rejected
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-backup F5: a torn cross-database snapshot fails the referential check
-ok 356 - w7-backup F5: a torn cross-database snapshot fails the referential check
+ok 371 - w7-backup F5: a torn cross-database snapshot fails the referential check
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-seam F1: technicalValidation enforces advisory/confidence/channel/kind bars and persists evidence
-ok 357 - w7-seam F1: technicalValidation enforces advisory/confidence/channel/kind bars and persists evidence
+ok 372 - w7-seam F1: technicalValidation enforces advisory/confidence/channel/kind bars and persists evidence
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-seam F2/F10: history replays in order and revalidation extends coverage
-ok 358 - w7-seam F2/F10: history replays in order and revalidation extends coverage
+ok 373 - w7-seam F2/F10: history replays in order and revalidation extends coverage
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-seam F3: drifted issuer evidence stops counting at evaluation
-ok 359 - w7-seam F3: drifted issuer evidence stops counting at evaluation
+ok 374 - w7-seam F3: drifted issuer evidence stops counting at evaluation
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-seam F4: stale-digest acks excluded from quorum; custodian re-acks
-ok 360 - w7-seam F4: stale-digest acks excluded from quorum; custodian re-acks
+ok 375 - w7-seam F4: stale-digest acks excluded from quorum; custodian re-acks
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-seam F5/F7: ceremony spent at reservation; revoke_old honored
-ok 361 - w7-seam F5/F7: ceremony spent at reservation; revoke_old honored
+ok 376 - w7-seam F5/F7: ceremony spent at reservation; revoke_old honored
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-seam F6: nested composite child escrows CHILD_TYPE
-ok 362 - w7-seam F6: nested composite child escrows CHILD_TYPE
+ok 377 - w7-seam F6: nested composite child escrows CHILD_TYPE
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w7-seam F9: wedged composite reconciles composite-aware
-ok 363 - w7-seam F9: wedged composite reconciles composite-aware
+ok 378 - w7-seam F9: wedged composite reconciles composite-aware
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: CAN-F1: revocation existence oracle is own-property only — prototype members cannot mint revocation records
-ok 364 - CAN-F1: revocation existence oracle is own-property only — prototype members cannot mint revocation records
+ok 379 - CAN-F1: revocation existence oracle is own-property only — prototype members cannot mint revocation records
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: CAN-F2: evidence binding on an inherited member can never be satisfied by a constant claim
-ok 365 - CAN-F2: evidence binding on an inherited member can never be satisfied by a constant claim
+ok 380 - CAN-F2: evidence binding on an inherited member can never be satisfied by a constant claim
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: CAN-F2b: evidence binding on an object-valued leaf can never be satisfied vacuously
-ok 366 - CAN-F2b: evidence binding on an object-valued leaf can never be satisfied vacuously
+ok 381 - CAN-F2b: evidence binding on an object-valued leaf can never be satisfied vacuously
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: CAN-F3: verifyAttestation shares verifySigned strictness — extra keys, malleated encoding, prototype key_id
-ok 367 - CAN-F3: verifyAttestation shares verifySigned strictness — extra keys, malleated encoding, prototype key_id
+ok 382 - CAN-F3: verifyAttestation shares verifySigned strictness — extra keys, malleated encoding, prototype key_id
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: CAN-F4: every body the parser admits fits inside the envelope wrap — depth 31 in, 32 out
-ok 368 - CAN-F4: every body the parser admits fits inside the envelope wrap — depth 31 in, 32 out
+ok 383 - CAN-F4: every body the parser admits fits inside the envelope wrap — depth 31 in, 32 out
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: CAN-F5: schema-layer type confusion surfaces as INV-400-SCHEMA, never 500/503
-ok 369 - CAN-F5: schema-layer type confusion surfaces as INV-400-SCHEMA, never 500/503
+ok 384 - CAN-F5: schema-layer type confusion surfaces as INV-400-SCHEMA, never 500/503
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: CAN-F6: canonical() rejects every Object.prototype member name as a key
-ok 370 - CAN-F6: canonical() rejects every Object.prototype member name as a key
+ok 385 - CAN-F6: canonical() rejects every Object.prototype member name as a key
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: CAN-F7: committed parse vectors and envelope rejection vectors are honoured by the shipped implementation
-ok 371 - CAN-F7: committed parse vectors and envelope rejection vectors are honoured by the shipped implementation
+ok 386 - CAN-F7: committed parse vectors and envelope rejection vectors are honoured by the shipped implementation
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: CAN-F10: evidence claims must be a scalar map — strings, numbers and arrays are schema-invalid
-ok 372 - CAN-F10: evidence claims must be a scalar map — strings, numbers and arrays are schema-invalid
+ok 387 - CAN-F10: evidence claims must be a scalar map — strings, numbers and arrays are schema-invalid
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: CAN-F11: prototype-member suite names never satisfy the suite allowlist
-ok 373 - CAN-F11: prototype-member suite names never satisfy the suite allowlist
+ok 388 - CAN-F11: prototype-member suite names never satisfy the suite allowlist
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: CAN-F8: query grammar rejects -0 exactly like the body grammar
-ok 374 - CAN-F8: query grammar rejects -0 exactly like the body grammar
+ok 389 - CAN-F8: query grammar rejects -0 exactly like the body grammar
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: CAN-F12: capsule nonces and perception attestation nonces live in separate namespaces
-ok 375 - CAN-F12: capsule nonces and perception attestation nonces live in separate namespaces
+ok 390 - CAN-F12: capsule nonces and perception attestation nonces live in separate namespaces
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w8 F9: composite over an expired child certificate escrows at evaluation
-ok 376 - w8 F9: composite over an expired child certificate escrows at evaluation
+ok 391 - w8 F9: composite over an expired child certificate escrows at evaluation
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w8 F8: a certified composite child certificate refuses solo execution
-ok 377 - w8 F8: a certified composite child certificate refuses solo execution
+ok 392 - w8 F8: a certified composite child certificate refuses solo execution
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w8 F1/F3/F7/F16: uncompensated bail records FAILED parent + per-child outcomes
-ok 378 - w8 F1/F3/F7/F16: uncompensated bail records FAILED parent + per-child outcomes
+ok 393 - w8 F1/F3/F7/F16: uncompensated bail records FAILED parent + per-child outcomes
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w8 F4/F6: a verified composite child settles to its recorded outcome without re-firing effects
-ok 379 - w8 F4/F6: a verified composite child settles to its recorded outcome without re-firing effects
+ok 394 - w8 F4/F6: a verified composite child settles to its recorded outcome without re-firing effects
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w8 F2: an egressed export inside a failed composite is charged and watermarked
-ok 380 - w8 F2: an egressed export inside a failed composite is charged and watermarked
+ok 395 - w8 F2: an egressed export inside a failed composite is charged and watermarked
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w8 F5: reconcile verifies a time-embedded journal entry after the clock moved
-ok 381 - w8 F5: reconcile verifies a time-embedded journal entry after the clock moved
+ok 396 - w8 F5: reconcile verifies a time-embedded journal entry after the clock moved
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w8 F11/F13: re-declare preserves validation; UNCOVERED cannot self-promote; validation earns ENFORCED
-ok 382 - w8 F11/F13: re-declare preserves validation; UNCOVERED cannot self-promote; validation earns ENFORCED
+ok 397 - w8 F11/F13: re-declare preserves validation; UNCOVERED cannot self-promote; validation earns ENFORCED
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w8 F10/F12/F14: unreachable issuer stales paths; same-ms replays keep write order; re-drift never throws
-ok 383 - w8 F10/F12/F14: unreachable issuer stales paths; same-ms replays keep write order; re-drift never throws
+ok 398 - w8 F10/F12/F14: unreachable issuer stales paths; same-ms replays keep write order; re-drift never throws
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w8 F10 (unit): same-ms coverage events replay in insertion order
-ok 384 - w8 F10 (unit): same-ms coverage events replay in insertion order
+ok 399 - w8 F10 (unit): same-ms coverage events replay in insertion order
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: F1: pre-AAD-upgrade rows decrypt via the legacy fallback
-ok 385 - F1: pre-AAD-upgrade rows decrypt via the legacy fallback
+ok 400 - F1: pre-AAD-upgrade rows decrypt via the legacy fallback
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: F2: a contended WAL checkpoint keeps committed work green and the flag armed
-ok 386 - F2: a contended WAL checkpoint keeps committed work green and the flag armed
+ok 401 - F2: a contended WAL checkpoint keeps committed work green and the flag armed
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: F3: superseding target writes truncate the WAL at commit
-ok 387 - F3: superseding target writes truncate the WAL at commit
+ok 402 - F3: superseding target writes truncate the WAL at commit
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: COV-004: a live manifest drift drops the dependent path to UNKNOWN and opens an owner task
-ok 388 - COV-004: a live manifest drift drops the dependent path to UNKNOWN and opens an owner task
+ok 403 - COV-004: a live manifest drift drops the dependent path to UNKNOWN and opens an owner task
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: COV-005: stale evidence transitions to UNKNOWN at read time with event and owner task
-ok 389 - COV-005: stale evidence transitions to UNKNOWN at read time with event and owner task
+ok 404 - COV-005: stale evidence transitions to UNKNOWN at read time with event and owner task
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: COV-005: a fresh MONITORED path produces no expiry task or event
-ok 390 - COV-005: a fresh MONITORED path produces no expiry task or event
+ok 405 - COV-005: a fresh MONITORED path produces no expiry task or event
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: W8-TOOLING restore-check: execution keys never join the audit trust anchor (F1)
-ok 391 - W8-TOOLING restore-check: execution keys never join the audit trust anchor (F1)
+ok 406 - W8-TOOLING restore-check: execution keys never join the audit trust anchor (F1)
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: W8-TOOLING restore-check: db carrying audit table without committed heads fails (F5)
-ok 392 - W8-TOOLING restore-check: db carrying audit table without committed heads fails (F5)
+ok 407 - W8-TOOLING restore-check: db carrying audit table without committed heads fails (F5)
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: W8-TOOLING cli sign: keyfile consistency + option parse errors (F7)
-ok 393 - W8-TOOLING cli sign: keyfile consistency + option parse errors (F7)
+ok 408 - W8-TOOLING cli sign: keyfile consistency + option parse errors (F7)
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: W8-TOOLING cli init: duplicated tenants dedupe instead of half-writing (F9)
-ok 394 - W8-TOOLING cli init: duplicated tenants dedupe instead of half-writing (F9)
+ok 409 - W8-TOOLING cli init: duplicated tenants dedupe instead of half-writing (F9)
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w9-deploy F1: /health after issuance stays up and reports an integer p50
-ok 395 - w9-deploy F1: /health after issuance stays up and reports an integer p50
+ok 410 - w9-deploy F1: /health after issuance stays up and reports an integer p50
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w9-deploy F2: issuerd error responses never echo internal details
-ok 396 - w9-deploy F2: issuerd error responses never echo internal details
+ok 411 - w9-deploy F2: issuerd error responses never echo internal details
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w9-deploy F4: a wrong-issuer bearer gets the same 404 as a missing name
-ok 397 - w9-deploy F4: a wrong-issuer bearer gets the same 404 as a missing name
+ok 412 - w9-deploy F4: a wrong-issuer bearer gets the same 404 as a missing name
   ---
   duration_ms: 0
   type: 'test'
   ...
 # {"error":"INV-503-CONFIG","message":"keystore.json must not be readable by group or other users"}
 # Subtest: w9-deploy F5: issuerd pins Host and carries socket timeouts
-ok 398 - w9-deploy F5: issuerd pins Host and carries socket timeouts
+ok 413 - w9-deploy F5: issuerd pins Host and carries socket timeouts
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w9-deploy F6: serve refuses world/group-readable keystore, not just config
-ok 399 - w9-deploy F6: serve refuses world/group-readable keystore, not just config
+ok 414 - w9-deploy F6: serve refuses world/group-readable keystore, not just config
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w9-deploy F7: bootstrap issuer specs carry bearer digests, not plaintext tokens
-ok 400 - w9-deploy F7: bootstrap issuer specs carry bearer digests, not plaintext tokens
+ok 415 - w9-deploy F7: bootstrap issuer specs carry bearer digests, not plaintext tokens
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w9-deploy F9: the coarse bucket is spent before request validation
-ok 401 - w9-deploy F9: the coarse bucket is spent before request validation
+ok 416 - w9-deploy F9: the coarse bucket is spent before request validation
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w9-deploy F10: constructor-name kinds miss own-property lookup; tokenless daemon stays closed
-ok 402 - w9-deploy F10: constructor-name kinds miss own-property lookup; tokenless daemon stays closed
+ok 417 - w9-deploy F10: constructor-name kinds miss own-property lookup; tokenless daemon stays closed
   ---
   duration_ms: 0
   type: 'test'
   ...
-# Subtest: w9-deploy F3: --trust-proxy keys rate buckets on X-Forwarded-For from a loopback peer
-ok 403 - w9-deploy F3: --trust-proxy keys rate buckets on X-Forwarded-For from a loopback peer
+# Subtest: w9-deploy F3: --trust-proxy keys rate buckets on X-Forwarded-For only with the proxy secret
+ok 418 - w9-deploy F3: --trust-proxy keys rate buckets on X-Forwarded-For only with the proxy secret
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w9-fixverify NB-1: malformed UTF-8 bodies get INV-400-SCHEMA, not a 500
-ok 404 - w9-fixverify NB-1: malformed UTF-8 bodies get INV-400-SCHEMA, not a 500
+ok 419 - w9-fixverify NB-1: malformed UTF-8 bodies get INV-400-SCHEMA, not a 500
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w9-fixverify: a proto-member issuer name resolves to the same 404 as a ghost
-ok 405 - w9-fixverify: a proto-member issuer name resolves to the same 404 as a ghost
+ok 420 - w9-fixverify: a proto-member issuer name resolves to the same 404 as a ghost
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w9-fixverify F5: transforms container types are schema errors, not signed payloads
-ok 406 - w9-fixverify F5: transforms container types are schema errors, not signed payloads
+ok 421 - w9-fixverify F5: transforms container types are schema errors, not signed payloads
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w9-fixverify NB-4: proposals are depth-bounded at admission, before any write
-ok 407 - w9-fixverify NB-4: proposals are depth-bounded at admission, before any write
+ok 422 - w9-fixverify NB-4: proposals are depth-bounded at admission, before any write
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w9-fixverify NB-5: a legacy bare nonce row still blocks replay
-ok 408 - w9-fixverify NB-5: a legacy bare nonce row still blocks replay
+ok 423 - w9-fixverify NB-5: a legacy bare nonce row still blocks replay
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w9-fixverify NB-2: the forbidden key set is the literal three-verifier list
-ok 409 - w9-fixverify NB-2: the forbidden key set is the literal three-verifier list
+ok 424 - w9-fixverify NB-2: the forbidden key set is the literal three-verifier list
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w9-network F1: the config snapshot watches auth, keys, components and data keys
-ok 410 - w9-network F1: the config snapshot watches auth, keys, components and data keys
+ok 425 - w9-network F1: the config snapshot watches auth, keys, components and data keys
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w9-network F2: an emergency policy cannot weaken network, remediation, bindings or windows
-ok 411 - w9-network F2: an emergency policy cannot weaken network, remediation, bindings or windows
+ok 426 - w9-network F2: an emergency policy cannot weaken network, remediation, bindings or windows
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w9-network F3: a widened live policy cannot retro-extend a signed capability channel
-ok 412 - w9-network F3: a widened live policy cannot retro-extend a signed capability channel
+ok 427 - w9-network F3: a widened live policy cannot retro-extend a signed capability channel
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w9-network F4: clock recovery never resurrects lapsed authority
-ok 413 - w9-network F4: clock recovery never resurrects lapsed authority
+ok 428 - w9-network F4: clock recovery never resurrects lapsed authority
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w9-network F5: a failed grant revocation leaves no phantom revoke
-ok 414 - w9-network F5: a failed grant revocation leaves no phantom revoke
+ok 429 - w9-network F5: a failed grant revocation leaves no phantom revoke
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w9-network F6: a quarantined-device principal cannot dispatch another actor's certificate
-ok 415 - w9-network F6: a quarantined-device principal cannot dispatch another actor's certificate
+ok 430 - w9-network F6: a quarantined-device principal cannot dispatch another actor's certificate
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w9-network F7: quarantine denials on execute join the containment ledger
-ok 416 - w9-network F7: quarantine denials on execute join the containment ledger
+ok 431 - w9-network F7: quarantine denials on execute join the containment ledger
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w9-network F8: a stale issuer manifest is drift, not freshness
-ok 417 - w9-network F8: a stale issuer manifest is drift, not freshness
+ok 432 - w9-network F8: a stale issuer manifest is drift, not freshness
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w9-network F9: an unrelated operator cannot cancel another actor's capsule
-ok 418 - w9-network F9: an unrelated operator cannot cancel another actor's capsule
+ok 433 - w9-network F9: an unrelated operator cannot cancel another actor's capsule
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w9-network F10: an idempotent replay cannot slip past a fresh quarantine
-ok 419 - w9-network F10: an idempotent replay cannot slip past a fresh quarantine
+ok 434 - w9-network F10: an idempotent replay cannot slip past a fresh quarantine
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w9-network F11: a re-assertion audit records the previous section digests
-ok 420 - w9-network F11: a re-assertion audit records the previous section digests
+ok 435 - w9-network F11: a re-assertion audit records the previous section digests
   ---
   duration_ms: 0
   type: 'test'
   ...
 # Subtest: w9-network F12: the deploy unit carries clock/syscall/sandbox hardening
-ok 421 - w9-network F12: the deploy unit carries clock/syscall/sandbox hardening
+ok 436 - w9-network F12: the deploy unit carries clock/syscall/sandbox hardening
   ---
   duration_ms: 0
   type: 'test'
   ...
-1..421
-# tests 421
+# Subtest: w9-schema F-4: master.key without keystore.json refuses to silently re-key
+ok 437 - w9-schema F-4: master.key without keystore.json refuses to silently re-key
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w9-schema F-5: issuer specs validate shape, not just presence
+ok 438 - w9-schema F-5: issuer specs validate shape, not just presence
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w9-schema F-3: caller-supplied request.subject_id never enters signed claims
+ok 439 - w9-schema F-3: caller-supplied request.subject_id never enters signed claims
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w9-schema F-7/F-8: stored id/version cannot shadow registry columns; tuple AADs both open
+ok 440 - w9-schema F-7/F-8: stored id/version cannot shadow registry columns; tuple AADs both open
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w9-schema F-8: legacy slash-AAD ciphertexts still decrypt after the migration
+ok 441 - w9-schema F-8: legacy slash-AAD ciphertexts still decrypt after the migration
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+# Subtest: w9-schema F-9: a leftover deployment dir gets an actionable refusal
+ok 442 - w9-schema F-9: a leftover deployment dir gets an actionable refusal
+  ---
+  duration_ms: 0
+  type: 'test'
+  ...
+1..442
+# tests 442
 # suites 0
-# pass 421
+# pass 442
 # fail 0
 # cancelled 0
 # skipped 0

@@ -2,7 +2,7 @@ import { mkdirSync, writeFileSync, existsSync, chmodSync, readFileSync } from 'n
 import { join, resolve } from 'node:path';
 import { randomBytes, generateKeyPairSync } from 'node:crypto';
 import { generateKey, signed, encrypt } from './crypto.mjs';
-import { hashBytes, canonical, digest } from './canonical.mjs';
+import { hashBytes, canonical, digest, parseStrict } from './canonical.mjs';
 import { defaultPolicy } from './policy.mjs';
 import { KeyVault } from './keystore.mjs';
 import { requireThat } from './errors.mjs';
@@ -127,7 +127,7 @@ export function issuerRecords(tenant) {
 export function createConfiguration(tenantNames = ['acme'], now = Date.now(), { vault = null, issuerEndpoint = null } = {}) {
   const config = { format: 'IF-CONFIG-1', profile: 'engineering', gate_id: 'local-software-gate', tenants: {} }, credentials = {}, custodianKeys = {}, issuerKeys = {}, componentSecrets = {}, identityKeys = {};
   for (const tenant of tenantNames) {
-    requireThat(/^[a-z][a-z0-9-]{1,31}$/.test(tenant), 'INV-400-SCHEMA', 'Tenant must use lowercase alphanumeric characters');
+    requireThat(/^[a-z][a-z0-9-]{1,31}$/.test(tenant), 'INV-400-SCHEMA', 'Tenant must start with a lowercase letter and use only lowercase letters, digits and hyphens (2–32 chars)');
     const policy = defaultPolicy(tenant), identities = {}, auth = {}, identityPrivate = {};
     const roles = [['operator', ['operator']], ['security', ['security']], ['auditor', ['auditor']], ['policy-admin', ['policy_admin']], ...Array.from({ length: 5 }, (_, i) => [`custodian-${i + 1}`, ['approver', 'custodian']])];
     credentials[tenant] = {}; custodianKeys[tenant] = {}; issuerKeys[tenant] = {}; componentSecrets[tenant] = {}; identityKeys[tenant] = identityPrivate;
@@ -179,7 +179,7 @@ export function createDevComponent(name) {
 
 export function bootstrap(directory, tenants = ['acme'], now = Date.now(), { issuerPort = 8090 } = {}) {
   directory = resolve(directory);
-  requireThat(!existsSync(directory), 'INV-409-CONFLICT', 'Refusing to overwrite an existing deployment directory', 409);
+  requireThat(!existsSync(directory), 'INV-409-CONFLICT', 'Refusing to overwrite an existing deployment directory — if this is an incomplete bootstrap, remove it and retry', 409);
   mkdirSync(directory, { recursive: true, mode: 0o700 }); chmodSync(directory, 0o700);
   // Deployment path: keys are generated INSIDE the software vault; config.json
   // on disk carries only public material (KEY-001/002 for this profile).
@@ -239,4 +239,14 @@ export function seedSyntheticResources(fabric, tenants) {
     fabric.target.seed(tenant, 'subject-operator', { subject_id: 'operator', mfa_status: 'enrolled', authenticators: ['auth-1'], privilege: 'standard' });
   }
 }
-export function loadConfiguration(directory) { return JSON.parse(readFileSync(join(resolve(directory), 'config.json'), 'utf8')); }
+// Strict grammar for the operator-authored config too: duplicate keys,
+// floats and oversize strings must fail at load (w10-fixverify F-12). Each
+// tenant name is validated against the strict charset AND refused when it
+// collides with an Object.prototype member — an inherited member resolving
+// inside tenant() would authenticate into a phantom tenant.
+export function loadConfiguration(directory) {
+  const config = parseStrict(readFileSync(join(resolve(directory), 'config.json'), 'utf8'));
+  for (const t of Object.keys(config.tenants ?? {}))
+    requireThat(/^[a-z][a-z0-9-]{1,31}$/.test(t) && !Object.hasOwn(Object.prototype, t) && !['constructor', 'watch', 'unwatch', 'prototype'].includes(t), 'INV-503-CONFIG', `Illegal tenant name ${t}`, 503);
+  return config;
+}

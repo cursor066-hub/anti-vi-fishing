@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync, statSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { bootstrap, loadConfiguration } from './bootstrap.mjs';
 import { Fabric } from './fabric.mjs';
@@ -33,11 +33,19 @@ try {
     requireThat(Number.isInteger(port) && port >= 1024 && port <= 65535, 'INV-400-SCHEMA', 'Port must be in 1024–65535');
     // Every credential-bearing file the daemon reads gets the custody check
     // — config.json alone left keystore/master key/tokens/DBs unguarded
-    // (w9-deploy F6).
-    for (const f of ['config.json', 'master.key', 'keystore.json', 'access-tokens.json', 'fabric.db', 'target.db'])
+    // (w9-deploy F6). The sweep also covers the private material bootstrap
+    // writes elsewhere in the directory: offline custodian identity keys,
+    // dev component ECDH secrets, issuer signing keys and SQLite sidecars
+    // (w10-fixverify F-4).
+    const custody = ['config.json', 'master.key', 'keystore.json', 'access-tokens.json', 'fabric.db', 'fabric.db-wal', 'fabric.db-shm', 'target.db', 'target.db-wal', 'target.db-shm'];
+    const sweep = (sub, pattern) => { try { for (const f of readdirSync(join(directory, sub))) if (pattern.test(f)) custody.push(join(sub, f)); } catch (e) { if (e.code !== 'ENOENT' && e.code !== 'ENOTDIR') throw e; } };
+    sweep('offline-custodians', /\.json$/);
+    sweep('issuers', /\.issuer\.json$/);
+    sweep('.', /^component-.*\.json$/);
+    for (const f of custody)
       try { requireThat((statSync(join(directory, f)).mode & 0o077) === 0, 'INV-503-CONFIG', `${f} must not be readable by group or other users`, 503); } catch (e) { if (e.code === 'ENOENT') continue; throw e; }
     const fabric = new Fabric(loadConfiguration(directory), directory), origin = option('origin', `http://127.0.0.1:${port}`);
-    const app = createServer(fabric, { port, origin, trustProxy: args.includes('--trust-proxy') }); await app.listen();
+    const app = createServer(fabric, { port, origin, trustProxy: args.includes('--trust-proxy'), proxySecret: option('proxy-secret', null) }); await app.listen();
     console.log(`Invariant Fabric engineering console: ${origin} (loopback only; no production guarantee)`);
     let closing = false;
     const close = async () => { if (closing) return; closing = true; await app.close(); fabric.close(); process.exitCode = 0; };

@@ -124,18 +124,20 @@ test('w9-deploy F10: constructor-name kinds miss own-property lookup; tokenless 
   await assert.rejects(() => httpJson('http://0.0.0.0:1/'), hasCode('INV-400-CONNECTOR'));
 });
 
-test('w9-deploy F3: --trust-proxy keys rate buckets on X-Forwarded-For from a loopback peer', async t => {
+test('w9-deploy F3: --trust-proxy keys rate buckets on X-Forwarded-For only with the proxy secret', async t => {
   const h = fixture(t);
   const origin = 'http://127.0.0.1:17778';
-  const app = createServer(h.f, { port: 0, origin, trustProxy: true }); await app.listen(); t.after(() => app.close());
+  const app = createServer(h.f, { port: 0, origin, trustProxy: true, proxySecret: 'test-proxy-secret-1234' }); await app.listen(); t.after(() => app.close());
   const port = app.server.address().port;
-  const hit = xff => new Promise((resolve, reject) => {
-    const req = http.request({ host: '127.0.0.1', port, path: '/session', method: 'POST', headers: { Host: '127.0.0.1:17778', Origin: origin, 'X-Forwarded-For': xff, 'Content-Type': 'application/json', 'Content-Length': 2 } },
+  const hit = (xff, secret = 'test-proxy-secret-1234') => new Promise((resolve, reject) => {
+    const headers = { Host: '127.0.0.1:17778', Origin: origin, 'X-Forwarded-For': xff, 'Content-Type': 'application/json', 'Content-Length': 2 };
+    if (secret) headers['X-Fabric-Proxy'] = secret;
+    const req = http.request({ host: '127.0.0.1', port, path: '/session', method: 'POST', headers },
       res => { res.resume(); res.on('end', () => resolve(res.statusCode)); });
     req.on('error', reject); req.end('{}');
   });
-  // Login bucket is 20/min per identity — a single forged XFF must exhaust
-  // only its own bucket, not the shared loopback one.
+  // Login bucket is 20/min per identity — a secreted XFF exhausts only its
+  // own bucket, not the shared loopback one (w10-fixverify F-2).
   for (let i = 0; i < 20; i++) assert.notEqual(await hit('10.9.9.9'), 429, `request ${i}`);
   assert.equal(await hit('10.9.9.9'), 429);
   assert.notEqual(await hit('10.9.9.8'), 429);

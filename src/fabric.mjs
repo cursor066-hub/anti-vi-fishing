@@ -120,6 +120,11 @@ export class Fabric {
     // master.key is the commit marker written last: a keystore without it
     // means a crash mid-persist — refuse rather than silently regenerate.
     if (existsSync(storePath) && !existsSync(masterPath)) throw new InvariantError('INV-503-CONFIG', 'Keystore exists but master key is missing — refusing to silently regenerate', 503);
+    // The mirror image is equally suspect: a stale master.key without a
+    // keystore means a prior wrapped store is gone — silently re-keying
+    // under a fresh master strands every stored DEK and wedges the NEXT
+    // persist on MAC mismatch, far from the cause (w9-schema F-4).
+    if (!existsSync(storePath) && existsSync(masterPath)) throw new InvariantError('INV-503-CONFIG', 'Master key exists but keystore is missing — refusing to silently re-key and strand existing wrapped records', 503);
     if (existsSync(storePath)) return KeyVault.load(storePath, JSON.parse(readFileSync(masterPath, 'utf8')).master_key);
     return new KeyVault(randomBytes(32).toString('base64url'));
   }
@@ -151,7 +156,10 @@ export class Fabric {
     return { count: ceremony.acknowledgements.length, live: domains.size, custodians: live };
   }
   close() { this.target.close(); this.store.close(); }
-  tenant(t) { const row = this.config.tenants[t]; requireThat(row, 'INV-404-NOT-FOUND', 'Resource not found', 404); return row; }
+  // Own-property only: an inherited member must never resolve into a
+  // phantom tenant (w10-fixverify F-12 — loadConfiguration also refuses
+  // proto-named tenants at boot, defence in depth).
+  tenant(t) { const row = Object.hasOwn(this.config.tenants ?? {}, t) ? this.config.tenants[t] : undefined; requireThat(row, 'INV-404-NOT-FOUND', 'Resource not found', 404); return row; }
   // Tenant data keys are stored wrapped under the vault master key in real
   // deployments (encryption_key_wrapped / watermark_key_wrapped); the
   // embedded-custody dev profile falls back to the plaintext fields
@@ -260,7 +268,7 @@ export class Fabric {
     requireThat(identity && !identity.revoked, 'INV-401-AUTH', 'Authentication required', 401); return identity;
   }
   authorize(p, roles) {
-    requireThat(p && this.config.tenants[p.tenant_id], 'INV-401-AUTH', 'Authentication required', 401);
+    requireThat(p && Object.hasOwn(this.config.tenants ?? {}, p.tenant_id), 'INV-401-AUTH', 'Authentication required', 401);
     const identity = this.identity(p);
     const effective = this.grantsFor(p.tenant_id, p.subject_id, this.clock()).roles ?? identity.roles;
     requireThat(effective.some(r => roles.includes(r)), 'INV-403-ROLE', 'Permission denied', 403);
