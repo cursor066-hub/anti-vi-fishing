@@ -2,1555 +2,1555 @@ TAP version 13
 # Subtest: ADV: signature malleability — every structural mutation rejects
 ok 1 - ADV: signature malleability — every structural mutation rejects
   ---
-  duration_ms: 1.993193
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: ADV: unicode normalisation confusion — NFC and NFD diverge
 ok 2 - ADV: unicode normalisation confusion — NFC and NFD diverge
   ---
-  duration_ms: 0.253309
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: ADV: merkle proof forgery — wrong index, size, hash and path order all reject
 ok 3 - ADV: merkle proof forgery — wrong index, size, hash and path order all reject
   ---
-  duration_ms: 1.012202
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: ADV: shamir share confusion — mixed, duplicated and truncated shares reject
 ok 4 - ADV: shamir share confusion — mixed, duplicated and truncated shares reject
   ---
-  duration_ms: 1.140971
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: ADV: capsule approval replay — the same signed approval cannot be resubmitted
 ok 5 - ADV: capsule approval replay — the same signed approval cannot be resubmitted
   ---
-  duration_ms: 52.997999
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: ADV: certificate cannot mint twice or execute past expiry
 ok 6 - ADV: certificate cannot mint twice or execute past expiry
   ---
-  duration_ms: 52.01212
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: ADV: issuer registry — ambiguous bare names resolve only via tenant key
 ok 7 - ADV: issuer registry — ambiguous bare names resolve only via tenant key
   ---
-  duration_ms: 0.687471
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: ADV: staged policy cannot skip a version or resurrect a rolled-back rule
 ok 8 - ADV: staged policy cannot skip a version or resurrect a rolled-back rule
   ---
-  duration_ms: 40.020678
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: ADV: envelope with evidence purpose cannot be submitted as approval
 ok 9 - ADV: envelope with evidence purpose cannot be submitted as approval
   ---
-  duration_ms: 38.300871
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: ACT-001 ACT-003: stable field order and exact material binding
 ok 10 - ACT-001 ACT-003: stable field order and exact material binding
   ---
-  duration_ms: 0.999265
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: ACT-007: ambiguous encodings and unknown types rejected
 ok 11 - ACT-007: ambiguous encodings and unknown types rejected
   ---
-  duration_ms: 0.405756
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: ACT-003: strict parser rejects duplicate keys, trailing values and prototype keys
 ok 12 - ACT-003: strict parser rejects duplicate keys, trailing values and prototype keys
   ---
-  duration_ms: 0.454288
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: ACT-003: 2000 deterministic canonical round trips with integer and Unicode vectors
 ok 13 - ACT-003: 2000 deterministic canonical round trips with integer and Unicode vectors
   ---
-  duration_ms: 41.582511
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: ACT-007: oversized nesting and bodies rejected
 ok 14 - ACT-007: oversized nesting and bodies rejected
   ---
-  duration_ms: 0.69442
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: COM-002 KEY-007: Ed25519 domain-separated signatures reject every altered field
 ok 15 - COM-002 KEY-007: Ed25519 domain-separated signatures reject every altered field
   ---
-  duration_ms: 3.05606
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: AUD-003: AES-GCM binds ciphertext to tenant, record id and key
 ok 16 - AUD-003: AES-GCM binds ciphertext to tenant, record id and key
   ---
-  duration_ms: 0.905409
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: IF-CJSON-1: every recorded vector produces the recorded output
 ok 17 - IF-CJSON-1: every recorded vector produces the recorded output
   ---
-  duration_ms: 0.958352
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: IF-ENVELOPE-1: recorded envelopes verify under node:crypto
 ok 18 - IF-ENVELOPE-1: recorded envelopes verify under node:crypto
   ---
-  duration_ms: 1.843118
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: parseStrict: rejects every duplicate-key injection
 ok 19 - parseStrict: rejects every duplicate-key injection
   ---
-  duration_ms: 0.443356
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: IF-CJSON-1: non-serialisable edge values reject (cannot appear on the wire)
 ok 20 - IF-CJSON-1: non-serialisable edge values reject (cannot appear on the wire)
   ---
-  duration_ms: 0.213889
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: parseStrict: envelope text still parses and verifies end-to-end
 ok 21 - parseStrict: envelope text still parses and verifies end-to-end
   ---
-  duration_ms: 1.397574
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: COM-002: all independently signed certificate binding mutations still fail registered-authority equality
 ok 22 - COM-002: all independently signed certificate binding mutations still fail registered-authority equality
   ---
-  duration_ms: 83.062521
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: RUN-004: runtime issuer-key revocation and active-policy change invalidate cached token
 ok 23 - RUN-004: runtime issuer-key revocation and active-policy change invalidate cached token
   ---
-  duration_ms: 44.314602
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: DAT-001 COM-009: exact data export cannot return extra columns from downstream
 ok 24 - DAT-001 COM-009: exact data export cannot return extra columns from downstream
   ---
-  duration_ms: 45.303935
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: DAT-001: caller cannot mislabel dataset jurisdiction or sensitivity
 ok 25 - DAT-001: caller cannot mislabel dataset jurisdiction or sensitivity
   ---
-  duration_ms: 38.278475
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: IDN-001 POL-011: an initiator cannot approve their own protected action even with an eligible signing key
 ok 26 - IDN-001 POL-011: an initiator cannot approve their own protected action even with an eligible signing key
   ---
-  duration_ms: 41.560959
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: AIG-006: source prose cannot override typed policy fields
 ok 27 - AIG-006: source prose cannot override typed policy fields
   ---
-  duration_ms: 38.091993
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: KEY-010 NFR-MNT-002: independent verifiers reject signed-log tampering and duplicate JSON keys
 ok 28 - KEY-010 NFR-MNT-002: independent verifiers reject signed-log tampering and duplicate JSON keys
   ---
-  duration_ms: 146.729356
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: ACT-007 UX-002: unsupported or ambiguous currency scales fail rather than render a false amount
 ok 29 - ACT-007 UX-002: unsupported or ambiguous currency scales fail rather than render a false amount
   ---
-  duration_ms: 36.043468
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: POL-001 POL-002 POL-015: exact inputs and trusted test time produce identical decision and reasons
 ok 30 - POL-001 POL-002 POL-015: exact inputs and trusted test time produce identical decision and reasons
   ---
-  duration_ms: 160.57108
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: CON-004 COM-012: missing data-output fields return UNCERTAIN rather than an exception after dispatch
 ok 31 - CON-004 COM-012: missing data-output fields return UNCERTAIN rather than an exception after dispatch
   ---
-  duration_ms: 55.707064
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: HTTP: health, ready, console assets and hardened headers are served
 ok 32 - HTTP: health, ready, console assets and hardened headers are served
   ---
-  duration_ms: 61.913198
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: HTTP: missing/expired auth, cross origin, unknown host, traversal and cross-tenant objects denied
 ok 33 - HTTP: missing/expired auth, cross origin, unknown host, traversal and cross-tenant objects denied
   ---
-  duration_ms: 47.048709
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: HTTP: duplicate keys, wrong content-type and huge bodies reject safely
 ok 34 - HTTP: duplicate keys, wrong content-type and huge bodies reject safely
   ---
-  duration_ms: 42.106645
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: HTTP: same-origin HttpOnly cookie session requires CSRF and logs out
 ok 35 - HTTP: same-origin HttpOnly cookie session requires CSRF and logs out
   ---
-  duration_ms: 38.296714
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: HTTP: full propose -> evidence -> independent signatures -> ALLOW -> certificate -> execute -> audit
 ok 36 - HTTP: full propose -> evidence -> independent signatures -> ALLOW -> certificate -> execute -> audit
   ---
-  duration_ms: 76.575901
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: PER-007 PER-009: Secure Perception is dev-attested: forged attestations fail, releases are encrypted envelopes, no plaintext path
 ok 37 - PER-007 PER-009: Secure Perception is dev-attested: forged attestations fail, releases are encrypted envelopes, no plaintext path
   ---
-  duration_ms: 46.776775
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: COM-003 NFR-TST-002: eight independent gate workers race; exactly one certificate is consumed
 ok 38 - COM-003 NFR-TST-002: eight independent gate workers race; exactly one certificate is consumed
   ---
-  duration_ms: 357.006636
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: DAT-002: concurrent gates cannot overspend shared rolling budget
 ok 39 - DAT-002: concurrent gates cannot overspend shared rolling budget
   ---
-  duration_ms: 321.328077
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: NFR-SEC-004: bootstrap creates random credentials, private files and refuses overwrite
 ok 40 - NFR-SEC-004: bootstrap creates random credentials, private files and refuses overwrite
   ---
-  duration_ms: 60.194008
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: UX-002 UX-003: UI state logic exposes no generic approval or executable non-ALLOW state
 ok 41 - UX-002 UX-003: UI state logic exposes no generic approval or executable non-ALLOW state
   ---
-  duration_ms: 0.447798
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: UX-007: static interface labels all named inputs and uses no unsafe DOM injection sink
 ok 42 - UX-007: static interface labels all named inputs and uses no unsafe DOM injection sink
   ---
-  duration_ms: 0.533677
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: UX-006 NET-010: /v1/approvals/batch and /v1/containment are real routes
 ok 43 - UX-006 NET-010: /v1/approvals/batch and /v1/containment are real routes
   ---
-  duration_ms: 54.919871
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: RUN-006: rejection metrics count by reason code on the live HTTP surface
 ok 44 - RUN-006: rejection metrics count by reason code on the live HTTP surface
   ---
-  duration_ms: 37.789519
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: UX-007: the controlled-workspace fallback succeeds end-to-end when policy permits
 ok 45 - UX-007: the controlled-workspace fallback succeeds end-to-end when policy permits
   ---
-  duration_ms: 35.582147
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: AUD-009: security evidence continues while optional analytics is disabled
 ok 46 - AUD-009: security evidence continues while optional analytics is disabled
   ---
-  duration_ms: 34.878823
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: EVD-001 CON-002: issuer kind ceiling — bank key cannot mint governance_review
 ok 47 - EVD-001 CON-002: issuer kind ceiling — bank key cannot mint governance_review
   ---
-  duration_ms: 63.815054
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: EVD-001: evidence bound to a different bank account is rejected at attach
 ok 48 - EVD-001: evidence bound to a different bank account is rejected at attach
   ---
-  duration_ms: 44.079278
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: CON-006: issuer-drift flag suspends evidence until cleared
 ok 49 - CON-006: issuer-drift flag suspends evidence until cleared
   ---
-  duration_ms: 45.799352
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: RUN-007 NFR-SEC-005: issuerd refuses cross-tenant issuance; record miss is an in-band conflict
 ok 50 - RUN-007 NFR-SEC-005: issuerd refuses cross-tenant issuance; record miss is an in-band conflict
   ---
-  duration_ms: 17.138595
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: NFR-SEC-005: /v1/issuers lists only the holder tenant
 ok 51 - NFR-SEC-005: /v1/issuers lists only the holder tenant
   ---
-  duration_ms: 3.701099
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: loadIssuers: prototype-colliding issuer names stay resolvable
 ok 52 - loadIssuers: prototype-colliding issuer names stay resolvable
   ---
-  duration_ms: 0.712026
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: loadIssuers: ":" and malformed tenants are rejected at spec load
 ok 53 - loadIssuers: ":" and malformed tenants are rejected at spec load
   ---
-  duration_ms: 0.579476
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: DAT-009: touching every row crosses the coverage threshold and denies
 ok 54 - DAT-009: touching every row crosses the coverage threshold and denies
   ---
-  duration_ms: 65.470275
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: NET-010: denied consumes produce containment records; the report reconstructs the sequence
 ok 55 - NET-010: denied consumes produce containment records; the report reconstructs the sequence
   ---
-  duration_ms: 48.821064
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: COV-007: the coverage manifest verifies against the audit key and lists every declared path
 ok 56 - COV-007: the coverage manifest verifies against the audit key and lists every declared path
   ---
-  duration_ms: 39.566701
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: AUD-010: an operational principal sees digest-level audit entries; the auditor sees full signed envelopes
 ok 57 - AUD-010: an operational principal sees digest-level audit entries; the auditor sees full signed envelopes
   ---
-  duration_ms: 55.759699
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: UX-006: a batch approves each declared action; hidden additions and omissions invalidate it
 ok 58 - UX-006: a batch approves each declared action; hidden additions and omissions invalidate it
   ---
-  duration_ms: 54.003015
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: KEY-005: rotating the audit key Ed25519 -> ES256 keeps old entries verifiable
 ok 59 - KEY-005: rotating the audit key Ed25519 -> ES256 keeps old entries verifiable
   ---
-  duration_ms: 84.80772
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: EVD-009: missing, conflicting and unverifiable evidence yield distinct reason codes
 ok 60 - EVD-009: missing, conflicting and unverifiable evidence yield distinct reason codes
   ---
-  duration_ms: 45.810138
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: RUN-009: denial, throttle, quarantine and infrastructure failure produce distinct stable codes
 ok 61 - RUN-009: denial, throttle, quarantine and infrastructure failure produce distinct stable codes
   ---
-  duration_ms: 52.820002
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: AIG-004: advisory output records model identity, version, provider and digests in the audit trail
 ok 62 - AIG-004: advisory output records model identity, version, provider and digests in the audit trail
   ---
-  duration_ms: 38.567074
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: CON-010: the target manifest surfaces limitations and the engineering profile flag
 ok 63 - CON-010: the target manifest surfaces limitations and the engineering profile flag
   ---
-  duration_ms: 38.792553
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: ACT-006: free-form text is never an authoritative action representation
 ok 64 - ACT-006: free-form text is never an authoritative action representation
   ---
-  duration_ms: 35.091024
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: EVD-011 AIG-008: advisory-marked evidence cannot satisfy an authoritative requirement
 ok 65 - EVD-011 AIG-008: advisory-marked evidence cannot satisfy an authoritative requirement
   ---
-  duration_ms: 40.298845
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: CON-005: connector reads are bounded — the retry budget caps attempts
 ok 66 - CON-005: connector reads are bounded — the retry budget caps attempts
   ---
-  duration_ms: 15.824393
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: NET-005: losing device health withdraws ordinary capability immediately
 ok 67 - NET-005: losing device health withdraws ordinary capability immediately
   ---
-  duration_ms: 39.586482
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: NET-008: firewall changes are protected actions requiring evidence and approval
 ok 68 - NET-008: firewall changes are protected actions requiring evidence and approval
   ---
-  duration_ms: 38.348363
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: PER-010: the controlled-workspace fallback is labelled lower-assurance and policy-gated
 ok 69 - PER-010: the controlled-workspace fallback is labelled lower-assurance and policy-gated
   ---
-  duration_ms: 35.713432
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: IDN-003: rule identity_classes admits only listed classes
 ok 70 - IDN-003: rule identity_classes admits only listed classes
   ---
-  duration_ms: 39.158686
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: IDN-010: rule min_proofing requires the actor identity to carry it
 ok 71 - IDN-010: rule min_proofing requires the actor identity to carry it
   ---
-  duration_ms: 42.097601
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: NET-005 NET-006: remediation service must be policy-allowlisted and is audited
 ok 72 - NET-005 NET-006: remediation service must be policy-allowlisted and is audited
   ---
-  duration_ms: 34.734108
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: AUD-006: evidence cannot claim retention past the per-kind policy ceiling
 ok 73 - AUD-006: evidence cannot claim retention past the per-kind policy ceiling
   ---
-  duration_ms: 39.106714
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: AUD-010: named projections filter the verified page without breaking integrity
 ok 74 - AUD-010: named projections filter the verified page without breaking integrity
   ---
-  duration_ms: 50.115545
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: CON-009: connector status reports per-issuer call latency and error telemetry
 ok 75 - CON-009: connector status reports per-issuer call latency and error telemetry
   ---
-  duration_ms: 36.059918
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: DAT-008: exports always require an approval — zero threshold is constitutionally refused
 ok 76 - DAT-008: exports always require an approval — zero threshold is constitutionally refused
   ---
-  duration_ms: 45.427998
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: DAT-005: aggregate transform generalises numeric cells deterministically
 ok 77 - DAT-005: aggregate transform generalises numeric cells deterministically
   ---
-  duration_ms: 0.36876
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: NFR-AVL-004: per-class stale_ms tightens but cannot loosen the default window
 ok 78 - NFR-AVL-004: per-class stale_ms tightens but cannot loosen the default window
   ---
-  duration_ms: 41.932941
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: COV-005 COV-009: stale evidence ages a MONITORED path back to UNKNOWN
 ok 79 - COV-005 COV-009: stale evidence ages a MONITORED path back to UNKNOWN
   ---
-  duration_ms: 34.096209
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: KEY-012: ceremony devices are member-validated and recorded
 ok 80 - KEY-012: ceremony devices are member-validated and recorded
   ---
-  duration_ms: 36.580793
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: COV-001 COV-005 COV-009 COV-010: path classes, owner tasks, history replay, technical validation
 ok 81 - COV-001 COV-005 COV-009 COV-010: path classes, owner tasks, history replay, technical validation
   ---
-  duration_ms: 35.731136
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: UX-010: digest-only scoping hides payload bodies from unprivileged roles
 ok 82 - UX-010: digest-only scoping hides payload bodies from unprivileged roles
   ---
-  duration_ms: 48.935898
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: COV-002: the UNCOVERED label is representable, creates an owner task and never reads as observed
 ok 83 - COV-002: the UNCOVERED label is representable, creates an owner task and never reads as observed
   ---
-  duration_ms: 45.776304
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: COV-003: the coverage evidence bundle exports, verifies offline and detects tampering
 ok 84 - COV-003: the coverage evidence bundle exports, verifies offline and detects tampering
   ---
-  duration_ms: 70.465733
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: COV-006: coverage state is scoped per environment without cross-contamination
 ok 85 - COV-006: coverage state is scoped per environment without cross-contamination
   ---
-  duration_ms: 51.993438
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: COM-007 COM-008: no direct-authenticate surface exists; a certificate bound to one action performs no other
 ok 86 - COM-007 COM-008: no direct-authenticate surface exists; a certificate bound to one action performs no other
   ---
-  duration_ms: 59.855602
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: RUN-008: adversarial request load neither evicts policy nor crashes the gate
 ok 87 - RUN-008: adversarial request load neither evicts policy nor crashes the gate
   ---
-  duration_ms: 62.324244
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: DAT-007: no reusable database credential exists anywhere in configuration or seeded state
 ok 88 - DAT-007: no reusable database credential exists anywhere in configuration or seeded state
   ---
-  duration_ms: 48.559527
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: IDN-006: recovery without authoritative recovery evidence cannot allow
 ok 89 - IDN-006: recovery without authoritative recovery evidence cannot allow
   ---
-  duration_ms: 38.210151
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: NET-007: local capability enforcement keeps working without further control-plane calls
 ok 90 - NET-007: local capability enforcement keeps working without further control-plane calls
   ---
-  duration_ms: 83.686354
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: NET-009: a peer-class resource is never a service destination
 ok 91 - NET-009: a peer-class resource is never a service destination
   ---
-  duration_ms: 39.486489
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: UX-005: every non-green coverage state carries an owner, a reason and a resolution path
 ok 92 - UX-005: every non-green coverage state carries an owner, a reason and a resolution path
   ---
-  duration_ms: 51.300464
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: UX-009: the coverage manifest exposes enforced-vs-monitored state and the honest guarantee
 ok 93 - UX-009: the coverage manifest exposes enforced-vs-monitored state and the honest guarantee
   ---
-  duration_ms: 49.299544
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: NFR-SEC-001: a threat model and an executable adversarial suite exist
 ok 94 - NFR-SEC-001: a threat model and an executable adversarial suite exist
   ---
-  duration_ms: 0.203332
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: NFR-SEC-002: the trusted base is inventoried per component with line-of-code counts
 ok 95 - NFR-SEC-002: the trusted base is inventoried per component with line-of-code counts
   ---
-  duration_ms: 0.16525
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: NFR-SEC-006: crypto agility is configurable and both suites sign/verify
 ok 96 - NFR-SEC-006: crypto agility is configurable and both suites sign/verify
   ---
-  duration_ms: 36.655168
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: NFR-PERF-001 NFR-PERF-003: the benchmark publishes its environment and separates connector latency
 ok 97 - NFR-PERF-001 NFR-PERF-003: the benchmark publishes its environment and separates connector latency
   ---
-  duration_ms: 0.133077
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: NFR-AVL-002: connector unavailability does not remove already-issued local controls inside the stale window
 ok 98 - NFR-AVL-002: connector unavailability does not remove already-issued local controls inside the stale window
   ---
-  duration_ms: 37.629541
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: NFR-PRV-002: retention policy is configurable per evidence kind
 ok 99 - NFR-PRV-002: retention policy is configurable per evidence kind
   ---
-  duration_ms: 38.566494
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: NFR-PRV-005: deletion preserves integrity metadata via tombstones
 ok 100 - NFR-PRV-005: deletion preserves integrity metadata via tombstones
   ---
-  duration_ms: 49.358033
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: NFR-MNT-001: every public route is versioned and the contract is documented
 ok 101 - NFR-MNT-001: every public route is versioned and the contract is documented
   ---
-  duration_ms: 1.423958
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: NFR-MNT-003: a CycloneDX SBOM enumerates components and dependencies
 ok 102 - NFR-MNT-003: a CycloneDX SBOM enumerates components and dependencies
   ---
-  duration_ms: 0.156804
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: NFR-USA-004: a recorded decision replays deterministically from stored inputs
 ok 103 - NFR-USA-004: a recorded decision replays deterministically from stored inputs
   ---
-  duration_ms: 49.012369
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: NFR-TST-001: every requirement row carries a verification method
 ok 104 - NFR-TST-001: every requirement row carries a verification method
   ---
-  duration_ms: 0.680402
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: NFR-TST-003: seeded test data is synthetic and marked as such
 ok 105 - NFR-TST-003: seeded test data is synthetic and marked as such
   ---
-  duration_ms: 34.058099
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: COM-001 COM-009 COM-010: exact approved action executes and produces signed verified outcome
 ok 106 - COM-001 COM-009 COM-010: exact approved action executes and produces signed verified outcome
   ---
-  duration_ms: 75.587825
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: ACT-008: tampered schema digest rejected
 ok 107 - ACT-008: tampered schema digest rejected
   ---
-  duration_ms: 33.148989
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: ACT-011 COM-006: proposal idempotency returns exact first result; changed request rejected
 ok 108 - ACT-011 COM-006: proposal idempotency returns exact first result; changed request rejected
   ---
-  duration_ms: 41.39112
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: POL-003 POL-005: missing evidence/approvals cannot mint or execute
 ok 109 - POL-003 POL-005: missing evidence/approvals cannot mint or execute
   ---
-  duration_ms: 42.293874
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: POL-007: denied nonce cannot be revived or re-evaluated
 ok 110 - POL-007: denied nonce cannot be revived or re-evaluated
   ---
-  duration_ms: 39.995348
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: POL-006 COM-013: cooldown defers exact bank change
 ok 111 - POL-006 COM-013: cooldown defers exact bank change
   ---
-  duration_ms: 37.614101
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: COM-003: consumed certificate is never replayed
 ok 112 - COM-003: consumed certificate is never replayed
   ---
-  duration_ms: 53.463199
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: COM-004 ACT-004: stale target state invalidates certificate
 ok 113 - COM-004 ACT-004: stale target state invalidates certificate
   ---
-  duration_ms: 50.382741
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: COM-004: expired certificate fails closed
 ok 114 - COM-004: expired certificate fails closed
   ---
-  duration_ms: 51.00282
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: COM-011: dry-run does not mutate or consume certificate
 ok 115 - COM-011: dry-run does not mutate or consume certificate
   ---
-  duration_ms: 59.598508
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: COM-012: post-commit timeout becomes UNCERTAIN; reconciliation finds one durable mutation
 ok 116 - COM-012: post-commit timeout becomes UNCERTAIN; reconciliation finds one durable mutation
   ---
-  duration_ms: 55.261484
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: COM-005 COM-012: target failure before commit rolls back and stays uncertain without blind retry
 ok 117 - COM-005 COM-012: target failure before commit rolls back and stays uncertain without blind retry
   ---
-  duration_ms: 50.857795
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: CON-004 COM-009: malformed-response cannot produce false success
 ok 118 - CON-004 COM-009: malformed-response cannot produce false success
   ---
-  duration_ms: 54.439574
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: CON-004 COM-009: altered-response cannot produce false success
 ok 119 - CON-004 COM-009: altered-response cannot produce false success
   ---
-  duration_ms: 56.724347
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: COM-012: process crash reservation survives restart and prevents replay
 ok 120 - COM-012: process crash reservation survives restart and prevents replay
   ---
-  duration_ms: 59.748469
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: COM-013: cancellation closes issued authority
 ok 121 - COM-013: cancellation closes issued authority
   ---
-  duration_ms: 52.710671
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: NFR-SEC-005: cross-tenant read and execution rejected
 ok 122 - NFR-SEC-005: cross-tenant read and execution rejected
   ---
-  duration_ms: 48.940964
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: IDN-002: auditor login grants no mutation authority
 ok 123 - IDN-002: auditor login grants no mutation authority
   ---
-  duration_ms: 31.798991
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: AUD-003 CON-003: stored sensitive fields never appear as plaintext in database/WAL
 ok 124 - AUD-003 CON-003: stored sensitive fields never appear as plaintext in database/WAL
   ---
-  duration_ms: 48.971103
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: AUD-004: persisted clock regression halts security mutation
 ok 125 - AUD-004: persisted clock regression halts security mutation
   ---
-  duration_ms: 34.115818
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: EVD-001 EVD-002: correlated issuer and derivative evidence cannot satisfy independence
 ok 126 - EVD-001 EVD-002: correlated issuer and derivative evidence cannot satisfy independence
   ---
-  duration_ms: 48.464315
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: EVD-005 AIG-006: email/advisory evidence cannot confer authority
 ok 127 - EVD-005 AIG-006: email/advisory evidence cannot confer authority
   ---
-  duration_ms: 47.527016
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: EVD-009: conflicting evidence remains escrow despite sufficient positive sources
 ok 128 - EVD-009: conflicting evidence remains escrow despite sufficient positive sources
   ---
-  duration_ms: 50.522384
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: EVD-008: evidence revocation invalidates pending certificate immediately
 ok 129 - EVD-008: evidence revocation invalidates pending certificate immediately
   ---
-  duration_ms: 51.999583
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: EVD-003: tampered issuer signature and wrong tenant evidence are rejected
 ok 130 - EVD-003: tampered issuer signature and wrong tenant evidence are rejected
   ---
-  duration_ms: 39.437333
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: IDN-001: software signature cannot satisfy hardware-required policy
 ok 131 - IDN-001: software signature cannot satisfy hardware-required policy
   ---
-  duration_ms: 49.388683
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: POL-011: duplicate signer cannot satisfy threshold
 ok 132 - POL-011: duplicate signer cannot satisfy threshold
   ---
-  duration_ms: 47.064995
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: ACT-010: material change or graph change invalidates exact approval
 ok 133 - ACT-010: material change or graph change invalidates exact approval
   ---
-  duration_ms: 40.344219
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: COM-014 POL-009: 3-of-5 customer software quorum protects exact policy activation
 ok 134 - COM-014 POL-009: 3-of-5 customer software quorum protects exact policy activation
   ---
-  duration_ms: 74.392799
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: UC-02: exact first payment enforces beneficiary amount and cannot repeat
 ok 135 - UC-02: exact first payment enforces beneficiary amount and cannot repeat
   ---
-  duration_ms: 52.487025
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: COM-009: self-consistent but unauthorised observed state must not pass reconciliation
 ok 136 - COM-009: self-consistent but unauthorised observed state must not pass reconciliation
   ---
-  duration_ms: 52.876336
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: POL-010: exact candidate simulation required before policy certificate
 ok 137 - POL-010: exact candidate simulation required before policy certificate
   ---
-  duration_ms: 53.86946
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: driftCheck: identical registered/observed manifests report no drift
 ok 138 - driftCheck: identical registered/observed manifests report no drift
   ---
-  duration_ms: 3.48015
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: driftCheck: version, kinds, channel and key changes are each reported
 ok 139 - driftCheck: version, kinds, channel and key changes are each reported
   ---
-  duration_ms: 0.270124
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: driftCheck: missing optional fields never throw and are reported honestly
 ok 140 - driftCheck: missing optional fields never throw and are reported honestly
   ---
-  duration_ms: 0.228477
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: workspaceFallback: returns honest plaintext binding with reason
 ok 141 - workspaceFallback: returns honest plaintext binding with reason
   ---
-  duration_ms: 0.192271
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: workspaceFallback: policy denial is fail-closed
 ok 142 - workspaceFallback: policy denial is fail-closed
   ---
-  duration_ms: 0.303948
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: ES256: envelope signs and verifies with P-256/IEEE-P1363
 ok 143 - ES256: envelope signs and verifies with P-256/IEEE-P1363
   ---
-  duration_ms: 2.461324
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: suite confusion: Ed25519 signature cannot masquerade under another suite
 ok 144 - suite confusion: Ed25519 signature cannot masquerade under another suite
   ---
-  duration_ms: 0.536398
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: vault: ES256 keys generate, sign and attest honestly
 ok 145 - vault: ES256 keys generate, sign and attest honestly
   ---
-  duration_ms: 1.682841
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: crypto-shredding: record unreadable after DEK destruction
 ok 146 - crypto-shredding: record unreadable after DEK destruction
   ---
-  duration_ms: 8.83332
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: canonical: 2000 seeded random values roundtrip deterministically
 ok 147 - canonical: 2000 seeded random values roundtrip deterministically
   ---
-  duration_ms: 43.067441
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: canonical: adversarial string corpus rejects per profile
 ok 148 - canonical: adversarial string corpus rejects per profile
   ---
-  duration_ms: 0.339403
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: parseStrict: duplicate keys and oversized bodies rejected
 ok 149 - parseStrict: duplicate keys and oversized bodies rejected
   ---
-  duration_ms: 0.834961
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: coverage: direct target mutation does not upgrade manifest assurance
 ok 150 - coverage: direct target mutation does not upgrade manifest assurance
   ---
-  duration_ms: 43.414065
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: COV-004 CON-006: declared paths carry observation time and drift moves them to UNKNOWN
 ok 151 - COV-004 CON-006: declared paths carry observation time and drift moves them to UNKNOWN
   ---
-  duration_ms: 0.211633
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: RUN-010: config drift withdraws gate privileges until security re-attestation
 ok 152 - RUN-010: config drift withdraws gate privileges until security re-attestation
   ---
-  duration_ms: 50.249183
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: KEY-009: recovery delay blocks reconstruction and per-custodian notices are issued
 ok 153 - KEY-009: recovery delay blocks reconstruction and per-custodian notices are issued
   ---
-  duration_ms: 45.819069
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: IDN-005: MFA reset, authenticator enrolment and account recovery are separate protected actions
 ok 154 - IDN-005: MFA reset, authenticator enrolment and account recovery are separate protected actions
   ---
-  duration_ms: 79.787871
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: IDN-004: expired JIT grant no longer widens runtime scope
 ok 155 - IDN-004: expired JIT grant no longer widens runtime scope
   ---
-  duration_ms: 60.007095
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: AIG-003: extraction preserves provenance (span, confidence, model, document digest)
 ok 156 - AIG-003: extraction preserves provenance (span, confidence, model, document digest)
   ---
-  duration_ms: 32.902076
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: AIG-009: disabling the advisory plane preserves enforcement (no degradation)
 ok 157 - AIG-009: disabling the advisory plane preserves enforcement (no degradation)
   ---
-  duration_ms: 55.745652
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: H1: a certificate revoked via its own revocation_ref cannot execute
 ok 158 - H1: a certificate revoked via its own revocation_ref cannot execute
   ---
-  duration_ms: 50.522577
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: M1: key.rotate adopting a non-vault public key is rejected
 ok 159 - M1: key.rotate adopting a non-vault public key is rejected
   ---
-  duration_ms: 57.562993
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: H2: issuerd issuance requires the bearer token; conflict answers never leak unclaimed fields
 ok 160 - H2: issuerd issuance requires the bearer token; conflict answers never leak unclaimed fields
   ---
-  duration_ms: 24.196267
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: L1: malleated ES256 signature (r, n-s) is rejected
 ok 161 - L1: malleated ES256 signature (r, n-s) is rejected
   ---
-  duration_ms: 0.870937
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: L2: explain renders real reason codes, never [object Object]
 ok 162 - L2: explain renders real reason codes, never [object Object]
   ---
-  duration_ms: 44.529051
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: L3: secure-perception release binds capsule_id and evidence_ref into the sealed envelope
 ok 163 - L3: secure-perception release binds capsule_id and evidence_ref into the sealed envelope
   ---
-  duration_ms: 46.702057
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: L4: evidence signed under a retired suite is rejected policy-wide
 ok 164 - L4: evidence signed under a retired suite is rejected policy-wide
   ---
-  duration_ms: 35.508638
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: M2: a rolled-back consume leaves no phantom data_access touches
 ok 165 - M2: a rolled-back consume leaves no phantom data_access touches
   ---
-  duration_ms: 38.437808
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: audit: only the proposing actor may attach evidence (griefing blocked)
 ok 166 - audit: only the proposing actor may attach evidence (griefing blocked)
   ---
-  duration_ms: 36.501684
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: audit: revoke names must exist (no silent record pollution)
 ok 167 - audit: revoke names must exist (no silent record pollution)
   ---
-  duration_ms: 36.442001
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: audit: token revocation marks the token hash in the revocation store
 ok 168 - audit: token revocation marks the token hash in the revocation store
   ---
-  duration_ms: 36.199594
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: audit: key.rotate requires an acknowledged ceremony
 ok 169 - audit: key.rotate requires an acknowledged ceremony
   ---
-  duration_ms: 57.416975
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: audit: releaseFields honour a policy allowlist (INV-451 on unlisted fields)
 ok 170 - audit: releaseFields honour a policy allowlist (INV-451 on unlisted fields)
   ---
-  duration_ms: 0.13459
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: audit: configDriftStatus reports per-section digests and no drift on fresh snapshot
 ok 171 - audit: configDriftStatus reports per-section digests and no drift on fresh snapshot
   ---
-  duration_ms: 31.278983
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: R2-1: a grant narrowed since issuance cannot ride a signed capability
 ok 172 - R2-1: a grant narrowed since issuance cannot ride a signed capability
   ---
-  duration_ms: 40.073163
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: R2-2: transform policy binds capabilities; row key is never transformable
 ok 173 - R2-2: transform policy binds capabilities; row key is never transformable
   ---
-  duration_ms: 38.70228
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: R2-3: deterministic target refusals record FAILED, not UNCERTAIN
 ok 174 - R2-3: deterministic target refusals record FAILED, not UNCERTAIN
   ---
-  duration_ms: 55.840842
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: RUN-005 R2-4: constrained fail mode allows stale reads at half budget only
 ok 175 - RUN-005 R2-4: constrained fail mode allows stale reads at half budget only
   ---
-  duration_ms: 41.161083
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: R2-5: perception sessions are bound to their creator
 ok 176 - R2-5: perception sessions are bound to their creator
   ---
-  duration_ms: 39.167707
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: POL-014 R2-6: governance floors cannot be lowered by a successor
 ok 177 - POL-014 R2-6: governance floors cannot be lowered by a successor
   ---
-  duration_ms: 36.220514
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: POL-014 R2-7: an emergency policy that weakens any dimension is denied
 ok 178 - POL-014 R2-7: an emergency policy that weakens any dimension is denied
   ---
-  duration_ms: 36.588311
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: POL-011 R2-8: cooldown anchors on server received_at, not caller created_at
 ok 179 - POL-011 R2-8: cooldown anchors on server received_at, not caller created_at
   ---
-  duration_ms: 34.644092
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: R2-9: an expired constitution still permits its own succession
 ok 180 - R2-9: an expired constitution still permits its own succession
   ---
-  duration_ms: 35.045533
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: POL-011 R2-10: approval quorum requires distinct subjects, not just domains
 ok 181 - POL-011 R2-10: approval quorum requires distinct subjects, not just domains
   ---
-  duration_ms: 33.937159
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: R2-11: staged admission refuses pre-expired or min-delay-violating successors
 ok 182 - R2-11: staged admission refuses pre-expired or min-delay-violating successors
   ---
-  duration_ms: 35.364696
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: R2-12: a lapsed approval cannot drag the certificate expiry floor below now
 ok 183 - R2-12: a lapsed approval cannot drag the certificate expiry floor below now
   ---
-  duration_ms: 51.499683
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: IDN-007 R2-13: a capability is bound to the attested device at consume
 ok 184 - IDN-007 R2-13: a capability is bound to the attested device at consume
   ---
-  duration_ms: 36.564376
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: CON-008 R2-14: vendor support access is time-bound, approved and revoked by expiry
 ok 185 - CON-008 R2-14: vendor support access is time-bound, approved and revoked by expiry
   ---
-  duration_ms: 67.177962
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: AUD-002 R2-15: the complete action chain is reconstructable from the audit log
 ok 186 - AUD-002 R2-15: the complete action chain is reconstructable from the audit log
   ---
-  duration_ms: 53.493301
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: AUD-004 R2-16: a replay attempt is identifiable from log state and ordering is monotonic
 ok 187 - AUD-004 R2-16: a replay attempt is identifiable from log state and ordering is monotonic
   ---
-  duration_ms: 54.164348
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: POL-012 R2-17: no vendor-controlled credential can satisfy root-policy activation
 ok 188 - POL-012 R2-17: no vendor-controlled credential can satisfy root-policy activation
   ---
-  duration_ms: 53.695276
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: COM-014 R2-18: 3-of-5 custodian threshold holds; any 3 shares reconstruct, 2 cannot
 ok 189 - COM-014 R2-18: 3-of-5 custodian threshold holds; any 3 shares reconstruct, 2 cannot
   ---
-  duration_ms: 0.644618
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: COM-013 R2-19: high-risk actions honor the delay window and remain cancellable
 ok 190 - COM-013 R2-19: high-risk actions honor the delay window and remain cancellable
   ---
-  duration_ms: 45.817063
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: RUN-004 R2-20: subject revocation propagates synchronously — the next call is denied
 ok 191 - RUN-004 R2-20: subject revocation propagates synchronously — the next call is denied
   ---
-  duration_ms: 34.794358
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: RUN-009 R2-21: denial, throttling, quarantine and infrastructure failure are distinguishable
 ok 192 - RUN-009 R2-21: denial, throttling, quarantine and infrastructure failure are distinguishable
   ---
-  duration_ms: 37.936424
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: DAT-006 R2-22: adversarial input cannot escape row/column constraints
 ok 193 - DAT-006 R2-22: adversarial input cannot escape row/column constraints
   ---
-  duration_ms: 42.630102
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: DAT-010 R2-23: access logs record policy metadata and digests, not plaintext contents
 ok 194 - DAT-010 R2-23: access logs record policy metadata and digests, not plaintext contents
   ---
-  duration_ms: 37.809971
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: ACT-002 R2-24: the schema validator rejects a capsule missing a mandatory field
 ok 195 - ACT-002 R2-24: the schema validator rejects a capsule missing a mandatory field
   ---
-  duration_ms: 37.217854
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: ACT-005 R2-25: intent, authority and outcome are three distinct signed objects
 ok 196 - ACT-005 R2-25: intent, authority and outcome are three distinct signed objects
   ---
-  duration_ms: 55.619848
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: ACT-009 DAT-005 R2-26: an overbroad export SHIELDs into an exact compliant subset with explicit exclusions
 ok 197 - ACT-009 DAT-005 R2-26: an overbroad export SHIELDs into an exact compliant subset with explicit exclusions
   ---
-  duration_ms: 36.305158
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: ACT-010 R2-27: rendering derives from the signed canonical fields — a changed value changes the digest
 ok 198 - ACT-010 R2-27: rendering derives from the signed canonical fields — a changed value changes the digest
   ---
-  duration_ms: 36.295102
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: EVD-004 EVD-010 R2-28: policy selects evidence per domain and provenance distinguishes extraction path
 ok 199 - EVD-004 EVD-010 R2-28: policy selects evidence per domain and provenance distinguishes extraction path
   ---
-  duration_ms: 42.386729
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: EVD-006 EVD-007 R2-29: evidence is purpose-limited, minimised and ages per action class
 ok 200 - EVD-006 EVD-007 R2-29: evidence is purpose-limited, minimised and ages per action class
   ---
-  duration_ms: 37.740526
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: RUN-001 RUN-003 R2-30: dataplane consume is fully local and health-gated on every call
 ok 201 - RUN-001 RUN-003 R2-30: dataplane consume is fully local and health-gated on every call
   ---
-  duration_ms: 39.40988
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: IDN-001 R2-31: password/OTP-only proof cannot authorise a protected action
 ok 202 - IDN-001 R2-31: password/OTP-only proof cannot authorise a protected action
   ---
-  duration_ms: 40.452453
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: IDN-009 R2-32: service credentials are short-lived capabilities, not standing secrets
 ok 203 - IDN-009 R2-32: service credentials are short-lived capabilities, not standing secrets
   ---
-  duration_ms: 36.473285
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: KEY-004 R2-33: key generation uses CSPRNG and is non-deterministic
 ok 204 - KEY-004 R2-33: key generation uses CSPRNG and is non-deterministic
   ---
-  duration_ms: 30.775924
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: KEY-007 R2-34: a purpose-bound key cannot sign outside its purpose
 ok 205 - KEY-007 R2-34: a purpose-bound key cannot sign outside its purpose
   ---
-  duration_ms: 33.746335
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: KEY-012 R2-35: a ceremony is documented, witnessed and reproducible
 ok 206 - KEY-012 R2-35: a ceremony is documented, witnessed and reproducible
   ---
-  duration_ms: 40.765294
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: AIG-002 AIG-007 R2-36: communication-channel evidence is advisory-only and can never authorise
 ok 207 - AIG-002 AIG-007 R2-36: communication-channel evidence is advisory-only and can never authorise
   ---
-  duration_ms: 42.783606
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: CON-002 CON-007 R2-37: issuer evidence stays purpose-bound and customer-hosted
 ok 208 - CON-002 CON-007 R2-37: issuer evidence stays purpose-bound and customer-hosted
   ---
-  duration_ms: 35.066286
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: NET-001 NET-002 NET-003 NET-010 R2-38: segmentation is identity-bound, envelope-bound and reconstructable
 ok 209 - NET-001 NET-002 NET-003 NET-010 R2-38: segmentation is identity-bound, envelope-bound and reconstructable
   ---
-  duration_ms: 43.7061
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: AUD-010 R2-39: the auditor role gets read-only least-privilege views
 ok 210 - AUD-010 R2-39: the auditor role gets read-only least-privilege views
   ---
-  duration_ms: 51.134501
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: CONC-A R2-40: a nested store.tx rollback cannot destroy outer-transaction writes
 ok 211 - CONC-A R2-40: a nested store.tx rollback cannot destroy outer-transaction writes
   ---
-  duration_ms: 33.619644
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: CONC-B R2-41: idempotent() refuses outside a transaction; reuse with a different hash rejects
 ok 212 - CONC-B R2-41: idempotent() refuses outside a transaction; reuse with a different hash rejects
   ---
-  duration_ms: 33.873528
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: CONC-C R2-42: recoverClock revives the gate after a forward host-clock jump
 ok 213 - CONC-C R2-42: recoverClock revives the gate after a forward host-clock jump
   ---
-  duration_ms: 54.765048
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: CONC-D R2-43: reconcile-superseded outcomes name their predecessor digest
 ok 214 - CONC-D R2-43: reconcile-superseded outcomes name their predecessor digest
   ---
-  duration_ms: 57.063432
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: CONC-E R2-44: config drift quarantine is durable across Fabric instances
 ok 215 - CONC-E R2-44: config drift quarantine is durable across Fabric instances
   ---
-  duration_ms: 37.478896
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: CONC-F R2-45: mid-flight certificate revocation is flagged on the recorded outcome
 ok 216 - CONC-F R2-45: mid-flight certificate revocation is flagged on the recorded outcome
   ---
-  duration_ms: 58.106049
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: CONC-G R2-46: a wedged composite child is named in the parent outcome
 ok 217 - CONC-G R2-46: a wedged composite child is named in the parent outcome
   ---
-  duration_ms: 91.8331
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: RUN-001 DAT-001: local scoped synthetic data read enforces rows and columns
 ok 218 - RUN-001 DAT-001: local scoped synthetic data read enforces rows and columns
   ---
-  duration_ms: 56.411892
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: DAT-002 DAT-009: low-and-slow extraction accumulates across newly minted capabilities
 ok 219 - DAT-002 DAT-009: low-and-slow extraction accumulates across newly minted capabilities
   ---
-  duration_ms: 240.292746
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: DAT-002: rolling budget recovers after bounded window expires
 ok 220 - DAT-002: rolling budget recovers after bounded window expires
   ---
-  duration_ms: 52.465908
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: DAT-003: server-controlled sensitivity weight increases information charge
 ok 221 - DAT-003: server-controlled sensitivity weight increases information charge
   ---
-  duration_ms: 39.678001
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: RUN-002 DAT-004: destination binding cannot be broadened
 ok 222 - RUN-002 DAT-004: destination binding cannot be broadened
   ---
-  duration_ms: 40.141996
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: RUN-002 DAT-004: device_id binding cannot be broadened
 ok 223 - RUN-002 DAT-004: device_id binding cannot be broadened
   ---
-  duration_ms: 39.418854
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: RUN-002 DAT-004: resource binding cannot be broadened
 ok 224 - RUN-002 DAT-004: resource binding cannot be broadened
   ---
-  duration_ms: 38.095085
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: RUN-002 DAT-004: purpose binding cannot be broadened
 ok 225 - RUN-002 DAT-004: purpose binding cannot be broadened
   ---
-  duration_ms: 37.460148
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: DAT-006: SQL-shaped columns and unrestricted row sets rejected
 ok 226 - DAT-006: SQL-shaped columns and unrestricted row sets rejected
   ---
-  duration_ms: 38.447459
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: RUN-007: cross-tenant capability cannot be consumed
 ok 227 - RUN-007: cross-tenant capability cannot be consumed
   ---
-  duration_ms: 36.609633
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: RUN-004 IDN-008: device quarantine rejects issued capability immediately
 ok 228 - RUN-004 IDN-008: device quarantine rejects issued capability immediately
   ---
-  duration_ms: 39.990927
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: RUN-003: stale configured device health prevents renewal
 ok 229 - RUN-003: stale configured device health prevents renewal
   ---
-  duration_ms: 36.110384
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: RUN-002: runtime request replay does not spend twice or return data twice
 ok 230 - RUN-002: runtime request replay does not spend twice or return data twice
   ---
-  duration_ms: 44.199345
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: NET-003 NET-004: local service envelope rejects other port and excess request rate
 ok 231 - NET-003 NET-004: local service envelope rejects other port and excess request rate
   ---
-  duration_ms: 76.598162
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: DAT-005 POL-004: restricted export requires explicit new SHIELD proposal
 ok 232 - DAT-005 POL-004: restricted export requires explicit new SHIELD proposal
   ---
-  duration_ms: 40.83024
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: AUD-001 AUD-005: export verifies with pinned root and rejects edit, reorder, removal and wrong root
 ok 233 - AUD-001 AUD-005: export verifies with pinned root and rejects edit, reorder, removal and wrong root
   ---
-  duration_ms: 53.437967
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: AUD-008: externally pinned prior checkpoint detects a fork and truncation
 ok 234 - AUD-008: externally pinned prior checkpoint detects a fork and truncation
   ---
-  duration_ms: 41.842257
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: AUD-001: append-only triggers reject SQL update and deletion
 ok 235 - AUD-001: append-only triggers reject SQL update and deletion
   ---
-  duration_ms: 35.939977
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: AUD-007: audit export access is itself recorded
 ok 236 - AUD-007: audit export access is itself recorded
   ---
-  duration_ms: 34.957915
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: DAT-012: expired evidence is held for active actions and legal hold; terminal evidence logically deleted
 ok 237 - DAT-012: expired evidence is held for active actions and legal hold; terminal evidence logically deleted
   ---
-  duration_ms: 39.091861
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: COV-002 COV-007 COV-008: no manual declaration can claim ENFORCED or production guarantee
 ok 238 - COV-002 COV-007 COV-008: no manual declaration can claim ENFORCED or production guarantee
   ---
-  duration_ms: 37.492597
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: POL-010 UX-008: policy simulation records diff without activating candidate
 ok 239 - POL-010 UX-008: policy simulation records diff without activating candidate
   ---
-  duration_ms: 44.11712
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: POL-012: fewer than 3 customer bootstrap signers cannot start the service
 ok 240 - POL-012: fewer than 3 customer bootstrap signers cannot start the service
   ---
-  duration_ms: 41.445934
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: KEY-002: Shamir k-of-n reconstructs only at quorum; wrong shares fail
 ok 241 - KEY-002: Shamir k-of-n reconstructs only at quorum; wrong shares fail
   ---
-  duration_ms: 2.763538
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: KEY-001 KEY-003: vault wraps keys, binds purpose, gates export, attests honestly
 ok 242 - KEY-001 KEY-003: vault wraps keys, binds purpose, gates export, attests honestly
   ---
-  duration_ms: 7.485389
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: AUD-002 AUD-008: merkle inclusion and consistency proofs verify and reject tampering
 ok 243 - AUD-002 AUD-008: merkle inclusion and consistency proofs verify and reject tampering
   ---
-  duration_ms: 1.869532
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: AUD-002: fabric auditProof verifies against exported tree head
 ok 244 - AUD-002: fabric auditProof verifies against exported tree head
   ---
-  duration_ms: 48.813878
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: ACT-012: composite executes children in order; child failure compensates executed children
 ok 245 - ACT-012: composite executes children in order; child failure compensates executed children
   ---
-  duration_ms: 95.517569
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: ACT-012: composite with uncertified child escrows
 ok 246 - ACT-012: composite with uncertified child escrows
   ---
-  duration_ms: 60.463632
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: POL-008: staged policy activates only when trusted time reaches not_before
 ok 247 - POL-008: staged policy activates only when trusted time reaches not_before
   ---
-  duration_ms: 76.437816
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: POL-013: emergency policy with sufficient custodians activates
 ok 248 - POL-013: emergency policy with sufficient custodians activates
   ---
-  duration_ms: 77.57349
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: POL-013: emergency policy without the extra custodian is denied
 ok 249 - POL-013: emergency policy without the extra custodian is denied
   ---
-  duration_ms: 51.440617
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: KEY-004 KEY-005: prepareRotation creates pending vault key; verified rotate activates it and retires the old
 ok 250 - KEY-004 KEY-005: prepareRotation creates pending vault key; verified rotate activates it and retires the old
   ---
-  duration_ms: 54.498859
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: IDN-004: verified identity.jit.grant mints a time-bounded grant usable by runtime
 ok 251 - IDN-004: verified identity.jit.grant mints a time-bounded grant usable by runtime
   ---
-  duration_ms: 47.322273
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: KEY-007 KEY-008: ceremony create → custodian acks → share split → quorum reconstruction
 ok 252 - KEY-007 KEY-008: ceremony create → custodian acks → share split → quorum reconstruction
   ---
-  duration_ms: 30.377381
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: KEY-008: reconstruction below quorum fails
 ok 253 - KEY-008: reconstruction below quorum fails
   ---
-  duration_ms: 41.081712
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: EVD-004 CON-001: issuerd answers evidence queries over real HTTP; answers are signed envelopes
 ok 254 - EVD-004 CON-001: issuerd answers evidence queries over real HTTP; answers are signed envelopes
   ---
-  duration_ms: 18.933986
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: EVD-004: fabric.acquireEvidence fetches evidence over HTTP and attaches it
 ok 255 - EVD-004: fabric.acquireEvidence fetches evidence over HTTP and attaches it
   ---
-  duration_ms: 43.870892
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: AIG-001 AIG-006: advisory extract/explain/intent are deterministic and never confer authority
 ok 256 - AIG-001 AIG-006: advisory extract/explain/intent are deterministic and never confer authority
   ---
-  duration_ms: 6.793055
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: CON-001 CON-003: connector manifests verify and drift is detected
 ok 257 - CON-001 CON-003: connector manifests verify and drift is detected
   ---
-  duration_ms: 0.870743
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: DAT-009 DAT-011: reconstruction budget and watermarks on released rows
 ok 258 - DAT-009 DAT-011: reconstruction budget and watermarks on released rows
   ---
-  duration_ms: 47.613934
+  duration_ms: 0
   type: 'test'
   ...
 # Subtest: NFR-SEC-004 KEY-002: bootstrap writes vault + master key; config has no private key material
 ok 259 - NFR-SEC-004 KEY-002: bootstrap writes vault + master key; config has no private key material
   ---
-  duration_ms: 26.7324
+  duration_ms: 0
   type: 'test'
   ...
 1..259
@@ -1561,4 +1561,4 @@ ok 259 - NFR-SEC-004 KEY-002: bootstrap writes vault + master key; config has no
 # cancelled 0
 # skipped 0
 # todo 0
-# duration_ms 11548.04158
+# duration_ms 11422.265181
