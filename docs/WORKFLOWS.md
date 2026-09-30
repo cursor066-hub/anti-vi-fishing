@@ -55,3 +55,41 @@ Service-connect capabilities similarly validate a local software envelope. They 
 An auditor or security operator exports the metadata log with an explicit purpose; access is appended to the log. Independently obtain and pin `trust-public-acme.json` from local bootstrap. Verify the export with `scripts/verify-export.mjs` or the independent WebCrypto implementation. Never establish customer trust solely from the public key included in an untrusted export. A prior independently held checkpoint adds prefix/fork detection. The sample pinned key in this ZIP authenticates synthetic sample evidence only.
 
 Security operators can apply evidence legal holds and run the logical retention sweep. Evidence referenced by nonterminal actions is held; legal hold always wins. Eligible expired evidence is replaced by a digest-only tombstone. Original ciphertext may remain in SQLite free pages/WAL/backups, so complete erasure and per-record cryptographic shredding are **not** claimed.
+
+## Platform workflows (v2)
+
+### Live evidence acquisition
+
+With `issuerd` running (`node src/cli.mjs issuerd --dir <deploy>/issuers`), `POST /v1/action-capsules/{id}/acquire-evidence` with `{issuer, kind, claims}` fetches a fresh signed envelope and attaches it in one audited transaction. `issuer` is the registered issuer name, `kind` one of its declared evidence kinds, `claims` the query fields (e.g. `{account, owner_id}` for `bank.ownership`). A `conflict` claim or missing record is escrow, never silently supports.
+
+### Key rotation ceremony
+
+See RUNBOOKS → rotation procedure. The pending replacement key is listed under Key vault with status `pending` until a verified `key.rotate` action activates it; `Attest` downloads its signed software attestation.
+
+### Threshold secret recovery
+
+Create a ceremony with custodian subject ids and threshold k (Ceremonies view or API). Custodians acknowledge offline; then the operator pastes the base64url secret and receives k-of-n committed shares for distribution. Reconstruction needs k distinct shares — a duplicated share does not extend quorum, and the service never stores the reconstructed secret.
+
+### Staged policy deployment
+
+A `policy.change` proposal whose `next.not_before` lies in the future passes the same governance (simulation, evidence, custodian quorum, cooldown) but is stored as `staged` rather than activated. `GET /v1/policy/history` exposes it; `activateDuePolicies` promotes it exactly one version at `activate_at`. A staged policy that would skip a version is refused, not queued.
+
+### Emergency policy
+
+An emergency policy names `emergency_of` equal to the active version, expires within `emergency_max_ttl_ms`, and must tighten **every** rule's approval threshold by at least `emergency_extra_custodians`. A candidate that loosens any rule is denied with `EMERGENCY_WEAKER`; approval requires the extra custodian signature.
+
+### Composite actions
+
+`action.composite` binds up to 16 certified, unconsumed children of the same actor — each child's semantic binding is preserved individually, no silent scope merge. A child failure triggers `target.compensate` on the already-applied children and lands COMPENSATED.
+
+### Secure Perception (dev-attested)
+
+Sign an attestation with the dev component bundle (`component-<tenant>.json`) offline, then `POST /v1/secure-perception/sessions`. `release` returns fields sealed to the session's ECDH channel — the browser cannot read them without the session key. `fallback` records a controlled-workspace decision with its reason. The session is honest software attestation: never a trusted display.
+
+### Audit proofs
+
+`GET /v1/audit/proofs/{seq}` returns the RFC 6962 inclusion path for an audit entry plus the current tree head; `GET /v1/audit/consistency?first=N` proves append-only history between two tree sizes; `POST /v1/audit/verify-proof` verifies a fetched proof server-side.
+
+### JIT grants
+
+A verified `identity.jit.grant` action mints a time-bound grant listing in `GET /v1/grants`; runtime capability issuance merges active grants into the caller's entitlement check. Expired and revoked grants drop out automatically.

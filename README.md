@@ -21,18 +21,22 @@ The development server binds only to loopback. It rejects non-engineering mode a
 
 ## What runs
 
-Typed capsules cover four finance workflows and nine additional action classes. The complete local flow is proposal → signed evidence → deterministic decision → independent exact-action signatures → single-use certificate → state-bound simulated mutation → signed observed outcome. Finance changes run against a separate persistent synthetic SQLite target, never a real bank or ERP. Runtime capabilities enforce subject, device, resource, destination, selection, expiry, rate and shared rolling budgets for the synthetic data gate. The service-connect path evaluates a software envelope; it does **not** filter packets or connect a real service.
+Typed capsules cover four finance workflows plus the full v2 platform surface: composite actions, policy change (immediate, staged `not_before` and emergency), key rotation, JIT grants, secure-session reveals and data-export escrow. The complete local flow is proposal → signed evidence → deterministic decision → independent exact-action signatures → single-use certificate → state-bound simulated mutation → signed observed outcome. Finance changes run against a separate persistent synthetic SQLite target, never a real bank or ERP. Runtime capabilities enforce subject, device, resource, destination, selection, expiry, rate and shared rolling budgets for the synthetic data gate, with overlap-reconstruction detection and watermarking. The service-connect path evaluates a software envelope; it does **not** filter packets or connect a real service.
 
-The console provides finance proposals, exact old/new action review, signed evidence and approval submission, evaluation, certificate minting, dry run, execution, reconciliation, cancellation, coverage limitations, policy simulation, runtime synthetic reads, and audited evidence export. There are no fake approval buttons or generated claims that a normal browser is a secure display.
+The operator console covers actions and proposals, coverage limitations, policy simulation/history, runtime reads, key vault with rotation and attestation, threshold recovery ceremonies, connector status and drift checks, audit Merkle proofs, dev-attested Secure Perception sessions, JIT grants, and audited evidence export. There are no fake approval buttons or generated claims that a normal browser is a secure display.
+
+Evidence issuer daemons run over real HTTP: `node src/cli.mjs issuerd --dir <deploy>/issuers --port 8090` serves signed manifests, health and evidence issuance per issuer spec (tenant-scoped names supported). The fabric acquires evidence via `POST /v1/action-capsules/{id}/acquire-evidence` and audits connector drift.
+
+The IF-SOFTHSM-1 software vault wraps keys at rest, binds purpose, rotates via verified `key.rotate` actions, and attests software residency. Threshold recovery uses committed k-of-n Shamir ceremonies — a real HSM/MPC is still external.
 
 See [WORKFLOWS.md](docs/WORKFLOWS.md) for exact operation and signing instructions; [API.md](docs/API.md) and [openapi.json](docs/openapi.json) describe the API. The original SRS is preserved in `spec/`; its two referenced image assets were not included with the supplied document.
 
 ## Verify and reproduce
 
 ```sh
-node scripts/check.mjs
-node --test --test-concurrency=1 tests/*.test.mjs
-node scripts/simulate.mjs
+sh scripts/verify.sh        # complete pipeline: check + tests + simulate + verifiers
+npm test                    # 116-test suite incl. adversarial + conformance
+npm run conformance         # regenerate vectors; verify under node, WebCrypto and Python
 node scripts/verify-export.mjs reports/sample-audit.json reports/sample-pinned-trust.json
 python scripts/canonical-vectors.py examples/canonical-vectors.json
 bun scripts/verify-export-webcrypto.mjs reports/sample-audit.json reports/sample-pinned-trust.json
@@ -40,13 +44,15 @@ node scripts/benchmark.mjs
 node scripts/release-check.mjs
 ```
 
+Conformance vectors in `vectors/` are verified byte-for-byte by three independent implementations: node:crypto, the WebCrypto subtle API and Python `cryptography`. The adversarial suite covers signature malleability, Unicode confusion, Merkle forgery, share confusion, approval replay, certificate reuse, issuer ambiguity and purpose confusion.
+
 `release-check` **must exit nonzero** for this delivery: production blockers are deliberately enforced. Do not change a status to pass without the required independently reviewed evidence. Verification reports bundled in `reports/` distinguish direct execution, simulation, analysis, and unavailable checks. Source checks are not a SAST certification. HTTP/static UI tests are not browser or accessibility certification.
 
 All test databases and private fixture keys are generated in unique temporary directories. Tests remove only their own fixtures. The simulator writes public synthetic audit evidence and result files under `reports/`. Sample trust keys authenticate only the supplied synthetic audit, not the release publisher or a real customer.
 
 ## Boundaries that remain
 
-Customer systems and credentials were unavailable. There is no real ERP/bank/cloud/identity/backup/secret connector, HSM or threshold cryptographic integration, packet enforcement, trusted display/input implementation, remote attestation verifier, multi-zone consensus, enterprise authentication lifecycle, or independently witnessed production deployment. SQLite plus application-level AES-GCM is a single-host engineering profile, not a high-availability customer key-management architecture.
+Customer systems and credentials were unavailable. There is no real ERP/bank/cloud/identity/backup connector (the evidence issuer is a controlled local daemon, not a bank API), no real HSM/MPC (the software vault and Shamir ceremonies do not provide hardware custody), no packet enforcement, trusted display/input implementation (Secure Perception is a dev-attested software profile), remote attestation verifier, multi-zone consensus, enterprise authentication lifecycle, or independently witnessed production deployment. SQLite plus application-level AES-GCM is a single-host engineering profile, not a high-availability customer key-management architecture.
 
 The target system and gate use the same customer-local process privilege boundary; a process/host compromise can bypass the simulator. The supplied signature quorum is a software multisignature workflow, not protection against compromise of the machine holding generated fixture keys. An independent verifier with a previously pinned checkpoint detects a conflicting prefix; external witness hosting and publication are not deployed.
 

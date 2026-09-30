@@ -14,18 +14,18 @@ HTTP uses exact host/origin matching, same-origin-only browser requests, HttpOnl
 
 The gate consumes authority before dispatch. Ambiguous target responses never become success and never trigger automatic mutating retries. Certificate registration equality prevents a caller from presenting a differently scoped envelope, even one signed by a local execution key outside the issuance path. It does not defend against full compromise of the trusted process or database/key host.
 
-Software keys are generated using the platform CSPRNG and Ed25519 implementation. Approval and genesis verification require distinct customer failure domains. This is **software multisignature, not threshold cryptography**. Configuring `require_hardware` blocks all default software signers. No self-asserted API parameter can enroll a “hardware-backed” signer.
+Software keys are generated using the platform CSPRNG and Ed25519 implementation inside the IF-SOFTHSM-1 vault: private material is AES-256-GCM-wrapped at rest under a separately stored master key, purpose-bound at use, and exports only when flagged exportable. Approval and genesis verification require distinct customer failure domains — **software multisignature, not threshold cryptography** at the approval layer; threshold (k-of-n Shamir) is implemented for secret recovery ceremonies with committed shares. Key rotation runs through a verified `key.rotate` action: the replacement is generated pending and cannot sign until activation; the retired key is recorded. Configuring `require_hardware` blocks all default software signers. No self-asserted API parameter can enroll a “hardware-backed” signer. Master-key custody, real HSM/MPC and certified ceremonies remain external.
 
 ## Known material limitations
 
 | Boundary | Current position | Required release evidence |
 |---|---|---|
-| Root keys | Custodian software files; no HSM/MPC adapter | Hardware lifecycle, independent custody, 3-of-5 ceremony, compromise/recovery drills |
+| Root keys | Software vault with wrapped-at-rest keys, rotation and Shamir recovery; no real HSM/MPC adapter | Hardware lifecycle, independent custody, certified ceremony, compromise/recovery drills |
 | Host compromise | Host/runtime/local configuration is trusted | Reduced privileged gate, target credential ownership, hardened customer deployment and independent red team |
 | Production authentication | 24-hour local tokens and static synthetic device-health statements | Real workforce/workload federation, phishing-resistant WebAuthn, attestation, protected enrollment/recovery and JIT lifecycle |
 | Clock | Persisted regression check over OS milliseconds | Trusted-time profile, clock uncertainty and forward-jump drills |
 | Real targets | Synthetic target only | Named APIs, real least-privilege credentials, timeout contracts, total mediation and bypass tests |
-| Secure Perception | Unavailable; fail closed | Supported hardware, trusted display/input and hostile-OS tests |
+| Secure Perception | Dev-attested software profile; never a trusted display | Supported hardware, trusted display/input and hostile-OS tests |
 | Runtime network | Decisions only | Customer network/endpoint integration and packet-level quarantine/DoS tests |
 | Audit witness | Offline checkpoint comparison | Independent witness publication, monitoring and retention operations |
 | Retention | Logical deletion plus digest tombstones | Per-record crypto-shredding, backup deletion and legal-hold governance |

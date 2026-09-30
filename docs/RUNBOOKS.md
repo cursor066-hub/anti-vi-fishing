@@ -18,7 +18,11 @@ For an actual database backup, use a SQLite online-backup mechanism or stop the 
 
 ## Key or issuer compromise
 
-The security role invokes `POST /v1/revocations` with the affected key/issuer/subject/certificate, an incident reason, and a separately authenticated token. This blocks future local use and preserves evidence. If the execution/audit-key host is compromised, isolate it first; application-level revocation cannot make a malicious host trustworthy. Preserve external checkpoints and forensic copies. Do not rotate keys unilaterally: use an independently witnessed customer ceremony, confirm pending authority and historical verifier trust, and authorize the rotation explicitly. Key rotation/recovery tooling is not included.
+The security role invokes `POST /v1/revocations` with the affected key/issuer/subject/certificate, an incident reason, and a separately authenticated token. This blocks future local use and preserves evidence. If the execution/audit-key host is compromised, isolate it first; application-level revocation cannot make a malicious host trustworthy. Preserve external checkpoints and forensic copies.
+
+Rotation procedure: (1) `POST /v1/keys/rotate-prepare` with the affected `key_class` — the vault generates a **pending** key that cannot sign anything; (2) propose a `key.rotate` action binding `new_key_id`, the pending key's `new_public_key`, a `ceremony_id` and `revoke_old`; (3) collect `governance_review` evidence from two independent failure domains; (4) collect three custodian approvals and honour the cooldown; (5) certify and execute — the pending key activates and the old key is retired. `GET /v1/keys/{id}/attest` produces a signed software attestation for the new key. Unilateral rotation does not exist: the action is the authority.
+
+Secret recovery procedure: `POST /v1/ceremonies` creates a k-of-n ceremony with named custodians and a validity window. Each custodian acknowledges with an offline `action-approval`-style envelope (`POST .../acknowledge`). Only then may `POST .../split` divide a base64url secret into committed shares for distribution. `POST .../reconstruct` requires k distinct shares; a duplicate or below-quorum set is refused. The service never retains the secret.
 
 ## Suspected tenant isolation incident
 
@@ -30,7 +34,11 @@ Cancel unexecuted affected actions and revoke pending certificates. Use the exac
 
 ## Clock, evidence and hardware failures
 
-A detected backward clock movement stops security mutations with `INV-503-TIME`. Restore an authoritative clock under operator control and preserve evidence; do not change stored last-seen time to bypass the check. Missing, expired or dependent evidence remains escrow. Synthetic health expires after 24 hours. Real attestation and protected recovery are unavailable; there is no universal refresh override. Secure Perception always fails closed in this release.
+A detected backward clock movement stops security mutations with `INV-503-TIME`. Restore an authoritative clock under operator control and preserve evidence; do not change stored last-seen time to bypass the check. Missing, expired or dependent evidence remains escrow. Synthetic health expires after 24 hours. Real attestation and protected recovery are unavailable; there is no universal refresh override. Secure Perception in this release is the dev-attested software profile — hardware attestation still fails closed.
+
+## Evidence issuer operations
+
+Start issuers with `node src/cli.mjs issuerd --dir <deploy>/issuers [--port 8090]` or `node src/issuerd.mjs --dir ... --port ...`. Each `*.issuer.json` spec carries its own key, channel, record store and optional `tenant` scope; two tenants may run same-named issuers — the registry keys are `<tenant>:<issuer>` and bare-name requests are refused when ambiguous (`?tenant=` on manifest/health, `tenant_id` in the issue body). The issuance log is appended per query at `<dir>/issuance-log.jsonl`. `POST /v1/connectors/{key_id}/drift-check` compares registered trust metadata with the live signed manifest and audits `CONNECTOR_DRIFT`; investigate version, kinds, channel or key changes as a potential connector compromise. Updating an issuer spec requires the same governance as any trust-registry change; do not edit spec files on a running daemon without a witnessed procedure.
 
 ## Staging release and rollback
 
