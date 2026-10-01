@@ -34,5 +34,5 @@ architecture, WebSocket, GraphQL) are out of scope of this map.
 
 - Formal ASVS certification or independent verification report.
 - SAST/DAST tooling runs, independent penetration test, provider advisories.
-- Signed build/release provenance (`NFR-SEC-007` is `NOT_IMPLEMENTED`).
+- Production KMS-backed release signing (`NFR-SEC-007` is `PARTIAL`: engineering-profile SLSA-lite detached-envelope provenance is implemented and pinned-anchor verified via `scripts/release-sign.mjs` + `scripts/verify-release.mjs`).
 - Live-environment fuzzing against a production deployment.

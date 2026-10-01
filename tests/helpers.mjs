@@ -6,6 +6,7 @@ import { createConfiguration, seedSyntheticResources } from '../src/bootstrap.mj
 import { Fabric } from '../src/fabric.mjs';
 import { proposal } from '../src/schema.mjs';
 import { signed } from '../src/crypto.mjs';
+import { signAcknowledgement } from '../src/ceremony.mjs';
 import { digest, clone } from '../src/canonical.mjs';
 
 export const BASE_TIME = 1788648000000;
@@ -126,3 +127,19 @@ export function stageConstitution(h, next, { tenant = 'acme', activate_at } = {}
 }
 export function runtimeInput(overrides = {}) { return { device_id: 'operator-device', resource: 'dataset-1', destination: 'customer-vault', action: 'data.read', purpose: 'operations', columns: ['id', 'name'], row_ids: ['row-1'], classification: 'internal', jurisdiction: 'EU', max_cost: 1000, ttl_ms: 60000, ...overrides }; }
 export function runtimeRequest(capability, overrides = {}) { const c = capability.payload; return { capability, device_id: c.device_id, resource: c.resource, destination: c.destination, action: c.action, purpose: c.purpose, columns: c.columns, row_ids: c.row_ids, request_id: randomUUID(), protocol: 'https', port: 443, ...overrides }; }
+// The quorum-designated successor the revoke/fallback gates now require:
+// a pending key is only a legitimate successor when a custodian-acked
+// key.rotate ceremony names it in its rotation spec — prepareRotation
+// alone was a unilateral signer-substitution path (w18-crypto F3).
+let designateSeq = 0;
+export function designateSuccessor(h, key_class, tenant = 'acme') {
+  const pending = h.f.prepareRotation(h.p('security', tenant), key_class);
+  const custodians = ['custodian-1', 'custodian-2'];
+  const ceremony = h.f.createCeremony(h.p('security', tenant), {
+    ceremony_id: `cer-designate-${key_class}-${++designateSeq}`, purpose: 'key.rotate', threshold: 2,
+    custodians, valid_until: h.now() + 3600000, min_delay_ms: 120000,
+    rotation: { key_class, new_key_id: pending.key_id },
+  });
+  for (const subject of custodians) h.f.acknowledgeCeremony(h.p(subject, tenant), signAcknowledgement(ceremony, subject, h.setup.custodianKeys[tenant][subject], h.now()));
+  return pending;
+}

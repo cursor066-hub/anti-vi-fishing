@@ -9,7 +9,7 @@ import { digest, canonical } from '../src/canonical.mjs';
 import { InvariantError } from '../src/errors.mjs';
 import { signed } from '../src/crypto.mjs';
 import { Store } from '../src/store.mjs';
-import { fixture, hasCode as hc } from './helpers.mjs';
+import { fixture, hasCode as hc, designateSuccessor } from './helpers.mjs';
 
 const hasCode = code => e => e.code === code;
 
@@ -100,7 +100,7 @@ test('w14 W13-01: a revoked audit key cannot sign post-revocation rows', t => {
   // way: chain-anchored by ROTATION_PREPARED so the vault entry is
   // provably this tenant's (w17 D1 — a bare vault.generate is
   // indistinguishable from a relabeled foreign key).
-  h.f.prepareRotation(h.p('security'), 'audit');
+  designateSuccessor(h, 'audit');
   h.f.revoke(h.p('security'), { kind: 'key', id: auditKey.key_id, reason: 'leaked' });
   h.f._auditIndex('acme'); // consume the revocation
   // Forge a self-consistent append signed by the DEAD key.
@@ -116,7 +116,7 @@ test('w14 W13-01: a revoked audit key cannot sign post-revocation rows', t => {
 test('w14 W13-01b: recovery-signed rows pass the signing window', t => {
   const h = fixture(t);
   const auditKey = h.setup.config.tenants.acme.keys.audit;
-  h.f.prepareRotation(h.p('security'), 'audit');
+  designateSuccessor(h, 'audit');
   h.f.revoke(h.p('security'), { kind: 'key', id: auditKey.key_id, reason: 'leaked' });
   // Recovery signing under the pending successor — post-revocation rows
   // must still verify and be consumed.

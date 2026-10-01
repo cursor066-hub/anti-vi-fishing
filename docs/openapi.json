@@ -2761,7 +2761,7 @@
       "post": {
         "operationId": "post_v1_advisory",
         "summary": "Deterministic advisory plane (never confers authority)",
-        "description": "Roles: operator, approver, custodian, security, policy_admin. Engineering profile; all target mutations are simulated.",
+        "description": "Roles: operator, approver, custodian, security, policy_admin, auditor. Engineering profile; all target mutations are simulated.",
         "tags": [
           "Control"
         ],
@@ -3092,7 +3092,8 @@
           "status": {
             "enum": [
               "MONITORED",
-              "UNKNOWN"
+              "UNKNOWN",
+              "UNCOVERED"
             ]
           },
           "path_class": {

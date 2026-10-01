@@ -297,6 +297,25 @@ export class Fabric {
   // Live, failure-domain-deduplicated custodian consent for a ceremony:
   // acknowledgements from revoked identities or from the same failure
   // domain do not count toward quorum (w6 F7/F9).
+  // A pending key may take over signing only when the threshold quorum
+  // designated it: a ceremony whose anchored plan names the key in
+  // `rotation.new_key_id` for this key class, which gathered at least
+  // `threshold` custodian acknowledgements, and which was never aborted.
+  // prepareRotation alone is a unilateral substitution path — a lone
+  // `security` identity must not pick the tenant signer (w18-crypto F3).
+  ceremonyDesignated(t, kid, klass) {
+    const idx = this._auditIndex(t);
+    for (const [cid, plannedDigest] of idx.ceremonyPlanned ?? []) {
+      if (idx.ceremonyAborted?.has(cid)) continue;
+      const ceremony = this.store.get(t, 'ceremony', cid);
+      if (!ceremony || ceremony.rotation?.new_key_id !== kid || ceremony.rotation?.key_class !== klass) continue;
+      let planDigest = null;
+      try { planDigest = digest({ ceremony_id: cid, tenant_id: ceremony.tenant_id, purpose: ceremony.purpose, threshold: ceremony.threshold, custodians: [...(ceremony.custodians ?? [])].sort(), valid_until: ceremony.valid_until, min_delay_ms: ceremony.min_delay_ms, rotation: ceremony.rotation ?? null }); } catch { /* forged rows fail closed */ }
+      if (planDigest === null || !ctEqual(planDigest, plannedDigest)) continue;
+      if ((idx.ceremonyAcks.get(cid)?.size ?? 0) >= ceremony.threshold) return true;
+    }
+    return false;
+  }
   custodianQuorum(t, ceremony) {
     // The ceremony row must descend from an anchored plan: its governance
     // fields (threshold, custodians, validity, rotation) must recompute to
@@ -485,8 +504,9 @@ export class Fabric {
     const needed = this._keyPurposes[klass] ?? [];
     const successor = [...this.vault.keys.entries()].find(([kid, e]) => e.pending && !e.revoked && this.chainOwnsVaultKey(t, kid)
       && e.generated_inside !== false
-      && (e.purpose === 'any' || needed.every(x => (Array.isArray(e.purpose) ? e.purpose : [e.purpose]).includes(x))));
-    requireThat(successor, 'INV-401-SIGNATURE', `${klass} signing key unavailable and no pending successor exists — rotate first`, 401);
+      && (e.purpose === 'any' || needed.every(x => (Array.isArray(e.purpose) ? e.purpose : [e.purpose]).includes(x)))
+      && this.ceremonyDesignated(t, kid, klass));
+    requireThat(successor, 'INV-401-SIGNATURE', `${klass} signing key unavailable and no ceremony-designated pending successor exists — rotate first`, 401);
     return { key_id: successor[0], recovery: true, superseded: configured ?? null };
   }
   _recoveryBody(sel, payload) {
@@ -663,7 +683,8 @@ export class Fabric {
         if (!successor)
           successor = [...this.vault.keys.entries()].reverse().find(([kid, e]) => e.pending && !e.revoked
             && e.generated_inside !== false && !keyDeadAt.has(kid) && this.ownsVaultKey(t, kid)
-            && (e.purpose === 'any' || needed.every(x => (Array.isArray(e.purpose) ? e.purpose : [e.purpose]).includes(x))))?.[0];
+            && (e.purpose === 'any' || needed.every(x => (Array.isArray(e.purpose) ? e.purpose : [e.purpose]).includes(x)))
+            && this.ceremonyDesignated(t, kid, 'audit'))?.[0];
         requireThat(successor, 'INV-503-CONFIG', 'No live audit signing key can attest the seal', 503);
         const entry = this.vault.keys.get(successor);
         const wasPending = entry.pending, savedTenant = this.tenant(t);
@@ -1002,7 +1023,7 @@ export class Fabric {
   _auditIndex(t) {
     const maxSeq = this.store.db.prepare('SELECT COALESCE(MAX(seq),0) m FROM audit WHERE tenant=?').get(t).m;
     let idx = this.#auditIdx.get(t);
-    if (!idx) { idx = { maxSeq: 0, building: false, revoked: new Set(), attached: new Map(), proposedNonce: new Set(), proposedAt: new Map(), proposedDigest: new Map(), issued: new Set(), issuedCert: new Map(), issuedCerts: new Set(), grants: new Map(), grantMeta: new Map(), rotations: new Map(), rotationsByPrev: new Map(), rotationKeys: new Set(), policyAnchors: [], dataAccess: [], perceptionNonce: new Set(), reserved: new Set(), dispatched: new Map(), outcomes: new Map(), keyDeadAt: new Map(), parentChildren: new Map(), simulated: [], issuerDrift: new Set(), tenantDrifted: false, configSnapshot: null, decisions: new Map(), runtimeUse: [], runtimeUseByCap: new Map(), runtimeUseBySubject: new Map(), revocationDigests: new Map(), denials: [], denialsByReq: new Map(), ceremonyAcks: new Map(), ceremonyPlanned: new Map(), ceremonyCommitted: new Map(), coverageAnchors: new Map() }; this.#auditIdx.set(t, idx); }
+    if (!idx) { idx = { maxSeq: 0, building: false, revoked: new Set(), attached: new Map(), proposedNonce: new Set(), proposedAt: new Map(), proposedDigest: new Map(), issued: new Set(), issuedCert: new Map(), issuedCerts: new Set(), grants: new Map(), grantMeta: new Map(), rotations: new Map(), rotationsByPrev: new Map(), rotationKeys: new Set(), policyAnchors: [], dataAccess: [], perceptionNonce: new Set(), reserved: new Set(), dispatched: new Map(), outcomes: new Map(), keyDeadAt: new Map(), parentChildren: new Map(), simulated: [], issuerDrift: new Set(), tenantDrifted: false, configSnapshot: null, decisions: new Map(), runtimeUse: [], runtimeUseByCap: new Map(), runtimeUseBySubject: new Map(), revocationDigests: new Map(), denials: [], denialsByReq: new Map(), ceremonyAcks: new Map(), ceremonyPlanned: new Map(), ceremonyCommitted: new Map(), ceremonyAborted: new Set(), coverageAnchors: new Map() }; this.#auditIdx.set(t, idx); }
     // Re-entrancy must fail closed: a nested caller handed the mid-fold
     // partial projection could observe anchors that the committed chain
     // never attested (w17-idx F9). Nothing inside the fold recurses
@@ -1115,6 +1136,7 @@ export class Fabric {
         // flow ran — the mutable ceremony row's ack list is a cache, never
         // the quorum's authority (w17-fixverify H1).
         case 'CEREMONY_ACKNOWLEDGED': if (meta.custodian === pl.actor) { const s = idx.ceremonyAcks.get(pl.reference) ?? new Set(); s.add(pl.actor); idx.ceremonyAcks.set(pl.reference, s); } break;
+        case 'CEREMONY_ABORTED': idx.ceremonyAborted ??= new Set(); idx.ceremonyAborted.add(pl.reference); break;
       }
         idx.maxSeq = Math.max(idx.maxSeq, e.sequence ?? 0);
       }
@@ -2458,15 +2480,20 @@ export class Fabric {
       // forensically important fact and must never be rewritten (w11 F6).
       requireThat(!this.revoked(t, input.kind, input.id), 'INV-409-STATE', 'Authority already revoked', 409);
       // The bound execution or audit signer cannot be revoked without a
-      // pending, tenant-owned successor covering its purposes — the recovery
-      // rotation needs certificates and outcome signatures to keep flowing,
-      // and only the successor supplies them (w10-cert F5, w11-lifecycle
-      // F1/F2: an unguarded execution-key revoke bricked the whole tenant).
+      // quorum-designated pending successor covering its purposes — the
+      // recovery rotation needs certificates and outcome signatures to keep
+      // flowing, and only the successor supplies them (w10-cert F5,
+      // w11-lifecycle F1/F2: an unguarded execution-key revoke bricked the
+      // whole tenant). A merely-prepared key is NOT enough: a lone
+      // `security` identity could then substitute the tenant signer without
+      // any custodian involvement — the successor must be named in a
+      // custodian-acked ceremony's rotation spec (w18-crypto F3).
       for (const klass of ['execution', 'audit']) if (input.kind === 'key' && input.id === this.keys(t)[klass]?.key_id) {
         const needed = this._keyPurposes[klass] ?? [];
         const successor = [...this.vault.keys.entries()].some(([kid, e]) => e.pending && !e.revoked && this.chainOwnsVaultKey(t, kid)
-          && (e.purpose === 'any' || needed.every(x => (Array.isArray(e.purpose) ? e.purpose : [e.purpose]).includes(x))));
-        requireThat(successor, 'INV-409-STATE', `Revoking the active ${klass} signer requires a pending successor key covering the ${klass} purposes — rotate first`, 409);
+          && (e.purpose === 'any' || needed.every(x => (Array.isArray(e.purpose) ? e.purpose : [e.purpose]).includes(x)))
+          && this.ceremonyDesignated(t, kid, klass));
+        requireThat(successor, 'INV-409-STATE', `Revoking the active ${klass} signer requires a pending successor covering the ${klass} purposes that a custodian-acked rotation ceremony designated — prepare and ack a key.rotate ceremony first`, 409);
       }
       const payload = { ...clone(input), tenant_id: t, revoked_at: now, actor: p.subject_id, propagation: 'local-synchronous', remote_propagation: 'NOT_IMPLEMENTED' };
       // Sign the revocation envelope BEFORE the record lands — the signing
@@ -2731,10 +2758,25 @@ export class Fabric {
     // trigger (w12 red-team). A row that fails signature verification flags
     // loudly rather than blending into history.
     const keys = this.auditPublicKeys(p.tenant_id), deadAt = this._auditIndex(p.tenant_id).keyDeadAt;
+    // A verified row's signature verdict never changes — memoize on
+    // (seq, envelope digest) so each page serves O(limit) map hits
+    // instead of O(limit) signature verifications. The key must cover
+    // the verified BYTES: keying on the stored hash column alone would
+    // let an insider tamper only the envelope and be served from cache
+    // (w18-http F-3). The dead-key window is re-checked every call —
+    // it tightens after later revocations.
+    const memo = this._pageVerifyMemo ??= new Map();
     for (const e of page.entries) {
       let ok = false; try {
         const kid = e.envelope?.protected?.key_id, dead = kid !== undefined ? deadAt.get(kid) : undefined;
-        ok = e.envelope && !(dead !== undefined && dead < e.sequence) ? verifySigned(e.envelope, keys, 'audit').tenant_id === p.tenant_id : false;
+        if (e.envelope && !(dead !== undefined && dead < e.sequence)) {
+          const memoKey = `${p.tenant_id}:${e.sequence}:${digest(e.envelope)}`;
+          if (memo.has(memoKey)) ok = true;
+          else {
+            ok = verifySigned(e.envelope, keys, 'audit').tenant_id === p.tenant_id;
+            if (ok) { if (memo.size > 100000) memo.clear(); memo.set(memoKey, true); }
+          }
+        }
       } catch { ok = false; }
       requireThat(ok, 'INV-409-INTEGRITY', 'Audit page contains a row whose ledger signature does not verify', 409);
     }
@@ -2988,6 +3030,10 @@ export class Fabric {
     return this.transaction(p, now => {
       const t = p.tenant_id, ceremony = this.store.must(t, 'ceremony', identifier(ceremony_id));
       this.assertHealthy(t, p.subject_id, this.identity(p).device_id, now);
+      // One-shot: a completed or aborted ceremony can never be re-run with
+      // a different share subset — the status must land on the stored row,
+      // not just on the working clone (w18-crypto F4).
+      requireThat(!['completed', 'aborted'].includes(ceremony.status), 'INV-409-STATE', 'Ceremony is already closed', 409);
       // The consent quorum and the share quorum are one set: every presented
       // share must belong to a custodian who acknowledged the committed
       // artifact, and the acknowledgements themselves must span distinct
@@ -3009,6 +3055,10 @@ export class Fabric {
       const anchoredCommitted = this._auditIndex(t).ceremonyCommitted?.get(ceremony.ceremony_id);
       requireThat(anchoredCommitted !== undefined, 'INV-409-INTEGRITY', 'Ceremony share commitment is not ledger-anchored', 409);
       const { secret, artifact } = reconstructSecret({ ...ceremony, committed_at: anchoredCommitted }, shares, now);
+      // The status flip inside reconstructSecret lands on the clone passed
+      // to it — re-apply it to the stored row so the one-shot invariant
+      // actually persists (w18-crypto F4).
+      ceremony.status = 'completed';
       this.store.put(t, 'ceremony', ceremony.ceremony_id, ceremony, now);
       // The reconstructed secret's digest goes on the audit record so the
       // ledger can prove WHICH secret the quorum reconstructed (w6 F6). It

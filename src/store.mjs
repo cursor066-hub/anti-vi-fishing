@@ -19,6 +19,10 @@ const dekAad = (tenant, kind, id) => canonical({ tenant, kind, id, dek: true });
 // (w8-fixverify F1).
 const legacyAad = (tenant, kind, id) => `${tenant}/${kind}/${id}`;
 const legacyDekAad = (tenant, kind, id) => `${tenant}/${kind}/${id}/dek`;
+// The idempotency cache seals under its own disjoint tuple domain — the
+  // previous slash form sat inside the legacy records-AAD space and let a
+  // raw-writer transplant a sealed receipt into a records row (w18-crypto F1).
+const idemAad = (tenant, scope, key) => canonical({ idempotency: true, tenant, scope, key });
 const decryptEither = (wrapped, key, aad, legacy) => {
   try { return decrypt(wrapped, key, aad); } catch { return decrypt(wrapped, key, legacy); }
 };
@@ -99,6 +103,51 @@ export class Store {
     requireThat(probe(() => { this.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run(pt, 1, 'x', 'x', '{}'); this.db.prepare('UPDATE audit SET hash=? WHERE tenant=?').run('y', pt); }), 'INV-503-STORAGE', 'Audit append-only UPDATE trigger not enforced', 503);
     requireThat(probe(() => { this.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run(pt, 1, 'x', 'x', '{}'); this.db.prepare('DELETE FROM audit WHERE tenant=?').run(pt); }), 'INV-503-STORAGE', 'Audit append-only DELETE trigger not enforced', 503);
     requireThat(probe(() => this.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run(pt, 7, 'x', 'x', '{}')), 'INV-503-STORAGE', 'Audit sequence guard not enforced', 503);
+    this._migrateAad();
+  }
+  // One-shot migration: re-seal every ciphertext still bound under the
+  // legacy slash-form AAD space, then never consult that space again. The
+  // slash forms are a transplant surface — a legacy `deks.wrapped` copied
+  // into `records(kind, id+'/dek')` decrypts to the bare DEK, defeating
+  // crypto-shredding for that record (w18-crypto F2) — and the only
+  // honest closure is migrating out of it. A row that verifies under
+  // neither form was already unreadable; it stays sealed and fails loudly
+  // on read, never silently skipped.
+  _migrateAad() {
+    const master = t => this.key(t);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      // Each row is isolated: a ciphertext that fails BOTH AAD forms was
+      // already unreadable — it must stay sealed and keep failing on read,
+      // never wedge the open for every other tenant.
+      for (const r of this.db.prepare('SELECT tenant,kind,id,wrapped FROM deks').all()) {
+        try { decrypt(r.wrapped, master(r.tenant), dekAad(r.tenant, r.kind, r.id)); continue; } catch { /* legacy-sealed or corrupt */ }
+        try {
+          const bare = decrypt(r.wrapped, master(r.tenant), legacyDekAad(r.tenant, r.kind, r.id));
+          this.db.prepare('UPDATE deks SET wrapped=? WHERE tenant=? AND kind=? AND id=?').run(encrypt(bare, master(r.tenant), dekAad(r.tenant, r.kind, r.id)), r.tenant, r.kind, r.id);
+        } catch { /* corrupt — left sealed, fails on read as before */ }
+      }
+      const recs = this.db.prepare('SELECT tenant,kind,id,value FROM records').all();
+      const dekRow = this.db.prepare('SELECT wrapped FROM deks WHERE tenant=? AND kind=? AND id=?');
+      for (const r of recs) {
+        try {
+          const d = dekRow.get(r.tenant, r.kind, r.id);
+          const key = d ? Buffer.from(decrypt(d.wrapped, master(r.tenant), dekAad(r.tenant, r.kind, r.id)), 'base64url') : master(r.tenant);
+          try { decrypt(r.value, key, recAad(r.tenant, r.kind, r.id)); continue; } catch { /* legacy-sealed or corrupt */ }
+          const plain = decrypt(r.value, key, legacyAad(r.tenant, r.kind, r.id));
+          this.db.prepare('UPDATE records SET value=? WHERE tenant=? AND kind=? AND id=?').run(encrypt(plain, key, recAad(r.tenant, r.kind, r.id)), r.tenant, r.kind, r.id);
+        } catch { /* corrupt — left sealed */ }
+      }
+      for (const r of this.db.prepare('SELECT tenant,scope,key,result FROM idempotency').all()) {
+        try { decrypt(r.result, master(r.tenant), idemAad(r.tenant, r.scope, r.key)); continue; } catch { /* legacy-sealed or corrupt */ }
+        try {
+          const plain = decrypt(r.result, master(r.tenant), `${r.tenant}/idempotency/${r.scope}/${r.key}`);
+          this.db.prepare('UPDATE idempotency SET result=? WHERE tenant=? AND scope=? AND key=?').run(encrypt(plain, master(r.tenant), idemAad(r.tenant, r.scope, r.key)), r.tenant, r.scope, r.key);
+        } catch { /* corrupt — left sealed */ }
+      }
+      this.db.exec('COMMIT');
+    } catch (e) { if (this.db.isTransaction) this.db.exec('ROLLBACK'); throw e; }
+    this._aadMigrated = true;
   }
   close() { this.db.close(); }
   tx(fn) {
@@ -137,7 +186,7 @@ export class Store {
   }
   dek(tenant, kind, id) {
     const row = this.db.prepare('SELECT wrapped FROM deks WHERE tenant=? AND kind=? AND id=?').get(tenant, kind, id);
-    return row ? Buffer.from(decryptEither(row.wrapped, this.key(tenant), dekAad(tenant, kind, id), legacyDekAad(tenant, kind, id)), 'base64url') : null;
+    return row ? Buffer.from(this._aadMigrated ? decrypt(row.wrapped, this.key(tenant), dekAad(tenant, kind, id)) : decryptEither(row.wrapped, this.key(tenant), dekAad(tenant, kind, id), legacyDekAad(tenant, kind, id)), 'base64url') : null;
   }
   get(tenant, kind, id) {
     const row = this.db.prepare('SELECT value FROM records WHERE tenant=? AND kind=? AND id=?').get(tenant, kind, id);
@@ -182,7 +231,7 @@ export class Store {
   }
   readValue(tenant, kind, id, wrapped) {
     const key = this.dek(tenant, kind, id) ?? this.key(tenant);
-    return decryptEither(wrapped, key, recAad(tenant, kind, id), legacyAad(tenant, kind, id));
+    return this._aadMigrated ? decrypt(wrapped, key, recAad(tenant, kind, id)) : decryptEither(wrapped, key, recAad(tenant, kind, id), legacyAad(tenant, kind, id));
   }
   shred(tenant, kind, id) {
     // Crypto-shredding: destroy the record DEK (secure_delete zeroes its
@@ -311,10 +360,11 @@ export class Store {
     const row = this.db.prepare('SELECT hash,result FROM idempotency WHERE tenant=? AND scope=? AND key=?').get(tenant, scope, key);
     if (row) {
       requireThat(ctEqual(row.hash, requestHash), 'INV-409-IDEMPOTENCY', 'Idempotency key reused for a different request', 409);
-      return decrypt(row.result, this.key(tenant), `${tenant}/idempotency/${scope}/${key}`);
+      return this._aadMigrated ? decrypt(row.result, this.key(tenant), idemAad(tenant, scope, key))
+        : decryptEither(row.result, this.key(tenant), idemAad(tenant, scope, key), `${tenant}/idempotency/${scope}/${key}`);
     }
     const result = fn();
-    this.db.prepare('INSERT INTO idempotency VALUES(?,?,?,?,?)').run(tenant, scope, key, requestHash, encrypt(result, this.key(tenant), `${tenant}/idempotency/${scope}/${key}`));
+    this.db.prepare('INSERT INTO idempotency VALUES(?,?,?,?,?)').run(tenant, scope, key, requestHash, encrypt(result, this.key(tenant), idemAad(tenant, scope, key)));
     return result;
   }
 }

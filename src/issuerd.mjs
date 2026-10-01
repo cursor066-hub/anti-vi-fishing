@@ -216,6 +216,10 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
   const buckets = new Map();
   const server = http.createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Cache-Control', 'no-store');
+    // Same response-header bar as the main server — issuer responses are
+    // JSON only and must never be embedded cross-origin (w18-http F-4).
+    res.setHeader('Referrer-Policy', 'no-referrer'); res.setHeader('Content-Security-Policy', "default-src 'none'");
+    res.setHeader('Cross-Origin-Resource-Policy', 'same-origin'); res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
     // Serialize before any byte is flushed: a canonical() failure must land
     // in the catch cleanly, never mid-response after writeHead (w9-deploy F1).
     const send = (status, data) => { const bodyOut = canonical(data); res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(bodyOut); };
@@ -244,6 +248,10 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
       requireThat(req.url.startsWith('/'), 'INV-400-SCHEMA', 'Request target must be origin-form', 400);
       const url = new URL(req.url, base);
       requireThat(req.url.split('?')[0] === url.pathname, 'INV-400-SCHEMA', 'Request target must be an origin-form canonical path', 400);
+      // The wire contract is closed: 'tenant' on the manifest route is
+      // the only declared parameter — anything else fails rather than
+      // being silently ignored (w18-http F-4).
+      for (const k of url.searchParams.keys()) requireThat(k === 'tenant' && req.method === 'GET' && /^\/v1\/issuers\/[A-Za-z0-9_-]+\/(manifest|health)$/.test(url.pathname), 'INV-400-SCHEMA', 'Unknown query parameter', 400);
       // Same Host pinning as the main server: requests naming another
       // authority are answered by nothing here (w9-deploy F5). Compare
       // against the socket's own local address/port so a wildcard-bound
@@ -348,15 +356,27 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
       if (req.method === 'POST' && (m = /^\/v1\/issuers\/([A-Za-z0-9_-]+)\/issue$/.exec(url.pathname))) {
         const chunks = []; let size = 0;
         for await (const c of req) { size += c.length; requireThat(size <= 262144, 'INV-413-BODY', 'Request too large', 413); chunks.push(c); }
-        // Malformed wire bytes surface as INV-400-SCHEMA, never as a 500:
-        // the fatal decoder throws TypeError, which the generic handler
-        // would otherwise map to INV-500 (w9-fixverify NB-1).
         let request;
-        try { request = parseStrict(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))); }
-        catch (e) { if (e instanceof InvariantError) throw e; throw new InvariantError('INV-400-SCHEMA', 'Malformed request body encoding', 400); }
-        fields(request, ['tenant_id', 'capsule_digest', 'kind', 'subject_id', 'claims'], ['dependencies']);
-        identifier(request.tenant_id, 'tenant'); identifier(request.subject_id, 'subject'); text(request.kind, 'kind', 64);
-        requireThat(/^[a-f0-9]{64}$/.test(request.capsule_digest), 'INV-400-SCHEMA', 'capsule_digest must be a digest');
+        try {
+          // Same strict content contract as the main API — any other
+          // Content-Type cannot mint evidence (w18-http F-4).
+          requireThat(req.headers['content-type'] === 'application/json', 'INV-415-CONTENT', 'Use application/json', 415);
+          // Malformed wire bytes surface as INV-400-SCHEMA, never as a 500:
+          // the fatal decoder throws TypeError, which the generic handler
+          // would otherwise map to INV-500 (w9-fixverify NB-1).
+          try { request = parseStrict(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))); }
+          catch (e) { if (e instanceof InvariantError) throw e; throw new InvariantError('INV-400-SCHEMA', 'Malformed request body encoding', 400); }
+          fields(request, ['tenant_id', 'capsule_digest', 'kind', 'subject_id', 'claims'], ['dependencies']);
+          identifier(request.tenant_id, 'tenant'); identifier(request.subject_id, 'subject'); text(request.kind, 'kind', 64);
+          requireThat(/^[a-f0-9]{64}$/.test(request.capsule_digest), 'INV-400-SCHEMA', 'capsule_digest must be a digest');
+        } catch (e) {
+          // Malformed unauthenticated probes are logged too — a
+          // schema-failing flood must not be any more invisible to
+          // provenance than a well-formed one (w18-http F-5); the probe
+          // bucket bounds the entries.
+          if (!anyBearer('issue')) { take('probe'); issuanceLog({ issuer: 'unknown', request_digest: logMac(request ?? { wire_bytes: size }), refused: true, unauthenticated: true, malformed: true, code: e.code ?? 'INV-400-SCHEMA' }); }
+          throw e;
+        }
         if (!anyBearer('issue')) { take('probe'); issuanceLog({ issuer: 'unknown', request_digest: logMac(request), refused: true, unauthenticated: true, code: 'INV-401-AUTH' }); } gate('issue'); take('issue');
         const issuer = resolveIssuer(m[1], request.tenant_id);
         // Authentication failures are logged to the issuance chain too —

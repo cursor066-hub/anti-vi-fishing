@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
-import { fixture, hasCode } from './helpers.mjs';
+import { fixture, hasCode, designateSuccessor } from './helpers.mjs';
 import { signAcknowledgement } from '../src/ceremony.mjs';
 import { signed, verifySigned, generateKey } from '../src/crypto.mjs';
 import { digest } from '../src/canonical.mjs';
@@ -117,7 +117,7 @@ test('w11-lifecycle F1: exec-key recovery — pending successor signs marked cer
 test('w11-lifecycle F2: audit-key revoke with pending successor keeps outcomes settling', t => {
   const h = fixture(t);
   const { certificate } = h.ready();
-  const pendingAudit = h.f.prepareRotation(h.p('security'), 'audit');
+  const pendingAudit = designateSuccessor(h, 'audit');
   h.f.revoke(h.p('security'), { kind: 'key', id: h.f.keys('acme').audit.key_id, reason: 'compromise drill' });
   const outcome = h.f.execute(h.p(), certificate);
   assert.equal(outcome.payload.status, 'VERIFIED');

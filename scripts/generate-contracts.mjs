@@ -12,7 +12,7 @@ const components = {
   CertificateRequest: object({ capsule_id: type.id }),
   ExecuteRequest: object({ certificate: Ref('Envelope'), dry_run: { type: 'boolean' } }),
   Revocation: object({ kind: { enum: ['certificate', 'evidence', 'issuer', 'key', 'subject', 'device', 'capability', 'grant', 'token'] }, id: type.id, reason: type.text }),
-  CoverageDeclaration: object({ path_id: type.id, action_type: Str, target: type.id, environment: Str, connector_version: Str, owner: type.id, status: { enum: ['MONITORED', 'UNKNOWN'] }, path_class: { enum: ['web_ui', 'mobile', 'api', 'cli', 'batch', 'import', 'service_account', 'direct_database', 'recovery', 'emergency'] }, max_age_ms: { type: 'integer', minimum: 1000, maximum: 2592000000 }, configuration_digest: type.hash }),
+  CoverageDeclaration: object({ path_id: type.id, action_type: Str, target: type.id, environment: Str, connector_version: Str, owner: type.id, status: { enum: ['MONITORED', 'UNKNOWN', 'UNCOVERED'] }, path_class: { enum: ['web_ui', 'mobile', 'api', 'cli', 'batch', 'import', 'service_account', 'direct_database', 'recovery', 'emergency'] }, max_age_ms: { type: 'integer', minimum: 1000, maximum: 2592000000 }, configuration_digest: type.hash }),
   AuditRequest: object({ purpose: type.text }),
   BatchApproval: object({ capsule_ids: { type: 'array', items: type.id, minItems: 2, maxItems: 32, uniqueItems: true }, signatures: { type: 'array', items: Ref('Envelope'), minItems: 2, maxItems: 32 } }),
   RetentionHold: object({ evidence_id: type.id, legal_hold: { type: 'boolean' } }),
@@ -90,7 +90,7 @@ for (const row of [
  ['/v1/keys','get','List vault keys (public metadata only)','security, policy_admin'], ['/v1/keys/rotate-prepare','post','Pre-stage a pending rotation key','security, custodian','RotatePrepare',201], ['/v1/keys/{id}/attest','get','Vault-signed key attestation','security, auditor'],
  ['/v1/config-drift','get','Configuration drift status','security, policy_admin'], ['/v1/config-drift/reassert','post','Re-attest config after correction','security'], ['/v1/clock/recover','post','Audited clock repair after stall','security, policy_admin'],
  ['/v1/secure-perception/sessions','post','Open dev-attested sealed perception session','operator, approver, custodian, security','PerceptionSession',201], ['/v1/secure-perception/release','post','Release sealed fields under purpose binding','operator, approver, custodian, security','PerceptionRelease'], ['/v1/secure-perception/fallback','post','Labelled non-perception fallback submission','operator, approver, custodian, security','PerceptionFallback'],
- ['/v1/advisory','post','Deterministic advisory plane (never confers authority)','operator, approver, custodian, security, policy_admin','Advisory'],
+ ['/v1/advisory','post','Deterministic advisory plane (never confers authority)','operator, approver, custodian, security, policy_admin, auditor','Advisory'],
  ['/session','post','Establish same-origin session','token holder','Session'], ['/session/logout','post','Destroy current cookie session','authenticated']
 ]) operation(...row);
 paths['/session'].post.security = [];

@@ -2,7 +2,7 @@
   "generated_by": "scripts/report.mjs",
   "engineering_checks": "PASS",
   "production_release": "BLOCKED (expected)",
-  "unique_test_cases_executed": 599,
+  "unique_test_cases_executed": 608,
   "failed": 0,
   "scenarios_run": 22,
   "requirement_status_counts": {

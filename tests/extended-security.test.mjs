@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fixture, hasCode, runtimeInput, runtimeRequest, setTenant } from './helpers.mjs';
+import { fixture, hasCode, runtimeInput, runtimeRequest, setTenant, designateSuccessor } from './helpers.mjs';
 import { clone, digest } from '../src/canonical.mjs';
 import { signed } from '../src/crypto.mjs';
 import { spawnSync } from 'node:child_process';
@@ -40,7 +40,7 @@ test('RUN-004: runtime issuer-key revocation and active-policy change invalidate
   const h = fixture(t), cap = h.f.runtime.issue(h.p(), runtimeInput());
   // A pending successor must exist before the bound signer can be revoked
   // (w11-lifecycle F1) — the capability signed by the old key still dies.
-  h.f.prepareRotation(h.p('security'), 'execution');
+  designateSuccessor(h, 'execution');
   h.f.revoke(h.p('security'), { kind: 'key', id: cap.protected.key_id, reason: 'Execution key compromise drill' });
   assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap)), hasCode('INV-401-CAPABILITY'));
 });

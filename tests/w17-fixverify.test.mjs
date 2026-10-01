@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { fixture, hasCode, runtimeInput, runtimeRequest } from './helpers.mjs';
+import { fixture, hasCode, runtimeInput, runtimeRequest, designateSuccessor } from './helpers.mjs';
 import { digest } from '../src/canonical.mjs';
 import { Fabric } from '../src/fabric.mjs';
 import { signAcknowledgement } from '../src/ceremony.mjs';
@@ -236,7 +236,7 @@ test('w17 M2: sealAuditChain cuts a signed future-time poison row', t => {
 test('w17 M3: seal survives an audit key revoked without a rotation succession', t => {
   const h = fixture(t);
   const keyA = h.f.keys('acme').audit.key_id;
-  const pending = h.f.prepareRotation(h.p('security'), 'audit'); // revoke guard demands a pending successor
+  const pending = designateSuccessor(h, 'audit'); // revoke guard demands a quorum-designated successor
   h.f.revoke(h.p('security'), { kind: 'key', id: keyA, reason: 'compromised' });
   const last = h.f.store.db.prepare('SELECT seq,hash FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1').get('acme');
   const payload = { tenant_id: 'acme', sequence: last.seq + 1, previous: last.hash, type: 'FORGED', actor: 'mallory', reference: 'x', metadata: {}, time: h.now() };

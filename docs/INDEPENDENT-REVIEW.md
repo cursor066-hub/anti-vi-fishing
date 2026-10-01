@@ -18,6 +18,11 @@ external review.
 | w7 | Backup/restore, clock/replay/idempotency, cross-component seams, console sessions, DEK | Sibling-session retirement, session/token revocation binding, backup trust anchors, log-path hardening |
 | w8 | Ledger re-verify, fix-verification, tooling/CLI, composite/coverage, canonical/schema | Scoped trust anchors for restore, cli-sign key consistency, issuerd log protection, `--check-only` reports, prototype-member revoke oracles, evidence-binding own-property walks, parser depth split, 15-name key blocklist, reject-vector corpus |
 | w9 | Network/quarantine, SRS completeness, deploy/bootstrap, fix-verification, schema/bootstrap | issuerd crash-on-metrics fix, uniform-404 issuer oracle, socket timeouts, Host pinning, early IP bucket, per-issuer buckets, digest-stored issuer credentials, `serve` custody coverage, nginx/systemd template alignment, ledger status corrections |
+| w10–w11 | Datagate (2nd pass), cert/execute lifecycle, approval/ceremony/quorum, ledger 3rd pass, timing/side-channel | request-intent row leakage closed, outcome-store export budget drain, phantom revoke of signer keys, approval consent dies with device quarantine, custodian share loss on revocation, dealer binding, quorum by real signing key, constitutional floors on key.rotate/key.ceremony, KEY-006/KEY-011 honest demotions, traceability gate hardened to asserting test bodies |
+| w12–w13 | Provenance wave: store/auditIndex, timing, supply-chain, lifecycle | audit-chain provenance for all security state (mutable rows demoted to caches), tx-abort snapshot/restore, POLICY_STAGED anchor for promotion, folded cancel/reserve/outcome, composite parentage from chain, drift flag chain-anchored, self-contained verify-release, CI parity of verify.sh |
+| w14–w16 | w13 residual batch, anchored state, fix-verification of provenance layer | dead-key signing window enforced in the fold, anchored repoint selection by KEY_ROTATED events, dead-key repoint refusal, grant legacy-fallback field equality, decisions-anchor DoS fix, seal repoint under live successor, auditExport per-row re-checks, _signingKeyId corroborated steering |
+| w17 | Fix-verification, console/CSRF, red-team kill-chain, _auditIndex fold | chain-anchored ceremony plan/quorum, anchored-only policy restore (forged constitution un-signable), keyed rotation steering map, 60s denial/reject dedup, indexed runtime-use lookups, revoked-flag verify memo, CSRF byte-length + credential-bound logout, CORP/COOP headers |
+| w18 | Fix-verification of w17, ledger/docs 4th pass, crypto/vault 2nd pass, HTTP/console 2nd pass | in progress — findings land with fixes + regression tests |
 
 ## Method
 
@@ -26,7 +31,7 @@ external review.
 - Findings were re-verified against the live tree before any fix; stale or
   already-fixed findings were closed with the commit that pre-dated them.
 - Every accepted finding landed with a dedicated regression test — see
-  `tests/w5-*` … `tests/w9-deploy.test.mjs` — so a repeated auditor can
+  `tests/w5-*` … `tests/w17-*.test.mjs` — so a repeated auditor can
   check each repair independently.
 - Fix-verification auditors specifically hunt for defects *inside* the
   fixes of the same wave, closing the self-review loop.

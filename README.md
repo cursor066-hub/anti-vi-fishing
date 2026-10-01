@@ -2,7 +2,7 @@
 
 **Engineering release — not approved for production use.** This ZIP is an executable, tested software implementation of substantial parts of IF-02, together with synthetic target simulations, a control workspace, adversarial tests, offline verifiers, and a complete requirement-by-requirement gap register. It is **not the complete R0–R5 production platform**. Read [production acceptance](docs/PRODUCTION-ACCEPTANCE.md) before assigning any security guarantee.
 
-The implementation has no third-party application dependencies. It uses Node.js 24 built-in HTTP, SQLite, cryptography, test runner, and worker threads. Node **24.16.0 on Linux x64** is the tested runtime. Other versions and operating systems are not verified. Python 3 is optional for independent canonical digest verification. Bun 1.3.14 is used by the independent WebCrypto audit verifier and is required for the complete verification test suite; it is not needed to run the server.
+The implementation has no third-party application dependencies. It uses Node.js 24 built-in HTTP, SQLite, cryptography, test runner, and worker threads. Node **24.16.0 on Linux x64** is the tested runtime. Other versions and operating systems are not verified. Python 3 is optional for independent canonical digest verification. Bun 1.3.14 is used by the independent WebCrypto audit verifier: without it that leg self-skips and `reports/verification-webcrypto.json` cannot be reproduced locally; Bun is not needed to run the server.
 
 ## Start locally
 
@@ -35,7 +35,7 @@ See [WORKFLOWS.md](docs/WORKFLOWS.md) for exact operation and signing instructio
 
 ```sh
 sh scripts/verify.sh        # complete pipeline: check + tests + simulate + verifiers
-npm test                    # 136-test suite incl. adversarial, conformance, canonical fuzz + coverage bypass probe
+npm test                    # 599-test suite incl. adversarial, conformance, canonical fuzz + coverage bypass probe
 npm run conformance         # regenerate vectors; verify under node, WebCrypto and Python
 node scripts/verify-export.mjs reports/sample-audit.json reports/sample-pinned-trust.json
 python scripts/canonical-vectors.py examples/canonical-vectors.json

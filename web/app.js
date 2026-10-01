@@ -110,8 +110,8 @@ if (typeof document !== 'undefined') {
     // Affordances mirror the server's own authorization sets — a nav entry is
     // hidden exactly when every API call under it would 403 (UX-004,
     // w17-console F5: propose includes workload+policy_admin, coverage
-    // excludes workload, grants includes policy_admin).
-    const access = { actions: canActions, propose: has('operator', 'workload', 'policy_admin'), coverage: has('operator', 'approver', 'custodian', 'security', 'auditor', 'policy_admin'), policy: has('policy_admin', 'security'), runtime: has('operator', 'workload'), audit: has('auditor', 'security'), keys: has('security', 'policy_admin'), ceremonies: admin, connectors: has('operator', 'security', 'policy_admin', 'auditor'), proofs: has('operator', 'security', 'auditor'), perception: has('operator', 'approver', 'custodian', 'security'), grants: has('operator', 'security', 'auditor', 'policy_admin') };
+    // excludes workload, grants excludes policy_admin).
+    const access = { actions: canActions, propose: has('operator', 'workload', 'policy_admin'), coverage: has('operator', 'approver', 'custodian', 'security', 'auditor', 'policy_admin'), policy: has('policy_admin', 'security'), runtime: has('operator', 'workload'), audit: has('auditor', 'security'), keys: has('security', 'policy_admin'), ceremonies: admin, connectors: has('operator', 'security', 'policy_admin', 'auditor'), proofs: has('operator', 'security', 'auditor'), perception: has('operator', 'approver', 'custodian', 'security'), grants: has('operator', 'security', 'auditor') };
     document.querySelectorAll('nav button').forEach(b => { b.hidden = !access[b.dataset.view]; });
     // Per-ACTION affordances inside a visible view must also mirror the
     // server's role set: a button that always 403s is a dishonest
