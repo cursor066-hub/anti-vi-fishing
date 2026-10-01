@@ -82,8 +82,8 @@
       "bytes": 3671
     },
     "src/store.mjs": {
-      "lines": 320,
-      "bytes": 22530
+      "lines": 326,
+      "bytes": 23076
     },
     "src/target.mjs": {
       "lines": 260,
@@ -210,8 +210,8 @@
       "bytes": 29478
     },
     "tests/ledger3.test.mjs": {
-      "lines": 401,
-      "bytes": 27053
+      "lines": 405,
+      "bytes": 27387
     },
     "tests/lifecycle.test.mjs": {
       "lines": 135,
@@ -262,8 +262,8 @@
       "bytes": 10570
     },
     "tests/w12-redteam.test.mjs": {
-      "lines": 245,
-      "bytes": 16144
+      "lines": 247,
+      "bytes": 16314
     },
     "tests/w13-provenance.test.mjs": {
       "lines": 140,
@@ -274,8 +274,8 @@
       "bytes": 13787
     },
     "tests/w15-anchored.test.mjs": {
-      "lines": 173,
-      "bytes": 10898
+      "lines": 189,
+      "bytes": 12217
     },
     "tests/w5-mutations.test.mjs": {
       "lines": 192,
@@ -347,5 +347,5 @@
     }
   },
   "total_files": 86,
-  "total_lines": 16036
+  "total_lines": 16064
 }
