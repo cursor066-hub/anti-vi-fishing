@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 5208,
-      "bytes": 409420
+      "lines": 5237,
+      "bytes": 411168
     },
     "src/issuerd.mjs": {
       "lines": 797,
@@ -394,8 +394,8 @@
       "bytes": 17395
     },
     "tests/w30.test.mjs": {
-      "lines": 291,
-      "bytes": 17950
+      "lines": 388,
+      "bytes": 23965
     },
     "tests/w5-mutations.test.mjs": {
       "lines": 194,
@@ -467,5 +467,5 @@
     }
   },
   "total_files": 116,
-  "total_lines": 26837
+  "total_lines": 26963
 }

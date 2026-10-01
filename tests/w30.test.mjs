@@ -9,7 +9,7 @@ import http from 'node:http';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, randomBytes } from 'node:crypto';
 import { fixture, hasCode, stageConstitution } from './helpers.mjs';
 import { createIssuerServer, writeIssuer, loadIssuers } from '../src/issuerd.mjs';
 import { ISSUER_RULES, issuerRecords } from '../src/bootstrap.mjs';
@@ -287,4 +287,101 @@ for n in [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='tr
 c.execute("DELETE FROM records WHERE tenant='acme' AND kind='capsule' AND id='${r.capsule.capsule_id}'")`);
   assert.throws(() => h.f.getCapsule(h.p('operator', 'acme'), r.capsule.capsule_id), hasCode('INV-409-INTEGRITY'));
   assert.throws(() => h.f.getCapsule(h.p('operator', 'acme'), 'capsule-never-existed'), hasCode('INV-404-NOT-FOUND'));
+});
+
+// ---- w30 SECURE-PERCEPTION audit regressions (2nd pass) ---------------
+// F1 citation provenance derives from the chain (supersession order +
+// row-key binding), F2 legacy anchors fail closed, F3 suite floor reaches
+// attestation, F4 replay guard precedes attestation crypto.
+
+const scomponent = h => h.setup.componentSecrets.acme['secure-view-acme'];
+const smint = (h, nonce) => h.f.perceptionSession(h.p(), scomponent(h).attest(nonce, h.now() + 300000));
+const sfresh = () => randomBytes(32).toString('hex');
+const releaseBody = extra => ({ fields: { vendor: 'v1' }, purpose: 'verify', ...extra });
+
+// W30-PERCEPTION-F1: the citation gate trusted the mutable superseded_by
+// cache. A row writer could clear the flag to cite withdrawn evidence, or
+// plant it to deny live evidence. Supersession is now re-derived from the
+// anchored attach order like every other consumer.
+test('w30-perception F1: citation supersession is chain-derived, not a row flag', t => {
+  const h = fixture(t, ['acme']);
+  const record = h.proposed();
+  const e1 = h.evidence(record, { kind: 'ownership' });
+  h.evidence(record, { issuer: 'registry' });
+  const e2 = h.evidence(record, { kind: 'ownership' }); // later same-issuer+kind attach retires e1
+  h.approve(record);
+  h.f.certificate(h.p('operator'), record.capsule.capsule_id);
+  const session = smint(h, sfresh());
+  // Clearing the flag on the superseded row does NOT revive the citation.
+  const row1 = h.f.store.get('acme', 'evidence', e1.payload.evidence_id);
+  h.f.store.put('acme', 'evidence', e1.payload.evidence_id, { ...row1, superseded_by: null }, h.now());
+  assert.throws(() => h.f.perceptionRelease(h.p(), session.session_id, releaseBody({ capsule_id: record.capsule.capsule_id, evidence_ref: e1.payload.evidence_id })), hasCode('INV-412-EVIDENCE'));
+  // And a PLANTED flag on the live successor does not deny it — the store
+  // row no longer speaks for the chain.
+  const row2 = h.f.store.get('acme', 'evidence', e2.payload.evidence_id);
+  h.f.store.put('acme', 'evidence', e2.payload.evidence_id, { ...row2, superseded_by: 'ev-forged-deny' }, h.now());
+  const rel = h.f.perceptionRelease(h.p(), session.session_id, releaseBody({ capsule_id: record.capsule.capsule_id, evidence_ref: e2.payload.evidence_id }));
+  assert.ok(rel && typeof rel === 'object', 'a planted superseded flag no longer denies live evidence');
+});
+
+// W30-PERCEPTION-F1b: a decided capsule's contents transplanted under a
+// foreign row key cited the wrong provenance label — the row key must
+// equal the capsule id the row claims to be.
+test('w30-perception F1b: a capsule row transplanted under a foreign key cannot cite', t => {
+  const h = fixture(t, ['acme']);
+  const { record } = h.ready();
+  const session = smint(h, sfresh());
+  const row = h.f.store.get('acme', 'capsule', record.capsule.capsule_id);
+  h.f.store.put('acme', 'capsule', 'cap-forged', clone(row), h.now());
+  assert.throws(() => h.f.perceptionRelease(h.p(), session.session_id, releaseBody({ capsule_id: 'cap-forged' })), hasCode('INV-409-INTEGRITY'));
+});
+
+// W30-PERCEPTION-F1c: same row-key binding for evidence — a signed
+// envelope transplanted under a foreign id keeps verifying while naming
+// the wrong id on the trail.
+test('w30-perception F1c: an evidence row transplanted under a foreign key cannot cite', t => {
+  const h = fixture(t, ['acme']);
+  const record = h.proposed();
+  const e1 = h.evidence(record, { kind: 'ownership' });
+  h.evidence(record, { issuer: 'registry' });
+  h.approve(record);
+  h.f.certificate(h.p('operator'), record.capsule.capsule_id);
+  const session = smint(h, sfresh());
+  const row = h.f.store.get('acme', 'evidence', e1.payload.evidence_id);
+  h.f.store.put('acme', 'evidence', 'ev-forged', clone(row), h.now());
+  assert.throws(() => h.f.perceptionRelease(h.p(), session.session_id, releaseBody({ capsule_id: record.capsule.capsule_id, evidence_ref: 'ev-forged' })), hasCode('INV-409-INTEGRITY'));
+});
+
+// W30-PERCEPTION-F2: anchors minted before the signing-key binding carry
+// null — substituting the live config key let them outlive revocation of
+// the key that actually minted them. Null-kid anchors now fail closed.
+test('w30-perception F2: a session anchored without an attester key cannot release', t => {
+  const h = fixture(t, ['acme']);
+  const session = smint(h, sfresh());
+  const row = h.f.store.get('acme', 'perception-session', session.session_id);
+  // Rewrite the anchor in legacy shape — every field intact except the
+  // attester key id, exactly as pre-binding ledgers stored it.
+  h.f.store.audit('acme', 'PERCEPTION_SESSION', 'operator', session.session_id, {
+    component: row.component, assurance: row.assurance, firmware: row.firmware_version,
+    creator: row.creator, expires_at: row.expires_at,
+    channel_digest: digest({ component_ecdh: row.component_ecdh, server_ephemeral: row.server_ephemeral })
+  }, h.now());
+  assert.throws(() => h.f.perceptionRelease(h.p(), session.session_id, releaseBody()), hasCode('INV-403-SCOPE'));
+});
+
+// W30-PERCEPTION-F3: the constitutional suite floor never reached the
+// attestation path — a component whose suite the policy retired could
+// still mint sessions.
+test('w30-perception F3: attestation honours the constitutional suite floor', t => {
+  const h = fixture(t, ['acme']);
+  // An Ed25519-only floor is legal (it covers the live vault keys) — an
+  // attestation claiming ES256 must now die on it before any crypto work.
+  const next = clone(h.f.policy('acme')); next.version = 2; next.policy_id = 'constitution:acme:ed-only';
+  next.algorithms = { ...(next.algorithms ?? {}), allowed_suites: ['Ed25519'] };
+  stageConstitution(h, next, { activate_at: h.now() - 1 });
+  const att = scomponent(h).attest(sfresh(), h.now() + 300000);
+  att.protected.suite = 'ES256';
+  assert.throws(() => h.f.perceptionSession(h.p(), att), hasCode('INV-451-POLICY'));
+  // The floor still serves honest attestations on the same constitution.
+  smint(h, sfresh());
 });

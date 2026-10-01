@@ -2621,25 +2621,11 @@ export class Fabric {
     requireThat(false, 'INV-404-NOT-FOUND', 'Resource not found', 404);
   }
   ensureMutable(record) { requireThat(!['DENY', 'CANCELLED', 'CERTIFIED', 'EXECUTING', 'VERIFIED', 'UNCERTAIN', 'FAILED', 'COMPENSATED'].includes(record.status), 'INV-409-STATE', 'Action is immutable in its current state', 409); }
-  graph(t, record, policy = null) {
-    // Set membership is ledger-derived, not read off the mutable capsule
-    // record: only envelopes whose EVIDENCE_ATTACHED event sits on the
-    // signed chain count — deleting an id from record.evidence or planting
-    // one changes nothing (w11-redteam R3/R15).
-    const attachedIds = this._auditIndex(t).attached.get(record.capsule.capsule_id) ?? [];
-    // Evidence-binding rules come from the POLICY UNDER EVALUATION — a
-    // simulation must test the candidate constitution's bindings, not
-    // silently evaluate under the active one (w23-policy F9).
-    const bindingPolicy = policy ?? this.policy(t);
-    const rows = attachedIds.map(id => this.store.get(t, 'evidence', id) ? { id, e: this.store.get(t, 'evidence', id) } : { id, e: null });
-    // Supersession is derived from attach ORDER on the chain — the stored
-    // superseded_by flag is only a cache; a later same-issuer+kind envelope
-    // retires a non-conflict predecessor (mirrors attachEvidence semantics).
-    const claimOf = x => x?.envelope?.payload?.claim;
-    // Tombstoned (deleted) members still carry their issuer+kind — a later
-    // same-issuer+kind attach must retire them just like a live row, or a
-    // deleted conflict veto wedges the capsule forever (w22 F5).
-    const tombOf = x => x.e ? null : this.store.get(t, 'evidence-tombstone', x.id);
+  // Supersession is derived from attach ORDER on the chain — the stored
+  // superseded_by flag is only a cache; a later same-issuer+kind envelope
+  // retires a non-conflict predecessor (mirrors attachEvidence semantics).
+  // rows: [{ id, e }] — e is the live evidence row or null when deleted.
+  _supersededMap(t, rows) {
     // A dead member's attach family comes from the anchored
     // RETENTION_DELETED event — the mutable tomb row may not redefine it
     // (w23-fixverify F-e). Unanchored identity claims read as unknown.
@@ -2662,6 +2648,20 @@ export class Fabric {
     const acqOf = (y) => y.e?.envelope?.payload?.acquired_at ?? -Infinity;
     const better = (a, ai, b, bi) => { const ab = acqOf(a), bb = acqOf(b); return bb > ab || (bb === ab && bi > ai); };
     rows.forEach((x, i) => { if (kindOf(x) !== undefined) { let wi = -1; rows.forEach((y, j) => { if (y.e && kindOf(y) === kindOf(x) && kidOf(y) === kidOf(x) && (wi < 0 || better(rows[wi], wi, y, j))) wi = j; }); if (wi >= 0 && wi !== i) superseded.set(x.id, rows[wi].id); } });
+    return superseded;
+  }
+  graph(t, record, policy = null) {
+    // Set membership is ledger-derived, not read off the mutable capsule
+    // record: only envelopes whose EVIDENCE_ATTACHED event sits on the
+    // signed chain count — deleting an id from record.evidence or planting
+    // one changes nothing (w11-redteam R3/R15).
+    const attachedIds = this._auditIndex(t).attached.get(record.capsule.capsule_id) ?? [];
+    // Evidence-binding rules come from the POLICY UNDER EVALUATION — a
+    // simulation must test the candidate constitution's bindings, not
+    // silently evaluate under the active one (w23-policy F9).
+    const bindingPolicy = policy ?? this.policy(t);
+    const rows = attachedIds.map(id => this.store.get(t, 'evidence', id) ? { id, e: this.store.get(t, 'evidence', id) } : { id, e: null });
+    const superseded = this._supersededMap(t, rows);
     const items = rows.map(({ id, e }) => {
       if (!e) {
         // A deleted member whose tombstone row is also gone still counts as
@@ -4984,12 +4984,19 @@ export class Fabric {
       // Health before crypto work: a quarantined caller pays no attestation
       // cost (w26-perception F-10).
       this.assertHealthy(t, p.subject_id, this.identity(p).device_id, now);
+      // Replay guard BEFORE the attestation crypto — a forged replay pays a
+      // cheap SELECT + anchored-set probe, not a signature verify and a
+      // P-256 keygen (w30-perception F4). Bare-key lookup covers
+      // pre-namespacing rows as well (w9-fixverify NB-5).
+      const nonce = attestation?.payload?.nonce ?? null;
+      const seen = this.store.db.prepare('SELECT capsule FROM nonces WHERE tenant=? AND nonce IN (?, ?)').get(t, 'perception:' + nonce, nonce);
+      requireThat(!seen && !this._auditIndex(t).perceptionNonce.has(nonce), 'INV-409-REPLAY', 'Attestation nonce already consumed', 409);
+      // The constitutional suite floor reaches attestation like every other
+      // signature consumer — a retired suite cannot mint sessions under a
+      // component that still holds its key (w30-perception F3).
+      fields(attestation, ['protected', 'payload', 'signature']);
+      this.assertSuiteAllowed(t, attestation.protected.suite);
       const session = openSession(component, attestation, this.policy(t), now);
-      // Replay guard: an attestation nonce may mint exactly one session.
-      // Bare-key lookup covers pre-namespacing rows as well (w9-fixverify
-      // NB-5): a legacy nonce row must still block the replay.
-      const seen = this.store.db.prepare('SELECT capsule FROM nonces WHERE tenant=? AND nonce IN (?, ?)').get(t, 'perception:' + attestation.payload.nonce, attestation.payload.nonce);
-      requireThat(!seen && !this._auditIndex(t).perceptionNonce.has(attestation.payload.nonce), 'INV-409-REPLAY', 'Attestation nonce already consumed', 409);
       // Live-session cap: each mint writes a durable row AND a signed chain
       // event — an authorized caller must not grow either without bound
       // (w26-perception F-9). The anchored index counts only sessions that
@@ -5062,9 +5069,11 @@ export class Fabric {
       // ATTESTING key the session anchored — a rotated component cannot
       // launder sessions its retired key minted, and revoking that key still
       // reaches them after the config moved on (w18-issuerd F-5,
-      // w20-fixverify F-2). Sessions minted before the anchor carried the
-      // key id fall back to the current config key.
-      const attestingKid = anchoredSession.signing_key_id ?? releaseComponent?.signing.key_id;
+      // w20-fixverify F-2). Sessions anchored before the binding carried a
+      // key id fail CLOSED rather than substituting the live config key —
+      // the substitute would let them outlive revocation of the key that
+      // actually minted them; re-mint is the honest path (w30-perception F2).
+      const attestingKid = anchoredSession.signing_key_id;
       requireThat(releaseComponent && attestingKid && !this.revoked(t, 'key', attestingKid), 'INV-403-SCOPE', 'Perception component signing credential is revoked or unknown', 403);
       // Release provenance must be real: a cited capsule or evidence record
       // that does not exist would write forged authority into the signed
@@ -5098,8 +5107,13 @@ export class Fabric {
     // A citation means "this release draws on provenance that already passed
     // evaluation" — an undecided, expired, advisory or foreign capsule/
     // evidence can never launder sealed fields (w8-fixverify F4).
-    const checkCapsule = record => {
+    const checkCapsule = (record, id) => {
       requireThat(record && record.capsule.expires_at > now, 'INV-404-NOT-FOUND', 'Release cites no live capsule', 404);
+      // The row key must equal the capsule the row claims to be — a decided
+      // capsule's contents transplanted under a foreign id would otherwise
+      // cite the wrong provenance label into the signed trail
+      // (w30-perception F1).
+      requireThat(record.capsule.capsule_id === id, 'INV-409-INTEGRITY', 'Capsule row diverges from its record key — storage tamper', 409);
       // Mutable rows feed a SIGNED citation — the capsule must prove its
       // anchored proposal, verified request intent and self-consistent
       // digest before any row field is trusted, and the actor binding
@@ -5119,10 +5133,13 @@ export class Fabric {
       return record;
     };
     let cited = null;
-    if (release.capsule_id !== undefined)
-      cited = checkCapsule(this.store.get(t, 'capsule', identifier(release.capsule_id, 'capsule')));
+    if (release.capsule_id !== undefined) {
+      const cid = identifier(release.capsule_id, 'capsule');
+      cited = checkCapsule(this.store.get(t, 'capsule', cid), cid);
+    }
     if (release.evidence_ref !== undefined) {
-      const ev = this.store.get(t, 'evidence', identifier(release.evidence_ref, 'evidence'));
+      const eid = identifier(release.evidence_ref, 'evidence');
+      const ev = this.store.get(t, 'evidence', eid);
       const payload = ev?.envelope?.payload;
       requireThat(payload, 'INV-404-NOT-FOUND', 'Release cites nonexistent evidence', 404);
       // The citation path enforces the same integrity bar as every other
@@ -5141,12 +5158,24 @@ export class Fabric {
       // citation needs: a signed CONFLICT is a denial, and a superseded
       // attestation is withdrawn — neither is provenance (w22-fixverify F2).
       requireThat(payload.claim === 'supports', 'INV-412-EVIDENCE', 'Release cites evidence that does not assert support', 412);
-      requireThat(!ev.superseded_by, 'INV-412-EVIDENCE', 'Release cites superseded evidence', 412);
+      // Same row-key binding as the capsule side: a signed evidence
+      // envelope transplanted under a foreign id would put the WRONG id on
+      // the trail while the signature keeps verifying (w30-perception F1).
+      requireThat(payload.evidence_id === eid, 'INV-409-INTEGRITY', 'Evidence row diverges from its record key — storage tamper', 409);
       // An evidence-only citation still binds the capsule it supports — the
       // citation can never float free of its evaluated context.
-      const backing = cited ?? checkCapsule(this.store.list(t, 'capsule', 10000).find(r => r.capsule_digest === payload.capsule_digest));
+      const backing = cited ?? (() => {
+        const key = this.store.ids(t, 'capsule', 10000).find(k => this.store.get(t, 'capsule', k)?.capsule_digest === payload.capsule_digest);
+        return checkCapsule(key === undefined ? null : this.store.get(t, 'capsule', key), key);
+      })();
       if (cited) requireThat(payload.capsule_digest === cited.capsule_digest, 'INV-403-SCOPE', 'Evidence does not support the cited capsule', 403);
       else cited = backing;
+      // Supersession derives from the anchored attach order, not the
+      // mutable superseded_by cache — a row writer can neither cite
+      // withdrawn evidence nor deny live evidence by flipping the flag
+      // (w30-perception F1).
+      const fam = (this._auditIndex(t).attached.get(backing.capsule.capsule_id) ?? []).map(id => ({ id, e: this.store.get(t, 'evidence', id) }));
+      requireThat(!this._supersededMap(t, fam).has(eid), 'INV-412-EVIDENCE', 'Release cites superseded evidence', 412);
     }
     return cited;
   }
