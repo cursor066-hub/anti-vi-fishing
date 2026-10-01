@@ -3371,7 +3371,7 @@ export class Fabric {
     // the cross-check recomputes with the same key, so an external reader
     // cannot and an insider with row-write but no vault still fails it.
     const metaMac = v => createHmac('sha256', this.vault.masterKey).update(canonical(v)).digest('base64url');
-    const items = this.store.list(p.tenant_id, 'revocation', 10000).filter(i => idx.revoked.has(`${i.kind}:${i.id}`)).map(i => ({ ...i, anchored: (idx.revocationDigests.get(`${i.kind}:${i.id}`) ?? null) === metaMac(i) ? true : 'identity-only' }));
+    const items = this.store.list(p.tenant_id, 'revocation', 10000).filter(i => idx.revoked.has(`${i.kind}:${i.id}`)).map(i => ({ ...i, anchored: idx.revocationDigests.has(`${i.kind}:${i.id}`) && ctEqual(idx.revocationDigests.get(`${i.kind}:${i.id}`), metaMac(i)) ? true : 'identity-only' }));
     return { quarantine: items.filter(i => ['subject', 'device'].includes(i.kind)).filter(i => !kind || i.kind === kind), items: kind ? items.filter(i => i.kind === kind) : items };
   }
   listGrants(p, subject = null) {
@@ -3764,7 +3764,7 @@ export class Fabric {
     // different construction and the flag is always 'identity-only', i.e.
     // dead code that hid row tampering (w17-fixverify).
     const metaMac = v => createHmac('sha256', this.vault.masterKey).update(canonical(v)).digest('base64url');
-    const quarantines = this.store.list(t, 'revocation', 10000).filter(r => ['subject', 'device'].includes(r.kind) && idx.revoked.has(`${r.kind}:${r.id}`)).map(r => ({ kind: 'revocation', at: r.revoked_at, revoked: `${r.kind}:${r.id}`, by: r.actor, anchored: (idx.revocationDigests.get(`${r.kind}:${r.id}`) ?? null) === metaMac(r) ? true : 'identity-only' }));
+    const quarantines = this.store.list(t, 'revocation', 10000).filter(r => ['subject', 'device'].includes(r.kind) && idx.revoked.has(`${r.kind}:${r.id}`)).map(r => ({ kind: 'revocation', at: r.revoked_at, revoked: `${r.kind}:${r.id}`, by: r.actor, anchored: idx.revocationDigests.has(`${r.kind}:${r.id}`) && ctEqual(idx.revocationDigests.get(`${r.kind}:${r.id}`), metaMac(r)) ? true : 'identity-only' }));
     const sequence = [...denials, ...quarantines].sort((a, b) => a.at - b.at);
     this._auditAccess(t, p.subject_id, 'containment', { denials: denials.length, revocations: quarantines.length });
     return { sequence, dropped_requests: denials.length, unanchored_rows: sequence.filter(x => x.anchored !== true).length, affected_capabilities: [...new Set(denials.map(d => d.capability_id).filter(Boolean))], quarantined: quarantines.map(q => q.revoked), limitation: 'Software dataplane telemetry only; packet-level counters require a real network path.' };

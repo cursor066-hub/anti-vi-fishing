@@ -338,7 +338,7 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
         try { rec = JSON.parse(line); } catch { throw new InvariantError('INV-503-CONFIG', `Issuance log line ${i + 1} is unparseable; refuse to re-genesis silently`, 503); }
         requireThat(rec && Number.isSafeInteger(rec.sequence) && rec.sequence === i + 1 && rec.previous === previous && /^[a-f0-9]{64}$/.test(rec.digest ?? ''), 'INV-503-CONFIG', `Issuance log line ${i + 1} breaks the hash chain; refuse to re-genesis silently`, 503);
         const { digest: d, ...rest } = rec;
-        requireThat(logMac(rest) === d, 'INV-503-CONFIG', `Issuance log line ${i + 1} fails its keyed HMAC; refuse to re-genesis silently`, 503);
+        requireThat(ctEqual(logMac(rest), d), 'INV-503-CONFIG', `Issuance log line ${i + 1} fails its keyed HMAC; refuse to re-genesis silently`, 503);
         previous = d; last = rec;
       }
       if (last) { sequence.n = last.sequence; sequence.previous = last.digest; }

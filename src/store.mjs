@@ -469,6 +469,10 @@ export class Store {
     catch (e) { throw new InvariantError('INV-409-INTEGRITY', 'Stored ciphertext does not authenticate', 409); }
   }
   shred(tenant, kind, id) {
+    // Same address guard as every sibling: a numeric id would bind with no
+    // TEXT-affinity coercion, silently erase nothing, and report 'not
+    // present' while the ciphertext row survives (w24-crypto F8).
+    this._addr(tenant, kind, id);
     // Crypto-shredding: destroy the record DEK (secure_delete zeroes its
     // page) and drop the ciphertext; then truncate the WAL so no reachable
     // copy of the wrapped key remains. Pre-erasure backups are out of scope

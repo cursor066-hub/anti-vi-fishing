@@ -30,8 +30,8 @@
       "bytes": 5151
     },
     "src/crypto.mjs": {
-      "lines": 88,
-      "bytes": 5927
+      "lines": 97,
+      "bytes": 6582
     },
     "src/datagate.mjs": {
       "lines": 152,
@@ -42,16 +42,16 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 4275,
-      "bytes": 343106
+      "lines": 4293,
+      "bytes": 343943
     },
     "src/issuerd.mjs": {
       "lines": 679,
-      "bytes": 48536
+      "bytes": 48542
     },
     "src/keystore.mjs": {
-      "lines": 184,
-      "bytes": 14116
+      "lines": 213,
+      "bytes": 16831
     },
     "src/merkle.mjs": {
       "lines": 121,
@@ -67,7 +67,7 @@
     },
     "src/schema.mjs": {
       "lines": 90,
-      "bytes": 10241
+      "bytes": 10397
     },
     "src/secureview.mjs": {
       "lines": 144,
@@ -75,15 +75,15 @@
     },
     "src/server.mjs": {
       "lines": 360,
-      "bytes": 37151
+      "bytes": 37176
     },
     "src/shamir.mjs": {
       "lines": 91,
       "bytes": 3876
     },
     "src/store.mjs": {
-      "lines": 766,
-      "bytes": 55606
+      "lines": 770,
+      "bytes": 55854
     },
     "src/target.mjs": {
       "lines": 400,
@@ -353,6 +353,10 @@
       "lines": 151,
       "bytes": 7435
     },
+    "tests/w24-crypto.test.mjs": {
+      "lines": 138,
+      "bytes": 7784
+    },
     "tests/w24-datagate.test.mjs": {
       "lines": 102,
       "bytes": 6429
@@ -434,6 +438,6 @@
       "bytes": 6499
     }
   },
-  "total_files": 108,
-  "total_lines": 23772
+  "total_files": 109,
+  "total_lines": 23970
 }
