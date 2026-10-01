@@ -88,15 +88,20 @@ export class SimulatedTarget {
           const [tuple, legacy] = aads(r);
           try { decrypt(r[col], this.key(r.tenant), tuple); continue; } catch { /* legacy-sealed or corrupt */ }
           const prior = seen.get(r[col]);
-          if (prior) { prior.revert?.(); prior.unmark?.(); mark(r.tenant, 'transplants'); continue; }
+          // Cross-DB collision: the donor's revert closure runs on the
+          // sibling database — outside this transaction and against a live
+          // row. A graft is detected and counted; the donor keeps its
+          // canonical binding instead of being stranded (w24-fixverify
+          // W24-06).
+          if (prior) { if (prior.db === this.db) { prior.revert?.(); prior.unmark?.(); } mark(r.tenant, 'transplants'); continue; }
           if (slashy(r.tenant, r.id, r.dataset, r.row_id, r.secret_id, r.grant_id)) { seen.set(r[col], {}); mark(r.tenant, 'ambiguous'); continue; }
           try {
             const plain = decrypt(r[col], this.key(r.tenant), legacy);
             const upd = this.db.prepare(`UPDATE ${table} SET ${col}=? WHERE ${where}`), orig = r[col];
-            // A cross-DB revert supersedes THIS connection's ciphertext —
+            // A same-DB revert supersedes THIS connection's ciphertext —
             // re-arm its WAL-truncate flag or the donor's legacy bytes
             // linger until an unrelated write (w21-store F-9).
-            seen.set(orig, { revert: () => { upd.run(orig, ...pks(r)); this._deleted = true; }, unmark: () => unmark(r.tenant) });
+            seen.set(orig, { db: this.db, revert: () => { upd.run(orig, ...pks(r)); this._deleted = true; }, unmark: () => unmark(r.tenant) });
             upd.run(encrypt(plain, this.key(r.tenant), tuple), ...pks(r));
             mark(r.tenant, 'migrated');
           } catch { mark(r.tenant, 'skipped'); }
@@ -275,8 +280,8 @@ export class SimulatedTarget {
     // reflexive check stays as a shape guard, and the finish-time
     // exactOutput recompute is the real binding (w20-datagate F8).
     verifyPlan(plan, grant ?? { dataset: id, columns, row_ids: rowIds, max_rows: ceiling });
-    const rows = executePlan(this.db, plan, tenant, (row, r) => this._dec(r.data, tenant, AAD('target', 'dataset', tenant, id, row)));
-    return rows;
+    const result = executePlan(this.db, plan, tenant, (row, r) => this._dec(r.data, tenant, AAD('target', 'dataset', tenant, id, row)));
+    return result;
   }
   execute(capsule, transactionId, now, fault = null) {
     const tenant = capsule.tenant_id, id = capsule.action.target_resource;
@@ -294,7 +299,7 @@ export class SimulatedTarget {
       const requested = capsule.requested_state, type = capsule.action.type;
       const state = type === 'secret.use' ? this.secretState(tenant, requested.secret_id) : this.state(tenant, id);
       requireThat(state.version === capsule.current_state.version && state.digest === capsule.current_state.digest, 'INV-409-STATE', 'Target state changed', 409);
-      let next = { ...state.material_fields, ...clone(requested) }, output = null;
+      let next = { ...state.material_fields, ...clone(requested) }, output = null, output_row_ids = null;
       if (['finance.vendor.create', 'finance.beneficiary.create'].includes(type)) requireThat(state.version === 0, 'INV-409-STATE', 'Resource already exists', 409);
       if (type === 'finance.bank.change') { requireThat(state.version > 0, 'INV-409-STATE', 'Bank change requires existing resource', 409); next.first_payment_done = false; next.payment_eligible_at = now + 60000; }
       if (type === 'finance.payment.first') {
@@ -303,7 +308,8 @@ export class SimulatedTarget {
       }
       if (type === 'data.export') {
         requireThat(requested.dataset === id, 'INV-451-POLICY', 'Dataset binding mismatch', 451);
-        output = this.readDataset(tenant, id, requested.columns, requested.row_ids, requested.max_rows);
+        const datasetResult = this.readDataset(tenant, id, requested.columns, requested.row_ids, requested.max_rows);
+        output = datasetResult.rows; output_row_ids = datasetResult.row_ids;
         next = state.material_fields;
       }
       if (type === 'identity.mfa.reset' || type === 'identity.authenticator.enroll' || type === 'identity.account.recover') {
@@ -335,7 +341,7 @@ export class SimulatedTarget {
       const journalState = type === 'data.export' ? null
         : type === 'secret.use' ? { withheld: true, material_digest: digest(next) }
         : next;
-      outcome = { target_transaction_id: transactionId, capsule_digest: digest(capsule), authorised_requested_digest: digest(requested), observed_state_digest: digest(next), observed_state: journalState, output, status: 'VERIFIED', execution_time: now, simulation: true };
+      outcome = { target_transaction_id: transactionId, capsule_digest: digest(capsule), authorised_requested_digest: digest(requested), observed_state_digest: digest(next), observed_state: journalState, output, output_row_ids, status: 'VERIFIED', execution_time: now, simulation: true };
       this.db.prepare('INSERT INTO transactions VALUES(?,?,?)').run(tenant, transactionId, encrypt(outcome, this.key(tenant), AAD('target', 'transaction', tenant, transactionId)));
       this.db.exec('COMMIT');
       // Same commit-boundary truncation as tx() — durable on success, armed

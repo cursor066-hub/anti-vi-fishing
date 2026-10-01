@@ -42,6 +42,11 @@ export class RuntimeGate {
       for (const [col, tr] of Object.entries(input.transforms ?? {})) {
         requireThat(r.allowed_transforms.includes(tr.op), 'INV-403-SCOPE', `Transform ${tr.op} is not policy-declared`, 403);
         requireThat(col !== 'id', 'INV-403-SCOPE', 'The row key column cannot be transformed', 403);
+        // Per-op arg contracts (w24-datagate F1): a bucket below the policy
+        // floor leaks the verbatim cell as a "range", and a non-scalar
+        // constant reflects arbitrary structure into egress.
+        if (tr.op === 'aggregate') integer(tr.arg, 'aggregate bucket size', r.transform_min_bucket ?? 10, 1e12);
+        if (tr.op === 'constant') requireThat(tr.arg === undefined || tr.arg === null || ['string', 'number', 'boolean'].includes(typeof tr.arg), 'INV-400-SCHEMA', 'Transform constant must be a scalar');
       }
       if (input.action === 'service.connect') {
         requireThat(r.services.includes(input.resource) && input.destination === input.resource && !input.columns.length && !input.row_ids.length, 'INV-403-SCOPE', 'Network service scope denied', 403);
@@ -50,7 +55,7 @@ export class RuntimeGate {
       const payload = { ...clone(input), capability_id: randomUUID(), tenant_id: t, subject_id: principal.subject_id, policy_digest: digest(policy), policy_version: policy.version, issued_at: now, expires_at: Math.min(now + input.ttl_ms, policy.expires_at), gate_id: this.f.config.gate_id, runtime_policy: clone(r) };
       const envelope = this.f.signExecution(t, payload, 'capability');
       this.f.store.insert(t, 'capability', payload.capability_id, envelope, now);
-      this.f.store.audit(t, 'CAPABILITY_ISSUED', principal.subject_id, payload.capability_id, { digest: digest(envelope), resource: input.resource }, now);
+      this.f.store.audit(t, 'CAPABILITY_ISSUED', principal.subject_id, payload.capability_id, { digest: digest(envelope), resource: input.resource, expires_at: payload.expires_at }, now);
       return envelope;
     });
   }
@@ -89,9 +94,10 @@ export class RuntimeGate {
       let constrained = false;
       if (cap.policy_digest !== digest(policy)) {
         const mode = policy.fail_modes?.[cap.action] ?? policy.fail_modes?.default ?? 'closed';
-        // Per-class staleness ceiling (NFR-AVL-004): stale_ms[class] tightens
-        // the global max_stale_ms window for that class only.
-        const staleWindow = policy.stale_ms?.[cap.action] ?? policy.stale_ms?.default ?? policy.max_stale_ms;
+        // Per-class staleness ceiling (NFR-AVL-004): stale_ms[class] may
+        // tighten the global max_stale_ms window — never loosen it, so the
+        // class value clamps against the global ceiling (w24-datagate F2).
+        const staleWindow = Math.min(policy.stale_ms?.[cap.action] ?? policy.stale_ms?.default ?? policy.max_stale_ms, policy.max_stale_ms);
         if (mode === 'constrained') {
           // 'Constrained' (RUN-005): stale access is read-only at half the
           // capability budget — never writes, never full cost.
@@ -135,7 +141,7 @@ export class RuntimeGate {
       requireThat(rate < r.rate_per_second, 'INV-429-RATE', 'Subject request rate exceeded', 429);
       const resources = [...new Set(bySubject.filter(u => u.at > now - 1000).map(u => u.resource))];
       requireThat(resources.includes(cap.resource) || resources.length < r.max_fanout, 'INV-429-FANOUT', 'Service fan-out exceeded', 429);
-      let rows = null, recon = null, watermarks = null;
+      let rows = null, recon = null, watermarks = null, readRowIds = null;
       if (cap.action === 'data.read') {
         const dataset = this.f.target.state(t, cap.resource).material_fields;
         requireThat(dataset.classification === cap.classification && dataset.jurisdiction === cap.jurisdiction, 'INV-409-STATE', 'Dataset classification or jurisdiction changed', 409);
@@ -144,13 +150,17 @@ export class RuntimeGate {
         requireThat(recon.allowed, 'INV-429-BUDGET', `Reconstruction limit reached (${recon.coverage_percent}% of dataset rows touched)`, 429, { row_count: recon.row_count, column_count: recon.column_count, coverage_percent: recon.coverage_percent });
         // The plan rebinds to the authorising capability — the request's
         // own fields are not the grant (w20-datagate F8).
-        rows = this.f.target.readDataset(t, cap.resource, input.columns, input.row_ids, input.row_ids.length, { dataset: cap.resource, columns: cap.columns, row_ids: cap.row_ids, max_rows: cap.row_ids.length });
+        const datasetResult = this.f.target.readDataset(t, cap.resource, input.columns, input.row_ids, input.row_ids.length, { dataset: cap.resource, columns: cap.columns, row_ids: cap.row_ids, max_rows: cap.row_ids.length });
+        rows = datasetResult.rows; readRowIds = datasetResult.row_ids;
         if (cap.transforms) {
           // Pseudonyms get their own primitive: tokenise never shares the
           // row-encryption key — the same fusion the watermark path
-          // refuses (w20-datagate F5).
-          const tokeniseKey = this.f.dataKey(t, 'tokenise');
-          requireThat(tokeniseKey, 'INV-503-CONFIG', `Tenant ${t} has no tokenise data key`, 503);
+          // refuses (w20-datagate F5). The key is fetched only when some
+          // transform actually uses it — a mask/drop-only capability is
+          // not a latent poison pill on keyless tenants (w24-datagate F3).
+          const needsTokenise = Object.values(cap.transforms).some(tr => tr?.op === 'tokenise');
+          const tokeniseKey = needsTokenise ? this.f.dataKey(t, 'tokenise') : null;
+          requireThat(!needsTokenise || tokeniseKey, 'INV-503-CONFIG', `Tenant ${t} has no tokenise data key`, 503);
           rows = applyTransforms(rows, cap.transforms, { tenant: t, dataset: cap.resource, tenantKey: tokeniseKey });
         }
         // DAT-011: attribution watermark on released rows — returned as
@@ -160,7 +170,7 @@ export class RuntimeGate {
         // (w10-datagate F10).
         const watermarkKey = this.f.dataKey(t, 'watermark');
         requireThat(watermarkKey, 'INV-503-CONFIG', `Tenant ${t} has no watermark data key`, 503);
-        watermarks = watermark(rows, { tenant: t, dataset: cap.resource, subject: cap.subject_id, capabilityId: cap.capability_id, requestId: input.request_id, tenantWatermarkKey: watermarkKey }).watermarks;
+        watermarks = watermark(rows, { tenant: t, dataset: cap.resource, subject: cap.subject_id, capabilityId: cap.capability_id, requestId: input.request_id, tenantWatermarkKey: watermarkKey, rowIds: readRowIds }).watermarks;
       }
       // A squatted usage row is replay evidence, not a 500: the conflict
       // resolves only when the planted row is byte-identical to the honest

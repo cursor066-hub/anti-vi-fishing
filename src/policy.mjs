@@ -1,4 +1,4 @@
-import { digest, clone } from './canonical.mjs';
+import { digest, clone, canonical } from './canonical.mjs';
 import { fields, integer, uniqueStrings, oneOf, text, identifier } from './schema.mjs';
 import { requireThat } from './errors.mjs';
 
@@ -63,7 +63,7 @@ export function defaultPolicy(tenant) {
     // the stricter of the two applies (w22-ledger).
     retention: { default_ms: 31536000000, per_kind: {}, per_action: {} },
     algorithms: { allowed_suites: ['Ed25519'], deprecation: [] },
-    runtime: { max_cost: 10000, rate_per_second: 20, max_fanout: 4, windows: [{ duration_ms: 60000, limit: 100 }, { duration_ms: 3600000, limit: 1000 }, { duration_ms: 86400000, limit: 5000 }, { duration_ms: 2592000000, limit: 10000 }], destinations: ['customer-vault', 'erp-service'], services: ['erp-service'], forbidden_columns: ['passport', 'payment_token', 'password'], jurisdictions: ['EU'], purposes: ['operations'], classifications: ['internal'], remediation_services: ['device-wipe', 'mdm-notify'], sensitivity_weights: { internal: 1, confidential: 5, restricted: 10 }, reconstruction: { window_ms: 86400000, max_distinct_rows: 5000, max_distinct_columns: 100, max_coverage_percent: 90 }, network: { deny_workstation_peers: true, allowed_protocols: ['https'], allowed_ports: [443] }, datasets: ['dataset-1'], allowed_columns: ['id', 'name', 'region', 'passport'], allowed_transforms: ['mask', 'tokenise', 'drop', 'constant', 'aggregate'] } };
+    runtime: { max_cost: 10000, rate_per_second: 20, max_fanout: 4, windows: [{ duration_ms: 60000, limit: 100 }, { duration_ms: 3600000, limit: 1000 }, { duration_ms: 86400000, limit: 5000 }, { duration_ms: 2592000000, limit: 10000 }], destinations: ['customer-vault', 'erp-service'], services: ['erp-service'], forbidden_columns: ['passport', 'payment_token', 'password'], jurisdictions: ['EU'], purposes: ['operations'], classifications: ['internal'], remediation_services: ['device-wipe', 'mdm-notify'], sensitivity_weights: { internal: 1, confidential: 5, restricted: 10 }, reconstruction: { window_ms: 86400000, max_distinct_rows: 5000, max_distinct_columns: 100, max_coverage_percent: 90 }, network: { deny_workstation_peers: true, allowed_protocols: ['https'], allowed_ports: [443] }, datasets: ['dataset-1'], allowed_columns: ['id', 'name', 'region', 'passport'], allowed_transforms: ['mask', 'tokenise', 'drop', 'constant', 'aggregate'], transform_min_bucket: 10 } };
 }
 export function validatePolicy(p) {
   fields(p, ['policy_id', 'tenant_id', 'version', 'not_before', 'expires_at', 'max_capsule_ttl_ms', 'certificate_ttl_ms', 'capability_ttl_ms', 'mode', 'rules', 'runtime', 'fail_modes', 'max_stale_ms', 'staged_policy', 'secure_perception', 'algorithms'], ['emergency_of', 'stale_ms', 'retention', 'allow_weakening']);
@@ -100,7 +100,7 @@ export function validatePolicy(p) {
     uniqueStrings(r.destinations, 'destinations'); uniqueStrings(r.forbidden_fields, 'forbidden fields'); integer(r.max_evidence_age_ms, 'evidence age', 1000, 2592000000);
   }
   const r = p.runtime;
-  fields(r, ['max_cost', 'rate_per_second', 'max_fanout', 'windows', 'destinations', 'services', 'forbidden_columns', 'jurisdictions', 'purposes', 'classifications', 'remediation_services', 'sensitivity_weights', 'reconstruction', 'network', 'datasets', 'allowed_columns', 'allowed_transforms']);
+  fields(r, ['max_cost', 'rate_per_second', 'max_fanout', 'windows', 'destinations', 'services', 'forbidden_columns', 'jurisdictions', 'purposes', 'classifications', 'remediation_services', 'sensitivity_weights', 'reconstruction', 'network', 'datasets', 'allowed_columns', 'allowed_transforms'], ['transform_min_bucket']);
   integer(r.max_cost, 'runtime cost', 1, 1e9); integer(r.rate_per_second, 'runtime rate', 1, 10000); integer(r.max_fanout, 'fanout', 1, 100);
   requireThat(Array.isArray(r.windows) && r.windows.length >= 1 && r.windows.length <= 8, 'INV-400-SCHEMA', 'Invalid budget windows');
   for (const w of r.windows) { fields(w, ['duration_ms', 'limit']); integer(w.duration_ms, 'window duration', 1000, 2592000000); integer(w.limit, 'window limit', 1, 1e12); }
@@ -118,6 +118,7 @@ export function validatePolicy(p) {
   for (const k of ['datasets', 'allowed_columns']) uniqueStrings(r[k], k);
   uniqueStrings(r.allowed_transforms, 'transforms', 8);
   for (const op of r.allowed_transforms) oneOf(op, ['mask', 'tokenise', 'drop', 'constant', 'aggregate'], 'transform');
+  if (r.transform_min_bucket !== undefined) integer(r.transform_min_bucket, 'transform bucket floor', 2, 1e12);
   // Fail modes (RUN-005): every class resolves to a documented mode.
   for (const [k, v] of Object.entries(p.fail_modes)) { requireThat(k === 'default' || ['data.read', 'service.connect'].includes(k), 'INV-400-SCHEMA', `Unknown consume class in fail_modes: ${k}`); oneOf(v, ['closed', 'cached-allow', 'constrained'], `fail mode ${k}`); }
   requireThat(p.fail_modes.default === 'closed', 'INV-451-POLICY', 'Default failure mode must be fail-closed', 451);
@@ -128,6 +129,11 @@ export function validatePolicy(p) {
     // (U+2024, Cyrillic twin, empty string) validates into a dead ceiling
     // that never binds (w23-policy F8).
     for (const [k, v] of Object.entries(p.stale_ms)) { requireThat(k === 'default' || ['data.read', 'service.connect'].includes(k), 'INV-400-SCHEMA', `Unknown consume class in stale_ms: ${k}`); integer(v, `stale window ${k}`, 0, 3600000); }
+    // A class ceiling may tighten the global window, never loosen it —
+    // the contract holds inside ONE policy, so lowering max_stale_ms can
+    // never smuggle a looser class value past emergencyWeakening
+    // (w24-datagate F2).
+    for (const [k, v] of Object.entries(p.stale_ms)) requireThat(v <= p.max_stale_ms, 'INV-451-POLICY', `stale_ms.${k} cannot exceed max_stale_ms`, 451);
   }
   fields(p.staged_policy, ['min_delay_ms', 'emergency_extra_custodians', 'emergency_max_ttl_ms']);
   integer(p.staged_policy.min_delay_ms, 'staged delay', 0, 604800000); integer(p.staged_policy.emergency_extra_custodians, 'emergency custodians', 0, 5); integer(p.staged_policy.emergency_max_ttl_ms, 'emergency ttl', 1000, 2592000000);
@@ -225,6 +231,11 @@ export function emergencyWeakening(base, next, now = 0) {
   for (const w of nr.windows) { const bw = br.windows.find(x => x.duration_ms === w.duration_ms); if (bw && w.limit > bw.limit) return 'runtime.windows'; }
   const datasetCap = x => x.reconstruction.max_dataset_coverage_percent ?? x.reconstruction.max_coverage_percent;
   if (nr.reconstruction.max_distinct_rows > br.reconstruction.max_distinct_rows || nr.reconstruction.max_distinct_columns > br.reconstruction.max_distinct_columns || nr.reconstruction.max_coverage_percent > br.reconstruction.max_coverage_percent || datasetCap(nr) > datasetCap(br)) return 'runtime.reconstruction';
+  // The window is a reconstruction dimension in BOTH directions: shorter
+  // forgets prior disclosure (weakening), longer rewrites what the policy
+  // counts as fresh — an emergency may not move it undeclared
+  // (w24-fixverify W24-05).
+  if ((nr.reconstruction.window_ms ?? 86400000) !== (br.reconstruction.window_ms ?? 86400000)) return 'runtime.reconstruction.window_ms';
   for (const k of Object.keys(br.sensitivity_weights)) if ((nr.sensitivity_weights[k] ?? 0) < br.sensitivity_weights[k]) return 'runtime.sensitivity_weights';
   // Egress and remediation allowlists plus evidence bindings are weakening
   // dimensions too — an emergency policy may never drop a containment
@@ -264,10 +275,20 @@ export function emergencyWeakening(base, next, now = 0) {
   if (base.retention !== undefined) {
     if (next.retention === undefined) return 'retention';
     if (next.retention.default_ms > base.retention.default_ms) return 'retention.default_ms';
-    for (const [k, v] of Object.entries(base.retention.per_kind ?? {})) if ((next.retention.per_kind?.[k] ?? next.retention.default_ms) > v) return `retention.per_kind.${k}`;
-    for (const [k, v] of Object.entries(base.retention.per_action ?? {})) if ((next.retention.per_action?.[k] ?? next.retention.default_ms) > v) return `retention.per_action.${k}`;
+    // The ceiling consumer applies min(per_key ?? default) — an ADDED key
+    // below the default collapses the ceiling for that class exactly like
+    // a lowered declared one, so the comparison iterates the union
+    // (w24-fixverify W24-05).
+    for (const k of new Set([...Object.keys(base.retention.per_kind ?? {}), ...Object.keys(next.retention.per_kind ?? {})])) if ((next.retention.per_kind?.[k] ?? next.retention.default_ms) !== (base.retention.per_kind?.[k] ?? base.retention.default_ms)) return `retention.per_kind.${k}`;
+    for (const k of new Set([...Object.keys(base.retention.per_action ?? {}), ...Object.keys(next.retention.per_action ?? {})])) if ((next.retention.per_action?.[k] ?? next.retention.default_ms) !== (base.retention.per_action?.[k] ?? base.retention.default_ms)) return `retention.per_action.${k}`;
   }
   if (!subset(next.algorithms.allowed_suites, base.algorithms.allowed_suites)) return 'algorithms.allowed_suites';
+  // Suite sunsets are a weakening surface too: a normal successor may add
+  // a deprecation (tightening), but an emergency may never drop or rewrite
+  // one — a removed sunset revives a deprecated suite past its declared
+  // end-of-life (w24-fixverify W24-05).
+  for (const e of base.algorithms.deprecation ?? [])
+    if (!(next.algorithms.deprecation ?? []).some(n => canonical(n) === canonical(e))) return 'algorithms.deprecation';
   return null;
 }
 export function evaluatePolicy({ capsule, policy, evidence = [], approvals = [], identities, quarantined = false, now }) {

@@ -100,8 +100,11 @@ test('w23-policy F4: secure_perception nonce pin is bound across versions', () =
 // per_kind key inherits the default ceiling and may not exceed the
 // declared value; the whole block may not vanish.
 test('w23-policy F1/F6: retention ceilings bound dropped keys and the block itself', () => {
+  // An added key BELOW the default collapses that class's ceiling — a
+  // forensic-availability weakening installed silently (w24-fixverify
+  // W24-05); the union comparison catches adds, drops and moves alike.
   const kept = weak(n => { n.retention.per_kind = { ownership: 1000 }; });
-  assert.equal(kept, null);
+  assert.equal(kept, 'retention.per_kind.ownership');
   const block = base(); block.retention.per_kind = { ownership: 5000 };
   const dropped = clone(block); dropped.version = 2; dropped.retention.per_kind = {};
   assert.equal(emergencyWeakening(block, dropped, 1000), 'retention.per_kind.ownership');

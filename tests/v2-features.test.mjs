@@ -328,7 +328,7 @@ test('DAT-009 DAT-011: reconstruction budget and watermarks on released rows', t
   // over (tenant, dataset, subject, capability, request_id, row) with the
   // tenant watermark key (w10-datagate F7).
   const key = Buffer.from(h.f.tenant('acme').watermark_key, 'base64url');
-  const expected = createHmac('sha256', key).update(canonical({ tenant: 'acme', dataset: 'dataset-1', subject: 'operator', capability_id: cap.payload.capability_id, request_id, row: out.rows[0] })).digest('hex').slice(0, 24);
+  const expected = createHmac('sha256', key).update(canonical({ tenant: 'acme', dataset: 'dataset-1', subject: 'operator', capability_id: cap.payload.capability_id, request_id, row_id: 'row-1', row: out.rows[0] })).digest('hex').slice(0, 24);
   assert.equal(out.watermarks[0].tag, expected);
   // A different request id or subject does not reproduce the tag.
   const wrong = createHmac('sha256', key).update(canonical({ dataset: 'dataset-1', subject: 'auditor', request_id, row: out.rows[0] })).digest('hex').slice(0, 24);

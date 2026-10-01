@@ -34,16 +34,16 @@
       "bytes": 5927
     },
     "src/datagate.mjs": {
-      "lines": 138,
-      "bytes": 9888
+      "lines": 152,
+      "bytes": 10785
     },
     "src/errors.mjs": {
       "lines": 10,
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 4054,
-      "bytes": 325509
+      "lines": 4275,
+      "bytes": 343106
     },
     "src/issuerd.mjs": {
       "lines": 679,
@@ -58,12 +58,12 @@
       "bytes": 6684
     },
     "src/policy.mjs": {
-      "lines": 428,
-      "bytes": 43652
+      "lines": 449,
+      "bytes": 45523
     },
     "src/runtime.mjs": {
-      "lines": 220,
-      "bytes": 19641
+      "lines": 230,
+      "bytes": 20766
     },
     "src/schema.mjs": {
       "lines": 90,
@@ -82,12 +82,12 @@
       "bytes": 3876
     },
     "src/store.mjs": {
-      "lines": 757,
-      "bytes": 54883
+      "lines": 766,
+      "bytes": 55606
     },
     "src/target.mjs": {
-      "lines": 394,
-      "bytes": 28954
+      "lines": 400,
+      "bytes": 29444
     },
     "web/app.js": {
       "lines": 251,
@@ -235,11 +235,11 @@
     },
     "tests/v2-features.test.mjs": {
       "lines": 351,
-      "bytes": 23622
+      "bytes": 23639
     },
     "tests/w10-cert-datagate.test.mjs": {
       "lines": 217,
-      "bytes": 14222
+      "bytes": 14239
     },
     "tests/w10-fixverify.test.mjs": {
       "lines": 238,
@@ -342,8 +342,8 @@
       "bytes": 12364
     },
     "tests/w23-policy.test.mjs": {
-      "lines": 144,
-      "bytes": 8555
+      "lines": 147,
+      "bytes": 8797
     },
     "tests/w23-store.test.mjs": {
       "lines": 221,
@@ -352,6 +352,18 @@
     "tests/w23-supply.test.mjs": {
       "lines": 151,
       "bytes": 7435
+    },
+    "tests/w24-datagate.test.mjs": {
+      "lines": 102,
+      "bytes": 6429
+    },
+    "tests/w24-fixverify.test.mjs": {
+      "lines": 234,
+      "bytes": 14969
+    },
+    "tests/w24-lifecycle.test.mjs": {
+      "lines": 193,
+      "bytes": 11748
     },
     "tests/w5-mutations.test.mjs": {
       "lines": 194,
@@ -422,6 +434,6 @@
       "bytes": 6499
     }
   },
-  "total_files": 105,
-  "total_lines": 22959
+  "total_files": 108,
+  "total_lines": 23772
 }

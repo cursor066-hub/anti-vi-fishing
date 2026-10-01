@@ -274,12 +274,17 @@ export class Store {
       for (const r of this.db.prepare('SELECT tenant,kind,id,wrapped FROM deks').all()) {
         try { decrypt(r.wrapped, master(r.tenant), dekAad(r.tenant, r.kind, r.id)); continue; } catch { /* legacy-sealed or corrupt */ }
         const prior = seen.get(r.wrapped);
-        if (prior) { prior.revert?.(); prior.unmark?.(); mark(r.tenant, 'transplants'); continue; }
+        // Cross-DB collision: reverting through the donor's prepared
+        // statement would write outside this transaction AND strand the
+        // live donor row on the sibling database — a graft is detected
+        // and counted, but the donor keeps its canonical binding
+        // (w24-fixverify W24-06).
+        if (prior) { if (prior.db === this.db) { prior.revert?.(); prior.unmark?.(); } mark(r.tenant, 'transplants'); continue; }
         if (slashy(r.tenant, r.kind, r.id)) { seen.set(r.wrapped, {}); mark(r.tenant, 'ambiguous'); continue; }
         try {
           const bare = decrypt(r.wrapped, master(r.tenant), legacyDekAad(r.tenant, r.kind, r.id));
           const upd = this.db.prepare('UPDATE deks SET wrapped=? WHERE tenant=? AND kind=? AND id=?'), orig = r.wrapped;
-          seen.set(orig, { revert: () => { upd.run(orig, r.tenant, r.kind, r.id); this._shredded = true; }, unmark: () => unmark(r.tenant) });
+          seen.set(orig, { db: this.db, revert: () => { upd.run(orig, r.tenant, r.kind, r.id); this._shredded = true; }, unmark: () => unmark(r.tenant) });
           upd.run(encrypt(bare, master(r.tenant), dekAad(r.tenant, r.kind, r.id)), r.tenant, r.kind, r.id);
           mark(r.tenant, 'migrated');
         } catch { mark(r.tenant, 'skipped'); }
@@ -296,19 +301,19 @@ export class Store {
           // DEK unwrap before ever reaching the canonical check — it is a
           // detected transplant, not a skipped row (w20-fixverify F-10).
           const grafted = seen.get(r.value);
-          if (grafted) { grafted.revert?.(); grafted.unmark?.(); mark(r.tenant, 'transplants'); }
+          if (grafted) { if (grafted.db === this.db) { grafted.revert?.(); grafted.unmark?.(); } mark(r.tenant, 'transplants'); }
           else mark(r.tenant, 'skipped');
           continue;
         }
         const prior = seen.get(r.value);
-        if (prior) { prior.revert?.(); prior.unmark?.(); mark(r.tenant, 'transplants'); continue; }
+        if (prior) { if (prior.db === this.db) { prior.revert?.(); prior.unmark?.(); } mark(r.tenant, 'transplants'); continue; }
         if (slashy(r.tenant, r.kind, r.id) || spaceAlias(r.kind) || r.id.endsWith('/dek')) { seen.set(r.value, {}); mark(r.tenant, 'ambiguous'); continue; }
         try {
           const d = dekRow.get(r.tenant, r.kind, r.id);
           const key = d ? Buffer.from(decrypt(d.wrapped, master(r.tenant), dekAad(r.tenant, r.kind, r.id)), 'base64url') : master(r.tenant);
           const plain = decrypt(r.value, key, legacyAad(r.tenant, r.kind, r.id));
           const upd = this.db.prepare('UPDATE records SET value=? WHERE tenant=? AND kind=? AND id=?'), orig = r.value;
-          seen.set(orig, { revert: () => { upd.run(orig, r.tenant, r.kind, r.id); this._shredded = true; }, unmark: () => unmark(r.tenant) });
+          seen.set(orig, { db: this.db, revert: () => { upd.run(orig, r.tenant, r.kind, r.id); this._shredded = true; }, unmark: () => unmark(r.tenant) });
           upd.run(encrypt(plain, key, recAad(r.tenant, r.kind, r.id)), r.tenant, r.kind, r.id);
           mark(r.tenant, 'migrated');
         } catch { mark(r.tenant, 'skipped'); }
@@ -316,12 +321,12 @@ export class Store {
       for (const r of this.db.prepare('SELECT tenant,scope,key,result FROM idempotency').all()) {
         try { decrypt(r.result, master(r.tenant), idemAad(r.tenant, r.scope, r.key)); continue; } catch { /* legacy-sealed or corrupt */ }
         const prior = seen.get(r.result);
-        if (prior) { prior.revert?.(); prior.unmark?.(); mark(r.tenant, 'transplants'); continue; }
+        if (prior) { if (prior.db === this.db) { prior.revert?.(); prior.unmark?.(); } mark(r.tenant, 'transplants'); continue; }
         if (slashy(r.tenant, r.scope, r.key)) { seen.set(r.result, {}); mark(r.tenant, 'ambiguous'); continue; }
         try {
           const plain = decrypt(r.result, master(r.tenant), `${r.tenant}/idempotency/${r.scope}/${r.key}`);
           const upd = this.db.prepare('UPDATE idempotency SET result=? WHERE tenant=? AND scope=? AND key=?'), orig = r.result;
-          seen.set(orig, { revert: () => { upd.run(orig, r.tenant, r.scope, r.key); this._shredded = true; }, unmark: () => unmark(r.tenant) });
+          seen.set(orig, { db: this.db, revert: () => { upd.run(orig, r.tenant, r.scope, r.key); this._shredded = true; }, unmark: () => unmark(r.tenant) });
           upd.run(encrypt(plain, master(r.tenant), idemAad(r.tenant, r.scope, r.key)), r.tenant, r.scope, r.key);
           mark(r.tenant, 'migrated');
         } catch { mark(r.tenant, 'skipped'); }
@@ -639,6 +644,10 @@ export class Store {
     // assert runs on the pre-write row so the ratchet itself can never
     // launder a rewind.
     this.db.prepare('INSERT INTO clock VALUES(1,?) ON CONFLICT(id) DO UPDATE SET last=MAX(clock.last, excluded.last)').run(now);
+    // End-of-chain commitment: the fabric moves its signed head watermark
+    // post-commit — a truncated tail can never drag the watermark back
+    // with it (w24-fixverify W24-01).
+    this.onAuditAppend?.(tenant, entry.sequence, hash);
     return { hash, envelope };
   }
   auditHashes(tenant) {

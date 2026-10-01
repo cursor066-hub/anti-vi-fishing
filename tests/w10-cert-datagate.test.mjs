@@ -94,7 +94,7 @@ test('w10-dg F7: export watermarks bind tenant, capability and request', t => {
   const out = h.f.execute(h.p(), certificate);
   const certId = certificate.payload.certificate_id;
   const key = Buffer.from(h.f.tenant('acme').watermark_key, 'base64url');
-  const expected = createHmac('sha256', key).update(canonical({ tenant: 'acme', dataset: 'dataset-1', subject: 'operator', capability_id: `cert:${certId}`, request_id: certId, row: out.payload.output[0] })).digest('hex').slice(0, 24);
+  const expected = createHmac('sha256', key).update(canonical({ tenant: 'acme', dataset: 'dataset-1', subject: 'operator', capability_id: `cert:${certId}`, request_id: certId, row_id: 'row-1', row: out.payload.output[0] })).digest('hex').slice(0, 24);
   assert.equal(out.payload.watermarks[0].tag, expected);
 });
 

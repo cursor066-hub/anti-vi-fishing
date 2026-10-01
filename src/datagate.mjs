@@ -1,5 +1,5 @@
 import { createHmac } from 'node:crypto';
-import { digest, clone, canonical } from './canonical.mjs';
+import { clone, canonical } from './canonical.mjs';
 import { fields, identifier, text, integer, uniqueStrings, oneOf } from './schema.mjs';
 import { requireThat } from './errors.mjs';
 
@@ -38,7 +38,10 @@ export function executePlan(db, plan, tenant, decode = null) {
     .all(tenant, plan.dataset, ...plan.where.row_id, plan.limit)
     .map(r => ({ row_id: r.row_id, data: decode ? decode(r.row_id, r) : JSON.parse(r.data) }));
   requireThat(rows.length === plan.where.row_id.length, 'INV-409-STATE', 'Dataset row set changed since authorisation', 409);
-  return rows.map(r => Object.fromEntries(plan.select.map(c => [c, c === 'id' ? r.row_id : (r.data[c] ?? null)])));
+  // The storage row ids travel beside the projection — attribution marks
+  // bind the physical row, never a digest of the projected content
+  // (w24-datagate F4).
+  return { rows: rows.map(r => Object.fromEntries(plan.select.map(c => [c, c === 'id' ? r.row_id : (r.data[c] ?? null)]))), row_ids: rows.map(r => r.row_id) };
 }
 
 // SHIELD transformations applied to a result set (DAT-005). Each transform is
@@ -52,12 +55,17 @@ export const TRANSFORMS = {
   // weaken cross-dataset unlinkability (w19-aad adjacent observation).
   tokenise: (value, field, ctx) => 'tok:' + createHmac('sha256', ctx.tenantKey).update(canonical({ tenant: ctx.tenant, dataset: ctx.dataset, field, value })).digest('hex').slice(0, 24),
   drop: () => null,
-  constant: (value, field, ctx, arg) => arg ?? null,
+  // The constant literal is scalar-bound — an object arg would reflect
+  // verbatim into egress with no transform semantics (w24-datagate F1).
+  constant: (value, field, ctx, arg) => (arg === null || ['string', 'number', 'boolean'].includes(typeof arg) ? arg : null),
   // Generalization: replace a numeric value with a fixed-size bucket range.
-  // Deterministic so the transformed output is recomputable by an assessor.
+  // Deterministic so an assessor can recompute the transformed output.
+  // A bucket under 2 cells is identity, not generalization — a signed arg
+  // below the floor degrades to the wide default rather than leak the
+  // verbatim value (w24-datagate F1).
   aggregate: (value, field, ctx, arg) => {
     if (value === null || value === undefined) return null;
-    const size = Number.isSafeInteger(arg) && arg > 0 ? arg : 100;
+    const size = Number.isSafeInteger(arg) && arg >= 2 ? arg : 100;
     const n = Number(value); if (!Number.isFinite(n)) return null;
     const lo = Math.floor(n / size) * size; return `${lo}-${lo + size - 1}`;
   }
@@ -82,12 +90,18 @@ export function applyTransforms(rows, transforms, ctx) {
 // without altering source data.
 export function watermark(rows, ctx) {
   const key = Buffer.from(ctx.tenantWatermarkKey, 'base64url');
-  // Row identity falls back to a full-row digest so exports lacking an 'id'
-  // column are still attributable per record (runtime-audit F-3).
+  // Row identity is ALWAYS the physical storage row_id: ctx.rowIds carries
+  // the ids executePlan returned, order-correlated with `rows`. A
+  // projected-content digest cannot be joined back to dataset_rows and
+  // collides on identical projections (w24-datagate F4).
   // The tag binds tenant, dataset, subject, capability and request —
   // caller-chosen request ids must not make two different disclosures
   // produce colliding marks (w10-datagate F7).
-  const marks = rows.map(row => ({ row_id: row.id ?? `digest:${digest(row).slice(0, 24)}`, tag: createHmac('sha256', key).update(canonical({ tenant: ctx.tenant, dataset: ctx.dataset, subject: ctx.subject, capability_id: ctx.capabilityId ?? null, request_id: ctx.requestId, row })).digest('hex').slice(0, 24) }));
+  const marks = rows.map((row, i) => {
+    const rowId = row.id ?? ctx.rowIds?.[i];
+    requireThat(rowId !== undefined && rowId !== null, 'INV-409-STATE', 'Watermark requires physical row identity', 409);
+    return { row_id: rowId, tag: createHmac('sha256', key).update(canonical({ tenant: ctx.tenant, dataset: ctx.dataset, subject: ctx.subject, capability_id: ctx.capabilityId ?? null, request_id: ctx.requestId, row_id: rowId, row })).digest('hex').slice(0, 24) };
+  });
   return { rows, watermarks: marks };
 }
 
