@@ -32,8 +32,9 @@ test('w17 F2: deleting the parent capsule row cannot unbind a certified composit
   assert.throws(() => h.f.execute(h.p(), c1.certificate), hasCode('INV-409-STATE'), 'anchored parentage survives parent-row deletion');
   assert.throws(() => h.f.execute(h.p(), c2.certificate), hasCode('INV-409-STATE'));
   // The deleted parent cannot dispatch either — the binding dead-mans, it
-  // never silently unbinds.
-  assert.throws(() => h.f.execute(h.p(), parentCert), hasCode('INV-404-NOT-FOUND'));
+  // never silently unbinds (an anchored-proposed capsule gone from the
+  // store is integrity evidence, w29-lifecycle F5).
+  assert.throws(() => h.f.execute(h.p(), parentCert), hasCode('INV-409-INTEGRITY'));
 });
 
 // F3: key-rotation RECORDS are hints, never authority — deleting the

@@ -1804,8 +1804,16 @@ export class Fabric {
       requireThat(row, 'INV-409-INTEGRITY', 'Anchored parent certificate row is missing', 409);
       try {
         const pp = verifySigned(row.envelope, this.executionPublic(t), 'action-certificate');
+        // Signature validity is not enough — the envelope must BE this
+        // certificate: a grafted donor envelope (expired but genuinely
+        // signed) would silently unbind a live parent's children into
+        // solo spends (w29-lifecycle F3). Where the anchor recorded the
+        // issued envelope digest the row bytes must match it too.
+        requireThat(pp.certificate_id === parentCertId, 'INV-409-INTEGRITY', 'Parent certificate row carries a foreign signed envelope', 409);
+        const anchoredCertDigest = idx.issuedCertDigests?.get(parentCertId);
+        requireThat(anchoredCertDigest === undefined || digest(row.envelope) === anchoredCertDigest, 'INV-409-INTEGRITY', 'Parent certificate envelope diverges from the anchored issuance', 409);
         return pp.expires_at > now && !this.revoked(t, 'certificate', parentCertId);
-      } catch { return false; }
+      } catch (e) { if (e?.code === 'INV-409-INTEGRITY') throw e; return false; }
     });
   }
   // IDN: JIT grants merge with static identity grants. A grant only ever adds
@@ -2172,7 +2180,7 @@ export class Fabric {
         // to a pre-approval image cannot hide a lapsed vote or envelope
         // from the resurrection veto (w24-fixverify W24-07).
         case 'EXACT_ACTION_APPROVED': { const l = (idx.approvalExpiry ??= new Map()).get(pl.reference) ?? []; l.push({ signer_id: meta.signer_id ?? null, expires_at: meta.expires_at ?? null }); idx.approvalExpiry.set(pl.reference, l); break; }
-        case 'CERTIFICATE_ISSUED': idx.issued.add(pl.reference); if (meta.certificate_id) { idx.issuedCert.set(pl.reference, meta.certificate_id); idx.issuedCerts.add(meta.certificate_id); } if (Array.isArray(meta.children)) idx.parentChildren.set(pl.reference, meta.children); break;
+        case 'CERTIFICATE_ISSUED': idx.issued.add(pl.reference); if (meta.certificate_id) { idx.issuedCert.set(pl.reference, meta.certificate_id); idx.issuedCerts.add(meta.certificate_id); if (meta.certificate_digest) (idx.issuedCertDigests ??= new Map()).set(meta.certificate_id, meta.certificate_digest); } if (Array.isArray(meta.children)) idx.parentChildren.set(pl.reference, meta.children); break;
         case 'JIT_GRANT_ISSUED': idx.grants.set(meta.grant_id, meta.scope_digest ?? meta.grant_digest); if (meta.grant_id) idx.grantMeta.set(meta.grant_id, { expires_at: meta.expires_at, at: pl.time }); break;
         case 'CAPABILITY_ISSUED': (idx.capabilities ??= new Set()).add(pl.reference); (idx.capabilityMeta ??= new Map()).set(pl.reference, { expires_at: meta.expires_at ?? null }); break;
         case 'POLICY_GENESIS': case 'POLICY_ACTIVATED': case 'EMERGENCY_POLICY_ACTIVATED': if (meta.policy_digest) idx.policyAnchors.push({ staged: false, digest: meta.policy_digest }); break;
@@ -2206,7 +2214,7 @@ export class Fabric {
         // ciphertext transplant of a superseded verdict) is tamper
         // evidence, never a quiet serve (w24-lifecycle W24-6).
         case 'EXECUTION_OUTCOME': idx.outcomes.set(pl.reference, meta.status); if (meta.outcome_digest) (idx.outcomeDigests ??= new Map()).set(pl.reference, meta.outcome_digest); break;
-        case 'ACTION_CANCELLED': (idx.cancelled ??= new Set()).add(pl.reference); if (meta.certificate_id) idx.outcomes.set(meta.certificate_id, 'CANCELLED'); break;
+        case 'ACTION_CANCELLED': (idx.cancelled ??= new Set()).add(pl.reference); if (meta.certificate_id && idx.issuedCert.get(pl.reference) === meta.certificate_id) idx.outcomes.set(meta.certificate_id, 'CANCELLED'); break;
         // Dry-run marker is anchored too — a mutable last_at a row-writer
         // can backdate would let every call mint a new EXECUTION_DRY_RUN
         // anchor (w24-lifecycle W24-3).
@@ -2994,16 +3002,27 @@ export class Fabric {
       const t = p.tenant_id, cert = verifySigned(envelope, this.executionPublic(t), 'action-certificate');
       requireThat(cert.tenant_id === t && cert.target_gate_id === this.config.gate_id, 'INV-403-SCOPE', 'Certificate scope mismatch', 403);
       requireThat(!this.revoked(t, 'key', envelope.protected.key_id) && !this.revoked(t, 'certificate', cert.certificate_id) && cert.issued_at <= now && cert.expires_at > now, 'INV-401-CERTIFICATE', 'Certificate expired or revoked', 401);
-      const stored = this.store.must(t, 'certificate', cert.certificate_id), record = this.store.must(t, 'capsule', cert.capsule_id);
+      const stored = this.store.must(t, 'certificate', cert.certificate_id), record = this.store.get(t, 'capsule', cert.capsule_id);
+      const idx = this._auditIndex(t);
+      // A capsule the ledger attests as proposed but the store cannot
+      // serve is destructive tampering — integrity, not a bare 404 that
+      // erases the anchored lifecycle behind a missing-row error
+      // (w29-lifecycle F5).
+      requireThat(record || !idx.proposedDigest.has(cert.capsule_id), 'INV-409-INTEGRITY', 'Anchored capsule row is missing', 409);
+      if (!record) this.store.must(t, 'capsule', cert.capsule_id);
       this._capsuleIntegrity(t, record);
       requireThat(record.capsule.tenant_id === t, 'INV-403-SCOPE', 'Capsule tenant does not match the certificate tenant', 403);
       requireThat(digest(stored.envelope) === digest(envelope), 'INV-401-CERTIFICATE', 'Certificate does not match issued authority', 401);
-      const idx = this._auditIndex(t);
       // Mutable lifecycle flags are advisory caches — a `consumed`/status
       // row value can never veto what the anchored folds attest, and a
       // contradicting flag is tamper evidence, not a replay verdict
       // (w24-lifecycle W24-3).
       this._certSpendIntegrity(t, idx, cert.certificate_id, stored);
+      // Anchored issuance is admission, not a post-dispatch check: a cert
+      // whose CERTIFICATE_ISSUED was cut by a seal (record rows survive a
+      // seal) must never reserve and commit a real target mutation only to
+      // wedge at finish (w29-lifecycle F4).
+      requireThat(idx.issued.has(cert.capsule_id) && idx.issuedCert.get(cert.capsule_id) === cert.certificate_id, 'INV-401-CERTIFICATE', 'Certificate is not anchored as issued for this capsule', 401);
       // A composite child's certificate is spendable only through its parent
       // — a solo spend verifies the child, then the parent's reservation
       // bricks on the consumed cert (w8-composite F8). Once the parent is
@@ -3282,6 +3301,12 @@ export class Fabric {
       const issuedParent = verifySigned(stored.envelope, this.executionPublic(t), 'action-certificate');
       requireThat(this._auditIndex(t).issued.has(cert.capsule_id) && digest(cert) === digest(issuedParent), 'INV-401-CERTIFICATE', 'Presented certificate does not match the issued authority', 401);
       const existing = this.store.get(t, 'outcome', cert.certificate_id);
+      // Terminality is anchored, not row-derived: an EXECUTION_OUTCOME
+      // event attests the verdict, so a deleted served row is integrity
+      // evidence — never a fresh chance to re-fire effects and demote the
+      // anchored verdict (w29-lifecycle F2).
+      const anchoredOutcome = this._auditIndex(t).outcomes.get(cert.certificate_id);
+      requireThat(existing || !['VERIFIED', 'FAILED', 'COMPENSATED'].includes(anchoredOutcome), 'INV-409-INTEGRITY', 'Anchored terminal outcome lost its served row — restore before reconciling', 409);
       // A planted terminal outcome must scream INTEGRITY, not wedge the cert
       // behind a state check (w13-fixverify L6).
       if (existing) this._outcomeIntegrity(t, existing, cert.certificate_id);
@@ -3722,6 +3747,12 @@ export class Fabric {
       // Terminal outcomes are immutable — a VERIFIED/FAILED result can never
       // be overwritten by a second finish (only UNCERTAIN may resolve later).
       const existing = this.store.get(t, 'outcome', cert.certificate_id);
+      // Terminality is anchored, not row-derived: a deleted outcome row
+      // cannot re-open finish() for a second, demoted verdict — the
+      // anchored EXECUTION_OUTCOME attests the terminal state and the
+      // missing served row is integrity evidence (w29-lifecycle F2).
+      const anchoredOutcome = this._auditIndex(t).outcomes.get(cert.certificate_id);
+      requireThat(existing || !['VERIFIED', 'FAILED', 'COMPENSATED'].includes(anchoredOutcome), 'INV-409-INTEGRITY', 'Anchored terminal outcome lost its served row — restore before reconciling', 409);
       // A planted terminal outcome must scream INTEGRITY, not wedge the
       // cert behind a state ordering (w13-fixverify L6).
       if (existing) this._outcomeIntegrity(t, existing, cert.certificate_id);
@@ -3804,7 +3835,12 @@ export class Fabric {
     // instead of throwing where VERIFIED/FAILED simply answer (w7-seam F8).
     if (current && ['VERIFIED', 'FAILED', 'COMPENSATED'].includes(current.payload.status)) return this._outcomeIntegrity(t, current, id);
     const cert = stored.envelope.payload, raw = this.target.outcome(t, id);
-    const record = this.store.must(t, 'capsule', cert.capsule_id);
+    const record = this.store.get(t, 'capsule', cert.capsule_id);
+    // A missing capsule row for an anchored issuance is the same
+    // destructive tampering — reconcile must scream, not die on a bare
+    // 404 (w29-lifecycle F5).
+    requireThat(record || !this._auditIndex(t).proposedDigest.has(cert.capsule_id), 'INV-409-INTEGRITY', 'Anchored capsule row is missing', 409);
+    if (!record) this.store.must(t, 'capsule', cert.capsule_id);
     // A cert bound to a LIVE composite parent settles only through
     // finishComposite — an operator reconcile landing mid-composite would
     // fire irreversible effects under a verdict the parent then
@@ -3825,6 +3861,11 @@ export class Fabric {
       let allSettledVerified = true, anyFailed = false, anyCompensated = false;
       for (const childId of record.capsule.requested_state.children ?? []) {
         const childCapsule = this.store.get(t, 'capsule', childId);
+        // An anchored issuance for a child whose capsule row is gone is
+        // destructive tampering of the same class a missing anchored cert
+        // row is — scream, never silently classify it NOT_ATTEMPTED while
+        // every later path dies on a bare 404 (w29-lifecycle F5).
+        requireThat(childCapsule || !ridx.issued.has(childId), 'INV-409-INTEGRITY', 'Anchored child capsule row is missing', 409);
         // Cert bindings resolve from the anchored CERTIFICATE_ISSUED map —
         // the mutable capsule.certificate_id pointer can be repointed at a
         // foreign settled cert to mint parent verdicts (w23-fixverify F-h).
@@ -3914,13 +3955,18 @@ export class Fabric {
   cancel(p, id) {
     this.authorize(p, ['operator', 'security', 'policy_admin']);
     return this.transaction(p, now => {
-      const r = this.store.must(p.tenant_id, 'capsule', id);
+      const r = this.store.get(p.tenant_id, 'capsule', id);
+      const cancelIdx = this._auditIndex(p.tenant_id);
+      // A capsule the chain proposed but the store lost is destructive
+      // tampering — cancel must scream integrity, not a bare 404
+      // (w29-lifecycle F5).
+      requireThat(r || !cancelIdx.proposedDigest.has(id), 'INV-409-INTEGRITY', 'Anchored capsule row is missing', 409);
+      if (!r) this.store.must(p.tenant_id, 'capsule', id);
       // Terminal state is derived from the anchored folds, never the
       // mutable status field: re-cancelling, cancelling a dispatched or
       // settled cert — all refuse on the signed chain's word, and a
       // tampered row can neither slip the gate nor hold a live action
       // hostage (w24-lifecycle W24-3/W24-6).
-      const cancelIdx = this._auditIndex(p.tenant_id);
       // A DENY verdict is terminal too — the anchored evaluation fold
       // refuses rewrites of it, so a DENY can never be whitewashed into a
       // CANCELLED record (w11-lifecycle F7, w24-lifecycle W24-3).
@@ -3952,7 +3998,12 @@ export class Fabric {
         this.store.put(p.tenant_id, 'outcome', cancelCertId, cancelOutcome, now);
         this.store.audit(p.tenant_id, 'EXECUTION_OUTCOME', p.subject_id, cancelCertId, { status: 'CANCELLED', reason: 'ACTION_CANCELLED', outcome_digest: digest(cancelOutcome), supersedes: prior ? digest(prior) : null }, now);
       }
-      this.store.audit(p.tenant_id, 'ACTION_CANCELLED', p.subject_id, id, { certificate_id: cancelCertId ?? r.certificate_id }, now); return { status: r.status };
+      // The anchored binding names the killed cert — never the mutable
+      // capsule.certificate_id pointer, which a store-level writer can
+      // repoint at a foreign live cert to launder an anchored CANCELLED
+      // verdict onto it (w29-lifecycle F1). The fold additionally ignores
+      // any certificate_id that does not match the anchored issuance map.
+      this.store.audit(p.tenant_id, 'ACTION_CANCELLED', p.subject_id, id, { certificate_id: cancelCertId ?? null }, now); return { status: r.status };
     });
   }
   revoke(p, input) {

@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 5041,
-      "bytes": 396277
+      "lines": 5092,
+      "bytes": 400825
     },
     "src/issuerd.mjs": {
       "lines": 726,
@@ -282,8 +282,8 @@
       "bytes": 16209
     },
     "tests/w17-fixverify.test.mjs": {
-      "lines": 305,
-      "bytes": 23200
+      "lines": 306,
+      "bytes": 23296
     },
     "tests/w17-redteam.test.mjs": {
       "lines": 276,
@@ -389,6 +389,10 @@
       "lines": 381,
       "bytes": 25992
     },
+    "tests/w29.test.mjs": {
+      "lines": 163,
+      "bytes": 8903
+    },
     "tests/w5-mutations.test.mjs": {
       "lines": 194,
       "bytes": 13645
@@ -458,6 +462,6 @@
       "bytes": 6499
     }
   },
-  "total_files": 114,
-  "total_lines": 25927
+  "total_files": 115,
+  "total_lines": 26142
 }
