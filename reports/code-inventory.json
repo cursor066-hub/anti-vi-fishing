@@ -74,8 +74,8 @@
       "bytes": 10789
     },
     "src/server.mjs": {
-      "lines": 359,
-      "bytes": 37011
+      "lines": 360,
+      "bytes": 37151
     },
     "src/shamir.mjs": {
       "lines": 91,
@@ -407,5 +407,5 @@
     }
   },
   "total_files": 101,
-  "total_lines": 21730
+  "total_lines": 21731
 }
