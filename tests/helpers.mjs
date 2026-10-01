@@ -16,7 +16,9 @@ export function fixture(t, tenants = ['acme', 'globex']) {
   let f = new Fabric(setup.config, directory, () => time); seedSyntheticResources(f, tenants);
   let closed = false;
   const close = () => { if (!closed) { f.close(); closed = true; } };
-  t?.after(() => { close(); rmSync(directory, { recursive: true }); });
+  // A sibling worker's mid-flight chain-head/watermark write can drop a
+  // file into the tree between readdir and rmdir — retry, never swallow.
+  t?.after(() => { close(); rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 }); });
   const p = (subject = 'operator', tenant = 'acme') => ({ subject_id: subject, tenant_id: tenant });
   const actor = (subject = 'operator') => ({ subject_id: subject, identity_class: 'workforce', device_id: `${subject}-device` });
   function proposed(type = 'finance.beneficiary.create', requested = { vendor_id: 'vendor-1', bank_account: 'TESTBANK000002', currency: 'EUR' }, overrides = {}, principal = p()) {
