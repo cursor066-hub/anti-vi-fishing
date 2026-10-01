@@ -42,7 +42,7 @@ try {
   // its not_before slot, the old constitution keeps serving through the
   // window, then exactly one version promotes at activate_at.
   const active = h.f.policy('acme'), canary = clone(active);
-  canary.version = 2; canary.policy_id = 'constitution:acme:v2'; canary.not_before = h.now() + 240000;
+  canary.version = 2; canary.not_before = h.now() + 240000;
   canary.rules['finance.payment.first'].max_quantity = 5;
   const pc = h.proposed('policy.change', { policy: canary }, { action: { type: 'policy.change', target_resource: 'policy-root', purpose: 'Canary rollout' } });
   h.f.simulate(h.p('policy-admin'), canary); h.advance(120001);
@@ -59,9 +59,8 @@ try {
   // The verifier must anchor on the deployment's CONFIGURED keys, never on
   // the keys the artifact itself ships — bundle.public_keys as the anchor
   // certifies whatever the bundle claims (w23-supply F15).
-  const simConfig = JSON.parse(readFileSync(join(h.directory, 'config.json'), 'utf8'));
   const simAnchor = {};
-  for (const t of Object.values(simConfig.tenants ?? {})) simAnchor[t.keys.audit.key_id] = { public_key: t.keys.audit.public_key };
+  for (const t of Object.values(h.setup.config.tenants ?? {})) simAnchor[t.keys.audit.key_id] = { public_key: t.keys.audit.public_key };
   scenario('Offline signed audit integrity', true, () => verifyAudit(bundle, simAnchor).valid);
   const tampered = clone(bundle); tampered.entries.splice(3, 1);
   scenario('Audit deletion detection', 'INV-409-AUDIT', () => verifyAudit(tampered, simAnchor));
