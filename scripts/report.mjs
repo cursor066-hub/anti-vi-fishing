@@ -38,8 +38,11 @@ write('reports/final-regression-summary.json', JSON.stringify({ ...testSummary, 
 const nodeVerify = run(process.execPath, ['scripts/verify-export.mjs', 'reports/sample-audit.pinned.json', 'reports/sample-pinned-trust.pinned.json']);
 write('reports/verification-node.json', JSON.stringify({ verifier: 'scripts/verify-export.mjs (node:crypto)', exit: nodeVerify.status, output: (nodeVerify.stdout ?? '').trim() }, null, 2) + '\n');
 const bun = run('bun', ['scripts/verify-export-webcrypto.mjs', 'reports/sample-audit.pinned.json', 'reports/sample-pinned-trust.pinned.json']);
-if (bun.error || bun.status === null) write('reports/verification-webcrypto.json', JSON.stringify({ verifier: 'scripts/verify-export-webcrypto.mjs (bun WebCrypto)', exit: null, output: 'bun not installed on this machine — verifier not run' }, null, 2) + '\n');
-else write('reports/verification-webcrypto.json', JSON.stringify({ verifier: 'scripts/verify-export-webcrypto.mjs (bun WebCrypto)', exit: bun.status, output: (bun.stdout ?? '').trim() }, null, 2) + '\n');
+// verification-webcrypto.json is volatile evidence (see the source-check
+// note below): its output depends on whether bun exists in this
+// environment, so byte-equality across machines can never hold. The
+// verifier itself is proven by the live bun step in CI (w20 CI gate).
+const bunReport = { verifier: 'scripts/verify-export-webcrypto.mjs (bun WebCrypto)', exit: (bun.error || bun.status === null) ? null : bun.status, output: (bun.error || bun.status === null) ? 'bun not installed on this machine — verifier not run' : (bun.stdout ?? '').trim() };
 const py = run('python3', ['scripts/verify-vectors.py']);
 write('reports/verification-python.json', JSON.stringify({ verifier: 'scripts/verify-vectors.py (Python cryptography)', exit: py.status, output: (py.stdout ?? '').trim() }, null, 2) + '\n');
 
@@ -67,6 +70,7 @@ const described = treeState();
 const volatileReport = (report) => JSON.stringify({ described_tree: described, note: 'volatile evidence: describes the tree at generation time — freshness is proven by the live CI step, not by this snapshot (w11-supply SC-08)', report }, null, 2) + '\n';
 writeVolatile('reports/source-check.json', volatileReport(JSON.parse(checkOut)));
 writeVolatile('reports/artifact-audit.json', volatileReport({ check_exit: check.status, report: JSON.parse(checkOut) }));
+writeVolatile('reports/verification-webcrypto.json', volatileReport(bunReport));
 const gate = run(process.execPath, ['scripts/release-check.mjs']);
 write('reports/production-gate.json', JSON.stringify({ verifier: 'scripts/release-check.mjs', exit: gate.status, expected_exit: 1, output: (gate.stdout ?? '').trim() }, null, 2) + '\n');
 
