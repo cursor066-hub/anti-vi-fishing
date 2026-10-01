@@ -195,4 +195,4 @@ if (process.argv.includes('--require-ci')) {
   if (!ci?.run_id || !ci?.repository || !ci?.sha) fail('INV-412-PROVENANCE', 'attestation does not bind a CI run (--require-ci)');
   if (ci.sha !== payload.invocation?.source_commit) fail('INV-412-PROVENANCE', 'attested CI sha does not match the attested source commit');
 }
-console.log(JSON.stringify({ valid: true, key_id: JSON.parse(readFileSync(attPath, 'utf8')).protected.key_id, commit: payload.invocation.source_commit, manifest_sha256: manifestSha, timestamp: payload.timestamp, ...(payload.invocation?.ci ? { ci: payload.invocation.ci } : {}), ...(skipped.length ? { skipped_checks: skipped } : {}) }));
+console.log(JSON.stringify({ valid: true, key_id: JSON.parse(readFileSync(attPath, 'utf8')).protected.key_id, commit: payload.invocation?.source_commit ?? null, manifest_sha256: manifestSha, timestamp: payload.timestamp, ...(payload.invocation?.ci ? { ci: payload.invocation.ci } : {}), ...(skipped.length ? { skipped_checks: skipped } : {}) }));

@@ -62,7 +62,7 @@ export class Fabric {
         if (key.private_key && !this.vault.keys.has(key.key_id)) this.vault.importKey({ key_id: key.key_id, public_key: key.public_key, private_key: key.private_key }, purposes[klass], { exportable: false, tenant_id: tenant });
         requireThat(this.vault.keys.has(key.key_id), 'INV-503-CONFIG', `Tenant ${klass} key is not in the keystore`, 503);
       }
-      auditSigners[tenant] = { key_id: t.keys.audit.key_id, public_key: t.keys.audit.public_key, keys: () => this.auditPublicKeys(tenant), sign: (payload, purpose = 'audit') => { const sel = this._signingKeyId(tenant, 'audit'); return this.vault.envelope(sel.key_id, purpose, this._recoveryBody(sel, payload), { allowPending: sel.recovery }); } };
+      auditSigners[tenant] = { key_id: t.keys.audit.key_id, public_key: t.keys.audit.public_key, keys: () => this.auditPublicKeys(tenant), sign: (payload, purpose = 'audit') => { const sel = this._signingKeyId(tenant, 'audit'); return this.vault.envelope(sel.key_id, purpose, this._recoveryBody(sel, payload), { allowPending: sel.recovery, tenant_id: tenant }); } };
     }
     // Both migrators consult one dedup index so a ciphertext grafted
     // between the two DBs is caught by whichever side sees it second
@@ -74,8 +74,8 @@ export class Fabric {
     // collided, ambiguous or unreadable row lands on the tenant's ledger
     // at open (w19-aad W19-2).
     for (const t of new Set([...this.store.aadMigration.keys(), ...this.target.aadMigration.keys()])) {
-      const s = { migrated: 0, transplants: 0, ambiguous: 0, skipped: 0 };
-      for (const m of [this.store.aadMigration.get(t), this.target.aadMigration.get(t)]) if (m) for (const k of Object.keys(s)) s[k] += m[k];
+      const s = { migrated: 0, transplants: 0, ambiguous: 0, skipped: 0, reverted: 0 };
+      for (const m of [this.store.aadMigration.get(t), this.target.aadMigration.get(t)]) if (m) for (const k of Object.keys(s)) s[k] += m[k] ?? 0;
       if (s.migrated + s.transplants + s.ambiguous + s.skipped > 0)
         this.store.tx(() => { this.store.clock(this.clock()); this.store.audit(t, 'AAD_MIGRATION', 'system', 'fabric-open', s, this.clock()); });
     }
@@ -152,11 +152,23 @@ export class Fabric {
   // (w13-store F5 / w13-fixverify H1).
   _anchoredEvent(t, type, match) {
     let after = 0;
+    // The scan enforces the same dead-key window as the fold — a row
+    // signed after its key's anchored death is not anchored evidence
+    // (w21-crypto F-3).
+    const keyDeadAt = new Map();
+    const dead = e => {
+      const pl = e?.payload, meta = pl?.metadata ?? {};
+      if (pl?.type === 'AUTHORITY_REVOKED' && typeof pl.reference === 'string' && pl.reference.startsWith('key:')) keyDeadAt.set(pl.reference.slice(4), pl.sequence);
+      if (pl?.type === 'KEY_ROTATED' && meta.key_class === 'audit' && meta.previous_key_id) keyDeadAt.set(meta.previous_key_id, pl.sequence);
+      const kid = e?.protected?.key_id, deadAt = kid !== undefined ? keyDeadAt.get(kid) : undefined;
+      return deadAt !== undefined && deadAt < pl?.sequence;
+    };
     try {
       for (;;) {
         const page = this.store.auditPage(t, { after, limit: 5000 });
         for (const row of page.entries) {
           const e = row.envelope;
+          if (dead(e)) continue;
           if (!e || e.payload?.type !== type) continue;
           try { verifySigned(e, this.auditPublicKeys(t), 'audit'); } catch { continue; }
           if (match(e.payload)) return e.payload;
@@ -175,13 +187,23 @@ export class Fabric {
   // never launder (w13-fixverify M4).
   _anchoredConfigSnapshot(t) {
     let latest = null, after = 0;
+    // Same dead-key window as the fold — a snapshot minted after its
+    // signing key's anchored death cannot seed the drift baseline
+    // (w21-crypto F-3).
+    const keyDeadAt = new Map();
     try {
       for (;;) {
         const page = this.store.auditPage(t, { after, limit: 5000 });
         for (const row of page.entries) {
-          const e = row.envelope, pl = e?.payload;
+          const e = row.envelope, pl = e?.payload, meta = pl?.metadata ?? {};
+          if (pl?.type === 'AUTHORITY_REVOKED' && typeof pl.reference === 'string' && pl.reference.startsWith('key:')) keyDeadAt.set(pl.reference.slice(4), pl.sequence);
+          if (pl?.type === 'KEY_ROTATED' && meta.key_class === 'audit' && meta.previous_key_id) keyDeadAt.set(meta.previous_key_id, pl.sequence);
           if (pl?.type === 'CONFIG_SNAPSHOT' || pl?.type === 'CONFIG_REASSERTED') {
-            try { verifySigned(e, this.auditPublicKeys(t), 'audit'); if (pl.metadata?.config_digest) latest = pl.metadata.config_digest; } catch { /* forged row: ignore */ }
+            const kid = e?.protected?.key_id, deadAt = kid !== undefined ? keyDeadAt.get(kid) : undefined;
+            try {
+              verifySigned(e, this.auditPublicKeys(t), 'audit');
+              if (!(deadAt !== undefined && deadAt < pl.sequence) && pl.metadata?.config_digest) latest = pl.metadata.config_digest;
+            } catch { /* forged row: ignore */ }
           }
         }
         if (page.next_cursor === null) break;
@@ -608,7 +630,7 @@ export class Fabric {
     // The memo key must carry each key's material fingerprint and revoked
     // flag — a flipped revocation or swapped public key must never let a
     // stale hit keep verifying (w17-idx F10).
-    const ck = `${Object.entries(keys).map(([k, v]) => `${k}:${String(v?.public_key ?? '').slice(0, 8)}:${v?.revoked ? 1 : 0}`).sort().join(',')}|${purpose}|${digest(envelope)}`;
+    const ck = `${Object.entries(keys).map(([k, v]) => `${k}:${digest(v?.public_key ?? '').slice(0, 16)}:${v?.revoked ? 1 : 0}`).sort().join(',')}|${purpose}|${digest(envelope)}`;
     if (this.#verifyMemo.has(ck)) return this.#verifyMemo.get(ck);
     const pl = verifySigned(envelope, keys, purpose);
     if (this.#verifyMemo.size >= 16384) this.#verifyMemo.clear();
@@ -623,7 +645,7 @@ export class Fabric {
     // the scoped allowPending path.
     const e = this.vault.keys.get(sel.key_id);
     this.assertSuiteAllowed(t, e?.suite ?? 'Ed25519');
-    return this.vault.envelope(sel.key_id, purpose, this._recoveryBody(sel, payload), { allowPending: sel.recovery });
+    return this.vault.envelope(sel.key_id, purpose, this._recoveryBody(sel, payload), { allowPending: sel.recovery, tenant_id: t });
   }
   // The explicit key_id path is internal-only (the rotation-succession
   // outcome signer) — it still enforces tenant ownership and ledger
@@ -633,7 +655,7 @@ export class Fabric {
     if (key_id) requireThat(this.ownsVaultKey(t, key_id) && !this.revoked(t, 'key', key_id), 'INV-401-SIGNATURE', 'Signing key revoked or foreign', 401);
     const e = this.vault.keys.get(sel.key_id);
     this.assertSuiteAllowed(t, e?.suite ?? 'Ed25519');
-    return this.vault.envelope(sel.key_id, purpose, this._recoveryBody(sel, payload), { allowPending: allowPending || sel.recovery });
+    return this.vault.envelope(sel.key_id, purpose, this._recoveryBody(sel, payload), { allowPending: allowPending || sel.recovery, tenant_id: t });
   }
   assertSuiteAllowed(t, suite) {
     requireThat((this.policy(t).algorithms?.allowed_suites ?? ['Ed25519']).includes(suite), 'INV-451-POLICY', 'Signature suite retired by constitution', 451);
@@ -686,7 +708,7 @@ export class Fabric {
     // take authorize() down with it. Gate on the frozen tenant identity
     // set instead (role asserted, revocation unknowable until the seal
     // lands — the seal itself is signed and records who ran it).
-    const identity = Object.values(this.tenant(t).identities).find(v => v.subject_id === p.subject_id);
+    const [iid, identity] = Object.entries(this.tenant(t).identities).find(([, v]) => v.subject_id === p.subject_id) ?? [];
     requireThat(identity?.roles?.includes('security'), 'INV-403-ROLE', 'Role denied for security', 403);
     const keys = this.auditPublicKeys(t);
     const rows = this.store.db.prepare('SELECT seq,hash,envelope FROM audit WHERE tenant=? ORDER BY seq').all(t);
@@ -728,22 +750,30 @@ export class Fabric {
         auditSuccessions.set(env.payload.reference, meta.previous_key_id); // newest last, keyed by new key
       }
     }
+    // The revoked-caller refusal binds BOTH paths — a subject whose own
+    // revocation is on-chain must not clear the wedge on the early return
+    // any more than it may cut the chain (w21-fixverify H-3).
+    const callerRefs = [`subject:${p.subject_id}`, `key:${iid}`, ...(identity?.device_id ? [`device:${identity.device_id}`] : [])];
+    requireThat(!callerRefs.some(ref => revokedSeen.has(ref)), 'INV-403-QUARANTINE', 'A revoked identity cannot seal the audit chain', 403);
     if (firstBad === null) {
-      // A wedge planted by the cert sweep (not by a broken chain) can only
-      // clear when the sweep itself re-verifies — 'already verifies' must
-      // not strand the flag on the repair path that is documented to lift
-      // it (w20-fixverify F-4).
+      // A wedge planted by an integrity cause clears only when the SAME
+      // set of causes re-proves clean — a cert-only sweep clearing over a
+      // still-divergent capsule row is the same lie the wedge exists to
+      // deny, and a clear must land on the signed ledger, not just in a
+      // return value (w21-fixverify H-2/H-3, L-1).
       if (this._clockRecoveryUnverifiable?.has(t)) {
-        let sweepOk = false;
-        try { sweepOk = this._certIntegritySweep(t); } catch { sweepOk = false; }
-        if (sweepOk) { this._clockRecoveryUnverifiable.delete(t); return { sealed: false, reason: 'chain already verifies', unverifiable_cleared: true }; }
-        return { sealed: false, reason: 'certificate sweep still fails — anchored rows must be restored before the wedge clears' };
+        const sweep = this._wedgeIntegrity(t);
+        if (sweep.ok) {
+          const now = this.clock();
+          this.store.tx(() => { this.store.audit(t, 'AUDIT_WEDGE_CLEARED', p.subject_id, 'audit', { sealed_at_seq: null, cleared_by: p.subject_id }, now); });
+          this.#auditIdx?.delete(t);
+          this._clockRecoveryUnverifiable.delete(t);
+          return { sealed: false, reason: 'chain already verifies', unverifiable_cleared: true };
+        }
+        return { sealed: false, reason: `unverifiable state persists (${sweep.detail ?? 'fold failure'}) — repair the divergent rows and reseal` };
       }
       return { sealed: false, reason: 'chain already verifies' };
     }
-    const [iid, ident] = Object.entries(this.tenant(t).identities).find(([, v]) => v.subject_id === p.subject_id) ?? [];
-    const callerRefs = [`subject:${p.subject_id}`, `key:${iid}`, ...(ident?.device_id ? [`device:${ident.device_id}`] : [])];
-    requireThat(!callerRefs.some(ref => revokedSeen.has(ref)), 'INV-403-QUARANTINE', 'A revoked identity cannot seal the audit chain', 403);
     let repointUndo = null, activated = null, clearUnverifiable = false;
     try {
       const out = this.store.tx(() => {
@@ -832,13 +862,15 @@ export class Fabric {
       // the wedge clear: the seal the flag waited for landed. The fault is
       // reported on the result so the operator sees durability is pending
       // (w20-fixverify F-5).
+      // persistVault failure must NOT clear the wedge — the seal landed
+      // but durability is pending; keep the flag honest and say so on the
+      // result (w21-fixverify M-5).
       try { if (activated) this.persistVault(); }
       catch (persistErr) {
-        if (clearUnverifiable) this._clockRecoveryUnverifiable?.delete(t);
-        return { ...out, vault_persist_error: persistErr instanceof Error ? persistErr.message : String(persistErr) };
+        return { ...out, wedge_cleared: false, vault_persist_error: persistErr instanceof Error ? persistErr.message : String(persistErr) };
       }
       if (clearUnverifiable) this._clockRecoveryUnverifiable?.delete(t);
-      return out;
+      return { ...out, wedge_cleared: clearUnverifiable };
     } catch (sealErr) {
       // Any fault inside the repoint window — activation, the re-anchor
       // snapshot, the seal row itself — must undo the in-memory repoint:
@@ -849,20 +881,31 @@ export class Fabric {
       repointUndo?.(); this.#auditIdx?.delete(t); throw sealErr;
     }
   }
-  // The integrity half of recoverClock's sweep: every chain-anchored issued
-  // certificate must still exist as a verifiable row — a missing or
-  // divergent anchored row is the unverifiable condition sealAuditChain's
-  // repair path is allowed to clear once it re-verifies (w20-fixverify F-4).
-  _certIntegritySweep(tenant) {
-    const idx = this._auditIndex(tenant);
-    for (const id of idx.issuedCerts ?? []) {
-      let c; try { c = this.store.get(tenant, 'certificate', id); } catch { c = null; }
-      if (!c) return false;
-      if (idx.outcomes.has(id) || idx.reserved.has(id)) continue;
-      let envOk = false; try { envOk = !!verifySigned(c.envelope, this.executionPublic(tenant), 'action-certificate'); } catch { envOk = false; }
-      if (!envOk) return false;
-    }
-    return true;
+  // The EXACT integrity causes recoverClock wedges on — fold failure,
+  // anchored cert rows missing/unverifiable, anchored capsule rows missing
+  // or divergent. sealAuditChain's clear re-proves all of them through
+  // this single implementation so no cause can slip past the clear
+  // (w21-fixverify H-2). Returns {ok, detail} for an honest refusal reason.
+  _wedgeIntegrity(tenant, idx = null) {
+    try { idx ??= this._auditIndex(tenant); } catch { return { ok: false, detail: 'fold failure' }; }
+    try {
+      for (const id of idx.issuedCerts ?? []) {
+        let c; try { c = this.store.get(tenant, 'certificate', id); } catch { c = null; }
+        requireThat(c, 'INV-503-TIME', 'anchored certificate row missing');
+        if (idx.outcomes.has(id) || idx.reserved.has(id)) continue;
+        let envOk = false;
+        // The envelope must bind THIS row id — a sibling cert's valid
+        // envelope transplanted onto this row is not a pass
+        // (w21-fixverify L-2).
+        try { envOk = verifySigned(c.envelope, this.executionPublic(tenant), 'action-certificate').certificate_id === id; } catch { envOk = false; }
+        requireThat(envOk, 'INV-503-TIME', 'anchored certificate envelope does not verify for its row');
+      }
+      for (const [id, anchoredCapsuleDigest] of idx.proposedDigest ?? []) {
+        let r; try { r = this.store.get(tenant, 'capsule', id); } catch { r = null; }
+        requireThat(r && digest(r.capsule) === anchoredCapsuleDigest, 'INV-503-TIME', 'anchored capsule row missing or divergent');
+      }
+      return { ok: true, idx };
+    } catch (e) { return { ok: false, detail: e?.message ?? 'integrity failure' }; }
   }
   recoverClock(p) {
     this.authorize(p, ['security', 'policy_admin']);
@@ -894,18 +937,19 @@ export class Fabric {
           // tenant until sealAuditChain — it must never veto the recovery
           // every other tenant needs to transact again (w19-lifecycle F3).
           try {
+            // Integrity causes come from the SAME implementation the
+            // wedge-clear re-proves — no subset can pass here and fail
+            // the repair path (w21-fixverify H-2).
+            requireThat(this._wedgeIntegrity(tenant, idx).ok, 'INV-503-TIME', 'Anchored row integrity check failed');
+            // Resurrection vetoes stay here: they need now/prior.
             for (const id of idx.issuedCerts ?? []) {
-              let c; try { c = this.store.get(tenant, 'certificate', id); } catch { c = null; }
-              requireThat(c, 'INV-503-TIME', 'Anchored certificate row missing during clock recovery', 503);
               if (idx.outcomes.has(id) || idx.reserved.has(id)) continue;
-              let envOk = false; try { envOk = !!verifySigned(c.envelope, this.executionPublic(tenant), 'action-certificate'); } catch { envOk = false; }
-              requireThat(envOk, 'INV-503-TIME', 'Anchored certificate envelope does not verify — ledger tamper', 503);
+              const c = this.store.get(tenant, 'certificate', id);
               const exp = c.envelope.payload.expires_at;
               requireThat(exp <= now || exp > prior, 'INV-503-TIME', 'Clock recovery would resurrect an expired certificate', 503);
             }
-            for (const [id, anchoredCapsuleDigest] of idx.proposedDigest ?? []) {
-              let r; try { r = this.store.get(tenant, 'capsule', id); } catch { r = null; }
-              requireThat(r && digest(r.capsule) === anchoredCapsuleDigest, 'INV-503-TIME', 'Anchored capsule row missing or divergent during clock recovery', 503);
+            for (const [id] of idx.proposedDigest ?? []) {
+              const r = this.store.get(tenant, 'capsule', id);
               // Only a certified capsule can dispatch — a proposed-only
               // capsule cannot resurrect, and a terminally-anchored one is
               // spent. Both facts live on the chain, not the mutable status.
@@ -1309,8 +1353,20 @@ export class Fabric {
         case 'ACTION_CANCELLED': if (meta.certificate_id) idx.outcomes.set(meta.certificate_id, 'CANCELLED'); break;
         case 'RUNTIME_DENIED': { const d = { request_id: pl.reference, actor: pl.actor, code: meta.code ?? null, capability_id: meta.capability_id ?? null, at: pl.time }; idx.denials.push(d); const rl = idx.denialsByReq.get(d.request_id) ?? []; rl.push(d); idx.denialsByReq.set(d.request_id, rl); break; }
         case 'COVERAGE_DECLARED':
-          if (meta.identity_digest ?? meta.digest) idx.coverageAnchors.set(pl.reference, meta.identity_digest ?? meta.digest);
-          (idx.coverageDeclared ??= new Map()).set(pl.reference, { status: meta.status, at: pl.time, evidence_at: meta.status === 'UNCOVERED' ? null : pl.time, max_age_ms: meta.max_age_ms ?? null });
+          // Identity-anchored declarations carry meta.identity_digest; a
+          // legacy anchor's meta.digest covered the WHOLE row (status
+          // included) — keep them in separate slots so a current row can
+          // verify against its own digest only while untouched
+          // (w21-fixverify M-4).
+          if (meta.identity_digest ?? meta.digest) {
+            idx.coverageAnchors.set(pl.reference, meta.identity_digest ?? null);
+            if (!meta.identity_digest && meta.digest) (idx.coverageAnchorsLegacy ??= new Map()).set(pl.reference, meta.digest);
+          }
+          // Re-declaration starts a new epoch: the replay below must seed
+          // from the declaration in force at the answer time, not collapse
+          // every era into the latest row (w21-fixverify H-1).
+          (idx.coverageDeclarations ??= []).push({ path_id: pl.reference, status: meta.status, at: pl.time, evidence_at: meta.status === 'UNCOVERED' ? null : pl.time, max_age_ms: meta.max_age_ms ?? null, seq: e.sequence });
+          (idx.coverageDeclared ??= new Map()).set(pl.reference, { status: meta.status, at: pl.time, evidence_at: meta.status === 'UNCOVERED' ? null : pl.time, max_age_ms: meta.max_age_ms ?? null, seq: e.sequence });
           break;
         case 'COVERAGE_TRANSITION': (idx.coverageTransitions ??= []).push({ path_id: pl.reference, to: meta.to, cause: meta.cause, at: meta.at ?? pl.time, evidence_at: meta.evidence_at ?? null, seq: e.sequence }); break;
         // Validations are replay events too: refreshing an already-ENFORCED
@@ -1842,8 +1898,12 @@ export class Fabric {
       }
       throw e;
     }
-    const registered = { connector_id: `issuer:${issuer.name}`, version: issuer.version ?? '1.0.0', actions: issuer.kinds, channel: issuer.channel, key_id, permissions: issuer.permissions ?? [], limitations: issuer.limitations ?? [] };
-    const result = driftCheck(registered, { connector_id: observedPayload.connector_id, version: observedPayload.version, actions: observedPayload.actions, channel: observedPayload.domain, key_id: observed.protected.key_id, permissions: observedPayload.permissions, limitations: observedPayload.limitations }, this.clock());
+    // Registered baseline: only fields the stored config actually declares
+    // may compare — an undeclared baseline records the observed value
+    // informationally instead of false-drifting every pre-upgrade tenant
+    // (w21-fixverify M-3).
+    const registered = { connector_id: `issuer:${issuer.name}`, version: issuer.version ?? '1.0.0', actions: issuer.kinds, channel: issuer.channel, key_id, permissions: issuer.permissions, limitations: issuer.limitations, idempotency: issuer.idempotency, coverage_implications: issuer.coverage_implications };
+    const result = driftCheck(registered, { connector_id: observedPayload.connector_id, version: observedPayload.version, actions: observedPayload.actions, channel: observedPayload.domain, key_id: observed.protected.key_id, permissions: observedPayload.permissions, limitations: observedPayload.limitations, idempotency: observedPayload.idempotency, coverage_implications: observedPayload.coverage_implications }, this.clock());
     return this.transaction(p, now => {
       // A clean re-check clears the suspension; a drifted one records it and
       // stops the issuer's evidence until then (MED-2).
@@ -2859,13 +2919,16 @@ export class Fabric {
         if (!declared) return null;
         let s = { status: declared.status, evidence_at: declared.evidence_at };
         const events = [...(idx.coverageTransitions ?? []), ...(idx.coverageValidations ?? [])].sort((a, b) => a.seq - b.seq);
-        for (const e of events) if (e.path_id === path.path_id) {
+        // Epoch bound: transitions/validations from BEFORE the current
+        // declaration must not promote it — a re-declared path inherits
+        // nothing from the prior era (w21-fixverify H-1).
+        for (const e of events) if (e.path_id === path.path_id && e.seq >= declared.seq) {
           if (e.validation) s.evidence_at = e.at;
           else { if (e.to !== undefined) s.status = e.to; s.evidence_at = e.evidence_at; }
         }
         return s;
       };
-      const anchoredRows = rows.filter(path => anchoredStatus(path) !== null && idx.coverageAnchors.get(path.path_id) === anchoredIdentity(path))
+      const anchoredRows = rows.filter(path => anchoredStatus(path) !== null && (idx.coverageAnchors.get(path.path_id) === anchoredIdentity(path) || (!idx.coverageAnchors.get(path.path_id) && (idx.coverageAnchorsLegacy?.get(path.path_id) === digest(path)))))
         .map(path => {
           const anchored = anchoredStatus(path);
           const validated = (idx.coverageValidations ?? []).filter(v => v.path_id === path.path_id).at(-1);
@@ -2887,19 +2950,30 @@ export class Fabric {
     // rows can never rewrite the past a signed manifest attests
     // (w20-datagate F2). The mutable table stays as a display mirror.
     const idx = this._auditIndex(p.tenant_id), paths = {};
-    for (const [path_id, d] of idx.coverageDeclared ?? new Map()) if (d.at <= atTime) paths[path_id] = { path_id, status: d.status, evidence_at: d.evidence_at, max_age_ms: d.max_age_ms };
+    // The declaration in force at atTime is the LATEST one with
+    // d.at <= atTime — not the newest overall: era-1 history must still
+    // answer honestly inside era-1 instants even after a later
+    // re-declaration (w21-fixverify H-1).
+    const declByPath = {};
+    for (const d of idx.coverageDeclarations ?? []) {
+      if (d.at > atTime) continue;
+      const cur = declByPath[d.path_id];
+      if (!cur || d.seq > cur.seq) declByPath[d.path_id] = d;
+    }
+    for (const d of Object.values(declByPath)) paths[d.path_id] = { path_id: d.path_id, status: d.status, evidence_at: d.evidence_at, max_age_ms: d.max_age_ms, decl_seq: d.seq };
     // Ledger order (seq), not wall time, decides replay order — a refresh
     // validation on an already-ENFORCED path writes no transition, so both
     // event streams merge by seq into one honest history.
     const events = [...(idx.coverageTransitions ?? []), ...(idx.coverageValidations ?? [])].sort((a, b) => a.seq - b.seq);
     for (const e of events) {
-      if (e.at > atTime || !paths[e.path_id]) continue;
-      if (e.validation) { paths[e.path_id].evidence_at = e.at; continue; }
-      if (e.to !== undefined) paths[e.path_id].status = e.to;
-      paths[e.path_id].evidence_at = e.evidence_at;
+      const p = paths[e.path_id];
+      if (!p || e.at > atTime || e.seq < p.decl_seq) continue;
+      if (e.validation) { p.evidence_at = e.at; continue; }
+      if (e.to !== undefined) p.status = e.to;
+      p.evidence_at = e.evidence_at;
     }
     const out = {};
-    for (const [id, s] of Object.entries(paths)) out[id] = { ...s, status: effectiveStatus(s, atTime), stored_status: s.status };
+    for (const [id, s] of Object.entries(paths)) { const { decl_seq, ...rest } = s; out[id] = { ...rest, status: effectiveStatus(s, atTime), stored_status: s.status }; }
     return { at: atTime, paths: out };
   }
   declareCoverage(p, input) {
@@ -3560,7 +3634,13 @@ export class Fabric {
     // evidence can never launder sealed fields (w8-fixverify F4).
     const checkCapsule = record => {
       requireThat(record && record.capsule.expires_at > now, 'INV-404-NOT-FOUND', 'Release cites no live capsule', 404);
-      requireThat(record.capsule.actor.subject_id === p.subject_id, 'INV-403-SCOPE', 'Release cites a capsule belonging to another actor', 403);
+      // Mutable rows feed a SIGNED citation — the capsule must prove its
+      // anchored proposal, verified request intent and self-consistent
+      // digest before any row field is trusted, and the actor binding
+      // comes from the verified intent payload, never the mutable actor
+      // field (w21-crypto F-1).
+      const intentPayload = this._capsuleIntegrity(t, record);
+      requireThat(intentPayload.actor?.subject_id === p.subject_id, 'INV-403-SCOPE', 'Release cites a capsule belonging to another actor', 403);
       requireThat(record.decision, 'INV-409-STATE', 'Release cites an undecided capsule', 409);
       // The cited decision must equal the one the chain attests — editing
       // the mutable decision object cannot launder provenance
@@ -3575,6 +3655,16 @@ export class Fabric {
       const ev = this.store.get(t, 'evidence', identifier(release.evidence_ref, 'evidence'));
       const payload = ev?.envelope?.payload;
       requireThat(payload, 'INV-404-NOT-FOUND', 'Release cites nonexistent evidence', 404);
+      // The citation path enforces the same integrity bar as every other
+      // evidence consumer — a mutable row cited into the signed release
+      // trail must bind its cloned payload, re-verify its signature, and
+      // respect revocation/quarantine (w21-crypto F-1).
+      requireThat(digest(ev.payload) === digest(ev.envelope.payload), 'INV-409-INTEGRITY', 'Stored evidence diverged from its signed envelope', 409);
+      const iss = this.tenant(t).issuers[ev.envelope.protected.key_id];
+      requireThat(typeof iss?.public_key === 'string', 'INV-401-EVIDENCE', 'Unknown evidence issuer', 401);
+      this._verifyCached(ev.envelope, { [ev.envelope.protected.key_id]: { public_key: iss.public_key, suite: iss.suite } }, 'evidence');
+      requireThat(payload.tenant_id === t && payload.capsule_digest !== undefined, 'INV-409-INTEGRITY', 'Cited evidence names a different tenant or no action', 409);
+      requireThat(!this.revoked(t, 'evidence', release.evidence_ref) && !this.revoked(t, 'issuer', ev.envelope.protected.key_id) && !this.revoked(t, 'key', ev.envelope.protected.key_id) && !this._auditIndex(t).issuerDrift.has(ev.envelope.protected.key_id), 'INV-403-QUARANTINE', 'Cited evidence is revoked or quarantined', 403);
       requireThat(payload.expires_at > now, 'INV-412-EVIDENCE', 'Release cites expired evidence', 412);
       requireThat(payload.advisory !== true, 'INV-412-EVIDENCE', 'Advisory evidence cannot be cited as authority', 412);
       // An evidence-only citation still binds the capsule it supports — the

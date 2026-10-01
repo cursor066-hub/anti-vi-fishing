@@ -2,7 +2,7 @@ import { mkdirSync, writeFileSync, existsSync, lstatSync, chmodSync, readFileSyn
 import { join, resolve } from 'node:path';
 import { randomBytes, generateKeyPairSync } from 'node:crypto';
 import { generateKey, signed, encrypt } from './crypto.mjs';
-import { ISSUER_MANIFEST_PERMISSIONS, ISSUER_MANIFEST_LIMITATIONS } from './connectors.mjs';
+import { ISSUER_MANIFEST_PERMISSIONS, ISSUER_MANIFEST_LIMITATIONS, ISSUER_MANIFEST_IDEMPOTENCY, ISSUER_MANIFEST_COVERAGE } from './connectors.mjs';
 import { hashBytes, canonical, digest, parseStrict } from './canonical.mjs';
 import { defaultPolicy } from './policy.mjs';
 import { KeyVault } from './keystore.mjs';
@@ -150,7 +150,7 @@ export function createConfiguration(tenantNames = ['acme'], now = Date.now(), { 
       // issue_token for /issue and a read-scope read_token for manifest/
       // health/listing; both expire within a day and rotate via config update.
       const issue_token = randomBytes(24).toString('base64url'), read_token = randomBytes(24).toString('base64url'), token_expires_at = now + 86400000;
-      issuers[key.key_id] = { public_key: key.public_key, name, issuer_id: name, failure_domain: `${tenant}-${name}`, channel: role.channel, kinds: role.kinds, version: '1.0.0', issue_token, read_token, token_expires_at, permissions: ISSUER_MANIFEST_PERMISSIONS, limitations: ISSUER_MANIFEST_LIMITATIONS };
+      issuers[key.key_id] = { public_key: key.public_key, name, issuer_id: name, failure_domain: `${tenant}-${name}`, channel: role.channel, kinds: role.kinds, version: '1.0.0', issue_token, read_token, token_expires_at, permissions: ISSUER_MANIFEST_PERMISSIONS, limitations: ISSUER_MANIFEST_LIMITATIONS, idempotency: ISSUER_MANIFEST_IDEMPOTENCY, coverage_implications: ISSUER_MANIFEST_COVERAGE };
       if (issuerEndpoint) issuers[key.key_id].endpoint = `${issuerEndpoint}`;
     }
     // Dev Secure Perception component: generated per tenant; private material

@@ -11,6 +11,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { signed, generateKey } from '../src/crypto.mjs';
+import { derivePublic } from '../src/keystore.mjs';
 import { digest } from '../src/canonical.mjs';
 
 process.chdir(new URL('..', import.meta.url).pathname);
@@ -61,6 +62,10 @@ if (fresh.status !== 0) { console.error(`manifest is stale — regenerate before
 const tracked = spawnSync('git', ['ls-files'], { encoding: 'utf8' });
 const files = tracked.status === 0 ? tracked.stdout.split('\n').filter(Boolean).sort() : [];
 const key = { key_id: arg('key-id') ?? digest({ public_key: readFileSync(publicPath, 'utf8') }).slice(0, 32), public_key: readFileSync(publicPath, 'utf8'), private_key: readFileSync(keyPath, 'utf8'), suite: arg('suite') ?? 'Ed25519' };
+// The advertised public half must be the private half's own public —
+// otherwise the attestation claims an identity the signer never had
+// (w21-crypto F-5).
+if (derivePublic(key.private_key) !== key.public_key) { console.error('signing keypair is inconsistent — public.pem does not match the private key'); process.exit(1); }
 
 // Provenance binds the CI run when one exists — a laptop-built envelope is
 // then distinguishable from a pipeline-built one by the presence and values

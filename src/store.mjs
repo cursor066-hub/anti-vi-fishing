@@ -62,13 +62,6 @@ export class Store {
           value TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY(tenant,kind,id));
         CREATE TABLE IF NOT EXISTS audit (tenant TEXT NOT NULL, seq INTEGER NOT NULL, previous TEXT NOT NULL,
           hash TEXT NOT NULL, envelope TEXT NOT NULL, PRIMARY KEY(tenant,seq));
-        CREATE TRIGGER IF NOT EXISTS no_audit_update BEFORE UPDATE ON audit BEGIN SELECT RAISE(ABORT, 'append-only audit'); END;
-        CREATE TRIGGER IF NOT EXISTS no_audit_delete BEFORE DELETE ON audit BEGIN SELECT RAISE(ABORT, 'append-only audit'); END;
-        -- Chain-squat guard (store-audit MED-1): an insert must extend the head
-        -- exactly; earlier positions and gaps are rejected by the engine.
-        CREATE TRIGGER IF NOT EXISTS audit_seq_guard BEFORE INSERT ON audit
-          WHEN NEW.seq <> (SELECT COALESCE(MAX(seq),0)+1 FROM audit WHERE tenant=NEW.tenant)
-          BEGIN SELECT RAISE(ABORT, 'audit sequence must extend the head'); END;
         CREATE TABLE IF NOT EXISTS nonces (tenant TEXT NOT NULL, nonce TEXT NOT NULL, capsule TEXT NOT NULL, PRIMARY KEY(tenant,nonce));
         CREATE TABLE IF NOT EXISTS idempotency (tenant TEXT NOT NULL, scope TEXT NOT NULL, key TEXT NOT NULL,
           hash TEXT NOT NULL, result TEXT NOT NULL, PRIMARY KEY(tenant,scope,key));
@@ -83,42 +76,110 @@ export class Store {
         CREATE INDEX IF NOT EXISTS data_access_ix ON data_access(tenant,subject,dataset,at);
         PRAGMA user_version=1;
       `);
-      // A DB file whose append-only/seq triggers were weakened out-of-band is a
-      // tampered ledger — refuse to open rather than silently audit into a
-      // writable chain (w11-redteam R18). A plain DROP is healed by the CREATE
-      // statements above; what survives is a same-name trigger whose body no
-      // longer aborts, so the check binds the trigger text, not just the name.
-      const triggers = new Map(this.db.prepare("SELECT name, sql FROM sqlite_master WHERE type='trigger'").all().map(x => [x.name, x.sql ?? '']));
-      for (const name of ['no_audit_update', 'no_audit_delete', 'audit_seq_guard'])
-        if (!triggers.get(name)?.includes('RAISE(ABORT')) throw new Error(`audit integrity trigger missing or weakened: ${name}`);
-      // The append-only pair must fire unconditionally — a WHEN-gated or
-      // re-tabled same-name trigger is a smuggled no-op.
-      for (const name of ['no_audit_update', 'no_audit_delete'])
-        if (/WHEN/i.test(triggers.get(name)) || !triggers.get(name).includes('ON audit')) throw new Error(`audit integrity trigger weakened: ${name}`);
-      // Text checks are evadable (a shadow trigger can carry a matching
-      // name/body while never firing on `audit`) — the definitive test is
-      // functional: attempt each forbidden write inside a savepoint and
-      // require the abort (w13-timing H-1). The probe tenant's rows are
-      // rolled back, so boot never mutates the chain.
-      const probe = fn => {
-        this.db.exec('SAVEPOINT integrity_probe');
-        let aborted = false;
-        // A contention error is not a trigger abort — it must propagate to
-        // the constructor's INV-503-LEDGER translation, never masquerade
-        // as a passing integrity probe (w20-fixverify F-12).
-        try { fn(); } catch (e) { if (e?.errcode === 5 || /database is locked/i.test(e?.message ?? '')) throw e; aborted = true; }
-        finally { this.db.exec('ROLLBACK TO integrity_probe'); this.db.exec('RELEASE integrity_probe'); }
-        return aborted;
-      };
-      const pt = '__integrity_probe__';
-      requireThat(probe(() => { this.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run(pt, 1, 'x', 'x', '{}'); this.db.prepare('UPDATE audit SET hash=? WHERE tenant=?').run('y', pt); }), 'INV-503-STORAGE', 'Audit append-only UPDATE trigger not enforced', 503);
-      requireThat(probe(() => { this.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run(pt, 1, 'x', 'x', '{}'); this.db.prepare('DELETE FROM audit WHERE tenant=?').run(pt); }), 'INV-503-STORAGE', 'Audit append-only DELETE trigger not enforced', 503);
-      requireThat(probe(() => this.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run(pt, 7, 'x', 'x', '{}')), 'INV-503-STORAGE', 'Audit sequence guard not enforced', 503);
     } catch (e) {
-      if (e?.errcode === 5 || /database is locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
+      if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
       throw e;
     }
+    // Migration runs BEFORE the append-only guards exist: its donor-revert
+    // closures legitimately UPDATE/DELETE idempotency and dek rows
+    // (w21-store F-6 ordering).
     this._migrateAad();
+    try {
+      this._installIntegrityGuards();
+    } catch (e) {
+      if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
+      throw e;
+    }
+  }
+  // Tamper-evidence for the tables a file-level writer would rewrite:
+  // append-only audit (existing bar) plus the replay/clock/billing-control
+  // tables whose value IS their integrity (w21-store F-6). Trigger text is
+  // compared verbatim — a `WHERE 0`-gated or WHEN-gated replacement body
+  // can carry the RAISE literal while never firing (w21-store F-1).
+  _installIntegrityGuards() {
+    // [full CREATE text as stored in sqlite_master, abort message the
+    // functional probe must surface]. The seq guard keeps its WHEN (the
+    // head arithmetic cannot be a plain body) but the verbatim text
+    // comparison binds it byte-for-byte.
+    const guards = [
+      ['no_audit_update', "CREATE TRIGGER no_audit_update BEFORE UPDATE ON audit BEGIN SELECT RAISE(ABORT, 'append-only audit'); END", 'append-only audit'],
+      ['no_audit_delete', "CREATE TRIGGER no_audit_delete BEFORE DELETE ON audit BEGIN SELECT RAISE(ABORT, 'append-only audit'); END", 'append-only audit'],
+      // Chain-squat guard (store-audit MED-1): an insert must extend the
+      // head exactly; earlier positions and gaps are rejected.
+      ['audit_seq_guard', "CREATE TRIGGER audit_seq_guard BEFORE INSERT ON audit WHEN NEW.seq <> (SELECT COALESCE(MAX(seq),0)+1 FROM audit WHERE tenant=NEW.tenant) BEGIN SELECT RAISE(ABORT, 'audit sequence must extend the head'); END", 'audit sequence must extend the head'],
+      // Replay-detector rows are insert-only — a file-writer deleting
+      // nonces resurrects every spent nonce (w21-store F-6).
+      ['no_nonce_update', "CREATE TRIGGER no_nonce_update BEFORE UPDATE ON nonces BEGIN SELECT RAISE(ABORT, 'append-only nonces'); END", 'append-only nonces'],
+      ['no_nonce_delete', "CREATE TRIGGER no_nonce_delete BEFORE DELETE ON nonces BEGIN SELECT RAISE(ABORT, 'append-only nonces'); END", 'append-only nonces'],
+      // Idempotency receipts are insert-only (the AAD migrator ran before
+      // these guards exist) — rewriting or deleting a receipt re-opens
+      // replay of the guarded operation.
+      ['no_idem_update', "CREATE TRIGGER no_idem_update BEFORE UPDATE ON idempotency BEGIN SELECT RAISE(ABORT, 'append-only idempotency'); END", 'append-only idempotency'],
+      ['no_idem_delete', "CREATE TRIGGER no_idem_delete BEFORE DELETE ON idempotency BEGIN SELECT RAISE(ABORT, 'append-only idempotency'); END", 'append-only idempotency'],
+      // The clock row itself is never deleted — a file-writer cannot make
+      // a spent rewind detector forget the last asserted time. A decrease
+      // guard is impossible: recoverClock legitimately writes `last` back
+      // to the operator-asserted host time (the regression itself is
+      // attested on the signed chain as CLOCK_RECOVERED).
+      ['no_clock_delete', "CREATE TRIGGER no_clock_delete BEFORE DELETE ON clock BEGIN SELECT RAISE(ABORT, 'clock is monotone'); END", 'clock is monotone'],
+      // data_access is an insert-only audit mirror.
+      ['no_access_update', "CREATE TRIGGER no_access_update BEFORE UPDATE ON data_access BEGIN SELECT RAISE(ABORT, 'append-only data_access'); END", 'append-only data_access'],
+      ['no_access_delete', "CREATE TRIGGER no_access_delete BEFORE DELETE ON data_access BEGIN SELECT RAISE(ABORT, 'append-only data_access'); END", 'append-only data_access'],
+      // usage rows legitimately accumulate cost via ON CONFLICT UPDATE —
+      // only row deletion is forbidden (billing falsification).
+      ['no_usage_delete', "CREATE TRIGGER no_usage_delete BEFORE DELETE ON usage BEGIN SELECT RAISE(ABORT, 'append-only usage'); END", 'append-only usage'],
+    ];
+    const norm = s => (s ?? '').replace(/\s+/g, ' ').trim();
+    for (const [name, sql] of guards) this.db.exec(`CREATE TRIGGER IF NOT EXISTS ${sql.slice('CREATE TRIGGER '.length)}`);
+    // Text check: the STORED body must equal our literal — feature tests
+    // (WHEN present, RAISE literal) are evadable by WHERE-gated bodies
+    // (w21-store F-1).
+    const triggers = new Map(this.db.prepare("SELECT name, sql FROM sqlite_master WHERE type='trigger'").all().map(x => [x.name, x.sql ?? '']));
+    for (const [name, sql] of guards)
+      if (norm(triggers.get(name)) !== norm(sql)) throw new InvariantError('INV-503-STORAGE', `integrity trigger missing or tampered: ${name}`, 503);
+    // Functional probes: each forbidden write must abort with THAT
+    // trigger's own RAISE message — an unrelated failure (a primary-key
+    // collision on a pre-seeded probe row, a broken trigger raising a
+    // different error) must never count as 'enforced' (w21-store F-1).
+    // The probe tenant is unique per boot, so nothing pre-seeded can
+    // collide with it.
+    const probe = (fn, msg) => {
+      this.db.exec('SAVEPOINT integrity_probe');
+      let ok = false;
+      try {
+        fn();
+      } catch (e) {
+        // Contention is not enforcement evidence — it propagates to the
+        // caller's INV-503-LEDGER translation (w20-fixverify F-12).
+        if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw e;
+        if (e?.message === msg) ok = true;
+        else throw new InvariantError('INV-503-STORAGE', `Integrity probe fault: ${e?.message ?? e}`, 503);
+      } finally {
+        this.db.exec('ROLLBACK TO integrity_probe'); this.db.exec('RELEASE integrity_probe');
+      }
+      return ok;
+    };
+    const pt = `__integrity_probe__:${randomBytes(8).toString('hex')}`;
+    const insAudit = seq => this.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run(pt, seq, 'x', 'x', '{}');
+    requireThat(probe(() => { insAudit(1); this.db.prepare('UPDATE audit SET hash=? WHERE tenant=?').run('y', pt); }, 'append-only audit'), 'INV-503-STORAGE', 'Audit append-only UPDATE trigger not enforced', 503);
+    requireThat(probe(() => { insAudit(1); this.db.prepare('DELETE FROM audit WHERE tenant=?').run(pt); }, 'append-only audit'), 'INV-503-STORAGE', 'Audit append-only DELETE trigger not enforced', 503);
+    requireThat(probe(() => insAudit(7), 'audit sequence must extend the head'), 'INV-503-STORAGE', 'Audit sequence guard not enforced', 503);
+    for (const [table, msg] of [['nonces', 'append-only nonces'], ['idempotency', 'append-only idempotency'], ['data_access', 'append-only data_access']]) {
+      const ins = { nonces: () => this.db.prepare('INSERT INTO nonces VALUES(?,?,?)').run(pt, 'n', 'c'),
+        idempotency: () => this.db.prepare('INSERT INTO idempotency VALUES(?,?,?,?,?)').run(pt, 's', 'k', 'h', 'r'),
+        data_access: () => this.db.prepare('INSERT INTO data_access VALUES(?,?,?,?,?,?)').run(pt, 's', 'd', 'r', 'c', 0) }[table];
+      const col = { nonces: 'capsule', idempotency: 'result', data_access: 'subject' }[table];
+      requireThat(probe(() => { ins(); this.db.prepare(`UPDATE ${table} SET ${col}=? WHERE tenant=?`).run('y', pt); }, msg), 'INV-503-STORAGE', `${table} append-only UPDATE trigger not enforced`, 503);
+      requireThat(probe(() => { ins(); this.db.prepare(`DELETE FROM ${table} WHERE tenant=?`).run(pt); }, msg), 'INV-503-STORAGE', `${table} append-only DELETE trigger not enforced`, 503);
+    }
+    requireThat(probe(() => { this.db.prepare('INSERT INTO usage VALUES(?,?,?,?,?,?,?)').run(pt, 's', 'r', 0, 0, 'c', 'q'); this.db.prepare('DELETE FROM usage WHERE tenant=?').run(pt); }, 'append-only usage'), 'INV-503-STORAGE', 'usage append-only DELETE trigger not enforced', 503);
+    // INSERT OR IGNORE seeds when absent without firing the delete guard on
+    // an existing row; `last=last-1` is a backward write on any live value.
+    requireThat(probe(() => { this.db.prepare('INSERT OR IGNORE INTO clock VALUES(1,100)').run(); this.db.prepare('DELETE FROM clock WHERE id=1').run(); }, 'clock is monotone'), 'INV-503-STORAGE', 'clock delete trigger not enforced', 503);
+    // The probes above journal WAL frames even though they roll back —
+    // truncate so boot-time verification leaves no residual pages behind
+    // (w19-aad W19-3 measures post-migration WAL size).
+    try { this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); } catch { /* contention: next armed write retries */ }
   }
   // One-shot migration: re-seal every ciphertext still bound under the
   // legacy slash-form AAD space, then never consult that space again. The
@@ -167,7 +228,7 @@ export class Store {
         try {
           const bare = decrypt(r.wrapped, master(r.tenant), legacyDekAad(r.tenant, r.kind, r.id));
           const upd = this.db.prepare('UPDATE deks SET wrapped=? WHERE tenant=? AND kind=? AND id=?'), orig = r.wrapped;
-          seen.set(orig, { revert: () => upd.run(orig, r.tenant, r.kind, r.id), unmark: () => unmark(r.tenant) });
+          seen.set(orig, { revert: () => { upd.run(orig, r.tenant, r.kind, r.id); this._shredded = true; }, unmark: () => unmark(r.tenant) });
           upd.run(encrypt(bare, master(r.tenant), dekAad(r.tenant, r.kind, r.id)), r.tenant, r.kind, r.id);
           mark(r.tenant, 'migrated');
         } catch { mark(r.tenant, 'skipped'); }
@@ -196,7 +257,7 @@ export class Store {
           const key = d ? Buffer.from(decrypt(d.wrapped, master(r.tenant), dekAad(r.tenant, r.kind, r.id)), 'base64url') : master(r.tenant);
           const plain = decrypt(r.value, key, legacyAad(r.tenant, r.kind, r.id));
           const upd = this.db.prepare('UPDATE records SET value=? WHERE tenant=? AND kind=? AND id=?'), orig = r.value;
-          seen.set(orig, { revert: () => upd.run(orig, r.tenant, r.kind, r.id), unmark: () => unmark(r.tenant) });
+          seen.set(orig, { revert: () => { upd.run(orig, r.tenant, r.kind, r.id); this._shredded = true; }, unmark: () => unmark(r.tenant) });
           upd.run(encrypt(plain, key, recAad(r.tenant, r.kind, r.id)), r.tenant, r.kind, r.id);
           mark(r.tenant, 'migrated');
         } catch { mark(r.tenant, 'skipped'); }
@@ -209,7 +270,7 @@ export class Store {
         try {
           const plain = decrypt(r.result, master(r.tenant), `${r.tenant}/idempotency/${r.scope}/${r.key}`);
           const upd = this.db.prepare('UPDATE idempotency SET result=? WHERE tenant=? AND scope=? AND key=?'), orig = r.result;
-          seen.set(orig, { revert: () => upd.run(orig, r.tenant, r.scope, r.key), unmark: () => unmark(r.tenant) });
+          seen.set(orig, { revert: () => { upd.run(orig, r.tenant, r.scope, r.key); this._shredded = true; }, unmark: () => unmark(r.tenant) });
           upd.run(encrypt(plain, master(r.tenant), idemAad(r.tenant, r.scope, r.key)), r.tenant, r.scope, r.key);
           mark(r.tenant, 'migrated');
         } catch { mark(r.tenant, 'skipped'); }
@@ -224,7 +285,7 @@ export class Store {
       // The migration's BEGIN IMMEDIATE is a writer too — a lost
       // busy-timeout race surfaces in the ledger taxonomy, not raw
       // sqlite internals (w19-aad W19-4).
-      if (e?.errcode === 5 || /database is locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
+      if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
       throw e;
     }
   }
@@ -255,19 +316,34 @@ export class Store {
       if (this.db.isTransaction) this.db.exec('ROLLBACK');
       // A lost busy-timeout race must surface as a fabric error, not a raw
       // SQLITE_BUSY leaking internals (concurrency-audit H2).
-      if (e?.errcode === 5 || /database is locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
+      if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
       throw e;
     }
   }
+  _signer(tenant) {
+    // Same prototype-member bar as key() (w21-store F-10).
+    requireThat(Object.hasOwn(this.auditSigners, tenant), 'INV-404-NOT-FOUND', 'Resource not found', 404);
+    return this.auditSigners[tenant];
+  }
   key(tenant) {
-    requireThat(this.tenantKeys[tenant], 'INV-404-NOT-FOUND', 'Resource not found', 404);
+    // Prototype-member names must not resolve through Object.prototype —
+    // key('toString') is an unclassified crash otherwise (w21-store F-10).
+    requireThat(Object.hasOwn(this.tenantKeys, tenant), 'INV-404-NOT-FOUND', 'Resource not found', 404);
     return Buffer.from(this.tenantKeys[tenant], 'base64url');
   }
   dek(tenant, kind, id) {
+    this._addr(tenant, kind, id);
     const row = this.db.prepare('SELECT wrapped FROM deks WHERE tenant=? AND kind=? AND id=?').get(tenant, kind, id);
     return row ? Buffer.from(decrypt(row.wrapped, this.key(tenant), dekAad(tenant, kind, id)), 'base64url') : null;
   }
+  // Non-string addressing coerces at the SQL layer (TEXT affinity makes
+  // id=5 match id='5') — the write side must not address rows the
+  // string-guarded put() would have refused (w21-store F-11).
+  _addr(tenant, kind, id) {
+    requireThat(typeof tenant === 'string' && typeof kind === 'string' && typeof id === 'string', 'INV-400-SCHEMA', 'Store keys must be strings', 400);
+  }
   get(tenant, kind, id) {
+    this._addr(tenant, kind, id);
     const row = this.db.prepare('SELECT value FROM records WHERE tenant=? AND kind=? AND id=?').get(tenant, kind, id);
     if (!row) return null;
     // Records written before per-record DEKs fall back to the tenant key.
@@ -303,6 +379,7 @@ export class Store {
     return this.db.prepare('SELECT id FROM records WHERE tenant=? AND kind=? ORDER BY created DESC,id LIMIT ? OFFSET ?').all(tenant, kind, limit, offset).map(r => r.id);
   }
   remove(tenant, kind, id) {
+    this._addr(tenant, kind, id);
     this._shredded = true;
     this.db.prepare('DELETE FROM deks WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id);
     this.db.prepare('DELETE FROM records WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id);
@@ -310,7 +387,10 @@ export class Store {
   }
   readValue(tenant, kind, id, wrapped) {
     const key = this.dek(tenant, kind, id) ?? this.key(tenant);
-    return decrypt(wrapped, key, recAad(tenant, kind, id));
+    // A corrupted ciphertext is tamper evidence, not a code crash — every
+    // decrypt failure classifies in the ledger taxonomy (w21-store F-7).
+    try { return decrypt(wrapped, key, recAad(tenant, kind, id)); }
+    catch (e) { throw new InvariantError('INV-409-INTEGRITY', 'Stored ciphertext does not authenticate', 409); }
   }
   shred(tenant, kind, id) {
     // Crypto-shredding: destroy the record DEK (secure_delete zeroes its
@@ -362,13 +442,22 @@ export class Store {
     // legitimate clock rewind (recoverClock) stays verifiable. A forged
     // head claiming a far-future timestamp gets no silent credit — the
     // index's consume-time bound wedges on it instead (w13-supply W13-04).
-    const priorTime = last ? JSON.parse(last.envelope).payload.time : 0;
+    // A malformed head envelope is tamper evidence, not a permanent wedge
+    // of raw SyntaxErrors — classify it like the read path does
+    // (w21-store F-2).
+    let priorTime = 0;
+    if (last) {
+      let head;
+      try { head = JSON.parse(last.envelope); } catch { throw new InvariantError('INV-409-AUDIT-TAMPER', 'Audit head envelope is unparseable — ledger tamper', 409); }
+      requireThat(typeof head?.payload?.time === 'number' && Number.isFinite(head.payload.time), 'INV-409-AUDIT-TAMPER', 'Audit head envelope carries no valid time — ledger tamper', 409);
+      priorTime = head.payload.time;
+    }
     const entry = { tenant_id: tenant, sequence: (last?.seq ?? 0) + 1, previous: last?.hash ?? '0'.repeat(64), type, actor, reference, metadata, time: Math.max(now, priorTime) };
     // Hash what is actually attested: the signer may add a bound marker (the
     // recovery_signing annotation when a pending successor signs after a
     // key-revoke — w11-lifecycle F2), so the row digest binds the envelope's
     // payload, not the pre-signature entry.
-    const envelope = this.auditSigners[tenant].sign(entry);
+    const envelope = this._signer(tenant).sign(entry);
     const hash = digest(envelope.payload);
     this.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run(tenant, entry.sequence, entry.previous, hash, canonical(envelope));
     return { hash, envelope };
@@ -378,7 +467,7 @@ export class Store {
   }
   auditPage(tenant, { after = 0, limit = 1000 } = {}) {
     const rows = this.db.prepare('SELECT seq,hash,envelope FROM audit WHERE tenant=? AND seq>? ORDER BY seq LIMIT ?').all(tenant, after, limit);
-    const signer = this.auditSigners[tenant], public_keys = signer.keys ? signer.keys() : { [signer.key_id]: { public_key: signer.public_key } };
+    const signer = this._signer(tenant), public_keys = signer.keys ? signer.keys() : { [signer.key_id]: { public_key: signer.public_key } };
     // Serving the log is a security surface: re-verify each row's stored
     // hash against its signed payload and check chain continuity back to the
     // row preceding the page — an injected or rewritten row cannot pass
@@ -400,13 +489,17 @@ export class Store {
       // serve an unsigned forged row as a legitimate chain entry (w15).
       try { verifySigned(envelope, public_keys, 'audit'); }
       catch { throw new InvariantError('INV-409-AUDIT-TAMPER', 'Audit row failed signature verification', 409); }
+      // The signed payload must attest THIS tenant's row — a validly
+      // signed foreign-tenant envelope keyed under this tenant is still
+      // tamper evidence (w21-store F-8).
+      requireThat(envelope.payload.tenant_id === tenant, 'INV-409-AUDIT-TAMPER', 'Audit row attests a different tenant', 409);
       previous = r.hash;
       return { sequence: r.seq, hash: r.hash, envelope };
     });
     return { entries, next_cursor: rows.length === limit ? rows.at(-1).seq : null };
   }
   auditExport(tenant, now = null) {
-    const signer = this.auditSigners[tenant], public_keys = signer.keys ? signer.keys() : { [signer.key_id]: { public_key: signer.public_key } };
+    const signer = this._signer(tenant), public_keys = signer.keys ? signer.keys() : { [signer.key_id]: { public_key: signer.public_key } };
     // Export runs the same per-row pass as auditPage — a tampered-but-
     // parseable row must not fold silently into the checkpoint the signer
     // attests (w16-fixverify F11). The signed head would otherwise vouch
@@ -419,6 +512,10 @@ export class Store {
       requireThat(envelope.payload !== undefined && ctEqual(digest(envelope.payload), r.hash) && envelope.payload.sequence === r.seq && ctEqual(envelope.payload.previous, previous), 'INV-409-AUDIT-TAMPER', 'Audit row failed integrity verification', 409);
       try { verifySigned(envelope, public_keys, 'audit'); }
       catch { throw new InvariantError('INV-409-AUDIT-TAMPER', 'Audit row failed signature verification', 409); }
+      // The signed payload must attest THIS tenant's row — a validly
+      // signed foreign-tenant envelope keyed under this tenant is still
+      // tamper evidence (w21-store F-8).
+      requireThat(envelope.payload.tenant_id === tenant, 'INV-409-AUDIT-TAMPER', 'Audit row attests a different tenant', 409);
       previous = r.hash;
       return { hash: r.hash, envelope };
     });

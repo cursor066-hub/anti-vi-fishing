@@ -199,7 +199,10 @@ test('w18-issuerd F-9: issuance log is an HMAC-keyed chain', async t => {
   const record = lines[1];
   const { digest: stored, ...body } = record;
   assert.notEqual(digest(canonical(body)), stored, 'an unkeyed recompute of a logged record must diverge — the chain is HMAC-keyed, not merely hashed');
-  const logKey = digest(Object.values(loadIssuers(dir)).map(i => i.key?.private_key ?? '').sort().join('|'));
+  // w21-issuerd F1: the chain key is a dedicated 0600 secret beside the
+  // log — the issuer set rotating must not brick the chain, so custody
+  // material for recomputation lives in <log>.key, not the issuer specs.
+  const logKey = readFileSync(`${logPath}.key`, 'utf8').trim();
   const keyed = createHmac('sha256', logKey).update(canonical(body)).digest('hex');
   assert.equal(keyed, stored, 'the custody holder recomputes the exact keyed digest');
   // The selective-delete attack the code comment describes: splicing the

@@ -291,7 +291,9 @@ test('H2: issuerd issuance requires the bearer token; conflict answers never lea
   const open = createIssuerServer({ 'acme:bank': { ...spec, issue_token: undefined } }, { port: 0, host: '0.0.0.0' });
   await open.listen(); t.after(() => open.close());
   const refused = await httpJson(`http://127.0.0.1:${open.server.address().port}/v1/issuers/bank/issue`, { method: 'POST', body });
-  assert.equal(refused.status, 503);
+  // w21-issuerd F11: deployment state collapses to a uniform 401 — the
+  // tokenless-registry fingerprint never leaks through the refusal code.
+  assert.equal(refused.status, 401);
 });
 
 test('L1: malleated ES256 signature (r, n-s) is rejected', t => {

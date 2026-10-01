@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 import http from 'node:http';
-import { readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, existsSync, statSync, lstatSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, lstatSync, openSync, closeSync, writeSync, fstatSync, constants as fsConstants } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomUUID, randomBytes, timingSafeEqual, createHmac, createPrivateKey, createPublicKey } from 'node:crypto';
 import { canonical, digest, hashBytes, parseStrict } from './canonical.mjs';
 import { signed, verifySigned, ctEqual } from './crypto.mjs';
 import { fields, text, identifier, integer, uniqueStrings } from './schema.mjs';
 import { requireThat, InvariantError } from './errors.mjs';
-import { ISSUER_MANIFEST_PERMISSIONS, ISSUER_MANIFEST_LIMITATIONS } from './connectors.mjs';
+import { ISSUER_MANIFEST_PERMISSIONS, ISSUER_MANIFEST_LIMITATIONS, ISSUER_MANIFEST_IDEMPOTENCY, ISSUER_MANIFEST_COVERAGE } from './connectors.mjs';
 
 // IF-ISSUER-1: an independent evidence issuer service. Each issuer is a
 // separate trust-domain process holding its own signing key and record store.
@@ -20,12 +20,27 @@ export function loadIssuers(directory) {
   // via Object.prototype (issuerd-audit LOW-4).
   const issuers = Object.create(null);
   const parsed = [];
+  // Directory custody: a group/world-WRITABLE issuer dir lets any local
+  // principal plant a spec (or a FIFO that hangs the boot — w21-issuerd
+  // F3/F4), so the directory itself is checked before its contents.
+  const dstat = statSync(directory);
+  requireThat((dstat.mode & 0o022) === 0, 'INV-503-CONFIG', 'Issuer directory must not be writable by group or other users', 503);
   for (const file of readdirSync(directory)) {
     if (!file.endsWith('.issuer.json')) continue;
+    const specPath = join(directory, file);
+    // lstat — never stat-through: a symlinked spec (or FIFO/device) must
+    // not be served just because its target carries good mode bits
+    // (w21-issuerd F3/F4).
+    const st = lstatSync(specPath);
+    requireThat(!st.isSymbolicLink() && st.isFile(), 'INV-503-CONFIG', `Issuer file ${file} must be a regular file, not a link or special file`, 503);
     // These files carry private signing keys — group/world-readable specs
     // refuse to serve, matching the `sign` and `serve` custody bars
     // (w8-tooling F8).
-    requireThat((statSync(join(directory, file)).mode & 0o077) === 0, 'INV-503-CONFIG', `Issuer file ${file} must not be readable by group or other users`, 503);
+    requireThat((st.mode & 0o077) === 0, 'INV-503-CONFIG', `Issuer file ${file} must not be readable by group or other users`, 503);
+    // Ownership: a spec another non-root uid can rewrite is not custody —
+    // root-provisioned files pass because only root can touch them
+    // (w21-issuerd F4).
+    if (process.getuid) requireThat(st.uid === process.getuid() || st.uid === 0, 'INV-503-CONFIG', `Issuer file ${file} must be owned by the daemon user or root`, 503);
     // Specs parse through the strict grammar too — duplicate keys, floats
     // and oversize strings must fail at load, not inside canonical() at
     // serve time (w9-deploy F10).
@@ -53,10 +68,21 @@ export function loadIssuers(directory) {
       // instead of failing the boot (w20-fixverify F-13), so they are
       // required here, not optional.
       requireThat(typeof rule.lookup === 'string' && rule.lookup.length > 0, 'INV-400-SCHEMA', `Kind rule ${kind} lookup must be a non-empty string`);
-      requireThat(rule.ttl_ms === undefined || (Number.isSafeInteger(rule.ttl_ms) && rule.ttl_ms > 0), 'INV-400-SCHEMA', `Kind rule ${kind} ttl_ms must be a positive integer`);
-      requireThat(rule.extract === undefined || (Array.isArray(rule.extract) && rule.extract.every(f => typeof f === 'string')), 'INV-400-SCHEMA', `Kind rule ${kind} extract must be an array of field names`);
-      requireThat(rule.expect === undefined || (rule.expect && typeof rule.expect === 'object' && !Array.isArray(rule.expect) && Object.values(rule.expect).every(v => v === null || typeof v !== 'object')), 'INV-400-SCHEMA', `Kind rule ${kind} expect values must be scalars`);
+      // ttl_ms joins `now` arithmetic at sign time — a safe-integer near
+      // MAX would overflow expires_at/retention_until and 400 every
+      // request forever; 30 days is the declared ceiling (w21-issuerd F9).
+      requireThat(rule.ttl_ms === undefined || (Number.isSafeInteger(rule.ttl_ms) && rule.ttl_ms > 0 && rule.ttl_ms <= 2592000000), 'INV-400-SCHEMA', `Kind rule ${kind} ttl_ms must be an integer 1..2592000000`);
+      // extract names land as object keys of the signed `claims` map — a
+      // name the canonical encoder cannot express (proto keys, exotic
+      // charset) must fail at boot, not inside signed() per request
+      // (w21-issuerd F9).
+      const nameOk = f => { try { canonical({ [f]: 0 }); return true; } catch { return false; } };
+      requireThat(rule.extract === undefined || (Array.isArray(rule.extract) && rule.extract.every(f => typeof f === 'string' && nameOk(f))), 'INV-400-SCHEMA', `Kind rule ${kind} extract must be an array of canonical field names`);
+      requireThat(rule.expect === undefined || (rule.expect && typeof rule.expect === 'object' && !Array.isArray(rule.expect) && Object.keys(rule.expect).every(nameOk) && Object.values(rule.expect).every(v => v === null || typeof v !== 'object')), 'INV-400-SCHEMA', `Kind rule ${kind} expect keys must be canonical names with scalar values`);
       requireThat(Number.isSafeInteger(rule.confidence) && rule.confidence >= 0 && rule.confidence <= 100, 'INV-400-SCHEMA', `Kind rule ${kind} confidence must be an integer 0..100`);
+      // advisory is signed verbatim — a string 'false' would sign
+      // Boolean('false') === true into the envelope (w21-issuerd F9).
+      requireThat(rule.advisory === undefined || typeof rule.advisory === 'boolean', 'INV-400-SCHEMA', `Kind rule ${kind} advisory must be a boolean`);
     }
     if (spec.token_expires_at !== undefined) requireThat(Number.isSafeInteger(spec.token_expires_at), 'INV-400-SCHEMA', 'token_expires_at must be an integer epoch-ms');
     // A malformed *_token_digest must fail at boot: bearerMatches compares
@@ -65,10 +91,20 @@ export function loadIssuers(directory) {
     // request, daemon-wide, via the anyBearer sweep (w10-fixverify F-3).
     for (const f of ['issue_token_digest', 'read_token_digest'])
       if (spec[f] !== undefined) requireThat(typeof spec[f] === 'string' && /^[a-f0-9]{64}$/.test(spec[f]), 'INV-400-SCHEMA', `${f} must be a sha256 hex digest`);
+    // A plaintext token and a digest credential for the same scope cannot
+    // coexist: the digest silently wins (bearerDigest prefers stored
+    // digests), so the operator who sets both believes in a credential
+    // that never authenticates — refuse the dead config at boot
+    // (w21-issuerd F12).
+    requireThat(!(spec.issue_token !== undefined && spec.issue_token_digest !== undefined), 'INV-400-SCHEMA', 'issue_token is dead when issue_token_digest is set — pick one custody form');
+    requireThat(!(spec.read_token !== undefined && (spec.read_token_digest !== undefined || spec.issue_token_digest !== undefined)), 'INV-400-SCHEMA', 'read_token is dead when a digest credential shadows it — pick one custody form');
     // Tenant names use the strict tenant charset — ':' inside a tenant or
     // issuer name would collide with the '<tenant>:<issuer>' key form.
     if (spec.tenant !== undefined) requireThat(/^[a-z][a-z0-9-]{1,31}$/.test(spec.tenant), 'INV-400-SCHEMA', 'Issuer tenant must use the tenant charset');
-    requireThat(!spec.issuer.includes(':'), 'INV-400-SCHEMA', 'Issuer name must not contain ":"');
+    // The issuer name becomes a route path segment — a name the route
+    // regex cannot express ('.', ':', '/') loads but is unreachable:
+    // refuse it at boot instead of shipping a dead issuer (w21-issuerd F8).
+    requireThat(/^[A-Za-z0-9_-]+$/.test(spec.issuer), 'INV-400-SCHEMA', 'Issuer name must use the route charset [A-Za-z0-9_-]');
     requireThat(['authoritative', 'communication', 'device', 'counterparty'].includes(spec.channel), 'INV-400-SCHEMA', 'Unsupported issuer channel');
     parsed.push(spec);
   }
@@ -146,7 +182,10 @@ export function answerQuery(issuer, request, now) {
   // The provenance string is uniform for hit and miss alike — a signed
   // 'UNSATISFIED' vs '*' distinction would make the envelope itself an
   // authenticated record-existence oracle (w18-issuerd F-3).
-  const prov = `issuer:${issuer.issuer}@${issuer.version} record:${key.split(':')[0]}:lookup transformation:direct`;
+  // The provenance segment is issuer-keyed material too — echoing the
+  // caller's lookup text into a signed field would reflect whatever
+  // string the requester chose to embed (w21-issuerd F15).
+  const prov = `issuer:${issuer.issuer}@${issuer.version} record:${contentMac(issuer, { lookup_segment: key.split(':')[0] }).slice(0, 24)}:lookup transformation:direct`;
   if (!record) {
     // A missing record is a signed `conflict`, not an exception — the response
     // shape is identical to a claim mismatch, so /issue cannot be used to
@@ -211,53 +250,111 @@ export function answerQuery(issuer, request, now) {
 // already asserts.
 const contentMac = (issuer, obj) => createHmac('sha256', issuer.key.private_key).update(canonical(obj)).digest('hex');
 
-export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', clock = Date.now, logPath, allow_insecure_loopback = false } = {}) {
+export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', clock = Date.now, logPath, allow_insecure_loopback = false, log_max_bytes = 67108864 } = {}) {
+  // Bind-time honesty: configuration states that make parts of the
+  // registry unreachable are warned once on stderr instead of leaking
+  // through per-request refusal codes (w21-issuerd F10/F11).
+  {
+    const credentialled = i => i.issuer && !i.ambiguous && (i.issue_token || i.read_token || i.issue_token_digest || i.read_token_digest);
+    const real = Object.values(issuers).filter(i => i.issuer && !i.ambiguous);
+    const tokenless = real.filter(i => !credentialled(i));
+    if (!real.some(credentialled) && !allow_insecure_loopback)
+      process.stderr.write('issuerd: no bearer credentials configured — all endpoints refuse with uniform 401 until a token is provisioned or allow_insecure_loopback is set\n');
+    else if (tokenless.length)
+      process.stderr.write(`issuerd: tokenless issuers unreachable in a tokened registry: ${[...new Set(tokenless.map(i => i.issuer))].join(', ')}\n`);
+  }
   const sequence = { n: 0, previous: '0'.repeat(64) };
   // request_digest in the chained log gets the same keyed treatment —
   // request bodies can carry claim/credential material an offline log
-  // holder could dictionary (w15-timing F11). The key derives from every
-  // loaded issuer's private material; anyone able to recompute already
-  // holds the 0600 custody of the spec files.
-  const logKey = digest(Object.values(issuers).map(i => i.key?.private_key ?? '').sort().join('|'));
+  // holder could dictionary (w15-timing F11). The chain key is a
+  // DEDICATED secret beside the log (`<log>.key`, 0600, minted on first
+  // boot): deriving it from the live issuer set would make every routine
+  // issuer add/remove/rotation invalidate the chain and permanently
+  // refuse boot (w21-issuerd F1). Losing the key file is honest data
+  // loss — the old log refuses rather than re-genesising silently.
+  const logKey = (() => {
+    if (!logPath) return '0'.repeat(64);
+    mkdirSync(resolve(logPath, '..'), { recursive: true });
+    const keyPath = `${logPath}.key`;
+    let ks = null;
+    try { ks = lstatSync(keyPath); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+    if (ks) {
+      requireThat(!ks.isSymbolicLink() && ks.isFile(), 'INV-503-CONFIG', 'Issuance log key must be a regular file', 503);
+      requireThat((ks.mode & 0o077) === 0, 'INV-503-CONFIG', 'Issuance log key must not be readable by group or other users', 503);
+      const k = readFileSync(keyPath, 'utf8').trim();
+      requireThat(/^[a-f0-9]{64}$/.test(k), 'INV-503-CONFIG', 'Issuance log key is not a 64-hex secret', 503);
+      return k;
+    }
+    const k = randomBytes(32).toString('hex');
+    writeFileSync(keyPath, k + '\n', { mode: 0o600 });
+    return k;
+  })();
   const logMac = v => createHmac('sha256', logKey).update(canonical(v)).digest('hex');
   // Continue the hash chain across restarts: seed sequence/previous from the
   // last logged record so truncation of earlier entries stays detectable
-  // (issuerd-audit LOW-3).
-  if (logPath && existsSync(logPath)) {
-    const lines = readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean);
-    // Boot verifies the WHOLE chain, not just the tail: every line must
-    // parse, sequence must be contiguous, the hash link must hold, and the
-    // keyed HMAC must verify. An unparseable or edited line — including a
-    // mid-write-truncated tail — refuses boot rather than silently
-    // orphaning the prior segment under a fresh genesis (w20-fixverify
-    // F-7/F-8). Residual: a file truncated to a VALID prefix cannot be
-    // detected — the chain has no external anchor for its head; operators
-    // must ship the log off-box to bound that.
-    let previous = '0'.repeat(64), last = null;
-    for (const [i, line] of lines.entries()) {
-      let rec = null;
-      try { rec = JSON.parse(line); } catch { throw new InvariantError('INV-503-CONFIG', `Issuance log line ${i + 1} is unparseable; refuse to re-genesis silently`, 503); }
-      requireThat(rec && Number.isSafeInteger(rec.sequence) && rec.sequence === i + 1 && rec.previous === previous && /^[a-f0-9]{64}$/.test(rec.digest ?? ''), 'INV-503-CONFIG', `Issuance log line ${i + 1} breaks the hash chain; refuse to re-genesis silently`, 503);
-      const { digest: d, ...rest } = rec;
-      requireThat(logMac(rest) === d, 'INV-503-CONFIG', `Issuance log line ${i + 1} fails its keyed HMAC; refuse to re-genesis silently`, 503);
-      previous = d; last = rec;
+  // (issuerd-audit LOW-3). The read goes through O_NOFOLLOW + fstat, so a
+  // dangling symlink cannot redirect the open and a FIFO/device cannot
+  // hang the boot on an empty read (w21-issuerd F3).
+  if (logPath) {
+    let fd = null;
+    // O_NONBLOCK keeps a FIFO/socket node at logPath from hanging the
+    // open itself; fstat below then refuses it as non-regular.
+    try { fd = openSync(logPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK); }
+    catch (e) {
+      if (e.code !== 'ENOENT') { if (e instanceof InvariantError) throw e; throw new InvariantError('INV-503-CONFIG', 'Issuance log path is not openable as a regular file', 503); }
     }
-    if (last) { sequence.n = last.sequence; sequence.previous = last.digest; }
+    if (fd !== null) {
+      let lines;
+      try { requireThat(fstatSync(fd).isFile(), 'INV-503-CONFIG', 'Issuance log path must be a regular file', 503); lines = readFileSync(fd, 'utf8').trim().split('\n').filter(Boolean); }
+      finally { closeSync(fd); }
+      // Boot verifies the WHOLE chain, not just the tail: every line must
+      // parse, sequence must be contiguous, the hash link must hold, and
+      // the keyed HMAC must verify. An unparseable or edited line —
+      // including a mid-write-truncated tail — refuses boot rather than
+      // silently orphaning the prior segment under a fresh genesis
+      // (w20-fixverify F-7/F-8). Residual: a file truncated to a VALID
+      // prefix cannot be detected — the chain has no external anchor for
+      // its head; operators must ship the log off-box to bound that.
+      let previous = '0'.repeat(64), last = null;
+      for (const [i, line] of lines.entries()) {
+        let rec = null;
+        try { rec = JSON.parse(line); } catch { throw new InvariantError('INV-503-CONFIG', `Issuance log line ${i + 1} is unparseable; refuse to re-genesis silently`, 503); }
+        requireThat(rec && Number.isSafeInteger(rec.sequence) && rec.sequence === i + 1 && rec.previous === previous && /^[a-f0-9]{64}$/.test(rec.digest ?? ''), 'INV-503-CONFIG', `Issuance log line ${i + 1} breaks the hash chain; refuse to re-genesis silently`, 503);
+        const { digest: d, ...rest } = rec;
+        requireThat(logMac(rest) === d, 'INV-503-CONFIG', `Issuance log line ${i + 1} fails its keyed HMAC; refuse to re-genesis silently`, 503);
+        previous = d; last = rec;
+      }
+      if (last) { sequence.n = last.sequence; sequence.previous = last.digest; }
+    }
   }
+  // The log never rotates on its own: a size ceiling refuses the NEXT
+  // logged event instead of letting boot-verification cost and residency
+  // grow without bound — the operator archives + moves the file and the
+  // next boot genesises a fresh segment (w21-issuerd F5).
+  const LOG_MAX_BYTES = log_max_bytes;
   function issuanceLog(entry) {
     if (!logPath) return;
-    sequence.n += 1;
-    const record = { sequence: sequence.n, previous: sequence.previous, ...entry, time: clock() };
+    const record = { ...entry, sequence: sequence.n + 1, previous: sequence.previous, time: clock() };
     // The chain itself is keyed — an unkeyed sha256 tail can be recomputed
-    // after selective deletion; HMAC under the issuers' custody makes a
+    // after selective deletion; HMAC under the dedicated key makes a
     // rewritten history diverge at the next append (w18-issuerd F-9).
-    sequence.previous = logMac(record);
+    const next = logMac(record);
     mkdirSync(resolve(logPath, '..'), { recursive: true });
-    // Refuse symlinked log paths — appending through a planted link would
-    // write signed issuance records into an attacker-chosen file
-    // (w8-tooling F8).
-    if (existsSync(logPath)) requireThat(!lstatSync(logPath).isSymbolicLink(), 'INV-503-CONFIG', 'Issuance log path must not be a symlink', 503);
-    appendFileSync(logPath, canonical({ ...record, digest: sequence.previous }) + '\n', { mode: 0o600 });
+    // O_NOFOLLOW + fstat binds the append to the inode: a dangling
+    // symlink planted between checks gets ELOOP, and a FIFO/socket at
+    // logPath fails isFile instead of blocking or absorbing writes
+    // (w21-issuerd F3).
+    const afd = openSync(logPath, fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK, 0o600);
+    try {
+      const st = fstatSync(afd);
+      requireThat(st.isFile(), 'INV-503-CONFIG', 'Issuance log path must be a regular file', 503);
+      requireThat(st.size < LOG_MAX_BYTES, 'INV-503-CONFIG', 'Issuance log exceeds the 64 MiB custody cap — archive and rotate it', 503);
+      writeSync(afd, canonical({ ...record, digest: next }) + '\n');
+    } finally { closeSync(afd); }
+    // Chain state commits only once the bytes are durable: a failed
+    // append must never burn a phantom sequence the next boot cannot
+    // find on disk (w21-issuerd F2).
+    sequence.n = record.sequence; sequence.previous = next;
   }
   for (const i of Object.values(issuers)) i.metrics ??= { requests: 0, errors: 0, issued: 0, refused: 0, latencies: [] };
   // Per-IP token buckets are per-server-instance — a static map shared
@@ -273,7 +370,9 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
     // Serialize before any byte is flushed: a canonical() failure must land
     // in the catch cleanly, never mid-response after writeHead (w9-deploy F1).
     const send = (status, data) => { const bodyOut = canonical(data); res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(bodyOut); };
-    const ip = req.socket.remoteAddress ?? 'unknown';
+    // IPv4-mapped IPv6 forms share one bucket with their dotted twin — a
+    // dual-stack bind must not give a client two budgets (w21-issuerd F13).
+    const ip = (req.socket.remoteAddress ?? 'unknown').replace(/^::ffff:/, '');
     // Buckets are scope-keyed only: a per-issuer layer with identical caps
     // can never bind before the global one — dead bookkeeping removed
     // (w10-fixverify F-7).
@@ -351,7 +450,12 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
       // loopback alone must never open the issuer surface silently
       // (w9-deploy F10).
       const openLoopback = loopback && noTokens && allow_insecure_loopback;
-      const gate = (scope) => { requireThat(loopback || !noTokens, 'INV-503-CONNECTOR', 'Issuer endpoint requires a configured bearer token off loopback', 503); requireThat(!noTokens || allow_insecure_loopback, 'INV-503-CONNECTOR', 'Tokenless issuers require the insecure-loopback opt-in', 503); requireThat(anyBearer(scope) || openLoopback, 'INV-401-AUTH', `Issuer endpoint requires the ${scope} bearer token`, 401); };
+      // Uniform 401: whether the registry is tokenless, off-loopback or
+      // missing the opt-in is deployment state an unauthenticated caller
+      // must not fingerprint — the honest diagnosis is the one-time
+      // stderr warning printed at bind (w21-issuerd F11).
+      const configOk = (loopback || !noTokens) && (!noTokens || allow_insecure_loopback);
+      const gate = (scope) => requireThat(configOk && (anyBearer(scope) || openLoopback), 'INV-401-AUTH', `Issuer endpoint requires the ${scope} bearer token`, 401);
       // Own-property lookups only — a caller-controlled name like 'toString'
       // must never resolve an inherited member into a truthy issuer
       // (w9-fixverify: same oracle class as revoke()).
@@ -371,7 +475,15 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
           const d = bearerDigest(i, 'read');
           return d && bearerMatches(auth, d) && (!i.token_expires_at || i.token_expires_at > clock());
         });
-        if (!holder) { take('probe'); requireThat(loopback || !noTokens, 'INV-503-CONNECTOR', 'Issuer endpoint requires a configured bearer token off loopback', 503); requireThat(!noTokens || allow_insecure_loopback, 'INV-503-CONNECTOR', 'Tokenless issuers require the insecure-loopback opt-in', 503); requireThat(openLoopback, 'INV-401-AUTH', 'Issuer listing requires a valid read bearer token', 401); } else take('read');
+        if (!holder) {
+          take('probe');
+          // Refused listing probes land on the issuance chain too — the
+          // same provenance bar as manifest/health reads (w21-fixverify L-4).
+          if (!(configOk && openLoopback)) {
+            issuanceLog({ issuer: null, tenant: null, refused: true, unauthenticated: true, route: 'issuers-list', code: 'INV-401-AUTH' });
+            throw new InvariantError('INV-401-AUTH', 'Issuer listing requires a valid read bearer token', 401);
+          }
+        } else take('read');
         // The directory is scoped to the holder's tenant: one issuer's token
         // must not enumerate every tenant's issuers (issuerd-audit MED-4),
         // and a tenantless holder must not enumerate tenant-scoped issuers
@@ -388,22 +500,31 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
       // resolves only when it is not ambiguous across tenants.
       let m;
       if (req.method === 'GET' && (m = /^\/v1\/issuers\/([A-Za-z0-9_-]+)\/manifest$/.exec(url.pathname))) {
-        if (!anyBearer('read')) { take('probe'); } gate('read'); take('read');
+        const authed = anyBearer('read');
+        if (!authed) take('probe'); gate('read'); take('read');
         const issuer = resolveIssuer(m[1], url.searchParams.get('tenant'));
         const requestedTenant = url.searchParams.get('tenant');
         // Existence, tenant binding and per-issuer authorisation share one
         // answer — a bearer for a different issuer learns nothing about
-        // whether the name resolved (w9-deploy F4).
-        requireThat(issuer && (!requestedTenant || !issuer.tenant || issuer.tenant === requestedTenant) && issuerAuthOk(issuer, 'read'), 'INV-404-NOT-FOUND', 'Issuer not found', 404);
+        // whether the name resolved (w9-deploy F4). Foreign-bearer probing
+        // is charged AND logged like unauthenticated probing: the read
+        // bucket must not buy an 8x enumeration rate, and refused reads
+        // must not leave zero provenance (w21-issuerd F6).
+        const ok = issuer && (!requestedTenant || !issuer.tenant || issuer.tenant === requestedTenant) && issuerAuthOk(issuer, 'read');
+        if (!ok) {
+          if (authed || openLoopback) take('probe');
+          issuanceLog({ issuer: m[1], tenant: requestedTenant ?? null, refused: true, unauthenticated: !authed, route: 'manifest', code: 'INV-404-NOT-FOUND' });
+          throw new InvariantError('INV-404-NOT-FOUND', 'Issuer not found', 404);
+        }
         return send(200, signed({
           connector_id: `issuer:${issuer.issuer}`, version: issuer.version, domain: issuer.channel,
           actions: Object.keys(issuer.kinds), permissions: ISSUER_MANIFEST_PERMISSIONS,
           limitations: ISSUER_MANIFEST_LIMITATIONS,
-          idempotency: { mutating_retries: false, safe_read_retries: 2, timeout_ms: 10000 },
+          idempotency: ISSUER_MANIFEST_IDEMPOTENCY,
           // Manifests are short-lived so a captured replay cannot suppress
           // drift detection for weeks (w9-network F8): the consumer bounds
           // both the accepted issue age and the signed horizon.
-          coverage_implications: ['evidence-source'], issued_at: clock(), expires_at: clock() + 600000
+          coverage_implications: ISSUER_MANIFEST_COVERAGE, issued_at: clock(), expires_at: clock() + 600000
         }, issuer.key, 'connector-manifest'));
       }
       if (req.method === 'POST' && (m = /^\/v1\/issuers\/([A-Za-z0-9_-]+)\/issue$/.exec(url.pathname))) {
@@ -452,7 +573,7 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
         // probing must not be invisible to provenance audit (MED-5) — but
         // the response is a uniform 404 so wrong-issuer bearers cannot
         // enumerate names (w9-deploy F4).
-        try { requireThat(issuer && issuerAuthOk(issuer, 'issue'), 'INV-404-NOT-FOUND', 'Issuer not found', 404); } catch (e) { issuanceLog({ issuer: issuer?.issuer ?? 'unknown', request_digest: logMac(request), refused: true, unauthenticated: true, code: 'INV-404-NOT-FOUND' }); throw e; }
+        try { requireThat(issuer && issuerAuthOk(issuer, 'issue'), 'INV-404-NOT-FOUND', 'Issuer not found', 404); } catch (e) { issuanceLog({ issuer: issuer?.issuer ?? 'unknown', request_digest: logMac(request), refused: true, unauthenticated: !anyBearer('issue'), code: 'INV-404-NOT-FOUND' }); throw e; }
         issuer.metrics.requests++; const t0 = performance.now();
         try {
           const envelope = answerQuery(issuer, request, clock());
@@ -466,9 +587,17 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
         }
       }
       if (req.method === 'GET' && (m = /^\/v1\/issuers\/([A-Za-z0-9_-]+)\/health$/.exec(url.pathname))) {
-        if (!anyBearer('read')) { take('probe'); } gate('read'); take('read');
+        const authed = anyBearer('read');
+        if (!authed) take('probe'); gate('read'); take('read');
         const issuer = resolveIssuer(m[1], url.searchParams.get('tenant'));
-        requireThat(issuer && issuerAuthOk(issuer, 'read'), 'INV-404-NOT-FOUND', 'Issuer not found', 404);
+        // Same probing bar as manifest: a foreign read token burning the
+        // read bucket for 404-answer probing must ride the probe budget
+        // and leave a chain entry (w21-issuerd F6).
+        if (!(issuer && issuerAuthOk(issuer, 'read'))) {
+          if (authed || openLoopback) take('probe');
+          issuanceLog({ issuer: m[1], refused: true, unauthenticated: !authed, route: 'health', code: 'INV-404-NOT-FOUND' });
+          throw new InvariantError('INV-404-NOT-FOUND', 'Issuer not found', 404);
+        }
         const lat = issuer.metrics.latencies, sorted = [...lat].sort((a, b) => a - b);
         // Latencies are floats — emit an integer so the response can never
         // fail canonicalisation (w9-deploy F1).
@@ -498,7 +627,7 @@ export function writeIssuer(directory, spec) {
   // the issuer directory or produce a spec that cannot load back
   // (w18-issuerd F-10).
   identifier(spec?.issuer, 'issuer');
-  requireThat(!spec.issuer.includes(':'), 'INV-400-SCHEMA', 'Issuer name must not contain ":"');
+  requireThat(/^[A-Za-z0-9_-]+$/.test(spec.issuer), 'INV-400-SCHEMA', 'Issuer name must use the route charset [A-Za-z0-9_-]');
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   writeFileSync(join(directory, `${spec.issuer}.issuer.json`), canonical(spec) + '\n', { mode: 0o600, flag: 'wx' });
 }

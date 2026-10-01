@@ -36,6 +36,12 @@ export function signedManifest(input, key) {
 // check reads as escalation (w20-fixverify F-14 pairing).
 export const ISSUER_MANIFEST_PERMISSIONS = ['issue signed evidence within declared kinds'];
 export const ISSUER_MANIFEST_LIMITATIONS = ['Records are authoritative only for this issuer domain', 'No claim about target-side enforcement'];
+// Retry semantics and declared coverage impact live in the signed manifest
+// AND the registered baseline — driftCheck compares both, so a connector
+// that silently changes either is drift, not a signed silent change
+// (w21-fixverify M-2).
+export const ISSUER_MANIFEST_IDEMPOTENCY = { mutating_retries: false, safe_read_retries: 2, timeout_ms: 10000 };
+export const ISSUER_MANIFEST_COVERAGE = ['evidence-source'];
 
 export function verifyManifest(envelope, issuers, now, { max_age_ms } = {}) {
   const m = verifySigned(envelope, issuers, 'connector-manifest');
@@ -147,14 +153,30 @@ export function driftCheck(registered, observed, now) {
   // Permissions and limitations are trust fields too — a manifest that
   // quietly grows its permission set is escalation, and shrinking the
   // declared set is a recorded informational change (w18-issuerd F-15).
-  const permAdded = (observed.permissions ?? []).filter(x => !(registered.permissions ?? []).includes(x));
-  const permRemoved = (registered.permissions ?? []).filter(x => !(observed.permissions ?? []).includes(x));
-  if (permAdded.length) changes.push({ field: 'permissions', was: sorted(registered.permissions), now: sorted(observed.permissions), escalated: permAdded });
-  else if (permRemoved.length) changes.push({ field: 'permissions_reduced', was: sorted(registered.permissions), now: sorted(observed.permissions), informational: true });
-  const limAdded = (observed.limitations ?? []).filter(x => !(registered.limitations ?? []).includes(x));
-  const limRemoved = (registered.limitations ?? []).filter(x => !(observed.limitations ?? []).includes(x));
-  if (limRemoved.length) changes.push({ field: 'limitations', was: sorted(registered.limitations), now: sorted(observed.limitations), escalated: limRemoved.map(l => `dropped:${l}`) });
-  else if (limAdded.length) changes.push({ field: 'limitations_added', was: sorted(registered.limitations), now: sorted(observed.limitations), informational: true });
+  // A registered baseline that never declared the field cannot assert
+  // equality: an upgrade must not false-drift every pre-field tenant —
+  // the observed set is recorded informationally until re-registered
+  // (w21-fixverify M-3).
+  if (registered.permissions !== undefined) {
+    const permAdded = (observed.permissions ?? []).filter(x => !registered.permissions.includes(x));
+    const permRemoved = registered.permissions.filter(x => !(observed.permissions ?? []).includes(x));
+    if (permAdded.length) changes.push({ field: 'permissions', was: sorted(registered.permissions), now: sorted(observed.permissions), escalated: permAdded });
+    else if (permRemoved.length) changes.push({ field: 'permissions_reduced', was: sorted(registered.permissions), now: sorted(observed.permissions), informational: true });
+  } else if ((observed.permissions ?? []).length) changes.push({ field: 'permissions_undeclared_baseline', now: sorted(observed.permissions), informational: true });
+  if (registered.limitations !== undefined) {
+    const limAdded = (observed.limitations ?? []).filter(x => !registered.limitations.includes(x));
+    const limRemoved = registered.limitations.filter(x => !(observed.limitations ?? []).includes(x));
+    if (limRemoved.length) changes.push({ field: 'limitations', was: sorted(registered.limitations), now: sorted(observed.limitations), escalated: limRemoved.map(l => `dropped:${l}`) });
+    else if (limAdded.length) changes.push({ field: 'limitations_added', was: sorted(registered.limitations), now: sorted(observed.limitations), informational: true });
+  } else if ((observed.limitations ?? []).length) changes.push({ field: 'limitations_undeclared_baseline', now: sorted(observed.limitations), informational: true });
+  // Signed contract fields beyond identity: idempotency semantics and the
+  // declared coverage impact are part of what was registered — a connector
+  // that silently changes retry or coverage claims drifts even under a
+  // valid signature (w21-fixverify M-2). Same undeclared-baseline rule.
+  for (const f of ['idempotency', 'coverage_implications']) {
+    if (registered[f] !== undefined) cmp(f, registered[f], observed[f]);
+    else if (observed[f] !== undefined) changes.push({ field: `${f}_undeclared_baseline`, now: observed[f], informational: true });
+  }
   const configDigest = digest({ connector_id: observed.connector_id ?? null, version: observed.version ?? null, actions: observed.actions ?? [], permissions: observed.permissions ?? [] });
   const drifted = changes.some(c => !c.informational);
   return { drifted, changes, configuration_digest: configDigest, checked_at: now, action: drifted ? 'coverage->UNKNOWN pending compatibility, security and bypass revalidation' : 'none' };

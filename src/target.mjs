@@ -17,12 +17,18 @@ import { requireThat, InvariantError } from './errors.mjs';
 // surface (w18-crypto F1/F2, uniform closure).
 const AAD = (...parts) => canonical(parts);
 export class SimulatedTarget {
-  _dec(value, tenant, tuple) { return decrypt(value, this.key(tenant), tuple); }
+  _dec(value, tenant, tuple) {
+    // A corrupted ciphertext is tamper evidence, not a code crash — every
+    // decrypt failure classifies in the ledger taxonomy (w21-store F-7).
+    try { return decrypt(value, this.key(tenant), tuple); }
+    catch (e) { throw new InvariantError('INV-409-INTEGRITY', 'Stored ciphertext does not authenticate', 409); }
+  }
   constructor(path, tenantKeys, { aadDedup } = {}) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 }); this.db = new DatabaseSync(path); chmodSync(path, 0o600); this.keys = tenantKeys;
     // Shared with the ledger store — the same ciphertext must never mint
     // canonical bindings on both sides of a cross-DB graft (w19-aad W19-1).
     this._aadDedup = aadDedup ?? new Map();
+    this._sp = 0; // savepoint counter for nested tx() (w21-store F-3)
     // Same contention contract as the ledger store: constructor writes lose
     // a busy-timeout race as INV-503-LEDGER, never a raw sqlite error
     // (w20-fixverify F-12).
@@ -41,7 +47,7 @@ export class SimulatedTarget {
       // (w8-fixverify F3).
       this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
     } catch (e) {
-      if (e?.errcode === 5 || /database is locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
+      if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
       throw e;
     }
     this._migrateAad();
@@ -87,7 +93,10 @@ export class SimulatedTarget {
           try {
             const plain = decrypt(r[col], this.key(r.tenant), legacy);
             const upd = this.db.prepare(`UPDATE ${table} SET ${col}=? WHERE ${where}`), orig = r[col];
-            seen.set(orig, { revert: () => upd.run(orig, ...pks(r)), unmark: () => unmark(r.tenant) });
+            // A cross-DB revert supersedes THIS connection's ciphertext —
+            // re-arm its WAL-truncate flag or the donor's legacy bytes
+            // linger until an unrelated write (w21-store F-9).
+            seen.set(orig, { revert: () => { upd.run(orig, ...pks(r)); this._deleted = true; }, unmark: () => unmark(r.tenant) });
             upd.run(encrypt(plain, this.key(r.tenant), tuple), ...pks(r));
             mark(r.tenant, 'migrated');
           } catch { mark(r.tenant, 'skipped'); }
@@ -102,15 +111,24 @@ export class SimulatedTarget {
       if (this.db.isTransaction) this.db.exec('ROLLBACK');
       // BEGIN IMMEDIATE contention surfaces in the ledger taxonomy, not
       // as a raw sqlite error (w19-aad W19-4).
-      if (e?.errcode === 5 || /database is locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
+      if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
       throw e;
     }
   }
   close() { this.db.close(); }
   tx(fn) {
-    if (this.db.isTransaction) return fn();
-    this.db.exec('BEGIN IMMEDIATE');
+    // Same contract as Store.tx: a nested call nests via SAVEPOINT so a
+    // callee's failure cannot half-commit inside the outer transaction,
+    // BEGIN contention surfaces as INV-503-LEDGER, and a ROLLBACK that
+    // itself fails must not mask the original error (w21-store F-3).
+    if (this.db.isTransaction) {
+      const sp = `sp_${++this._sp}`;
+      this.db.exec(`SAVEPOINT ${sp}`);
+      try { const r = fn(); this.db.exec(`RELEASE ${sp}`); return r; }
+      catch (e) { this.db.exec(`ROLLBACK TO ${sp}; RELEASE ${sp}`); throw e; }
+    }
     try {
+      this.db.exec('BEGIN IMMEDIATE');
       const r = fn(); this.db.exec('COMMIT');
       // Deleted ciphertext must not linger in the WAL — any armed delete
       // truncates the log right at the commit boundary (DEK-audit F4). A
@@ -119,10 +137,13 @@ export class SimulatedTarget {
       // failing committed work (w8-fixverify F2).
       if (this._deleted) try { this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); this._deleted = false; } catch { /* retry next tx */ }
       return r;
+    } catch (e) {
+      try { if (this.db.isTransaction) this.db.exec('ROLLBACK'); } catch { /* rollback failure must not mask the real error */ }
+      if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
+      throw e;
     }
-    catch (e) { this.db.exec('ROLLBACK'); throw e; }
   }
-  key(tenant) { requireThat(this.keys[tenant], 'INV-404-NOT-FOUND', 'Resource not found', 404); return Buffer.from(this.keys[tenant], 'base64url'); }
+  key(tenant) { requireThat(Object.hasOwn(this.keys, tenant), 'INV-404-NOT-FOUND', 'Resource not found', 404); return Buffer.from(this.keys[tenant], 'base64url'); }
   exists(tenant, id) {
     return this.db.prepare('SELECT 1 FROM resources WHERE tenant=? AND id=?').get(tenant, id) !== undefined;
   }
@@ -191,6 +212,10 @@ export class SimulatedTarget {
   grant(tenant, grant_id, value) {
     this._deleted = true; // grant upsert supersedes ciphertext (w8-fixverify F3)
     this.db.prepare('INSERT INTO grants VALUES(?,?,?) ON CONFLICT(tenant,grant_id) DO UPDATE SET value=excluded.value').run(tenant, grant_id, encrypt(value, this.key(tenant), AAD('target', 'grant', tenant, grant_id)));
+    // Bare callers arm the flag but never reach tx()'s post-commit
+    // checkpoint — truncate on the autocommit path too, like the store
+    // does (w21-store F-5).
+    if (!this.db.isTransaction) try { this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); this._deleted = false; } catch { /* retry on next armed write */ }
   }
   // One undecryptable grant row must not wedge every authorize() call — a
   // corrupt row can only ever HIDE a grant (anchoring is the authority), so
@@ -211,13 +236,19 @@ export class SimulatedTarget {
     return out;
   }
   revokeGrant(tenant, grant_id) {
-    const row = this.db.prepare('SELECT value FROM grants WHERE tenant=? AND grant_id=?').get(tenant, grant_id);
-    requireThat(row, 'INV-404-NOT-FOUND', 'Grant not found', 404);
-    const value = this._dec(row.value, tenant, AAD('target', 'grant', tenant, grant_id));
-    value.revoked = true;
-    this._deleted = true; // revoke supersedes ciphertext (w8-fixverify F3)
-    this.db.prepare('UPDATE grants SET value=? WHERE tenant=? AND grant_id=?').run(encrypt(value, this.key(tenant), AAD('target', 'grant', tenant, grant_id)), tenant, grant_id);
-    return value;
+    // Read-modify-write inside tx(): an interleaved re-grant on a second
+    // connection must not be clobbered by a stale revocation of the
+    // pre-revocation value (w21-store F-4), and tx() truncates the WAL
+    // residue at commit (w21-store F-5).
+    return this.tx(() => {
+      const row = this.db.prepare('SELECT value FROM grants WHERE tenant=? AND grant_id=?').get(tenant, grant_id);
+      requireThat(row, 'INV-404-NOT-FOUND', 'Grant not found', 404);
+      const value = this._dec(row.value, tenant, AAD('target', 'grant', tenant, grant_id));
+      value.revoked = true;
+      this._deleted = true; // revoke supersedes ciphertext (w8-fixverify F3)
+      this.db.prepare('UPDATE grants SET value=? WHERE tenant=? AND grant_id=?').run(encrypt(value, this.key(tenant), AAD('target', 'grant', tenant, grant_id)), tenant, grant_id);
+      return value;
+    });
   }
   outcome(tenant, id) {
     const row = this.db.prepare('SELECT value FROM transactions WHERE tenant=? AND id=?').get(tenant, id);
@@ -246,9 +277,11 @@ export class SimulatedTarget {
     // target transaction (e.g. a predicate the reservation check could not
     // see) — the outcome must record FAILED, never UNCERTAIN.
     if (fault === 'state-conflict') throw new InvariantError('INV-409-STATE', 'Simulated deterministic target refusal', 409);
-    this.db.exec('BEGIN IMMEDIATE');
     let outcome;
     try {
+      // BEGIN inside the try: contention on the BEGIN itself must surface
+      // as INV-503-LEDGER, not a raw sqlite error (w21-store F-3).
+      this.db.exec('BEGIN IMMEDIATE');
       const requested = capsule.requested_state, type = capsule.action.type;
       const state = type === 'secret.use' ? this.secretState(tenant, requested.secret_id) : this.state(tenant, id);
       requireThat(state.version === capsule.current_state.version && state.digest === capsule.current_state.digest, 'INV-409-STATE', 'Target state changed', 409);
@@ -300,7 +333,8 @@ export class SimulatedTarget {
       // for a later retry when the log is contended (w8-fixverify F2/F3).
       if (this._deleted) try { this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); this._deleted = false; } catch { /* retry later */ }
     } catch (e) {
-      this.db.exec('ROLLBACK');
+      try { if (this.db.isTransaction) this.db.exec('ROLLBACK'); } catch { /* a failing ROLLBACK must not mask the real error (w21-store F-3) */ }
+      if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
       // Two processes racing the same transactionId hit the PK constraint
       // inside the write — the loser must get the stored outcome, not an
       // error (store-audit LOW: idempotent replay under contention).

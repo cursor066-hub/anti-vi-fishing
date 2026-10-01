@@ -107,7 +107,9 @@ export function openRelease(component, release) {
   // The outer binding is unauthenticated metadata — the authenticated copy
   // inside the ciphertext must agree with it, or the release was tampered.
   const { data, ...innerBinding } = inner;
-  requireThat(ctEqual(canonical(innerBinding), canonical(release.binding)), 'INV-401-TAMPER', 'Release binding does not match the authenticated plaintext', 401);
+  // Constant-time compare on fixed-length digests — raw string length
+  // must not leak which byte position first diverged (w21-crypto F-12).
+  requireThat(ctEqual(digest(innerBinding), digest(release.binding)), 'INV-401-TAMPER', 'Release binding does not match the authenticated plaintext', 401);
   return inner;
 }
 

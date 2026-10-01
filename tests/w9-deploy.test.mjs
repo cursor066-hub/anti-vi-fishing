@@ -115,7 +115,8 @@ test('w9-deploy F10: constructor-name kinds miss own-property lookup; tokenless 
   await closed.listen(); t.after(() => closed.close());
   const port = closed.server.address().port;
   // Tokenless spec without the opt-in must not serve — even on loopback.
-  assert.equal((await httpJson(`http://127.0.0.1:${port}/v1/issuers/bank/manifest?tenant=acme`)).status, 503);
+  // w21-issuerd F11: the refusal is a uniform 401, not a 503 fingerprint.
+  assert.equal((await httpJson(`http://127.0.0.1:${port}/v1/issuers/bank/manifest?tenant=acme`)).status, 401);
   const open = createIssuerServer({ 'acme:bank': spec('bank') }, { port: 0, host: '127.0.0.1', allow_insecure_loopback: true });
   await open.listen(); t.after(() => open.close());
   const openPort = open.server.address().port;

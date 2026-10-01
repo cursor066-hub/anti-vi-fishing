@@ -142,6 +142,9 @@ test('w12 R9: data-access disclosure is anchored on the chain', t => {
   h.f.runtime.consume(h.p(), runtimeRequest(cap));
   const idx = h.f._auditIndex('acme');
   assert.ok(idx.dataAccess.some(e => e.dataset === input.resource && e.row_ids.includes('row-1')), 'DATA_ACCESSED event is on the chain');
+  // A file-writer must first defeat the append-only trigger — even with
+  // DDL in hand the chain attestation survives (w21-store F-6).
+  h.f.store.db.exec('DROP TRIGGER no_access_delete');
   h.f.store.db.prepare('DELETE FROM data_access').run();
   // The chain-derived index still reports the disclosure after the wipe.
   const idx2 = h.f._auditIndex('acme');

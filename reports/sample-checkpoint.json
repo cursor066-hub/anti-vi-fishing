@@ -1,6 +1,6 @@
 {
   "tenant_id": "acme",
-  "size": 215,
-  "head": "5e89be1d0a7243932a760beee3a98f51765561bbec097ff12e62d2d3eb31b7e8",
-  "tree_head": "28fef7728fd8aba59bcf4a01c383a48f8d5a6437f3a9f335580228dc38e9aae9"
+  "size": 220,
+  "head": "3f878936dc00ff6288b2b7ad47d4a68fe60f8cfe32bedcf452a9765657f71d47",
+  "tree_head": "d109bc1c68958b75956af0155ba1e8fc6501466fa66487923114523ac7b39c4a"
 }

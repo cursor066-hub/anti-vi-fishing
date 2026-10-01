@@ -84,6 +84,10 @@ test('w15: forged and deleted usage rows cannot move the replay/budget ledger', 
   assert.equal(h.f.runtime.consume(h.p(), req).decision, 'ALLOW');
   // A real consume anchors RUNTIME_ALLOWED — deleting every usage row can
   // never replay it.
+  // The usage table is append-only too — a file-writer must drop the
+  // guard before wiping, and the chain still refuses the replay
+  // (w21-store F-6).
+  h.f.store.db.exec('DROP TRIGGER no_usage_delete');
   h.f.store.db.prepare('DELETE FROM usage').run();
   assert.throws(() => h.f.runtime.consume(h.p(), req), hasCode('INV-409-REPLAY'));
 });

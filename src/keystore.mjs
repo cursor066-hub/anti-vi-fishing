@@ -41,6 +41,11 @@ export class KeyVault {
     for (const p of Array.isArray(purpose) ? purpose : [purpose]) text(p, 'key purpose', 64);
     const raw = this._generateRaw(suite);
     const id = key_id ?? raw.key_id;
+    // A caller-chosen id becomes a Map key, an AAD suffix and a wire
+    // key_id: prototype-member names would silently poison downstream
+    // verification sets (w21-crypto F-6).
+    requireThat(!['__proto__', 'prototype', 'constructor'].includes(id), 'INV-400-SCHEMA', 'Key id collides with an Object.prototype member', 400);
+    requireThat(typeof id === 'string' && id.length <= 128, 'INV-400-SCHEMA', 'Invalid key id', 400);
     requireThat(!this.keys.has(id), 'INV-409-CONFLICT', 'Key id already exists', 409);
     // The vault is process-global — every entry carries its owning tenant so
     // no tenant-scoped path can sign, rotate, revoke or list another
@@ -67,14 +72,18 @@ export class KeyVault {
     // otherwise the vault would attest a foreign identity while signing with
     // whatever private material was handed in (crypto-audit M-2).
     requireThat(derivePublic(key.private_key) === key.public_key, 'INV-401-SIGNATURE', 'Imported keypair is inconsistent', 401);
+    requireThat(!['__proto__', 'prototype', 'constructor'].includes(key.key_id), 'INV-400-SCHEMA', 'Key id collides with an Object.prototype member', 400);
     requireThat(!this.keys.has(key.key_id), 'INV-409-CONFLICT', 'Key id already exists', 409);
     this.keys.set(key.key_id, { key_id: key.key_id, tenant_id, public_key: key.public_key, purpose, suite, exportable, revoked: false, generated_inside: false, wrapped: encrypt(key.private_key, this.masterKey, `vault/${key.key_id}`), created_firmware: 'imported' });
     return { key_id: key.key_id, public_key: key.public_key, suite, purpose, exportable };
   }
   _private(key_id, entry = null) { return decrypt((entry ?? this.entry(key_id)).wrapped, this.masterKey, `vault/${key_id}`); }
-  sign(key_id, purpose, message, { allowPending = false } = {}) {
+  sign(key_id, purpose, message, { allowPending = false, tenant_id = null } = {}) {
     const e = this.keys.get(key_id);
     requireThat(e && !e.revoked && (allowPending || !e.pending), 'INV-401-SIGNATURE', 'Key unavailable, revoked or pending activation', 401);
+    // The vault's own tenant invariant: a scoped entry must never mint for
+    // another tenant when the caller names one (w21-crypto F-7).
+    requireThat(!tenant_id || !e.tenant_id || e.tenant_id === tenant_id, 'INV-403-SCOPE', 'Key belongs to another tenant', 403);
     requireThat(e.purpose === 'any' || e.purpose === purpose || (Array.isArray(e.purpose) && e.purpose.includes(purpose)), 'INV-403-SCOPE', `Key is bound to purpose ${e.purpose}`, 403);
     requireThat(Object.hasOwn(SUITES, e.suite), 'INV-400-SCHEMA', 'Unapproved algorithm suite');
     return signSuite(e.suite, Buffer.isBuffer(message) ? message : Buffer.from(message), this._private(key_id, e));
@@ -93,11 +102,12 @@ export class KeyVault {
   // sign marked recovery envelopes or the tenant bricks (w11-lifecycle F1/F2).
   // Callers opt in only through Fabric._signingKeyId — pending keys can never
   // silently mint ordinary signatures.
-  envelope(key_id, purpose, payload, { allowPending = false } = {}) {
+  envelope(key_id, purpose, payload, { allowPending = false, tenant_id = null } = {}) {
     const e = this.keys.get(key_id);
     requireThat(e && !e.revoked && (allowPending || !e.pending), 'INV-401-SIGNATURE', 'Key unavailable, revoked or pending activation', 401);
+    requireThat(!tenant_id || !e.tenant_id || e.tenant_id === tenant_id, 'INV-403-SCOPE', 'Key belongs to another tenant', 403);
     const h = { profile: 'IF-CJSON-1', suite: e.suite, key_id, purpose };
-    return { protected: h, payload, signature: this.sign(key_id, purpose, canonical({ protected: h, payload }), { allowPending }) };
+    return { protected: h, payload, signature: this.sign(key_id, purpose, canonical({ protected: h, payload }), { allowPending, tenant_id }) };
   }
   export(key_id) {
     const e = this.entry(key_id);
@@ -131,14 +141,18 @@ export class KeyVault {
     requireThat(state.format === STORE_FORMAT, 'INV-503-CONFIG', 'Unrecognised keystore format', 503);
     const vault = new KeyVault(masterKey, { firmware: state.firmware });
     requireThat(ctEqual(stateMac(vault.masterKey, state), mac), 'INV-503-CONFIG', 'Keystore integrity check failed (state MAC mismatch)', 503);
-    const attestorPrivate = decrypt(state.attestor_wrapped, vault.masterKey, 'vault/attestor');
+    const attestorPrivate = (() => { try { return decrypt(state.attestor_wrapped, vault.masterKey, 'vault/attestor'); } catch { throw new InvariantError('INV-503-CONFIG', 'Keystore attestor fails to unwrap', 503); } })();
     // Restore the full attestor identity — persisting only the private key
     // corrupted key_id/public_key on every restart (crypto-audit H-1).
     requireThat(state.attestor && derivePublic(attestorPrivate) === state.attestor.public_key, 'INV-503-CONFIG', 'Attestor identity inconsistent', 503);
     vault.attestor = { key_id: state.attestor.key_id, public_key: state.attestor.public_key, private_key: attestorPrivate };
     for (const e of state.keys) {
+      // A duplicate id inside one MAC-valid state file must fail, not
+      // silently overwrite (w21-crypto F-9).
+      requireThat(!vault.keys.has(e.key_id), 'INV-503-CONFIG', `Duplicate key id ${e.key_id} in keystore`, 503);
       // Verify every entry's advertised public key matches its private half.
-      requireThat(derivePublic(decrypt(e.wrapped, vault.masterKey, `vault/${e.key_id}`)) === e.public_key, 'INV-503-CONFIG', `Key ${e.key_id} has inconsistent public material`, 503);
+      const priv = (() => { try { return decrypt(e.wrapped, vault.masterKey, `vault/${e.key_id}`); } catch { throw new InvariantError('INV-503-CONFIG', `Key ${e.key_id} fails to unwrap`, 503); } })();
+      requireThat(derivePublic(priv) === e.public_key, 'INV-503-CONFIG', `Key ${e.key_id} has inconsistent public material`, 503);
       vault.keys.set(e.key_id, { ...e, wrapped: e.wrapped });
     }
     return vault;
