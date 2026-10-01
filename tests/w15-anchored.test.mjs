@@ -29,6 +29,21 @@ test('w15: auditPage rejects a tampered audit envelope, including malformed JSON
   assert.throws(() => h.f.store.auditExport('acme'), hasCode('INV-409-AUDIT-TAMPER'));
 });
 
+// The index consumes only vault-signed events: a raw INSERT minting a
+// self-consistent "signed" row (attacker-computable hash+previous, junk
+// signature) wedges the index at verifySigned — the red-team root cause
+// on cd4e71b stays dead (w13-store F1).
+test('w15: a raw chain INSERT cannot mint a consumed event', t => {
+  const h = fixture(t);
+  h.ready();
+  const last = h.f.store.db.prepare('SELECT seq,hash FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1').get('acme');
+  const payload = { tenant_id: 'acme', sequence: last.seq + 1, previous: last.hash, type: 'POLICY_ACTIVATED', actor: 'mallory', reference: 'policy', metadata: { policy_digest: 'x', reanchored: true }, time: h.now() };
+  const envelope = { payload, protected: { key_id: 'mallory', algorithm: 'Ed25519' }, signature: 'forged' };
+  h.f.store.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run('acme', last.seq + 1, last.hash, digest(payload), JSON.stringify(envelope));
+  assert.throws(() => h.f._auditIndex('acme'), hasCode('INV-409-INTEGRITY'));
+  assert.throws(() => h.proposed(), e => /^INV-409/.test(e.code ?? ''), 'gate fails closed on a poisoned tail');
+});
+
 // A certificate row swapped to another valid envelope cannot launder a
 // forged finish — issuance is anchored on the chain AND the payload is
 // re-proven byte-for-byte (w13-store F2/L10).
