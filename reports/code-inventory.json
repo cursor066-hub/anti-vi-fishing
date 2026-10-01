@@ -134,8 +134,8 @@
       "bytes": 6239
     },
     "scripts/report.mjs": {
-      "lines": 145,
-      "bytes": 10834
+      "lines": 146,
+      "bytes": 11053
     },
     "scripts/restore-check.mjs": {
       "lines": 139,
@@ -347,5 +347,5 @@
     }
   },
   "total_files": 86,
-  "total_lines": 16064
+  "total_lines": 16065
 }
