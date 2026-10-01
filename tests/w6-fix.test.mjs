@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { fixture, hasCode, setTenant } from './helpers.mjs';
+import { fixture, hasCode, setTenant, stageConstitution } from './helpers.mjs';
 import { createServer } from '../src/server.mjs';
 import { answerQuery } from '../src/issuerd.mjs';
 import { generateKey, signed } from '../src/crypto.mjs';
@@ -56,7 +56,7 @@ test('w6-fix F6: denied exports do not burn the reconstruction budget', t => {
   const policy = h.clone(h.f.policy('acme'));
   policy.version += 1; policy.not_before = h.now();
   policy.runtime.reconstruction.max_distinct_rows = 1;
-  h.f.store.put('acme', 'policy', 'staged', { policy, activate_at: policy.not_before, staged_at: h.now() }, h.now());
+  stageConstitution(h, policy);
   h.f.activateDuePolicies('acme', h.now());
   const exportRow = row => {
     const r = h.proposed('data.export', { dataset: 'dataset-1', columns: ['id'], row_ids: [row], max_rows: 1, classification: 'internal', jurisdiction: 'EU' }, { action: { type: 'data.export', target_resource: 'dataset-1', purpose: 'Operations' }, destination: 'customer-vault', policy_version: 2 });

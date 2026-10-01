@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID, createHmac } from 'node:crypto';
-import { fixture, hasCode, setTenant, runtimeInput, runtimeRequest } from './helpers.mjs';
+import { fixture, hasCode, setTenant, runtimeInput, runtimeRequest, stageConstitution } from './helpers.mjs';
 import { TRANSFORMS } from '../src/datagate.mjs';
 import { canonical, digest } from '../src/canonical.mjs';
 import { signed } from '../src/crypto.mjs';
@@ -37,7 +37,7 @@ test('w10-dg F2: dataset-wide coverage binds across subject identities', t => {
   policy.version += 1; policy.not_before = h.now();
   policy.runtime.reconstruction.max_coverage_percent = 100;      // subjects never trip
   policy.runtime.reconstruction.max_dataset_coverage_percent = 50; // union cap: ≤1 of 3 rows
-  h.f.store.put('acme', 'policy', 'staged', { policy, activate_at: h.now(), staged_at: h.now() }, h.now());
+  stageConstitution(h, policy);
   h.f.activateDuePolicies('acme', h.now());
   const cap = h.f.runtime.issue(h.p(), runtimeInput());
   h.f.runtime.consume(h.p(), runtimeRequest(cap)); // operator touches row-1

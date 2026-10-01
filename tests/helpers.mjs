@@ -112,5 +112,17 @@ export function installPolicy(h, mutate, { approvals = 4, tenant = 'acme' } = {}
 // only path that still exists: mutate a clone of the live tenant, then a
 // config reload carries it (in-process _setTenant was F14's free swap).
 export function setTenant(h, tenant, mutate) { const tn = clone(h.f.tenant(tenant)); mutate?.(tn); h.reconfigure(cfg => { cfg.tenants[tenant] = tn; }); }
+// The fixture-level equivalent of a governed stage: the staged row AND its
+// signed POLICY_STAGED anchor land in one tx, exactly as a VERIFIED
+// policy.change produces them. A bare `store.put('policy','staged')` without
+// the anchor is what a row-writing insider forges — promotion now refuses
+// it (w12-lifecycle F2), so tests must stage through the chain.
+export function stageConstitution(h, next, { tenant = 'acme', activate_at } = {}) {
+  const at = activate_at ?? next.not_before ?? h.now();
+  h.f.store.tx(() => {
+    h.f.store.put(tenant, 'policy', 'staged', { policy: next, activate_at: at, staged_at: h.now() }, h.now());
+    h.f.store.audit(tenant, 'POLICY_STAGED', 'policy-admin', next.policy_id, { activate_at: at, version: next.version, policy_digest: digest(next) }, h.now());
+  });
+}
 export function runtimeInput(overrides = {}) { return { device_id: 'operator-device', resource: 'dataset-1', destination: 'customer-vault', action: 'data.read', purpose: 'operations', columns: ['id', 'name'], row_ids: ['row-1'], classification: 'internal', jurisdiction: 'EU', max_cost: 1000, ttl_ms: 60000, ...overrides }; }
 export function runtimeRequest(capability, overrides = {}) { const c = capability.payload; return { capability, device_id: c.device_id, resource: c.resource, destination: c.destination, action: c.action, purpose: c.purpose, columns: c.columns, row_ids: c.row_ids, request_id: randomUUID(), protocol: 'https', port: 443, ...overrides }; }

@@ -705,6 +705,17 @@ export class Fabric {
         this.store.audit(t, 'POLICY_SUPERSEDED', 'system', staged.policy.policy_id, { version: staged.policy.version, reason: staged.policy.expires_at <= now ? 'expired-before-activation' : 'version-superseded' }, now);
         return null;
       }
+      // The promoter must demand the same ledger anchor the getter does —
+      // a store-level 'staged' write can never launder into an anchored
+      // active constitution by being promoted (w12-lifecycle F2). An
+      // unanchored staged row is tamper evidence: retire it loudly instead
+      // of letting a mutable row mint a signed POLICY_ACTIVATED.
+      const stagedAnchored = [...this._auditIndex(t).policyAnchors].reverse().some(a => a.staged && a.digest === digest(staged.policy));
+      if (!stagedAnchored) {
+        this.store.remove(t, 'policy', 'staged');
+        this.store.audit(t, 'POLICY_SUPERSEDED', 'system', staged.policy.policy_id, { version: staged.policy.version, reason: 'unanchored-staged-row', policy_digest: digest(staged.policy) }, now);
+        return null;
+      }
       this.store.put(t, 'policy', 'active', staged.policy, now);
       this.store.remove(t, 'policy', 'staged');
       this.store.put(t, 'policy-history', `v${staged.policy.version}`, { activated_at: now, digest: digest(staged.policy), staged: true, emergency: staged.policy.emergency_of !== undefined }, now);
@@ -1065,8 +1076,11 @@ export class Fabric {
     rows.forEach((x, i) => { if (x.e) { const j = rows.findLastIndex(y => y.e && kindOf(y.e) === kindOf(x.e) && kidOf(y.e) === kidOf(x.e)); if (j > i) superseded.set(x.id, rows[j].id); } });
     const items = rows.map(({ id, e }) => {
       if (!e) {
-        const tombstone = this.store.must(t, 'evidence-tombstone', id);
-        return { payload: { evidence_id: id, expires_at: 0 }, envelope: { retained_digest: tombstone.original_digest }, revoked: true, superseded_by: superseded.get(id) ?? null, issuer: { failure_domain: 'deleted' } };
+        // A deleted member whose tombstone row is also gone still counts as
+        // revoked — anchored membership must never wedge the whole capsule
+        // into INV-404 forever (delete-as-DoS, w12-lifecycle F6).
+        const tombstone = this.store.get(t, 'evidence-tombstone', id);
+        return { payload: { evidence_id: id, expires_at: 0 }, envelope: { retained_digest: tombstone?.original_digest ?? null }, revoked: true, superseded_by: superseded.get(id) ?? null, issuer: { failure_domain: 'deleted' } };
       }
       const iss = this.tenant(t).issuers[e.envelope.protected.key_id];
       // The stored payload is a clone of the SIGNED envelope — divergence
@@ -1464,6 +1478,10 @@ export class Fabric {
       // its children — clearing the mutable composite_parents marker cannot
       // unbind a certified child (w11-redteam R17).
       const idx = this._auditIndex(t);
+      // Consumption and cancellation are chain verdicts, not row state: a
+      // flipped `consumed`/`status` pair can never un-spend or un-cancel
+      // what the signed ledger already attested (w12-lifecycle F3).
+      requireThat(!idx.outcomes.has(cert.certificate_id) && !idx.reserved.has(cert.certificate_id), 'INV-409-REPLAY', 'Certificate already consumed or cancelled on the ledger', 409);
       const certifiedParents = this.store.ids(t, 'capsule', 20000).filter(pid => {
         if (pid === record.capsule.capsule_id || !idx.issued.has(pid)) return false;
         const parentRow = this.store.get(t, 'capsule', pid);

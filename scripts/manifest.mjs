@@ -16,14 +16,14 @@ import { spawnSync } from 'node:child_process';
 // would describe only that subtree (w8-tooling F3).
 process.chdir(new URL('..', import.meta.url).pathname);
 
-// Tarball-verify walks every file except the Git object store and installed
-// dependencies: a release tree containing runtime state or session files IS
-// an anomaly and must flag, not exempt (w11-supply SC-02).
-const EXCLUDE_DIRS = new Set(['node_modules', '.git']);
+// Tarball-verify walks every file except the Git object store — a release
+// tree carrying installed dependencies or runtime state unhashed IS the
+// anomaly the walk exists to catch, not something to exempt (w15-supply F-5).
+const EXCLUDE_DIRS = new Set(['.git']);
 // Git-mode untracked scan exempts the runtime dirs that legitimately hold
 // state on a development checkout — but no .gitignore consultation, so a
 // broadened ignore rule cannot hide a payload (w11-supply SC-02).
-const GIT_MODE_EXEMPT = new Set(['node_modules', '.git', 'var', '.devin-files']);
+const GIT_MODE_EXEMPT = new Set(['node_modules', '.git', 'var']);
 const EXCLUDE_FILES = new Set(['MANIFEST.sha256']);
 const sha = f => createHash('sha256').update(readFileSync(f)).digest('hex');
 function* walk(dir) {
@@ -47,8 +47,14 @@ if (process.argv.includes('--verify')) {
   const problems = [];
   for (const { hash, name } of listed) {
     if (!existsSync(name)) { problems.push(`missing: ${name}`); continue; }
-    if (lstatSync(name).isSymbolicLink()) { problems.push(`symlinked: ${name}`); continue; }
-    if (sha(name) !== hash) problems.push(`tampered: ${name}`);
+    let st; try { st = lstatSync(name); } catch { problems.push(`unreadable: ${name}`); continue; }
+    if (st.isSymbolicLink()) { problems.push(`symlinked: ${name}`); continue; }
+    // Only regular files may stand at a listed path — a FIFO, socket or
+    // device node would block the re-hash forever and wedge every consumer
+    // gate instead of failing honestly (w15-supply F-7).
+    if (!st.isFile()) { problems.push(`non-regular: ${name}`); continue; }
+    try { if (sha(name) !== hash) problems.push(`tampered: ${name}`); }
+    catch { problems.push(`unreadable: ${name}`); }
   }
   // The invariant is set equality in BOTH directions: every tracked file is
   // listed AND every listed file is tracked/present. A committed file absent
@@ -81,8 +87,14 @@ if (tracked === null) { console.error('git ls-files unavailable — cannot enume
 const files = tracked.filter(f => !EXCLUDE_FILES.has(f)).sort();
 const problems = [];
 const lines = files.map(f => {
-  if (lstatSync(f).isSymbolicLink()) { problems.push(`symlinked: ${f}`); return null; }
-  return `${sha(f)}  ${f}`;
+  // Per-file failures report as problems — a deleted-but-indexed file or a
+  // gitlink crashing generation must surface like every other failure, not
+  // as a stack trace (w15-supply F-8).
+  try {
+    if (lstatSync(f).isSymbolicLink()) { problems.push(`symlinked: ${f}`); return null; }
+    if (!lstatSync(f).isFile()) { problems.push(`non-regular: ${f}`); return null; }
+    return `${sha(f)}  ${f}`;
+  } catch { problems.push(`unreadable: ${f}`); return null; }
 });
 if (problems.length) { console.error(JSON.stringify({ problems })); process.exit(1); }
 writeFileSync('MANIFEST.sha256', lines.join('\n') + '\n');

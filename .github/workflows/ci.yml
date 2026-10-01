@@ -59,7 +59,9 @@ jobs:
         run: |
           node scripts/release-sign.mjs --generate-fixture-key var/relkeys
           node scripts/release-sign.mjs --key var/relkeys/release-key.pem --public-key var/relkeys/release-key.pub --out var/release-attestation.json --test-anchors-out var/relkeys/anchors.json
-          node scripts/verify-release.mjs var/release-attestation.json var/relkeys/anchors.json --require-ci
+          # --anchors-in-tree: the fixture roundtrip deliberately ships its
+          # anchors under var/; production consumers must pin out-of-band.
+          node scripts/verify-release.mjs var/release-attestation.json var/relkeys/anchors.json --require-ci --anchors-in-tree
       - name: Test suite
         run: npm test
       - name: Simulation harness

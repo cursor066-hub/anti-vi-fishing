@@ -32,6 +32,35 @@ if (tracked.status === 0) {
 files.sort();
 
 let failed = false;
+// Secrets-bearing patterns are dangerous in ANY tracked file, not only code:
+// a PEM or cloud key committed inside docs/, web/, deploy/ or a JSON blob
+// leaks exactly the same (w15-supply F-11). Code rules stay code-scoped.
+// vectors/keys.json is a declared conformance fixture — its key material is
+// generated test data, intentionally committed.
+const TEXT_EXT = /\.(html|css|json|ya?ml|conf|service|md|txt|toml|ini|env|py|sh)$/;
+const SECRET_RULES = [
+  ['embedded private key', /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
+  ['cloud credential pattern', /\bAKIA[0-9A-Z]{16}\b/]
+];
+let textFiles = [];
+if (tracked.status === 0) {
+  textFiles = tracked.stdout.split('\0').filter(f => TEXT_EXT.test(f) && f !== 'vectors/keys.json');
+} else {
+  const walkText = dir => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory() && SKIP.has(entry.name)) continue;
+      const p = join(dir, entry.name).replaceAll('\\', '/');
+      if (entry.isDirectory()) walkText(p); else if (TEXT_EXT.test(p) && p !== 'vectors/keys.json') textFiles.push(p);
+    }
+  };
+  walkText('.');
+}
+for (const file of textFiles) {
+  if (!existsSync(file)) continue;
+  const s = readFileSync(file, 'utf8');
+  for (const [name, regex] of SECRET_RULES) if (regex.test(s)) { console.error(`${file}: ${name}`); failed = true; }
+}
+
 for (const file of files.filter(f => CODE_EXT.test(f) && existsSync(f))) {
   const check = spawnSync(process.execPath, ['--check', file], { encoding: 'utf8' });
   if (check.status !== 0) { console.error(check.stderr); failed = true; }

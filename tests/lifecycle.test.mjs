@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fixture, hasCode, installPolicy } from './helpers.mjs';
+import { fixture, hasCode, installPolicy, stageConstitution } from './helpers.mjs';
 import { clone, digest } from '../src/canonical.mjs';
 import { signed } from '../src/crypto.mjs';
 import { proposal } from '../src/schema.mjs';
@@ -89,7 +89,7 @@ test('EVD-008 POL-014: evidence revocation invalidates pending certificate immed
   // A real policy transition must not resurrect revoked authority: stage and
   // activate the next constitution version, then re-present the certificate.
   const next = clone(h.f.policy('acme')); next.version = 2; next.not_before = h.now() - 1;
-  h.f.store.put('acme', 'policy', 'staged', { policy: next, activate_at: next.not_before, staged_at: h.now() }, h.now());
+  stageConstitution(h, next);
   h.f.activateDuePolicies('acme', h.now());
   assert.equal(h.f.policy('acme').version, 2, 'the constitution actually transitioned');
   assert.throws(() => h.f.execute(h.p(), certificate), hasCode('INV-409-STATE'));
