@@ -439,7 +439,8 @@
   },
   "retention": {
     "default_ms": 31536000000,
-    "per_kind": {}
+    "per_kind": {},
+    "per_action": {}
   },
   "algorithms": {
     "allowed_suites": [

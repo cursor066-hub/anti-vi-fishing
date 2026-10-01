@@ -13,7 +13,9 @@ const now = new Date().toISOString();
 const checkOnly = process.argv.includes('--check-only');
 const stale = [];
 const staleDetail = [];
-const run = (cmd, args, opts = {}) => spawnSync(cmd, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, ...opts });
+// Every spawned helper gets a wall-clock ceiling — a hung subprocess must
+// fail the report, never stall CI forever (w23-supply F17).
+const run = (cmd, args, opts = {}) => spawnSync(cmd, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 600000, ...opts });
 const write = (path, content) => {
   if (checkOnly) {
     const committed = existsSync(path) ? readFileSync(path, 'utf8') : null;
@@ -50,8 +52,14 @@ const tap = run(process.execPath, ['--test', '--test-concurrency=1', '--test-rep
 const tapText = (tap.stdout ?? '') + (tap.stderr ?? '');
 // Strip per-test durations so the committed TAP is byte-stable.
 const stableTap = tapText.replace(/ \([\d.]+ms\)/g, '').replace(/(duration_ms: )[\d.]+/g, '$10').replace(/(# duration_ms )[\d.]+/g, '$10');
-const num = (re, s) => { const m = s.match(re); return m ? Number(m[1]) : 0; };
-const counts = { pass: num(/# pass (\d+)/, tapText), fail: num(/# fail (\d+)/, tapText) + (tapText.match(/^not ok /gm) ?? []).length };
+// TAP footer counts come from the LAST match — a test printing
+// '# pass 9999' to stdout controls the first regex hit but can never
+// outlive the runner's own summary (w23-supply F8). The four summary
+// counters must also be internally consistent.
+const numLast = (re, s) => { const m = [...s.matchAll(new RegExp(re, 'g'))].at(-1); return m ? Number(m[1]) : 0; };
+const rawFail = numLast('# fail (\d+)', tapText), rawCancel = numLast('# cancelled (\d+)', tapText), rawSkip = numLast('# skipped (\d+)', tapText), rawTodo = numLast('# todo (\d+)', tapText), rawTests = numLast('# tests (\d+)', tapText);
+const counts = { pass: numLast('# pass (\d+)', tapText), fail: rawFail + (tapText.match(/^not ok /gm) ?? []).length, tests: rawTests };
+if (rawTests > 0 && counts.pass + rawFail + rawSkip + rawTodo + rawCancel !== rawTests) { console.error(`TAP summary inconsistent: tests=${rawTests} but pass+fail+skipped+todo+cancelled=${counts.pass + rawFail + rawSkip + rawTodo + rawCancel}`); process.exitCode = 1; }
 write('reports/tests.tap', stableTap);
 write('reports/final-regression.tap', stableTap);
 const testSummary = { tests: counts.pass + counts.fail, pass: counts.pass, fail: counts.fail, runner: 'node --test --test-reporter=tap tests/', generated_at: 'regenerated on demand by scripts/report.mjs', note: 'Live counts; per-test durations are stripped so the artifact is deterministic.' };
@@ -107,7 +115,7 @@ const walk = (dir, prefix) => {
   for (const e of readdirSync(dir, { withFileTypes: true })) {
     const p = join(dir, e.name);
     if (e.isDirectory()) walk(p, prefix);
-    else if (/\.(mjs|js|py|sh)$/.test(e.name)) {
+    else if (/\.(mjs|js|cjs|ts|py|sh)$/.test(e.name)) {
       const s = readFileSync(p, 'utf8');
       inventory[p] = { lines: s.split('\n').length, bytes: statSync(p).size };
     }
@@ -137,7 +145,15 @@ const sbom = {
 write('reports/sbom.cdx.json', JSON.stringify(sbom, null, 2) + '\n');
 
 // ---- 6. VERIFICATION.md + summary from the live ledger ----
-run('python3', ['scripts/traceability.py']);
+// --check-only must not rewrite the tree it verifies: traceability runs
+// its verify-only mode and reports the diffs as stale rather than
+// silently repairing them (w23-supply F7).
+const trace = run('python3', ['scripts/traceability.py', ...(checkOnly ? ['--check'] : [])]);
+if (checkOnly) {
+  const traced = (trace.stdout ?? '').trim().split('\n').filter(l => l.startsWith('STALE:'));
+  for (const l of traced) stale.push(l.slice(6));
+  if (trace.status !== 0 && !traced.length) { console.error(trace.stderr ?? trace.stdout); process.exitCode = 1; }
+}
 const ledgerSummary = existsSync('reports/requirements-summary.json') ? JSON.parse(readFileSync('reports/requirements-summary.json', 'utf8')) : null;
 const statusCounts = ledgerSummary?.status_counts ?? {}, total = ledgerSummary?.total_requirements ?? 0;
 const sims = existsSync('reports/simulation-results.json') ? JSON.parse(readFileSync('reports/simulation-results.json', 'utf8')).scenarios?.length : null;

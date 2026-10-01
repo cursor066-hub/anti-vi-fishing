@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
-"""Map every numbered SRS requirement, including unimplemented/external gaps."""
-import csv, json, re, pathlib, collections
+"""Map every numbered SRS requirement, including unimplemented/external gaps.
+
+--check mode: compute the same outputs and report files that differ from the
+committed tree as `STALE: <path>` lines, exiting 1 — a verify-only sibling
+that never rewrites the tree it is checking (w23-supply F7).
+"""
+import csv, io, json, re, sys, pathlib, collections
 root = pathlib.Path(__file__).resolve().parents[1]
+check_only = '--check' in sys.argv[1:]
 source = (root / 'spec/Invariant_Fabric_SRS_and_System_Architecture.md').read_text()
 rows = []
 for line in source.splitlines():
@@ -60,19 +66,27 @@ by_prefix = {
 }
 tests = sorted((root/'tests').glob('*.test.mjs'), key=lambda p: p.name) + [root/'scripts/simulate.mjs', root/'scripts/ai-eval.mjs']
 # A citation must name the requirement inside a real test() block that also
-# asserts — an ID sitting in a comment alone cannot mint evidence
-# (w11-ledger F3). Script harnesses (simulate/ai-eval) are executable
-# scenarios cited by file, so their whole text counts.
+# runs a real assertion CALL EXPRESSION. Comments are stripped first, so an
+# ID or the word 'assert' sitting in a comment cannot mint evidence —
+# and a bare identifier or string mention is not an assertion either
+# (w11-ledger F3, w23-supply F9). Block comments and whole-line //
+# comments are removed; `//` inside string literals like 'https://x' is
+# left alone by requiring whitespace or line-start before the marker.
+def _strip_comments(text):
+    text = re.sub(r'/\*.*?\*/', '', text, flags=re.S)
+    # `//` preceded by : or a word char is inside a string/URL — not a comment.
+    return re.sub(r'(?m)(?<![:/\w])//[^\n]*', '', text)
+_ASSERT_CALL = re.compile(r'\b(?:assert(?:\.\w+)?|requireThat|hasCode|throws|rejects|doesNotThrow|strictEqual|deepStrictEqual|expect)\s*\(')
 def evidence_blocks(path):
     text = path.read_text()
     if not path.name.endswith('.test.mjs'):
         return [text]
-    return re.split(r'(?m)^test\(', text)[1:]
+    return [_strip_comments(b) for b in re.split(r'(?m)^test\(', text)[1:]]
 for row in rows:
     prefix = row['id'].rsplit('-', 1)[0]
     owner, baseline, implementation, limitation = by_prefix[prefix]
     matches = [str(p.relative_to(root)) for p in tests
-               if any(row['id'] in b and ('assert' in b or 'requireThat' in b or 'hasCode' in b or 'throws' in b or not p.name.endswith('.test.mjs')) for b in evidence_blocks(p))]
+               if any(row['id'] in b and (_ASSERT_CALL.search(b) or not p.name.endswith('.test.mjs')) for b in evidence_blocks(p))]
     # Evidence lists only the files that literally name the requirement —
     # corpus-level artifacts would be boilerplate on every row (w6-ledger S3).
     status = 'VERIFIED_IN_ENGINEERING_PROFILE' if row['id'] in verified else 'NOT_IMPLEMENTED' if row['id'] in not_implemented else 'BLOCKED_EXTERNAL' if row['id'] in external else 'PARTIAL'
@@ -80,10 +94,25 @@ for row in rows:
     # method must not read as if the requirement itself passed (w9-srs F17).
     method = 'Automated test / simulation' if matches and status in ('VERIFIED_IN_ENGINEERING_PROFILE', 'PARTIAL') else ('Automated test covers rejection legs only; the required capability is absent' if matches else 'Source inspection / analysis; external acceptance still required')
     row.update(status=status, owner_role=owner, named_owner='Not assigned; required before production', release_baseline=baseline, verification_method=method, implementation=implementation, stored_evidence='; '.join(matches) if matches else 'docs/PRODUCTION-ACCEPTANCE.md', limitations=limitation, production_acceptance='NOT_APPROVED')
-(root/'docs').mkdir(exist_ok=True)
-with (root/'docs/requirements.csv').open('w', newline='') as file:
-    writer = csv.DictWriter(file, fieldnames=list(rows[0]), lineterminator="\n"); writer.writeheader(); writer.writerows(rows)
+buf = io.StringIO()
+writer = csv.DictWriter(buf, fieldnames=list(rows[0]), lineterminator="\n"); writer.writeheader(); writer.writerows(rows)
+csv_text = buf.getvalue()
 summary = {'total_requirements':len(rows),'functional_requirements':sum(not r['id'].startswith('NFR-') for r in rows),'nonfunctional_requirements':sum(r['id'].startswith('NFR-') for r in rows),'status_counts':dict(collections.Counter(r['status'] for r in rows)), 'production_ready':False, 'interpretation':'Verified means directly exercised in the declared engineering profile only, not closure of external/production acceptance. Counts are not product completion percentages.'}
-(root/'reports/requirements-summary.json').write_text(json.dumps(summary, indent=2)+'\n')
-(root/'docs/REQUIREMENTS.md').write_text('# Requirements traceability\n\nAll **211** numbered rows in the supplied SRS are preserved in `requirements.csv`: **166 functional** and **45 non-functional**. No missing requirements were silently removed or treated as optional. Original source language, minimum acceptance, evidence method, accountable role, baseline and current gap are recorded. Named human owners remain unassigned, which itself prevents production acceptance.\n\n`VERIFIED_IN_ENGINEERING_PROFILE` means the narrow software behavior was exercised, not that the full real-system or hardware claim is satisfied. `PARTIAL` means relevant code or analysis exists but material acceptance remains. `NOT_IMPLEMENTED` explicitly identifies functionality absent from the build. `BLOCKED_EXTERNAL` identifies absent hardware, customer resources or independent/organisational evidence. No row is marked production-approved.\n\nThe trace references tests by requirement IDs and source modules. Reports are stored under `reports/`. Some tests exercise only the safe-rejection side of a requirement (for example rejecting software signatures under hardware-required policy); that does **not** implement the missing hardware path.\n\nStatus counts: '+json.dumps(summary['status_counts'])+'.\n')
+summary_text = json.dumps(summary, indent=2)+'\n'
+req_md = '# Requirements traceability\n\nAll **211** numbered rows in the supplied SRS are preserved in `requirements.csv`: **166 functional** and **45 non-functional**. No missing requirements were silently removed or treated as optional. Original source language, minimum acceptance, evidence method, accountable role, baseline and current gap are recorded. Named human owners remain unassigned, which itself prevents production acceptance.\n\n`VERIFIED_IN_ENGINEERING_PROFILE` means the narrow software behavior was exercised, not that the full real-system or hardware claim is satisfied. `PARTIAL` means relevant code or analysis exists but material acceptance remains. `NOT_IMPLEMENTED` explicitly identifies functionality absent from the build. `BLOCKED_EXTERNAL` identifies absent hardware, customer resources or independent/organisational evidence. No row is marked production-approved.\n\nThe trace references tests by requirement IDs and source modules. Reports are stored under `reports/`. Some tests exercise only the safe-rejection side of a requirement (for example rejecting software signatures under hardware-required policy); that does **not** implement the missing hardware path.\n\nStatus counts: '+json.dumps(summary['status_counts'])+'.\n'
+outputs = {'docs/requirements.csv': csv_text, 'reports/requirements-summary.json': summary_text, 'docs/REQUIREMENTS.md': req_md}
+if check_only:
+    stale = []
+    for rel, content in outputs.items():
+        p = root / rel
+        if not p.exists() or p.read_text() != content:
+            stale.append(rel)
+    for rel in stale:
+        print(f'STALE:{rel}')
+    if stale:
+        sys.exit(1)
+else:
+    (root/'docs').mkdir(exist_ok=True)
+    for rel, content in outputs.items():
+        (root / rel).write_text(content)
 print(json.dumps(summary))

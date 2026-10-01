@@ -7,7 +7,7 @@
 // Key material is NEVER read from the repository: --key points at a PEM the
 // release operator holds (KMS-wrapped in production). --generate-fixture-key
 // exists for tests and CI roundtrips only.
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { signed, generateKey } from '../src/crypto.mjs';
@@ -15,7 +15,9 @@ import { derivePublic } from '../src/keystore.mjs';
 import { digest } from '../src/canonical.mjs';
 
 process.chdir(new URL('..', import.meta.url).pathname);
-const arg = (name) => { const i = process.argv.indexOf(`--${name}`); return i >= 0 ? process.argv[i + 1] : undefined; };
+// A flag is never a value: `--key --out` must fail, not read '--out' as the
+// key path — same guard src/cli.mjs enforces (w23-supply F14).
+const arg = (name) => { const i = process.argv.indexOf(`--${name}`); if (i < 0) return undefined; const v = process.argv[i + 1]; return v !== undefined && !String(v).startsWith('--') ? v : undefined; };
 const has = (name) => process.argv.includes(`--${name}`);
 
 // Test-only conveniences are unreachable in a production invocation: key
@@ -44,6 +46,9 @@ if (!keyPath || !publicPath) {
   console.error('   or: node scripts/release-sign.mjs --generate-fixture-key [dir] [--suite ...]');
   process.exit(2);
 }
+// The release signer is the highest-value key operation in the repo — it
+// enforces the same 0600 custody rule cli.mjs sign does (w23-supply F14).
+if (existsSync(keyPath) && (statSync(keyPath).mode & 0o077) !== 0) { console.error('signing key file permissions must be 0600'); process.exit(1); }
 
 const head = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' });
 const manifestRaw = existsSync('MANIFEST.sha256') ? readFileSync('MANIFEST.sha256', 'utf8') : '';

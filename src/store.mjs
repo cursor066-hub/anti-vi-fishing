@@ -128,6 +128,13 @@ export class Store {
       // usage rows legitimately accumulate cost via ON CONFLICT UPDATE —
       // only row deletion is forbidden (billing falsification).
       ['no_usage_delete', "CREATE TRIGGER no_usage_delete BEFORE DELETE ON usage BEGIN SELECT RAISE(ABORT, 'append-only usage'); END", 'append-only usage'],
+      // A file-writer can still UPDATE usage: lowering cost erases spend
+      // (budget re-use = billing falsification), rewinding `at` shrinks the
+      // window queries bill against, and rewriting the identity columns
+      // moves a receipt to another subject/capability/request. The one
+      // legitimate update is the accumulate path — cost only ever grows
+      // and `at` only moves forward (w23 W23-07).
+      ['no_usage_rewind', "CREATE TRIGGER no_usage_rewind BEFORE UPDATE ON usage WHEN NEW.cost < OLD.cost OR NEW.at < OLD.at OR NEW.tenant <> OLD.tenant OR NEW.subject <> OLD.subject OR NEW.resource <> OLD.resource OR NEW.capability <> OLD.capability OR NEW.request <> OLD.request BEGIN SELECT RAISE(ABORT, 'usage is monotone'); END", 'usage is monotone'],
     ];
     const norm = s => (s ?? '').replace(/\s+/g, ' ').trim();
     for (const [name, sql] of guards) this.db.exec(`CREATE TRIGGER IF NOT EXISTS ${sql.slice('CREATE TRIGGER '.length)}`);
@@ -173,6 +180,7 @@ export class Store {
       requireThat(probe(() => { ins(); this.db.prepare(`DELETE FROM ${table} WHERE tenant=?`).run(pt); }, msg), 'INV-503-STORAGE', `${table} append-only DELETE trigger not enforced`, 503);
     }
     requireThat(probe(() => { this.db.prepare('INSERT INTO usage VALUES(?,?,?,?,?,?,?)').run(pt, 's', 'r', 0, 0, 'c', 'q'); this.db.prepare('DELETE FROM usage WHERE tenant=?').run(pt); }, 'append-only usage'), 'INV-503-STORAGE', 'usage append-only DELETE trigger not enforced', 503);
+    requireThat(probe(() => { this.db.prepare('INSERT INTO usage VALUES(?,?,?,?,?,?,?)').run(pt, 's', 'r', 100, 5, 'c', 'q'); this.db.prepare('UPDATE usage SET cost=? WHERE tenant=?').run(4, pt); }, 'usage is monotone'), 'INV-503-STORAGE', 'usage monotone UPDATE trigger not enforced', 503);
     // INSERT OR IGNORE seeds when absent without firing the delete guard on
     // an existing row; `last=last-1` is a backward write on any live value.
     requireThat(probe(() => { this.db.prepare('INSERT OR IGNORE INTO clock VALUES(1,100)').run(); this.db.prepare('DELETE FROM clock WHERE id=1').run(); }, 'clock is monotone'), 'INV-503-STORAGE', 'clock delete trigger not enforced', 503);
@@ -187,9 +195,25 @@ export class Store {
     // attested time — UNLESS the chain itself carries a CLOCK_RECOVERED
     // entry attesting the rewound value (recoverClock's honest backward
     // step). Seed both anchors here; audit() keeps them current.
-    const newestRow = this.db.prepare('SELECT envelope FROM audit ORDER BY rowid DESC LIMIT 1').get();
+    // The floor seeds from the newest VERIFIABLE row, never the newest
+    // row: a file-writer appending a well-formed unsigned tail entry
+    // (the seq trigger admits MAX+1) would otherwise plant a far-future
+    // floor and wedge every subsequent write — or, walked back past, a
+    // LOW floor that hides a rewind (w23 W23-02). Up to 64 tail rows are
+    // tried; a tail with no verifiable entry at all is tamper evidence
+    // that bricks the open rather than silently seeding zero.
     this._chainFloor = 0; this._lastRecoveredAt = null;
-    try { this._chainFloor = JSON.parse(newestRow?.envelope ?? 'null')?.payload?.time ?? 0; } catch { /* unparseable head is read-path tamper evidence */ }
+    let floorSeeded = false;
+    for (const row of this.db.prepare('SELECT tenant,envelope FROM audit ORDER BY rowid DESC LIMIT 64').all()) {
+      try {
+        const env = JSON.parse(row.envelope);
+        const signer = this._signer(row.tenant), pub = signer.keys ? signer.keys() : { [signer.key_id]: { public_key: signer.public_key } };
+        verifySigned(env, pub, 'audit');
+        const t = env?.payload?.time;
+        if (typeof t === 'number' && Number.isFinite(t)) { this._chainFloor = t; floorSeeded = true; break; }
+      } catch { /* forged or unverifiable tail row — keep walking back */ }
+    }
+    requireThat(floorSeeded || this.db.prepare('SELECT COUNT(*) n FROM audit').get().n === 0, 'INV-409-AUDIT-TAMPER', 'Audit tail carries no verifiable entry — ledger tamper', 409);
     for (const row of this.db.prepare("SELECT tenant,envelope FROM audit WHERE envelope LIKE '%\"type\":\"CLOCK_RECOVERED\"%' ORDER BY rowid DESC LIMIT 8").all()) {
       try {
         const env = JSON.parse(row.envelope);
@@ -305,8 +329,10 @@ export class Store {
       this.db.exec('COMMIT');
       // Legacy ciphertext physically lingers in the WAL until a checkpoint
       // — truncate now so the dead form cannot be revived (w19-aad W19-3).
-      let migrated = 0; for (const s of stats.values()) migrated += s.migrated;
-      if (migrated > 0) { this._shredded = true; this.checkpoint(); }
+      // Transplants count too: a detected graft reverts the donor row's
+      // bytes, and those writes deserve the same WAL hygiene (w23 W23-10).
+      let touched = 0; for (const s of stats.values()) touched += s.migrated + (s.transplants ?? 0);
+      if (touched > 0) { this._shredded = true; this.checkpoint(); }
     } catch (e) {
       if (this.db.isTransaction) this.db.exec('ROLLBACK');
       // The migration's BEGIN IMMEDIATE is a writer too — a lost
@@ -336,7 +362,15 @@ export class Store {
         this.db.exec(`RELEASE ${sp}`);
         anchorsPop();
         return result;
-      } catch (e) { this.db.exec(`ROLLBACK TO ${sp}; RELEASE ${sp}`); anchorsRollback(); throw e; }
+      } catch (e) {
+        // The rollback itself may fault (release on an auto-rolled-back
+        // savepoint, contention mid-rollback) — the original error still
+        // surfaces, the anchors still restore, or the detector stays
+        // pinned to a phantom floor for the process's life (w23 W23-06).
+        try { this.db.exec(`ROLLBACK TO ${sp}; RELEASE ${sp}`); } catch (rb) { e.rollback_error = rb?.message ?? String(rb); }
+        anchorsRollback();
+        throw e;
+      }
     }
     try {
       this.db.exec('BEGIN IMMEDIATE');
@@ -454,6 +488,35 @@ export class Store {
       if (!r.busy && r.checkpointed >= r.log) this._shredded = false;
     } catch { /* contention: flag stays armed */ }
   }
+  // Re-read the chain tail when the in-memory anchors are about to fail a
+  // legality check. The anchors are per-instance caches seeded at open —
+  // a peer instance's appends (entries, and CLOCK_RECOVERED above all)
+  // move the true floor forward and attest rewinds this instance never
+  // saw. Called only on the would-fail path so the common write costs no
+  // extra scan (w23 W23-03).
+  _refreshChainAnchors() {
+    const newest = this.db.prepare('SELECT tenant,envelope FROM audit ORDER BY rowid DESC LIMIT 1').get();
+    if (newest && newest.envelope !== this._anchorScanned) {
+      this._anchorScanned = newest.envelope;
+      try {
+        const env = JSON.parse(newest.envelope);
+        const signer = this._signer(newest.tenant), pub = signer.keys ? signer.keys() : { [signer.key_id]: { public_key: signer.public_key } };
+        verifySigned(env, pub, 'audit');
+        if (typeof env?.payload?.time === 'number' && Number.isFinite(env.payload.time) && env.payload.time > (this._chainFloor ?? 0)) this._chainFloor = env.payload.time;
+      } catch { /* unverifiable head — floor holds its last attested value */ }
+    }
+    for (const row of this.db.prepare("SELECT tenant,envelope FROM audit WHERE envelope LIKE '%\"type\":\"CLOCK_RECOVERED\"%' ORDER BY rowid DESC LIMIT 8").all()) {
+      try {
+        const env = JSON.parse(row.envelope);
+        if (env?.payload?.type !== 'CLOCK_RECOVERED') continue;
+        const signer = this._signer(row.tenant), pub = signer.keys ? signer.keys() : { [signer.key_id]: { public_key: signer.public_key } };
+        verifySigned(env, pub, 'audit');
+        const at = env.payload.metadata?.recovered_at;
+        if (typeof at === 'number' && (this._lastRecoveredAt === null || at > this._lastRecoveredAt)) this._lastRecoveredAt = at;
+        break; // newest verified recovery wins, same as at open
+      } catch { /* tampered candidate — skip to an older verified one */ }
+    }
+  }
   clock(now, { recovery = false, recoveryPath = false } = {}) {
     requireThat(Number.isSafeInteger(now) && now > 0, 'INV-503-TIME', 'Clock unavailable', 503);
     const row = this.db.prepare('SELECT last FROM clock WHERE id=1').get();
@@ -461,15 +524,26 @@ export class Store {
     // run during a halted clock — they may not advance the row forward nor
     // rewind it: the detector stays at its honest high-water mark while the
     // op's audit entry lands at chain-floor time (w22-fixverify F1).
+    // Anchors are per-instance caches: a peer's appended CLOCK_RECOVERED
+    // must become visible without a restart, and the floor must track the
+    // peer's committed head — the memory check is authoritative only when
+    // it PASSES; a would-be failure re-reads the chain first (w23 W23-03).
+    const floorLegal = v => v >= (this._chainFloor ?? 0) || (this._lastRecoveredAt !== null && v >= this._lastRecoveredAt);
     if (recoveryPath && row && now < row.last) {
-      requireThat(row.last >= (this._chainFloor ?? 0) || (this._lastRecoveredAt !== null && row.last >= this._lastRecoveredAt), 'INV-409-AUDIT-TAMPER', 'Clock floor rewound below attested chain time', 409);
+      if (!floorLegal(row.last)) { this._refreshChainAnchors(); requireThat(floorLegal(row.last), 'INV-409-AUDIT-TAMPER', 'Clock floor rewound below attested chain time', 409); }
       return now;
     }
     requireThat(recovery || !row || now >= row.last, 'INV-503-TIME', 'Clock regression; security operations halted', 503);
     // Anchored floor: `last` sitting below the chain's attested time is
     // legal only inside the span an on-chain CLOCK_RECOVERED attested —
     // anything deeper is a file-writer's silent rewind (w22-fixverify F1).
-    requireThat(!row || row.last >= (this._chainFloor ?? 0) || (this._lastRecoveredAt !== null && row.last >= this._lastRecoveredAt), 'INV-409-AUDIT-TAMPER', 'Clock floor rewound below attested chain time', 409);
+    // The recovery path itself must not dead-end on the rewound state it
+    // exists to repair: a below-floor row may move FORWARD here because
+    // the same transaction lands the attesting CLOCK_RECOVERED (w23 W23-04).
+    if (row && !floorLegal(row.last)) {
+      this._refreshChainAnchors();
+      requireThat(floorLegal(row.last) || (recovery && now >= row.last), 'INV-409-AUDIT-TAMPER', 'Clock floor rewound below attested chain time', 409);
+    }
     // Recovery writes the operator-asserted host time: `last` is the
     // regression detector, not the time source — expiry is evaluated
     // against host time either way, and an over-high `last` would wedge
@@ -507,20 +581,17 @@ export class Store {
     // explains any backward clock discontinuity (w22-fixverify F1). The
     // floor compare below must use the pre-entry value — `last` trails the
     // committed chain, it is not required to pre-empt the in-flight entry.
+    // Side effects are post-insert: committing the anchor/ratchet bumps
+    // BEFORE the fallible sign+insert would leave a phantom floor
+    // outliving the aborted write (w23 W23-05).
     const floorBefore = this._chainFloor ?? 0;
-    if (entry.time > floorBefore) this._chainFloor = entry.time;
-    if (type === 'CLOCK_RECOVERED') this._lastRecoveredAt = entry.metadata?.recovered_at ?? this._lastRecoveredAt;
-    // Every committed write ratchets the detector to its own host time —
-    // bypass paths (denial audit, drift flags, snapshots) commit entries
-    // outside transaction()'s clock() call, and `last` trailing the chain
-    // with no attested recovery is what makes a file-writer's rewind
-    // detectable instead of invisible (w22-fixverify F1). MAX keeps the
-    // honest high-water during a halted or recovered span; the legality
-    // assert runs on the pre-write row so the ratchet itself can never
-    // launder a rewind.
+    // The crow legality check honours the IN-FLIGHT attestation: an
+    // honest backward recovery writes `last` below the floor and lands
+    // its explaining CLOCK_RECOVERED right here — refusing would wedge
+    // the repair path on the state it exists to fix (w23 W23-04).
+    const recoveredBefore = type === 'CLOCK_RECOVERED' ? (entry.metadata?.recovered_at ?? this._lastRecoveredAt) : this._lastRecoveredAt;
     const crow = this.db.prepare('SELECT last FROM clock WHERE id=1').get();
-    requireThat(!crow || crow.last >= floorBefore || (this._lastRecoveredAt !== null && crow.last >= this._lastRecoveredAt), 'INV-409-AUDIT-TAMPER', 'Clock floor rewound below attested chain time', 409);
-    this.db.prepare('INSERT INTO clock VALUES(1,?) ON CONFLICT(id) DO UPDATE SET last=MAX(clock.last, excluded.last)').run(now);
+    requireThat(!crow || crow.last >= floorBefore || (recoveredBefore !== null && crow.last >= recoveredBefore), 'INV-409-AUDIT-TAMPER', 'Clock floor rewound below attested chain time', 409);
     // Hash what is actually attested: the signer may add a bound marker (the
     // recovery_signing annotation when a pending successor signs after a
     // key-revoke — w11-lifecycle F2), so the row digest binds the envelope's
@@ -541,13 +612,46 @@ export class Store {
     }
     const envelope = signer.sign(entry);
     const hash = digest(envelope.payload);
-    this.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run(tenant, entry.sequence, entry.previous, hash, canonical(envelope));
+    try {
+      this.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run(tenant, entry.sequence, entry.previous, hash, canonical(envelope));
+    } catch (e) {
+      // A peer instance appending between our head-read and this insert
+      // trips the seq guard — that is a retryable conflict, not tamper
+      // and not raw sqlite internals leaking to callers (w23 W23-09).
+      // errcode 517 = SQLITE_BUSY_SNAPSHOT: a deferred reader's snapshot
+      // went stale under a peer write — same retry semantics as busy.
+      if (e?.errcode === 5 || e?.errcode === 6 || e?.errcode === 517 || /database .*locked|database is busy/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
+      if (/audit sequence must extend the head/.test(e?.message ?? '')) throw new InvariantError('INV-409-CONFLICT', 'Audit head moved during append; retry', 409);
+      throw e;
+    }
+    // Post-commit ordering: only a landed entry may move the anchors and
+    // ratchet the detector (w23 W23-05). Our own head is the newest
+    // verifiable row — mark it scanned so a later refresh skips it.
+    this._anchorScanned = canonical(envelope);
+    if (entry.time > floorBefore) this._chainFloor = entry.time;
+    if (type === 'CLOCK_RECOVERED') this._lastRecoveredAt = entry.metadata?.recovered_at ?? this._lastRecoveredAt;
+    // Every committed write ratchets the detector to its own host time —
+    // bypass paths (denial audit, drift flags, snapshots) commit entries
+    // outside transaction()'s clock() call, and `last` trailing the chain
+    // with no attested recovery is what makes a file-writer's rewind
+    // detectable instead of invisible (w22-fixverify F1). MAX keeps the
+    // honest high-water during a halted or recovered span; the legality
+    // assert runs on the pre-write row so the ratchet itself can never
+    // launder a rewind.
+    this.db.prepare('INSERT INTO clock VALUES(1,?) ON CONFLICT(id) DO UPDATE SET last=MAX(clock.last, excluded.last)').run(now);
     return { hash, envelope };
   }
   auditHashes(tenant) {
     return this.db.prepare('SELECT hash FROM audit WHERE tenant=? ORDER BY seq').all(tenant).map(r => r.hash);
   }
   auditPage(tenant, { after = 0, limit = 1000 } = {}) {
+    // Cursor hygiene: limit=0 would crash on rows.at(-1), a negative limit
+    // turns into an UNBOUNDED sqlite read (LIMIT -1 = no bound), and a
+    // negative cursor silently anchors wrong — classify all of it as a
+    // schema fault before the query runs. Any positive limit is honoured:
+    // the internal index fold legitimately pages through the entire chain
+    // (w23 W23-08).
+    requireThat(Number.isSafeInteger(after) && after >= 0 && Number.isSafeInteger(limit) && limit >= 1, 'INV-400-SCHEMA', 'Invalid audit cursor or limit', 400);
     const rows = this.db.prepare('SELECT seq,hash,envelope FROM audit WHERE tenant=? AND seq>? ORDER BY seq LIMIT ?').all(tenant, after, limit);
     const signer = this._signer(tenant), public_keys = signer.keys ? signer.keys() : { [signer.key_id]: { public_key: signer.public_key } };
     // Serving the log is a security surface: re-verify each row's stored

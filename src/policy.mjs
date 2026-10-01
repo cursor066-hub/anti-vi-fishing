@@ -1,5 +1,5 @@
 import { digest, clone } from './canonical.mjs';
-import { fields, integer, uniqueStrings, oneOf, text } from './schema.mjs';
+import { fields, integer, uniqueStrings, oneOf, text, identifier } from './schema.mjs';
 import { requireThat } from './errors.mjs';
 
 export function defaultPolicy(tenant) {
@@ -119,12 +119,15 @@ export function validatePolicy(p) {
   uniqueStrings(r.allowed_transforms, 'transforms', 8);
   for (const op of r.allowed_transforms) oneOf(op, ['mask', 'tokenise', 'drop', 'constant', 'aggregate'], 'transform');
   // Fail modes (RUN-005): every class resolves to a documented mode.
-  for (const [k, v] of Object.entries(p.fail_modes)) oneOf(v, ['closed', 'cached-allow', 'constrained'], `fail mode ${k}`);
+  for (const [k, v] of Object.entries(p.fail_modes)) { requireThat(k === 'default' || ['data.read', 'service.connect'].includes(k), 'INV-400-SCHEMA', `Unknown consume class in fail_modes: ${k}`); oneOf(v, ['closed', 'cached-allow', 'constrained'], `fail mode ${k}`); }
   requireThat(p.fail_modes.default === 'closed', 'INV-451-POLICY', 'Default failure mode must be fail-closed', 451);
   integer(p.max_stale_ms, 'stale policy window', 0, 3600000);
   if (p.stale_ms !== undefined) {
     requireThat(typeof p.stale_ms === 'object' && p.stale_ms !== null && !Array.isArray(p.stale_ms), 'INV-400-SCHEMA', 'stale_ms must be a class→ms map');
-    for (const [k, v] of Object.entries(p.stale_ms)) integer(v, `stale window ${k}`, 0, 3600000);
+    // Keys are consume-class vocabulary — an exotic lookalike key
+    // (U+2024, Cyrillic twin, empty string) validates into a dead ceiling
+    // that never binds (w23-policy F8).
+    for (const [k, v] of Object.entries(p.stale_ms)) { requireThat(k === 'default' || ['data.read', 'service.connect'].includes(k), 'INV-400-SCHEMA', `Unknown consume class in stale_ms: ${k}`); integer(v, `stale window ${k}`, 0, 3600000); }
   }
   fields(p.staged_policy, ['min_delay_ms', 'emergency_extra_custodians', 'emergency_max_ttl_ms']);
   integer(p.staged_policy.min_delay_ms, 'staged delay', 0, 604800000); integer(p.staged_policy.emergency_extra_custodians, 'emergency custodians', 0, 5); integer(p.staged_policy.emergency_max_ttl_ms, 'emergency ttl', 1000, 2592000000);
@@ -137,7 +140,7 @@ export function validatePolicy(p) {
   if (p.retention !== undefined) {
     fields(p.retention, ['default_ms', 'per_kind'], ['per_action']);
     integer(p.retention.default_ms, 'default retention', 60000, 3153600000000);
-    for (const [k, v] of Object.entries(p.retention.per_kind ?? {})) { text(k, 'retention kind', 128); integer(v, `retention ${k}`, 0, 3153600000000); }
+    for (const [k, v] of Object.entries(p.retention.per_kind ?? {})) { identifier(k, 'retention kind'); integer(v, `retention ${k}`, 0, 3153600000000); }
     // Action-class ceilings key on declared action types — a typo'd class
     // silently fails to bind (w22-ledger AUD-006).
     for (const [k, v] of Object.entries(p.retention.per_action ?? {})) { requireThat(Object.hasOwn(p.rules, k), 'INV-400-SCHEMA', `Unknown action class in retention ceiling: ${k}`); integer(v, `retention action ${k}`, 0, 3153600000000); }
@@ -162,6 +165,10 @@ export function emergencyWeakening(base, next, now = 0) {
   const subset = (a, b) => a.every(x => b.includes(x));
   const superset = (a, b) => b.every(x => a.includes(x));
   if (next.mode !== base.mode) return 'mode';
+  // The constitution's identity is bound across versions — a successor
+  // may not renumber the policy_id the lineage's audit trail references
+  // (w23-policy F11).
+  if (next.policy_id !== base.policy_id) return 'policy_id';
   // Extending the horizon weakens a LIVE base; a base that already expired
   // cannot be weakened by its succession — resetting expiry is required.
   if (base.expires_at > now && next.expires_at > base.expires_at) return 'expires_at';
@@ -170,8 +177,18 @@ export function emergencyWeakening(base, next, now = 0) {
   if (next.capability_ttl_ms > base.capability_ttl_ms) return 'capability_ttl_ms';
   if (next.max_stale_ms > base.max_stale_ms) return 'max_stale_ms';
   for (const [k, v] of Object.entries(next.stale_ms ?? {})) if (v > ((base.stale_ms ?? {})[k] ?? base.max_stale_ms)) return `stale_ms.${k}`;
+  // A dropped class key reverts to the looser fallback — deleting a
+  // declared ceiling weakens it exactly like raising it (w23-policy F2).
+  for (const [k, v] of Object.entries(base.stale_ms ?? {})) {
+    if (Object.hasOwn(next.stale_ms ?? {}, k)) continue;
+    const fallback = (next.stale_ms ?? {}).default ?? next.max_stale_ms;
+    if (fallback > v) return `stale_ms.${k}`;
+  }
   const permissiveness = { closed: 0, constrained: 1, 'cached-allow': 2 };
-  for (const [k, v] of Object.entries(next.fail_modes)) if ((permissiveness[v] ?? -1) > (permissiveness[base.fail_modes[k]] ?? -1)) return `fail_modes.${k}`;
+  // A class the base never declared compares against the base's default
+  // mode — adding an explicit 'closed' key is strictly additive, not a
+  // weakening (w23-policy F10).
+  for (const [k, v] of Object.entries(next.fail_modes)) if ((permissiveness[v] ?? -1) > (permissiveness[base.fail_modes[k] ?? base.fail_modes.default] ?? -1)) return `fail_modes.${k}`;
   for (const [t, r] of Object.entries(next.rules)) {
     const b = base.rules[t]; if (!b) continue;
     if (r.approval_threshold < b.approval_threshold + extra) return `${t}.approval_threshold`;
@@ -179,7 +196,16 @@ export function emergencyWeakening(base, next, now = 0) {
     if (!superset(r.evidence_kinds, b.evidence_kinds)) return `${t}.evidence_kinds`;
     if (r.cooldown_ms < b.cooldown_ms) return `${t}.cooldown_ms`;
     if (r.max_quantity > b.max_quantity) return `${t}.max_quantity`;
-    if (b.destinations.length && !subset(r.destinations, b.destinations)) return `${t}.destinations`;
+    // destinations is a presence-gated allowlist: an EMPTY list removes
+    // the gate entirely, so subset([], base) reading 'stricter' inverts
+    // the comparison (w23-policy F5).
+    if (b.destinations.length && (!r.destinations.length || !subset(r.destinations, b.destinations))) return `${t}.destinations`;
+    // identity_classes/min_proofing are presence-gated admission
+    // restrictions — dropping or widening them silently re-admits actors
+    // the base refused (w23-policy F3).
+    if (b.identity_classes !== undefined && (r.identity_classes === undefined || !subset(r.identity_classes, b.identity_classes))) return `${t}.identity_classes`;
+    const PROOF_RANK = { low: 0, medium: 1, high: 2 };
+    if (b.min_proofing !== undefined && (r.min_proofing === undefined || PROOF_RANK[r.min_proofing] < PROOF_RANK[b.min_proofing])) return `${t}.min_proofing`;
     if (!superset(r.forbidden_fields, b.forbidden_fields)) return `${t}.forbidden_fields`;
     if (b.require_hardware && !r.require_hardware) return `${t}.require_hardware`;
     if (b.approval_role === 'custodian' && r.approval_role !== 'custodian') return `${t}.approval_role`;
@@ -228,6 +254,19 @@ export function emergencyWeakening(base, next, now = 0) {
   if (bs.release_fields !== '*' && ns.release_fields !== '*' && !subset(ns.release_fields, bs.release_fields)) return 'secure_perception.release_fields';
   if (bs.release_fields !== '*' && ns.release_fields === '*') return 'secure_perception.release_fields';
   if (!subset(ns.allowed_firmware, bs.allowed_firmware)) return 'secure_perception.allowed_firmware';
+  // The attestation pin may neither rotate silently nor drop — a pin
+  // change re-opens replayed/cross-machine attestation payloads
+  // (w23-policy F4).
+  if ((bs.nonce ?? null) !== (ns.nonce ?? null)) return 'secure_perception.nonce';
+  // AUD-006: retention ceilings are enforcement dimensions — dropping the
+  // block removes the envelope expiry ceiling entirely, and no declared
+  // ceiling may grow (w23-policy F1/F6).
+  if (base.retention !== undefined) {
+    if (next.retention === undefined) return 'retention';
+    if (next.retention.default_ms > base.retention.default_ms) return 'retention.default_ms';
+    for (const [k, v] of Object.entries(base.retention.per_kind ?? {})) if ((next.retention.per_kind?.[k] ?? next.retention.default_ms) > v) return `retention.per_kind.${k}`;
+    for (const [k, v] of Object.entries(base.retention.per_action ?? {})) if ((next.retention.per_action?.[k] ?? next.retention.default_ms) > v) return `retention.per_action.${k}`;
+  }
   if (!subset(next.algorithms.allowed_suites, base.algorithms.allowed_suites)) return 'algorithms.allowed_suites';
   return null;
 }
@@ -255,9 +294,17 @@ export function evaluatePolicy({ capsule, policy, evidence = [], approvals = [],
     // never consume a certificate post-mutation.
     if (candidate.expires_at <= now) return result('DENY', [reason('SUCCESSOR_EXPIRED', 'Proposed policy is already expired at admission time.')]);
     if (candidate.not_before > now && candidate.not_before < now + policy.staged_policy.min_delay_ms) return result('DENY', [reason('STAGED_DELAY', `Staged activation must observe min_delay_ms (${policy.staged_policy.min_delay_ms}).`)]);
+    // A far-future not_before parks in the single staged slot for years
+    // and no in-band path can preempt it — bound the horizon so one
+    // amendment cannot wedge the constitution (w23-policy F7).
+    if (candidate.not_before > now + 2592000000) return result('DENY', [reason('STAGED_HORIZON', 'Staged activation must land within 30 days — a far-future not_before wedges the amendment slot.')]);
     // The governance brakes are constitutional floors: a successor may
     // tighten them but never weaken them (policy-audit F9).
     if (candidate.staged_policy.min_delay_ms < policy.staged_policy.min_delay_ms || candidate.staged_policy.emergency_extra_custodians < policy.staged_policy.emergency_extra_custodians || candidate.staged_policy.emergency_max_ttl_ms > policy.staged_policy.emergency_max_ttl_ms) return result('DENY', [reason('GOVERNANCE_FLOOR', 'staged_policy floors may not be lowered and emergency_max_ttl may not grow.')]);
+    // Every rule must leave headroom under the approval_threshold cap for
+    // the installed emergency surcharge — otherwise the emergency path is
+    // dead forever for this constitution (w23-policy F12).
+    for (const [t, r] of Object.entries(candidate.rules)) if (r.approval_threshold + candidate.staged_policy.emergency_extra_custodians > 5) return result('DENY', [reason('EMERGENCY_HEADROOM', `Rule ${t} leaves no approval headroom for the emergency surcharge (${r.approval_threshold}+${candidate.staged_policy.emergency_extra_custodians} > 5).`)]);
   }
   if (type === 'data.export') {
     const state = p.current_state.material_fields;

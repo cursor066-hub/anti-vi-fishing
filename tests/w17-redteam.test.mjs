@@ -215,10 +215,16 @@ test('w17-idx F4: clock regression wedges the fold, then seal + recoverClock rep
   // The fixture's bearer tokens legitimately resurrect in the rewound span —
   // the veto is honest (w22-http F6); the operator path is revoke-then-recover.
   assert.throws(() => h.f.recoverClock(h.p('security')), hasCode('INV-503-TIME'), 'an unrevoked resurrectable token must veto recovery');
-  // The veto scans EVERY tenant — the remediation must too.
-  for (const tenant of ['acme', 'globex'])
+  // The veto scans EVERY tenant — the remediation must too. The sweep
+  // covers tokens and device health alike: a device whose configured
+  // health lapsed inside the rewound span must be quarantined first,
+  // same as the tokens (w23 W23-01).
+  for (const tenant of ['acme', 'globex']) {
     for (const [hash, entry] of Object.entries(h.f.tenant(tenant).auth ?? {}))
       if (entry.expires_at > h.now() && entry.expires_at <= h.now() + 172800000) h.f.revoke(h.p('security', tenant), { kind: 'token', id: hash, reason: 'Clock rewind would resurrect it' });
+    for (const [, idn] of Object.entries(h.f.tenant(tenant).identities ?? {}))
+      if (!idn.revoked && idn.health_expires_at > h.now() && idn.health_expires_at <= h.now() + 172800000) h.f.revoke(h.p('security', tenant), { kind: 'device', id: idn.device_id, reason: 'Clock rewind would resurrect stale health evidence' });
+  }
   const recovery = h.f.recoverClock(h.p('security'));
   assert.ok(recovery.recovered_at, 'recovery is recorded, not silent');
 });

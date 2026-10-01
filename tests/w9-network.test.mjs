@@ -70,7 +70,7 @@ test('w9-network F3: a widened live policy cannot retro-extend a signed capabili
   // though the live constitution is newer (a store-level rewrite is
   // INV-409-INTEGRITY now, w11-redteam R4). A tightening change is enough:
   // what is under test is the snapshot pin, not the policy direction.
-  const widened = clone(h.f.policy('acme')); widened.version = 2; widened.policy_id = 'constitution:acme:v2'; widened.runtime.reconstruction = { ...widened.runtime.reconstruction, max_distinct_rows: 10 };
+  const widened = clone(h.f.policy('acme')); widened.version = 2; widened.runtime.reconstruction = { ...widened.runtime.reconstruction, max_distinct_rows: 10 };
   const r = h.proposed('policy.change', { policy: widened }, { action: { type: 'policy.change', target_resource: 'policy-root', purpose: 'Widen network' } });
   h.f.simulate(h.p('policy-admin'), widened); h.advance(120001);
   h.evidence(r, { kind: 'governance_review' }); h.evidence(r, { kind: 'governance_review', issuer: 'audit-committee' }); h.approve(r, 3);

@@ -966,9 +966,45 @@ export class Fabric {
               // capsule cannot resurrect, and a terminally-anchored one is
               // spent. Both facts live on the chain, not the mutable status.
               const certId = idx.issuedCert.get(id);
-              if (!certId || idx.outcomes.has(certId) || idx.reserved.has(certId)) continue;
+              if (certId && (idx.outcomes.has(certId) || idx.reserved.has(certId))) continue;
               requireThat(r.capsule.expires_at <= now || r.capsule.expires_at > prior, 'INV-503-TIME', 'Clock recovery would resurrect an expired action', 503);
+              // Approval envelopes inside an UNCERTIFIED live capsule carry
+              // a 5-minute expiry — one that lapsed inside the rewound span
+              // would silently re-count toward quorum. A certified
+              // capsule's approvals are already consumed, so resurrecting
+              // them changes nothing (w23 W23-01).
+              if (!certId) for (const a of r.approvals ?? [])
+                requireThat(!(typeof a?.payload?.expires_at === 'number' && a.payload.expires_at > now && a.payload.expires_at <= prior), 'INV-503-TIME', 'Clock recovery would resurrect an expired approval', 503);
             }
+            // Signed capabilities are bearer authority with an expiry — an
+            // un-revoked capability whose window lapsed inside the rewound
+            // span resurrects exactly like a certificate (w23 W23-01).
+            for (const id of idx.capabilities ?? []) {
+              if (this.revoked(tenant, 'capability', id)) continue;
+              // The stored row IS the signed envelope — expires_at lives
+              // on the payload directly.
+              const exp = this.store.get(tenant, 'capability', id)?.payload?.expires_at;
+              requireThat(!(typeof exp === 'number' && exp > now && exp <= prior), 'INV-503-TIME', 'Clock recovery would resurrect an expired capability', 503);
+            }
+            // JIT grants fold their expiry at anchor time — a grant that
+            // lapsed inside the rewound span revives inside the target's
+            // scope evaluator (w23 W23-01).
+            for (const [grantId, gm] of idx.grantMeta ?? [])
+              if (!this.revoked(tenant, 'grant', grantId))
+                requireThat(!(typeof gm.expires_at === 'number' && gm.expires_at > now && gm.expires_at <= prior), 'INV-503-TIME', 'Clock recovery would resurrect an expired grant', 503);
+            // Perception sessions carry anchored expiries — one that
+            // lapsed in the span would re-open its release/fallback paths
+            // (w23 W23-01).
+            for (const [, s] of idx.perceptionSessions ?? [])
+              requireThat(!(typeof s.expires_at === 'number' && s.expires_at > now && s.expires_at <= prior), 'INV-503-TIME', 'Clock recovery would resurrect an expired perception session', 503);
+            // Device health evidence gates privileged operations through
+            // assertHealthy — a configured expiry inside the rewound span
+            // resurrects the gate's pass state. Identities whose authority
+            // is already dead (revoked key, device or subject) cannot
+            // resurrect and never veto (w23 W23-01).
+            for (const [keyId, idn] of Object.entries(this.tenant(tenant).identities ?? {}))
+              if (!idn.revoked && !this.revoked(tenant, 'key', keyId) && !this.revoked(tenant, 'device', idn.device_id) && !this.revoked(tenant, 'subject', idn.subject_id))
+                requireThat(!(typeof idn.health_expires_at === 'number' && idn.health_expires_at > now && idn.health_expires_at <= prior), 'INV-503-TIME', 'Clock recovery would resurrect expired device health evidence', 503);
             // Bearer access tokens are authority too: an entry whose expiry
             // falls inside the rewound span would resurrect exactly like a
             // certificate. An already-revoked token cannot resurrect — the
@@ -1268,7 +1304,7 @@ export class Fabric {
   _auditIndex(t) {
     const maxSeq = this.store.db.prepare('SELECT COALESCE(MAX(seq),0) m FROM audit WHERE tenant=?').get(t).m;
     let idx = this.#auditIdx.get(t);
-    if (!idx) { idx = { maxSeq: 0, building: false, revoked: new Set(), attached: new Map(), proposedNonce: new Set(), proposedAt: new Map(), proposedDigest: new Map(), issued: new Set(), issuedCert: new Map(), issuedCerts: new Set(), grants: new Map(), grantMeta: new Map(), rotations: new Map(), rotationsByPrev: new Map(), rotationKeys: new Set(), policyAnchors: [], dataAccess: [], perceptionNonce: new Set(), reserved: new Set(), dispatched: new Map(), outcomes: new Map(), keyDeadAt: new Map(), parentChildren: new Map(), simulated: [], issuerDrift: new Set(), tenantDrifted: false, configSnapshot: null, decisions: new Map(), runtimeUse: [], runtimeUseByCap: new Map(), runtimeUseBySubject: new Map(), revocationDigests: new Map(), denials: [], denialsByReq: new Map(), ceremonyAcks: new Map(), ceremonyPlanned: new Map(), ceremonyCommitted: new Map(), ceremonyAborted: new Set(), ceremonyCompleted: new Set(), ceremonyNotices: new Map(), ceremonyRotationConsumed: new Map(), coverageAnchors: new Map(), coverageDeclared: new Map(), coverageTransitions: [], coverageValidations: [], perceptionSessions: new Map() }; this.#auditIdx.set(t, idx); }
+    if (!idx) { idx = { maxSeq: 0, building: false, revoked: new Set(), attached: new Map(), proposedNonce: new Set(), proposedAt: new Map(), proposedDigest: new Map(), issued: new Set(), issuedCert: new Map(), issuedCerts: new Set(), grants: new Map(), grantMeta: new Map(), rotations: new Map(), rotationsByPrev: new Map(), rotationKeys: new Set(), policyAnchors: [], dataAccess: [], perceptionNonce: new Set(), reserved: new Set(), reservedAt: new Map(), dispatched: new Map(), outcomes: new Map(), keyDeadAt: new Map(), parentChildren: new Map(), simulated: [], issuerDrift: new Set(), tenantDrifted: false, configSnapshot: null, decisions: new Map(), runtimeUse: [], runtimeUseByCap: new Map(), runtimeUseBySubject: new Map(), revocationDigests: new Map(), denials: [], denialsByReq: new Map(), ceremonyAcks: new Map(), ceremonyPlanned: new Map(), ceremonyCommitted: new Map(), ceremonyAborted: new Set(), ceremonyCompleted: new Set(), ceremonyNotices: new Map(), ceremonyRotationConsumed: new Map(), coverageAnchors: new Map(), coverageDeclared: new Map(), coverageTransitions: [], coverageValidations: [], perceptionSessions: new Map(), capabilities: new Set() }; this.#auditIdx.set(t, idx); }
     // Re-entrancy must fail closed: a nested caller handed the mid-fold
     // partial projection could observe anchors that the committed chain
     // never attested (w17-idx F9). Nothing inside the fold recurses
@@ -1364,6 +1400,7 @@ export class Fabric {
         case 'CAPSULE_PROPOSED': idx.proposedAt.set(pl.reference, pl.time); if (meta.nonce) idx.proposedNonce.add(meta.nonce); if (meta.capsule_digest) idx.proposedDigest.set(pl.reference, meta.capsule_digest); break;
         case 'CERTIFICATE_ISSUED': idx.issued.add(pl.reference); if (meta.certificate_id) { idx.issuedCert.set(pl.reference, meta.certificate_id); idx.issuedCerts.add(meta.certificate_id); } if (Array.isArray(meta.children)) idx.parentChildren.set(pl.reference, meta.children); break;
         case 'JIT_GRANT_ISSUED': idx.grants.set(meta.grant_id, meta.scope_digest ?? meta.grant_digest); if (meta.grant_id) idx.grantMeta.set(meta.grant_id, { expires_at: meta.expires_at, at: pl.time }); break;
+        case 'CAPABILITY_ISSUED': (idx.capabilities ??= new Set()).add(pl.reference); break;
         case 'POLICY_GENESIS': case 'POLICY_ACTIVATED': case 'EMERGENCY_POLICY_ACTIVATED': if (meta.policy_digest) idx.policyAnchors.push({ staged: false, digest: meta.policy_digest }); break;
         case 'POLICY_STAGED': if (meta.policy_digest) idx.policyAnchors.push({ staged: true, digest: meta.policy_digest, activate_at: meta.activate_at ?? null }); break;
         case 'POLICY_SIMULATED': if (meta.candidate_digest) idx.simulated.push({ candidate_digest: meta.candidate_digest, baseline_digest: meta.baseline_digest ?? null, at: pl.time }); break;
@@ -1378,12 +1415,17 @@ export class Fabric {
         case 'RUNTIME_ALLOWED': { const u = { capability: pl.reference, subject: pl.actor, resource: meta.resource ?? null, request_id: meta.request_id ?? null, cost: typeof meta.cost === 'number' ? meta.cost : 0, at: pl.time }; idx.runtimeUse.push(u); const cl = idx.runtimeUseByCap.get(u.capability) ?? []; cl.push(u); idx.runtimeUseByCap.set(u.capability, cl); const sl = idx.runtimeUseBySubject.get(u.subject) ?? []; sl.push(u); idx.runtimeUseBySubject.set(u.subject, sl); break; }
         case 'PERCEPTION_SESSION': if (meta.nonce) idx.perceptionNonce.add(meta.nonce); if (meta.channel_digest) idx.perceptionSessions.set(pl.reference, { creator: meta.creator ?? null, expires_at: meta.expires_at ?? null, channel_digest: meta.channel_digest, component: meta.component ?? null, signing_key_id: meta.signing_key_id ?? null }); break;
         case 'DATA_ACCESSED': idx.dataAccess.push({ subject: pl.reference, dataset: meta.dataset, row_ids: meta.row_ids ?? [], columns: meta.columns ?? [], at: meta.at ?? pl.time, certificate_id: meta.certificate_id ?? null }); break;
-        case 'EXECUTION_RESERVED': idx.reserved.add(pl.reference); break;
+        // The reservation's anchored time bounds the crash-gap window an
+        // honest EXECUTION_DISPATCHED can lose — an unanchored journal far
+        // outside it is tamper evidence, never a settleable FAILED
+        // (w23-fixverify F-a).
+        case 'EXECUTION_RESERVED': idx.reserved.add(pl.reference); (idx.reservedAt ??= new Map()).set(pl.reference, pl.time); break;
         // A released reservation frees the cert's one spend slot — the
         // journal-less child returns to free authority exactly once
         // (w22 F2).
-        case 'EXECUTION_RELEASED': idx.reserved.delete(pl.reference); (idx.released ??= new Set()).add(pl.reference); break;
+        case 'EXECUTION_RELEASED': idx.reserved.delete(pl.reference); idx.reservedAt?.delete(pl.reference); (idx.released ??= new Set()).add(pl.reference); break;
         case 'EXECUTION_COMPENSATED': (idx.compensated ??= new Set()).add(pl.reference); break;
+        case 'RETENTION_DELETED': (idx.tombstones ??= new Map()).set(pl.reference, { key_id: meta.key_id ?? null, kind: meta.kind ?? null }); break;
         case 'EXECUTION_DISPATCHED': if (meta.journal_digest) idx.dispatched.set(pl.reference, meta.journal_digest); break;
         case 'EXECUTION_OUTCOME': idx.outcomes.set(pl.reference, meta.status); break;
         case 'ACTION_CANCELLED': if (meta.certificate_id) idx.outcomes.set(meta.certificate_id, 'CANCELLED'); break;
@@ -1683,12 +1725,16 @@ export class Fabric {
     }));
   }
   ensureMutable(record) { requireThat(!['DENY', 'CANCELLED', 'CERTIFIED', 'EXECUTING', 'VERIFIED', 'UNCERTAIN', 'FAILED', 'COMPENSATED'].includes(record.status), 'INV-409-STATE', 'Action is immutable in its current state', 409); }
-  graph(t, record) {
+  graph(t, record, policy = null) {
     // Set membership is ledger-derived, not read off the mutable capsule
     // record: only envelopes whose EVIDENCE_ATTACHED event sits on the
     // signed chain count — deleting an id from record.evidence or planting
     // one changes nothing (w11-redteam R3/R15).
     const attachedIds = this._auditIndex(t).attached.get(record.capsule.capsule_id) ?? [];
+    // Evidence-binding rules come from the POLICY UNDER EVALUATION — a
+    // simulation must test the candidate constitution's bindings, not
+    // silently evaluate under the active one (w23-policy F9).
+    const bindingPolicy = policy ?? this.policy(t);
     const rows = attachedIds.map(id => this.store.get(t, 'evidence', id) ? { id, e: this.store.get(t, 'evidence', id) } : { id, e: null });
     // Supersession is derived from attach ORDER on the chain — the stored
     // superseded_by flag is only a cache; a later same-issuer+kind envelope
@@ -1698,13 +1744,20 @@ export class Fabric {
     // same-issuer+kind attach must retire them just like a live row, or a
     // deleted conflict veto wedges the capsule forever (w22 F5).
     const tombOf = x => x.e ? null : this.store.get(t, 'evidence-tombstone', x.id);
-    const kindOf = x => x.e ? x.e.envelope?.payload?.kind : tombOf(x)?.kind;
-    const kidOf = x => x.e ? x.e.envelope?.protected?.key_id : tombOf(x)?.key_id;
+    // A dead member's attach family comes from the anchored
+    // RETENTION_DELETED event — the mutable tomb row may not redefine it
+    // (w23-fixverify F-e). Unanchored identity claims read as unknown.
+    const tombId = x => x.e ? null : this._auditIndex(t).tombstones?.get(x.id);
+    const kindOf = x => x.e ? x.e.envelope?.payload?.kind : tombId(x)?.kind;
+    const kidOf = x => x.e ? x.e.envelope?.protected?.key_id : tombId(x)?.key_id;
     const superseded = new Map();
     // The issuer's LATEST signed statement wins for its own kind — including
     // a supports envelope that retracts an earlier conflict. A veto only
-    // stays sticky against a DIFFERENT issuer (w11-lifecycle F4).
-    rows.forEach((x, i) => { if (kindOf(x) !== undefined) { const j = rows.findLastIndex(y => kindOf(y) === kindOf(x) && kidOf(y) === kidOf(x)); if (j > i) superseded.set(x.id, rows[j].id); } });
+    // stays sticky against a DIFFERENT issuer (w11-lifecycle F4). Only a
+    // LIVE signed envelope may supersede: a tombstoned member's mutable
+    // tomb row can lie about kind/key_id to un-supersede itself under the
+    // issuer's own newer attach (dead-supersedes-live — w23-fixverify F-e).
+    rows.forEach((x, i) => { if (kindOf(x) !== undefined) { const j = rows.findLastIndex(y => y.e && kindOf(y) === kindOf(x) && kidOf(y) === kidOf(x)); if (j > i) superseded.set(x.id, rows[j].id); } });
     const items = rows.map(({ id, e }) => {
       if (!e) {
         // A deleted member whose tombstone row is also gone still counts as
@@ -1737,7 +1790,7 @@ export class Fabric {
       // the graph/digest trail but cannot satisfy requirements.
       let binding_failed = false;
       if (e.envelope.payload.claim === 'supports') {
-        const bindings = (this.policy(t).rules[record.capsule.action.type]?.evidence_bindings ?? {})[e.envelope.payload.kind] ?? {};
+        const bindings = (bindingPolicy.rules[record.capsule.action.type]?.evidence_bindings ?? {})[e.envelope.payload.kind] ?? {};
         const scalar = v => v === null || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean';
         for (const [cf, path] of Object.entries(bindings)) {
           const expected = path.split('.').reduce((o, k) => (o !== null && typeof o === 'object' && Object.hasOwn(o, k)) ? o[k] : undefined, record.capsule);
@@ -1981,7 +2034,7 @@ export class Fabric {
     });
   }
   evaluation(t, record, now, policy = this.policy(t)) {
-    const graph = this.graph(t, record), identities = this.identities(t);
+    const graph = this.graph(t, record, policy), identities = this.identities(t);
     if (record.capsule.action.type === 'policy.change') {
       const candidateDigest = digest(record.capsule.requested_state.policy);
       // Simulation freshness (policy-audit F11): 'reviewed' means reviewed
@@ -2379,9 +2432,17 @@ export class Fabric {
       // rather than an in-memory array (w22 F4).
       for (const c of compensations ?? []) {
         if (c.compensated !== true) continue;
-        const ccId = this.store.get(t, 'capsule', c.capsule_id)?.certificate_id;
+        // The child's certificate resolves from the anchored index, never
+        // the mutable capsule.certificate_id pointer — a repointed row
+        // must not name a foreign live cert for release/attestation
+        // (w23-fixverify F-b/F-c).
+        const ccId = this._auditIndex(t).issuedCert.get(c.capsule_id);
+        const cRow = this.store.get(t, 'capsule', c.capsule_id);
         const compJournal = ccId ? this.target.outcome(t, `comp:${ccId}`) : null;
-        if (compJournal) { c.attested = true; this.store.audit(t, 'EXECUTION_COMPENSATED', p.subject_id, ccId, { capsule_id: c.capsule_id, journal_digest: digest(compJournal) }, now); }
+        // Presence alone does not attest: the journal must bind THIS
+        // child's capsule digest — a donor compensate() binding a foreign
+        // capsule is evidence of nothing for this child.
+        if (compJournal && cRow && compJournal.capsule_digest === digest(cRow.capsule)) { c.attested = true; this.store.audit(t, 'EXECUTION_COMPENSATED', p.subject_id, ccId, { capsule_id: c.capsule_id, journal_digest: digest(compJournal) }, now); }
         else { c.compensated = false; c.reason = 'COMPENSATION_UNJOURNALED'; }
       }
       const compensatedIds = new Set((compensations ?? []).filter(c => c.compensated === true).map(c => c.capsule_id));
@@ -2422,7 +2483,15 @@ export class Fabric {
           const childJournal = this.target.outcome(t, childCertId);
           requireThat(childJournal && digest(childJournal) === digest(done.raw), 'INV-409-INTEGRITY', 'Child journal diverged from the recorded dispatch', 409);
           const childAnchored = this._auditIndex(t).dispatched.get(childCertId);
-          if (childAnchored === undefined) { status = 'FAILED'; reason = 'DISPATCH_UNATTESTED'; childStatus = 'FAILED'; }
+          if (childAnchored === undefined) {
+            // The crash-gap verdict only applies to a journal written
+            // inside the reservation window — a planted journal outside
+            // it is tamper evidence, not a settleable FAILED
+            // (w23-fixverify F-a).
+            const reservedAt = this._auditIndex(t).reservedAt?.get(childCertId);
+            requireThat(reservedAt !== undefined && childJournal.execution_time >= reservedAt && childJournal.execution_time - reservedAt <= 60000, 'INV-409-INTEGRITY', 'Unanchored child journal outside the reservation window — tamper evidence', 409);
+            status = 'FAILED'; reason = 'DISPATCH_UNATTESTED'; childStatus = 'FAILED';
+          }
           else requireThat(childAnchored === digest(childJournal), 'INV-409-INTEGRITY', 'Child outcome lacks a ledger-anchored dispatch', 409);
         }
         if (status === 'VERIFIED' && childStatus === 'VERIFIED' && !settledTerminal) {
@@ -2458,9 +2527,12 @@ export class Fabric {
       // live, approved action forever (w22 F2). A journaled wedge keeps
       // its reservation: it may still reconcile to a real verdict.
       for (const childId of wedged) {
-        const wc = this.store.get(t, 'capsule', childId), wcertId = wc?.certificate_id;
+        // Anchored binding, never the mutable row pointer — a repointed
+        // wedged child must not free a foreign cert's live reservation
+        // under a vault-signed EXECUTION_RELEASED (w23-fixverify F-b).
+        const wc = this.store.get(t, 'capsule', childId), wcertId = this._auditIndex(t).issuedCert.get(childId);
         const wstored = wcertId ? this.store.get(t, 'certificate', wcertId) : null;
-        if (wc && wstored?.consumed === true && !this.target.outcome(t, wcertId)) {
+        if (wc && wcertId && wstored?.consumed === true && this._auditIndex(t).reserved.has(wcertId) && !this.target.outcome(t, wcertId)) {
           wstored.consumed = false; wstored.status = 'CERTIFIED'; delete wstored.transaction_id;
           wc.status = 'CERTIFIED';
           this.store.put(t, 'certificate', wcertId, wstored, now); this.store.put(t, 'capsule', childId, wc, now);
@@ -2471,7 +2543,7 @@ export class Fabric {
       // The terminal record names every child's fate — wedged, attempted-
       // failed and never-attempted children are accounted, not hidden
       // (w8-composite F7, w22 F9).
-      for (const childId of capsule.requested_state.children ?? []) childOutcomes[childId] ??= wedged.includes(childId) ? (this._auditIndex(t).released?.has(this.store.get(t, 'capsule', childId)?.certificate_id) ? 'RELEASED' : 'WEDGED') : attemptedFailed.includes(childId) ? 'FAILED' : 'NOT_ATTEMPTED';
+      for (const childId of capsule.requested_state.children ?? []) childOutcomes[childId] ??= wedged.includes(childId) ? (this._auditIndex(t).released?.has(this._auditIndex(t).issuedCert.get(childId)) ? 'RELEASED' : 'WEDGED') : attemptedFailed.includes(childId) ? 'FAILED' : 'NOT_ATTEMPTED';
       const payload = { certificate_id: cert.certificate_id, capsule_digest: cert.capsule_digest, target_transaction_id: cert.certificate_id, observed_state_digest: digest({ children: executed.map(e => e.child.capsule.capsule_id), compensations }), status, reason, execution_time: execNow, reconciliation_evidence: digest(executed.map(e => e.raw)), simulation: true, output: null, composite: true, children: executed.map(e => e.child.capsule.capsule_id), child_outcomes: childOutcomes, wedged_children: wedged.length ? wedged : null, compensations, supersedes: existing ? digest(existing) : null };
       const envelope = this.signAudit(t, payload, 'outcome');
       this.store.put(t, 'outcome', cert.certificate_id, envelope, now); stored.status = status; r.status = status;
@@ -2558,7 +2630,13 @@ export class Fabric {
   _applyVerifiedEffects(p, t, r, cert, raw, now, post) {
     const type = r.capsule.action.type;
     if (type === 'policy.change') {
-      const next = r.capsule.requested_state.policy, active = this.policy(t);
+      // allow_weakening is a property of the TRANSITION's approval set,
+      // not of the installed constitution — a flag persisted into the
+      // stored policy would silently entitle later weakening waves.
+      // Strip it before staging/anchoring so every digest binds the
+      // governed form (w23-policy F13).
+      const { allow_weakening: _aw, ...candidate } = r.capsule.requested_state.policy;
+      const next = candidate, active = this.policy(t);
       // A lapsed activation — a sibling took the version, or a staged
       // candidate already pends — must never throw inside the outcome
       // transaction: the journal committed, so the honest verdict is FAILED
@@ -2756,7 +2834,14 @@ export class Fabric {
         // divergence named — never a permanent INV-409 wedge (w22 F1).
         // A mismatched anchor stays tamper evidence — the integrity scream.
         const anchoredDispatch = this._auditIndex(t).dispatched.get(cert.certificate_id);
-        if (anchoredDispatch === undefined) { status = 'FAILED'; reason = 'DISPATCH_UNATTESTED'; }
+        if (anchoredDispatch === undefined) {
+          // The crash-gap verdict only applies to a journal written inside
+          // the reservation window — a planted journal outside it is
+          // tamper evidence, not a settleable FAILED (w23-fixverify F-a).
+          const reservedAt = this._auditIndex(t).reservedAt?.get(cert.certificate_id);
+          requireThat(reservedAt !== undefined && raw.execution_time >= reservedAt && raw.execution_time - reservedAt <= 60000, 'INV-409-INTEGRITY', 'Unanchored journal outside the reservation window — tamper evidence', 409);
+          status = 'FAILED'; reason = 'DISPATCH_UNATTESTED';
+        }
         else requireThat(anchoredDispatch === digest(journal), 'INV-409-INTEGRITY', 'Anchored dispatch does not match the durable journal', 409);
       }
       const { valid } = this._validateTargetResponse(r, cert, raw, now, { postRead });
@@ -2772,7 +2857,7 @@ export class Fabric {
       // finish is recorded and flagged rather than hidden, so the ledger
       // shows the race instead of pretending it never happened.
       const revokedMidFlight = this.revoked(t, 'certificate', cert.certificate_id) || this.revoked(t, 'key', stored.envelope.protected.key_id);
-      const payload = { certificate_id: cert.certificate_id, capsule_digest: cert.capsule_digest, target_transaction_id: cert.certificate_id, observed_state_digest: valid ? raw.observed_state_digest : null, status, reason, execution_time: valid ? raw.execution_time : now, reconciliation_evidence: valid ? digest(raw) : null, journal_digest: status === 'VERIFIED' ? digest(journal) : null, simulation: true, output: valid && !extras?.gate_denied ? raw.output : null, watermarks: extras?.watermarks ?? null, gate_denied: extras?.gate_denied?.detail ?? null, revoked_post_reservation: revokedMidFlight || null, composite_child_of: (r.composite_parents ?? []).map(pid => this.store.get(t, 'capsule', pid)?.certificate_id).find(Boolean) ?? null, supersedes: existing ? digest(existing) : null };
+      const payload = { certificate_id: cert.certificate_id, capsule_digest: cert.capsule_digest, target_transaction_id: cert.certificate_id, observed_state_digest: valid ? raw.observed_state_digest : null, status, reason, execution_time: valid ? raw.execution_time : now, reconciliation_evidence: valid ? digest(raw) : null, journal_digest: status === 'VERIFIED' ? digest(journal) : null, simulation: true, output: valid && !extras?.gate_denied ? raw.output : null, watermarks: extras?.watermarks ?? null, gate_denied: extras?.gate_denied?.detail ?? null, revoked_post_reservation: revokedMidFlight || null, composite_child_of: (r.composite_parents ?? []).map(pid => this._auditIndex(t).issuedCert.get(pid) ?? this.store.get(t, 'capsule', pid)?.certificate_id).find(Boolean) ?? null, supersedes: existing ? digest(existing) : null };
       const envelope = this.signAudit(t, payload, 'outcome', extras?.outcome_key_id ?? null, { allowPending: extras?.outcome_allow_pending === true });
       this.store.put(t, 'outcome', cert.certificate_id, envelope, now); stored.status = status; r.status = status;
       this.store.put(t, 'certificate', cert.certificate_id, stored, now); this.store.put(t, 'capsule', cert.capsule_id, r, now);
@@ -2829,7 +2914,11 @@ export class Fabric {
       let allSettledVerified = true, anyFailed = false, anyCompensated = false;
       for (const childId of record.capsule.requested_state.children ?? []) {
         const childCapsule = this.store.get(t, 'capsule', childId);
-        const childCert = childCapsule?.certificate_id ? this.store.get(t, 'certificate', childCapsule.certificate_id) : null;
+        // Cert bindings resolve from the anchored CERTIFICATE_ISSUED map —
+        // the mutable capsule.certificate_id pointer can be repointed at a
+        // foreign settled cert to mint parent verdicts (w23-fixverify F-h).
+        const anchoredCertId = ridx.issuedCert.get(childId);
+        const childCert = anchoredCertId ? this.store.get(t, 'certificate', anchoredCertId) : null;
         const certId = childCert?.envelope?.payload?.certificate_id;
         const childOutcome = certId ? this.store.get(t, 'outcome', certId) : null;
         // A planted child outcome can never mint a parent verdict: the row
@@ -2843,12 +2932,17 @@ export class Fabric {
         // settle the child COMPENSATED instead of ratcheting UNCERTAIN
         // over already-reverted resources (w22 F4).
         const compJournal = certId ? this.target.outcome(t, `comp:${certId}`) : null;
+        // Presence alone does not attest a compensation — the journal must
+        // bind THIS child's capsule digest, or a donor compensate() mints
+        // COMPENSATED over a mutation that was never reverted
+        // (w23-fixverify F-c).
+        const compJournalOk = compJournal && childCapsule && compJournal.capsule_digest === digest(childCapsule.capsule);
         const settled = childOutcome && ['VERIFIED', 'FAILED', 'COMPENSATED'].includes(childOutcome.payload.status) ? childOutcome.payload.status : null;
         if (settled === 'FAILED') anyFailed = true;
         if (settled === 'COMPENSATED') anyCompensated = true;
         if (settled !== 'VERIFIED') allSettledVerified = false;
-        if (compJournal && !settled) reconciledCompensations.push({ capsule_id: childId, compensated: true });
-        if (childCapsule && childCert && (childRaw || settled || compJournal)) executed.push({ child: { ...childCapsule, certificate_id: certId }, raw: childRaw, prior: childCapsule.capsule.current_state.material_fields });
+        if (compJournalOk && !settled) reconciledCompensations.push({ capsule_id: childId, compensated: true });
+        if (childCapsule && childCert && (childRaw || settled || compJournalOk)) executed.push({ child: { ...childCapsule, certificate_id: certId }, raw: childRaw, prior: childCapsule.capsule.current_state.material_fields });
         else if (childCert?.consumed === true) wedged.push(childId);
         else if (certId && ridx.released?.has(certId)) wedged.push(childId);
         // Never-reserved children are honestly NOT_ATTEMPTED, not WEDGED —
@@ -2877,7 +2971,14 @@ export class Fabric {
             : settled === 'VERIFIED' ? 'VERIFIED' : settled === 'UNCERTAIN' ? 'UNCERTAIN' : 'FAILED';
         }
         for (const childId of record.capsule.requested_state.children ?? []) {
-          const ccId = this.store.get(t, 'capsule', childId)?.certificate_id;
+          const ccId = ridx.issuedCert.get(childId);
+          // A murdered outcome row for an executed child must never dedupe
+          // as unchanged — row existence is part of the signature
+          // (w23-fixverify F-f).
+          if (!wedged.includes(childId)) {
+            const exists = executed.some(d => d.child.capsule.capsule_id === childId) && this.store.get(t, 'outcome', ccId);
+            if (executed.some(d => d.child.capsule.capsule_id === childId) && !exists) prospective[childId] = '__MISSING__';
+          }
           prospective[childId] ??= wedged.includes(childId) ? (ccId && ridx.released?.has(ccId) ? 'RELEASED' : 'WEDGED') : 'NOT_ATTEMPTED';
         }
         if (digest({ status: settled, children: prospective }) === digest({ status: current.payload.status, children: current.payload.child_outcomes })) return this._outcomeIntegrity(t, current, id);
@@ -2901,7 +3002,11 @@ export class Fabric {
       // ledger with no anchored outcome is executing regardless of what a
       // tampered status field claims (w22 F9).
       const cancelIdx = this._auditIndex(p.tenant_id);
-      requireThat(!(r.certificate_id && cancelIdx.reserved.has(r.certificate_id) && !cancelIdx.outcomes.has(r.certificate_id)), 'INV-409-STATE', 'Dispatched or terminal action cannot be cancelled; reconcile first', 409);
+      // The cert binding resolves from the anchored CERTIFICATE_ISSUED
+      // index — the mutable capsule.certificate_id pointer can be nulled
+      // or repointed at a foreign cert to slip the guard (w23-fixverify F-i).
+      const cancelCertId = cancelIdx.issuedCert.get(id);
+      requireThat(!(cancelCertId && cancelIdx.reserved.has(cancelCertId) && !cancelIdx.outcomes.has(cancelCertId)), 'INV-409-STATE', 'Dispatched or terminal action cannot be cancelled; reconcile first', 409);
       this.assertHealthy(p.tenant_id, p.subject_id, this.identity(p).device_id, now);
       // Same anti-grief rule attachEvidence already carries: only the
       // proposing actor — or a privileged role — may cancel (w9-network F9).
@@ -2909,10 +3014,12 @@ export class Fabric {
       requireThat(r.capsule.actor.subject_id === p.subject_id || callerRoles.some(x => ['security', 'policy_admin'].includes(x)), 'INV-403-SCOPE', 'Only the proposing actor or a privileged role may cancel', 403);
       r.status = 'CANCELLED'; this.store.put(p.tenant_id, 'capsule', id, r, now);
       // The certificate row must not keep reading as a live CERTIFIED
-      // authority after its action is cancelled (w10-cert F8).
-      const cert = r.certificate_id ? this.store.get(p.tenant_id, 'certificate', r.certificate_id) : null;
-      if (cert && cert.status === 'CERTIFIED') { cert.status = 'CANCELLED'; this.store.put(p.tenant_id, 'certificate', r.certificate_id, cert, now); }
-      this.store.audit(p.tenant_id, 'ACTION_CANCELLED', p.subject_id, id, { certificate_id: r.certificate_id }, now); return { status: r.status };
+      // authority after its action is cancelled (w10-cert F8). The flip
+      // binds the anchored cert — a repointed mutable pointer must not
+      // brand a foreign cert row CANCELLED (w23-fixverify F-i).
+      const cert = cancelCertId ? this.store.get(p.tenant_id, 'certificate', cancelCertId) : null;
+      if (cert && cert.status === 'CERTIFIED') { cert.status = 'CANCELLED'; this.store.put(p.tenant_id, 'certificate', cancelCertId, cert, now); }
+      this.store.audit(p.tenant_id, 'ACTION_CANCELLED', p.subject_id, id, { certificate_id: cancelCertId ?? r.certificate_id }, now); return { status: r.status };
     });
   }
   revoke(p, input) {
@@ -3038,7 +3145,7 @@ export class Fabric {
     this.authorize(p, ['policy_admin', 'security']); validatePolicy(candidate); requireThat(candidate.tenant_id === p.tenant_id, 'INV-403-SCOPE', 'Policy scope mismatch', 403);
     return this.transaction(p, now => {
       const active = this.policy(p.tenant_id), records = this.store.list(p.tenant_id, 'capsule', 500);
-      const results = records.map(r => ({ capsule_id: r.capsule.capsule_id, observed_status: r.status, projected: this.evaluation(p.tenant_id, { ...r, capsule: { ...r.capsule, policy_version: candidate.version } }, now, candidate).decision }));
+      const results = records.map(r => { const e = this.evaluation(p.tenant_id, { ...r, capsule: { ...r.capsule, policy_version: candidate.version } }, now, candidate); return { capsule_id: r.capsule.capsule_id, observed_status: r.status, projected: e.decision, projected_reasons: e.reasons.map(x => x.code) }; });
       const result = { simulation_id: randomUUID(), candidate_digest: digest(candidate), baseline_digest: digest(active), activation: false, approvals_invalidated_by_policy_change: true, time_basis: now, diff: policyDiff(active, candidate), results, counts: Object.fromEntries(['ALLOW', 'SHIELD', 'ESCROW', 'DEFER', 'DENY'].map(d => [d, results.filter(r => r.projected === d).length])), truncated: records.length === 500 };
       this.store.insert(p.tenant_id, 'simulation', result.simulation_id, result, now); this.store.audit(p.tenant_id, 'POLICY_SIMULATED', p.subject_id, result.simulation_id, { candidate_digest: digest(candidate), baseline_digest: digest(active), result_digest: digest(result) }, now); return result;
     });
@@ -3493,7 +3600,10 @@ export class Fabric {
         // retire this deleted member in the evidence graph (w22 F5).
         this.store.put(p.tenant_id, 'evidence-tombstone', e.payload.evidence_id, { evidence_id: e.payload.evidence_id, original_digest, deleted_at: now, superseded, key_id: e.envelope?.protected?.key_id ?? null, kind: e.payload?.kind ?? null }, now);
         this.store.shred(p.tenant_id, 'evidence', e.payload.evidence_id); deleted++;
-        this.store.audit(p.tenant_id, 'RETENTION_DELETED', p.subject_id, e.payload.evidence_id, { original_digest, crypto_shred: true }, now);
+        // The tombstone's issuer+kind anchor on the chain — the mutable
+        // tomb row may not redefine which attach family it claims to retire
+        // (w23-fixverify F-e).
+        this.store.audit(p.tenant_id, 'RETENTION_DELETED', p.subject_id, e.payload.evidence_id, { original_digest, crypto_shred: true, key_id: e.envelope?.protected?.key_id ?? null, kind: e.payload?.kind ?? null }, now);
       }
       // Expired perception sessions surrender their ECDH private key: after
       // expiry no release may be minted from them, so the "ephemeral" key

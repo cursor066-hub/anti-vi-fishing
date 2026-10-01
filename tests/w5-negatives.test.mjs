@@ -147,7 +147,7 @@ test('schema: account charset, nonce length, payment and export invariants are e
 test('POL-008: a staged policy activates, then a fresh capsule is evaluated and executed under it', t => {
   const h = fixture(t);
   const canary = clone(h.f.policy('acme'));
-  canary.version = 2; canary.policy_id = 'constitution:acme:v2'; canary.not_before = h.now() + 120000;
+  canary.version = 2; canary.not_before = h.now() + 120000;
   canary.rules['finance.payment.first'].max_quantity = 10000;
   const pc = h.proposed('policy.change', { policy: canary }, { action: { type: 'policy.change', target_resource: 'policy-root', purpose: 'Staged rollout' } });
   h.f.simulate(h.p('policy-admin'), canary);

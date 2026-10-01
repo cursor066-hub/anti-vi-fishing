@@ -19,7 +19,8 @@ node scripts/release-sign.mjs --key var/relkeys/release-key.pem --public-key var
 # in-tree so --anchors-in-tree is required for this roundtrip (w15-supply F-2).
 REQUIRE_CI=
 [ "${CI:-}" = "true" ] && REQUIRE_CI=--require-ci
-node scripts/verify-release.mjs var/release-attestation.json var/relkeys/anchors.json $REQUIRE_CI --anchors-in-tree
+node scripts/verify-release.mjs var/release-attestation.json var/relkeys/anchors.json $REQUIRE_CI --anchors-in-tree --ack-self-anchors
+unset IF_TEST_ANCHORS
 node --test --test-concurrency=1 'tests/**/*.test.mjs'
 node scripts/simulate.mjs
 # Verify the committed vector set before regeneration (same ordering as CI).
@@ -39,7 +40,9 @@ node scripts/generate-contracts.mjs
 # included), same exclusion set, `|| true` so a fully-filtered pipeline
 # cannot kill the step under set -e (w15-supply F-6).
 node scripts/report.mjs --check-only
-stale="$(git status --porcelain -- docs/ examples/ ai-eval/ vectors/ reports/ | grep -v 'reports/benchmark.json' | grep -v 'reports/source-check.json' | grep -v 'reports/artifact-audit.json' | grep -v 'vectors/envelope-es256-vectors.json' | grep -v 'reports/sample-audit.json' | grep -v 'reports/sample-checkpoint.json' | grep -v 'reports/sample-pinned-trust.json' || true)"
+# Same SHARED exclusion list and exact-path matching as ci.yml — substring
+# filtering swallows 'x.evil' under 'x' (w23-supply F6).
+stale="$(git status --porcelain -- docs/ examples/ ai-eval/ vectors/ reports/ | awk 'NR==FNR { if ($0 !~ /^#|^$/) excl[$0]=1; next } { f=$2; if (f != "" && !excl[f]) print }' scripts/stale-excludes.txt - || true)"
 if [ -n "$stale" ]; then printf '%s\n' 'stale generated artifacts:' "$stale" >&2; exit 1; fi
 # The production gate must exit 1 (BLOCKED); any other result is a broken gate.
 set +e

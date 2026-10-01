@@ -132,7 +132,7 @@ function policyChange(h, next, approvals = 3) {
 test('POL-008: staged policy activates only when trusted time reaches not_before', t => {
   const h = fixture(t);
   const active = h.f.policy('acme');
-  const next = clone(active); next.version = 2; next.policy_id = 'constitution:acme:v2'; next.not_before = h.now() + 240000;
+  const next = clone(active); next.version = 2; next.not_before = h.now() + 240000;
   const { r, cert } = policyChange(h, next);
   const out = h.f.execute(h.p(), cert);
   assert.equal(out.payload.status, 'VERIFIED');
@@ -148,7 +148,7 @@ test('POL-008: staged policy activates only when trusted time reaches not_before
 test('POL-013: emergency policy with sufficient custodians activates', t => {
   const h = fixture(t);
   const active = h.f.policy('acme');
-  const next = clone(active); next.version = 2; next.policy_id = 'constitution:acme:em2'; next.emergency_of = 1; next.expires_at = h.now() + 3600000; next.not_before = 1;
+  const next = clone(active); next.version = 2; next.emergency_of = 1; next.expires_at = h.now() + 3600000; next.not_before = 1;
   for (const r of Object.values(next.rules)) r.approval_threshold += 1; // emergency must tighten, never loosen
   const { cert } = policyChange(h, next, 4); // emergency = normal quorum + emergency_extra_custodians
   assert.equal(h.f.execute(h.p(), cert).payload.status, 'VERIFIED');

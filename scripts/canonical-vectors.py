@@ -1,28 +1,19 @@
 #!/usr/bin/env python3
-"""Independent IF-CJSON-1 canonical digest conformance (not a signature verifier)."""
-import hashlib, json, re, sys, unicodedata
+"""Independent IF-CJSON-1 canonical digest conformance (not a signature verifier).
 
-def canonical(value, depth=0):
-    if depth > 32:
-        raise ValueError('Maximum depth')
-    if value is None or isinstance(value, bool):
-        return json.dumps(value)
-    if isinstance(value, int) and not isinstance(value, bool):
-        if abs(value) > 9007199254740991:
-            raise ValueError('Unsafe integer')
-        return str(value)
-    if isinstance(value, str):
-        if unicodedata.normalize('NFC', value) != value or any(0xD800 <= ord(c) <= 0xDFFF for c in value):
-            raise ValueError('Invalid Unicode')
-        return json.dumps(value, ensure_ascii=False, separators=(',', ':'))
-    if isinstance(value, list):
-        return '[' + ','.join(canonical(x, depth + 1) for x in value) + ']'
-    if isinstance(value, dict):
-        for key in value:
-            if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}', key) or key in ('constructor', '__proto__', 'prototype'):
-                raise ValueError('Invalid key')
-        return '{' + ','.join(json.dumps(k) + ':' + canonical(value[k], depth + 1) for k in sorted(value)) + '}'
-    raise ValueError('Unsupported type')
+Shares the strict canonicalizer from verify-vectors.py — a second, weaker
+implementation would let this "reference" accept canonical forms the runtime
+rejects (w23-supply F12). verify-vectors.py is loaded by path since the
+hyphenated name is not importable directly.
+"""
+import hashlib, importlib.util, json, sys, pathlib
+
+_spec = importlib.util.spec_from_file_location('verify_vectors', pathlib.Path(__file__).with_name('verify-vectors.py'))
+_mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_mod)
+canon = _mod.canon
+CanonError = _mod.CanonError
+
 
 def unique_pairs(pairs):
     result = {}
@@ -32,10 +23,16 @@ def unique_pairs(pairs):
         result[key] = value
     return result
 
+
 if __name__ == '__main__':
-    vectors = json.load(open(sys.argv[1], encoding='utf-8'), object_pairs_hook=unique_pairs)
+    vectors = json.load(open(sys.argv[1], encoding='utf-8'), object_pairs_hook=unique_pairs,
+                        parse_int=lambda s: -0.0 if s == '-0' else int(s))
     for vector in vectors:
-        actual = hashlib.sha256(canonical(vector['value']).encode('utf-8')).hexdigest()
+        try:
+            got = canon(vector['value'])
+            actual = hashlib.sha256(got.encode('utf-8')).hexdigest()
+        except CanonError:
+            raise SystemExit('FAIL (rejected input): ' + vector['name'])
         if actual != vector['sha256']:
             raise SystemExit('FAIL: ' + vector['name'])
     print(json.dumps({'valid': True, 'vectors': len(vectors), 'implementation': 'Python standard library'}))

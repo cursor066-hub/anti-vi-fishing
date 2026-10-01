@@ -88,6 +88,9 @@ test('w22 F5: a deleted conflict member is superseded by a later same-issuer+kin
   const evId = conflict.payload.evidence_id;
   h.f.store.shred('acme', 'evidence', evId);
   h.f.store.put('acme', 'evidence-tombstone', evId, { evidence_id: evId, original_digest: digest(conflict), deleted_at: h.now(), superseded: [], key_id: conflict.protected.key_id, kind: conflict.payload.kind }, h.now());
+  // The real sweep also anchors the deletion on the chain — the tombstone's
+  // issuer+kind identity comes from RETENTION_DELETED, not the mutable row.
+  h.f.store.audit('acme', 'RETENTION_DELETED', 'retention-sweep', evId, { original_digest: digest(conflict), crypto_shred: true, key_id: conflict.protected.key_id, kind: conflict.payload.kind }, h.now());
   h.evidence(r, { kind: 'ownership' });
   const graph = h.f.graph('acme', h.f.store.must('acme', 'capsule', r.capsule.capsule_id));
   const deletedItem = graph.items.find(i => i.payload.evidence_id === evId);

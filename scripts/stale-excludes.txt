@@ -1,0 +1,13 @@
+# Shared stale-gate exclusion list (w23-supply F6): files whose CONTENT is
+# nondeterministic or environment-dependent — they are proven FRESH by live
+# pipeline steps, never by byte-equality against the committed copy.
+# Consumed by .github/workflows/ci.yml and scripts/verify.sh via EXACT path
+# equality (never substring matching — 'x.evil' must not hide under 'x').
+reports/benchmark.json
+reports/source-check.json
+reports/artifact-audit.json
+reports/verification-webcrypto.json
+reports/sample-audit.json
+reports/sample-checkpoint.json
+reports/sample-pinned-trust.json
+vectors/envelope-es256-vectors.json

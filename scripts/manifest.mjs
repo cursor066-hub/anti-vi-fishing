@@ -19,11 +19,14 @@ process.chdir(new URL('..', import.meta.url).pathname);
 // Tarball-verify walks every file except the Git object store — a release
 // tree carrying installed dependencies or runtime state unhashed IS the
 // anomaly the walk exists to catch, not something to exempt (w15-supply F-5).
-const EXCLUDE_DIRS = new Set(['.git']);
+const EXCLUDE_DIRS = new Set(['.git', '__pycache__', 'node_modules']);
 // Git-mode untracked scan exempts the runtime dirs that legitimately hold
 // state on a development checkout — but no .gitignore consultation, so a
 // broadened ignore rule cannot hide a payload (w11-supply SC-02).
 const GIT_MODE_EXEMPT = new Set(['node_modules', '.git', 'var']);
+// __pycache__ is exempt at ANY depth — interpreter bytecode caches are
+// runtime artifacts, not payload (w23-supply).
+const exemptPath = f => GIT_MODE_EXEMPT.has(f.split('/')[0]) || f.split('/').includes('__pycache__');
 const EXCLUDE_FILES = new Set(['MANIFEST.sha256']);
 const sha = f => createHash('sha256').update(readFileSync(f)).digest('hex');
 function* walk(dir) {
@@ -69,7 +72,10 @@ if (process.argv.includes('--verify')) {
     // SC-02). MANIFEST.sha256 itself may be untracked in a fresh checkout —
     // it is the verifier's own artifact, not payload.
     const untracked = spawnSync('git', ['ls-files', '--others', '-z'], { encoding: 'utf8' });
-    if (untracked.status === 0) extras = untracked.stdout.split('\0').filter(f => f && !EXCLUDE_FILES.has(f) && !GIT_MODE_EXEMPT.has(f.split('/')[0]));
+    // A failed untracked sweep is LOUD — silently empty extras would turn
+    // extra-file detection off (w23-supply F17).
+    if (untracked.status === 0) extras = untracked.stdout.split('\0').filter(f => f && !EXCLUDE_FILES.has(f) && !exemptPath(f));
+    else problems.push('git ls-files --others failed — untracked sweep could not run');
   } else {
     extras = [...walk('.')].map(p => relative('.', p)).filter(f => !names.has(f));
   }

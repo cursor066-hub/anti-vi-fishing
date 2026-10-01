@@ -14,11 +14,17 @@
 // trust anchor.
 //
 // usage: node scripts/verify-release.mjs <attestation.json> <anchors.json>
-//        [--allow-skips] [--require-ci] [--anchors-in-tree]
+//        [--tree <dir>] [--allow-skips] [--require-ci] [--anchors-in-tree]
+//        [--ack-self-anchors]
 // anchors.json: { "key_id": { "public_key": "<pem>", "suite": "Ed25519" } }
 // The anchors file is REQUIRED and must live OUTSIDE the artifact tree —
 // a trust anchor shipped inside the release it vouches for is no anchor
-// (w15-supply F-2). --anchors-in-tree overrides for CI's fixture roundtrip.
+// (w15-supply F-2). --anchors-in-tree admits an in-tree anchor file but the
+// verdict stays invalid unless --ack-self-anchors explicitly acknowledges
+// self-certification (CI's fixture roundtrip only — w23-supply F3).
+// --tree names the release directory under verification; when omitted the
+// script's own parent directory is verified and a warning records that the
+// verifier selected the tree implicitly.
 import { existsSync, readFileSync, readdirSync, lstatSync, realpathSync } from 'node:fs';
 import { createHash, createPublicKey, verify } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -52,6 +58,51 @@ function canonical(value, depth = 0) {
     }).join(',') + '}';
   }
   die('Unsupported canonical value');
+}
+// Strict JSON parse (dup keys last-win under JSON.parse — the attestation
+// must mean one thing; w23-supply F17). Same grammar as src/canonical.mjs
+// parseStrict, inlined for self-containment.
+function parseStrictJson(text) {
+  if (typeof text !== 'string' || Buffer.byteLength(text) > 1048576) die('JSON body exceeds 1 MiB');
+  let i = 0;
+  const ws = () => { while (i < text.length && /[\x20\t\r\n]/.test(text[i])) i++; };
+  const str = () => {
+    const s = i++;
+    while (i < text.length) {
+      if (text[i] === '\\') { i += 2; continue; }
+      if (text[i++] === '"') { try { return JSON.parse(text.slice(s, i)); } catch { die('Invalid JSON string'); } }
+    }
+    die('Unterminated JSON string');
+  };
+  const read = (depth) => {
+    if (depth > 31) die('Maximum nesting depth exceeded');
+    ws(); const c = text[i];
+    if (c === '"') return str();
+    if (c === '{') {
+      i++; ws(); const out = {}, keys = new Set();
+      if (text[i] === '}') { i++; return out; }
+      while (i < text.length) {
+        ws(); if (text[i] !== '"') die('Expected object key');
+        const k = str(); if (keys.has(k)) die('Duplicate JSON key'); keys.add(k);
+        ws(); if (text[i++] !== ':') die('Expected colon'); out[k] = read(depth + 1); ws();
+        const end = text[i++]; if (end === '}') return out; if (end !== ',') die('Expected comma');
+      }
+    } else if (c === '[') {
+      i++; ws(); const out = []; if (text[i] === ']') { i++; return out; }
+      while (i < text.length) {
+        out.push(read(depth + 1)); if (out.length > 10000) die('Array too long'); ws();
+        const end = text[i++]; if (end === ']') return out; if (end !== ',') die('Expected comma');
+      }
+    } else {
+      for (const [word, val] of [['true', true], ['false', false], ['null', null]])
+        if (text.slice(i, i + word.length) === word) { i += word.length; return val; }
+      const m = /^-?(?:0|[1-9][0-9]*)/.exec(text.slice(i));
+      if (m) { i += m[0].length; return Number(m[0]); }
+    }
+    die('Invalid JSON');
+  };
+  const value = read(0); ws(); if (i !== text.length) die('Trailing JSON data');
+  canonical(value); return value;
 }
 const digest = value => createHash('sha256').update(canonical(value)).digest('hex');
 
@@ -123,7 +174,10 @@ function manifestVerify() {
     const trackedFiles = tracked.stdout.split('\0').filter(Boolean);
     for (const f of trackedFiles) if (!names.has(f) && !EXCLUDE_FILES.has(f)) problems.push(`unlisted tracked file: ${f}`);
     const untracked = spawnSync('git', ['ls-files', '--others', '-z'], { encoding: 'utf8' });
-    if (untracked.status === 0) extras = untracked.stdout.split('\0').filter(f => f && !EXCLUDE_FILES.has(f) && !GIT_MODE_EXEMPT.has(f.split('/')[0]));
+    // A failed untracked sweep must be LOUD — silently empty extras turn
+    // extra-file detection off (w23-supply F17).
+    if (untracked.status === 0) extras = untracked.stdout.split('\0').filter(f => f && !EXCLUDE_FILES.has(f) && !(GIT_MODE_EXEMPT.has(f.split('/')[0]) || f.split('/').includes('__pycache__')));
+    else problems.push('git ls-files --others failed — untracked sweep could not run');
   } else {
     extras = [...walk('.')].map(p => relative('.', p)).filter(f => !names.has(f));
   }
@@ -132,22 +186,38 @@ function manifestVerify() {
 }
 
 // ---------------------------------------------------------------------------
-process.chdir(new URL('..', import.meta.url).pathname);
-const args = process.argv.slice(2).filter(a => !a.startsWith('--'));
+{
+  const ti = process.argv.indexOf('--tree');
+  const treeArg = ti >= 0 ? process.argv[ti + 1] : null;
+  // A bare `--tree` (or one followed by another flag) is a usage error —
+  // silently defaulting would verify a different tree than the operator
+  // named (w23-supply F13).
+  if (ti >= 0 && (!treeArg || treeArg.startsWith('--'))) { console.error(JSON.stringify({ valid: false, code: 'INV-400-USAGE', error: '--tree requires a directory value' })); process.exit(2); }
+  const treeDir = treeArg ?? new URL('..', import.meta.url).pathname;
+  if (ti < 0) console.error(JSON.stringify({ warning: 'no --tree given — verifying the directory containing this script implicitly' }));
+  if (!existsSync(treeDir)) { console.error(JSON.stringify({ valid: false, code: 'INV-404-TREE', error: `tree not found: ${treeDir}` })); process.exit(1); }
+  process.chdir(treeDir);
+}
+const flagIdx = i => process.argv[i - 1] === '--tree';
+const args = process.argv.slice(2).filter((a, i) => !a.startsWith('--') && !flagIdx(i + 2));
 const attPath = args[0], anchorsPath = args[1];
 const fail = (code, msg) => { console.error(JSON.stringify({ valid: false, code, error: msg })); process.exit(1); };
 
-if (!attPath || !anchorsPath) fail('INV-400-USAGE', 'usage: node scripts/verify-release.mjs <attestation.json> <anchors.json> [--allow-skips] [--require-ci] [--anchors-in-tree] — the trust-anchor file is REQUIRED and must live outside the artifact');
+if (!attPath || !anchorsPath) fail('INV-400-USAGE', 'usage: node scripts/verify-release.mjs <attestation.json> <anchors.json> [--tree <dir>] [--allow-skips] [--require-ci] [--anchors-in-tree] [--ack-self-anchors] — the trust-anchor file is REQUIRED and must live outside the artifact');
 if (!existsSync(attPath)) fail('INV-404-ATTESTATION', `attestation not found: ${attPath}`);
 if (!existsSync(anchorsPath)) fail('INV-404-ANCHORS', `trust anchors not found: ${anchorsPath} — verification requires operator-pinned keys, not keys shipped inside the release`);
 // An anchors path resolving inside the artifact root is a self-issued key —
-// the release would vouch for itself (w15-supply F-2).
+// the release would vouch for itself (w15-supply F-2). --anchors-in-tree
+// admits it for the CI fixture roundtrip, but self-certification can never
+// yield valid:true unless --ack-self-anchors explicitly acknowledges it
+// (w23-supply F3).
 const root = realpathSync('.'), anchorReal = realpathSync(anchorsPath);
-if ((anchorReal === root || anchorReal.startsWith(root + sep)) && !process.argv.includes('--anchors-in-tree'))
+const anchorInTree = anchorReal === root || anchorReal.startsWith(root + sep);
+if (anchorInTree && !process.argv.includes('--anchors-in-tree'))
   fail('INV-412-ANCHORS', 'trust anchors resolve inside the artifact tree — pin them out-of-band, or pass --anchors-in-tree for the CI fixture roundtrip');
 
 let payload;
-try { payload = verifySigned(JSON.parse(readFileSync(attPath, 'utf8')), JSON.parse(readFileSync(anchorsPath, 'utf8')), 'release.attestation'); } catch (e) { fail(e.code ?? 'INV-401-SIGNATURE', e.message); }
+try { payload = verifySigned(parseStrictJson(readFileSync(attPath, 'utf8')), parseStrictJson(readFileSync(anchorsPath, 'utf8')), 'release.attestation'); } catch (e) { fail(e.code ?? 'INV-401-SIGNATURE', e.message); }
 
 if (payload?._type !== 'https://invariant-fabric.dev/release-provenance/v1' || payload.buildType !== 'IF-RELEASE-1')
   fail('INV-400-SCHEMA', 'attestation is not an IF-RELEASE-1 provenance');
@@ -159,6 +229,10 @@ if (payload.materials?.manifest_sha256 !== manifestSha)
 // manifest was already attacker-rewritable at that point.
 if (readFileSync('MANIFEST.sha256', 'utf8').split('\n').some(l => l.endsWith('  ' + relative('.', anchorsPath))))
   console.error(JSON.stringify({ warning: 'anchors file is listed inside the release manifest — an in-tree key cannot anchor the release', code: 'INV-412-ANCHORS' }));
+// A self-issued anchor certifies nothing — the verdict itself must carry
+// the failure, not a stderr warning a consumer never parses (w23-supply F3).
+if (anchorInTree && !process.argv.includes('--ack-self-anchors'))
+  fail('INV-412-ANCHORS', 'trust anchors resolve inside the artifact tree — a self-issued anchor cannot produce valid:true (pass --ack-self-anchors to acknowledge for CI fixtures only)');
 
 // The attestation binds the manifest; the manifest binds the tree — inlined
 // above so no artifact code ever executes during verification (w15 F-1).

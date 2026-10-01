@@ -76,8 +76,12 @@ const subtle = webcrypto.subtle;
 const spki = pem => Buffer.from(pem.replace(/-----[A-Z ]+-----/g, '').replace(/\s+/g, ''), 'base64');
 const b64url = s => Buffer.from(s, 'base64url');
 
-const cv = JSON.parse(readFileSync('vectors/canonical-vectors.json', 'utf8'));
-const ev = JSON.parse(readFileSync('vectors/envelope-vectors.json', 'utf8'));
+// The corpus is anchored to this script's location — running from a
+// directory that happens to contain a vectors/ folder must verify THIS
+// repo's corpus, never the caller's (w23-supply F16).
+const vec = name => new URL(`../vectors/${name}`, import.meta.url);
+const cv = JSON.parse(readFileSync(vec('canonical-vectors.json'), 'utf8'));
+const ev = JSON.parse(readFileSync(vec('envelope-vectors.json'), 'utf8'));
 let failed = 0;
 for (const v of cv.vectors) {
   try { const got = canon(v.input); if (got !== v.canonical || v.canonical === null) { failed++; console.log(`FAIL canonical/${v.name}`); } }
@@ -110,7 +114,7 @@ for (const v of ev.vectors) {
 }
 console.log(`webcrypto: ${cv.vectors.length} canonical + ${ev.vectors.length} envelope vectors, ${failed} failures`);
 
-const ev2 = JSON.parse(readFileSync('vectors/envelope-es256-vectors.json', 'utf8'));
+const ev2 = JSON.parse(readFileSync(vec('envelope-es256-vectors.json'), 'utf8'));
 for (const v of ev2.vectors) {
   const env = v.envelope, message = Buffer.from(canon({ protected: env.protected, payload: env.payload }));
   const key = await subtle.importKey('spki', spki(v.public_key), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);

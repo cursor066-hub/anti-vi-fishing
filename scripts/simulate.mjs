@@ -56,9 +56,15 @@ try {
   h.f.revoke(h.p('security'), { kind: 'device', id: 'operator-device', reason: 'Synthetic endpoint agent loss' });
   scenario('Device quarantine prevents renewal', 'INV-403-QUARANTINE', () => h.f.runtime.issue(h.p(), runtimeInput()));
   const bundle = h.f.exportAudit(h.p('auditor'), 'Synthetic simulation evidence');
-  scenario('Offline signed audit integrity', true, () => verifyAudit(bundle, bundle.public_keys).valid);
+  // The verifier must anchor on the deployment's CONFIGURED keys, never on
+  // the keys the artifact itself ships — bundle.public_keys as the anchor
+  // certifies whatever the bundle claims (w23-supply F15).
+  const simConfig = JSON.parse(readFileSync(join(h.directory, 'config.json'), 'utf8'));
+  const simAnchor = {};
+  for (const t of Object.values(simConfig.tenants ?? {})) simAnchor[t.keys.audit.key_id] = { public_key: t.keys.audit.public_key };
+  scenario('Offline signed audit integrity', true, () => verifyAudit(bundle, simAnchor).valid);
   const tampered = clone(bundle); tampered.entries.splice(3, 1);
-  scenario('Audit deletion detection', 'INV-409-AUDIT', () => verifyAudit(tampered, bundle.public_keys));
+  scenario('Audit deletion detection', 'INV-409-AUDIT', () => verifyAudit(tampered, simAnchor));
   mkdirSync('reports', { recursive: true });
   writeFileSync('reports/sample-audit.json', JSON.stringify(bundle, null, 2) + '\n');
   writeFileSync('reports/sample-pinned-trust.json', JSON.stringify(bundle.public_keys, null, 2) + '\n');

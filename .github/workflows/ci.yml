@@ -59,9 +59,11 @@ jobs:
         run: |
           node scripts/release-sign.mjs --generate-fixture-key var/relkeys
           node scripts/release-sign.mjs --key var/relkeys/release-key.pem --public-key var/relkeys/release-key.pub --out var/release-attestation.json --test-anchors-out var/relkeys/anchors.json
-          # --anchors-in-tree: the fixture roundtrip deliberately ships its
-          # anchors under var/; production consumers must pin out-of-band.
-          node scripts/verify-release.mjs var/release-attestation.json var/relkeys/anchors.json --require-ci --anchors-in-tree
+          # --anchors-in-tree + --ack-self-anchors: the fixture roundtrip
+          # deliberately ships its anchors under var/ and acknowledges the
+          # self-certification; production consumers must pin out-of-band
+          # and never pass --ack-self-anchors (w23-supply F3).
+          node scripts/verify-release.mjs var/release-attestation.json var/relkeys/anchors.json --require-ci --anchors-in-tree --ack-self-anchors
       - name: Test suite
         run: npm test
       - name: Simulation harness
@@ -102,10 +104,11 @@ jobs:
           # someone forgets to name cannot slip through (w13-supply W12-05).
           # sample-audit/checkpoint/pinned-trust mint fresh keys each run —
           # byte-stability impossible; proven fresh by the live verify steps.
-          # `|| true`: when every porcelain line is filtered, the final grep
-          # exits 1 and bash -e would kill the step even though stale is
-          # correctly empty.
-          stale="$(git status --porcelain -- docs/ examples/ ai-eval/ vectors/ reports/ | grep -v 'reports/benchmark.json' | grep -v 'reports/source-check.json' | grep -v 'reports/artifact-audit.json' | grep -v 'reports/verification-webcrypto.json' | grep -v 'vectors/envelope-es256-vectors.json' | grep -v 'reports/sample-audit.json' | grep -v 'reports/sample-checkpoint.json' | grep -v 'reports/sample-pinned-trust.json' || true)"
+          # Exclusions come from the SHARED list scripts/stale-excludes.txt
+          # applied by exact path equality — a substring grep-v would
+          # silently swallow 'reports/x.evil' under the 'reports/x' prefix
+          # (w23-supply F6).
+          stale="$(git status --porcelain -- docs/ examples/ ai-eval/ vectors/ reports/ | awk 'NR==FNR { if ($0 !~ /^#|^$/) excl[$0]=1; next } { f=$2; if (f != "" && !excl[f]) print }' scripts/stale-excludes.txt - || true)"
           test -z "$stale" || { echo "stale generated artifacts:"; echo "$stale"; exit 1; }
           # reports/benchmark.json is intentionally absent: it embeds measured
           # timings, so byte-equality can never hold — freshness there is
