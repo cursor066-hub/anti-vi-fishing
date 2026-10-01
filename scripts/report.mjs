@@ -51,7 +51,11 @@ collectTests('tests');
 const tap = run(process.execPath, ['--test', '--test-concurrency=1', '--test-reporter=tap', ...testFiles]);
 const tapText = (tap.stdout ?? '') + (tap.stderr ?? '');
 // Strip per-test durations so the committed TAP is byte-stable.
-const stableTap = tapText.replace(/ \([\d.]+ms\)/g, '').replace(/(duration_ms: )[\d.]+/g, '$10').replace(/(# duration_ms )[\d.]+/g, '$10');
+const stableTap = tapText.replace(/ \([\d.]+ms\)/g, '').replace(/(duration_ms: )[\d.]+/g, '$10').replace(/(# duration_ms )[\d.]+/g, '$10')
+  // issuerd construction warnings ride process.stderr and land at
+  // timing-dependent offsets inside the TAP stream — they are daemon
+  // diagnostics, not test results; strip them like durations.
+  .split('\n').filter(l => !l.startsWith('# issuerd:')).join('\n');
 // TAP footer counts come from the LAST match — a test printing
 // '# pass 9999' to stdout controls the first regex hit but can never
 // outlive the runner's own summary (w23-supply F8). The four summary

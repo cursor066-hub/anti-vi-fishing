@@ -323,7 +323,6 @@ ok 54 - HTTP: refusal responses carry the INV-* reason code, not just a status
   duration_ms: 0
   type: 'test'
   ...
-# issuerd: tokenless issuers unreachable in a tokened registry: bank
 # Subtest: EVD-001 CON-002: issuer kind ceiling — bank key cannot mint governance_review
 ok 55 - EVD-001 CON-002: issuer kind ceiling — bank key cannot mint governance_review
   ---
@@ -1074,7 +1073,6 @@ ok 179 - M1: key.rotate adopting a non-vault public key is rejected
   duration_ms: 0
   type: 'test'
   ...
-# issuerd: no bearer credentials configured — all endpoints refuse with uniform 401 until a token is provisioned or allow_insecure_loopback is set
 # Subtest: H2: issuerd issuance requires the bearer token; conflict answers never leak unclaimed fields
 ok 180 - H2: issuerd issuance requires the bearer token; conflict answers never leak unclaimed fields
   ---
@@ -1597,7 +1595,6 @@ ok 266 - POL-012: fewer than 3 customer bootstrap signers cannot start the servi
   duration_ms: 0
   type: 'test'
   ...
-# issuerd: tokenless issuers unreachable in a tokened registry: bank
 # Subtest: KEY-002: Shamir k-of-n reconstructs only at quorum; wrong shares fail
 ok 267 - KEY-002: Shamir k-of-n reconstructs only at quorum; wrong shares fail
   ---
@@ -1676,7 +1673,6 @@ ok 279 - KEY-008: reconstruction below quorum fails
   duration_ms: 0
   type: 'test'
   ...
-# issuerd: tokenless issuers unreachable in a tokened registry: bank
 # Subtest: EVD-004 CON-001: issuerd answers evidence queries over real HTTP; answers are signed envelopes
 ok 280 - EVD-004 CON-001: issuerd answers evidence queries over real HTTP; answers are signed envelopes
   ---
@@ -1809,7 +1805,6 @@ ok 301 - w10 F-8: issuerd rejects a bare-address Host
   duration_ms: 0
   type: 'test'
   ...
-# issuerd: tokenless issuers unreachable in a tokened registry: hris
 # Subtest: w10 F-13: issuerd refuses absolute-form and query-mismatched request targets
 ok 302 - w10 F-13: issuerd refuses absolute-form and query-mismatched request targets
   ---
@@ -2884,7 +2879,6 @@ ok 479 - w18 F-3b: the verify memo binds the verified bytes, not just purpose
   duration_ms: 0
   type: 'test'
   ...
-# issuerd: tokenless issuers unreachable in a tokened registry: bank
 # Subtest: w18 F-1: policy_admin is denied on /v1/grants end-to-end
 ok 480 - w18 F-1: policy_admin is denied on /v1/grants end-to-end
   ---
@@ -2957,7 +2951,6 @@ ok 491 - w19-aad: datagate tokenise binds components as a canonical tuple
   duration_ms: 0
   type: 'test'
   ...
-# issuerd: tokenless issuers unreachable in a tokened registry: bank
 # Subtest: w18-issuerd F-1a: a swapped component_ecdh refuses release
 ok 492 - w18-issuerd F-1a: a swapped component_ecdh refuses release
   ---
@@ -3012,14 +3005,12 @@ ok 500 - w18-issuerd F-8: omitted issuer_version cannot skip the drift pin
   duration_ms: 0
   type: 'test'
   ...
-# issuerd: tokenless issuers unreachable in a tokened registry: bank
 # Subtest: w18-issuerd F-12: tokenless issue writes one honest log entry
 ok 501 - w18-issuerd F-12: tokenless issue writes one honest log entry
   ---
   duration_ms: 0
   type: 'test'
   ...
-# issuerd: tokenless issuers unreachable in a tokened registry: bank
 # Subtest: w18-issuerd F-2: oversize probes are logged and budgeted
 ok 502 - w18-issuerd F-2: oversize probes are logged and budgeted
   ---
@@ -3212,15 +3203,12 @@ ok 533 - w20-fv F-5: a vault persist fault on seal surfaces without un-repointin
   duration_ms: 0
   type: 'test'
   ...
-# issuerd: tokenless issuers unreachable in a tokened registry: bank
 # Subtest: w20-fv F-6: oversize floods are logged and budgeted even with a bearer
 ok 534 - w20-fv F-6: oversize floods are logged and budgeted even with a bearer
   ---
   duration_ms: 0
   type: 'test'
   ...
-# issuerd: tokenless issuers unreachable in a tokened registry: bank
-# issuerd: tokenless issuers unreachable in a tokened registry: bank
 # Subtest: w20-fv F-7/F-8: a mid-chain edit refuses boot; a valid prefix resumes
 ok 535 - w20-fv F-7/F-8: a mid-chain edit refuses boot; a valid prefix resumes
   ---
@@ -3366,7 +3354,6 @@ ok 558 - w21-issuerd F-6: foreign-bearer read probing is probe-budgeted and logg
   type: 'test'
   ...
 # Subtest: w21-issuerd F-7: refused issues stamp the real authentication state
-# issuerd: no bearer credentials configured — all endpoints refuse with uniform 401 until a token is provisioned or allow_insecure_loopback is set
 ok 559 - w21-issuerd F-7: refused issues stamp the real authentication state
   ---
   duration_ms: 0
@@ -4495,8 +4482,6 @@ ok 746 - w9-deploy F7: bootstrap issuer specs carry bearer digests, not plaintex
   duration_ms: 0
   type: 'test'
   ...
-# issuerd: no bearer credentials configured — all endpoints refuse with uniform 401 until a token is provisioned or allow_insecure_loopback is set
-# issuerd: tokenless issuers unreachable in a tokened registry: bank
 # Subtest: w9-deploy F9: the coarse bucket is spent before request validation
 ok 747 - w9-deploy F9: the coarse bucket is spent before request validation
   ---
