@@ -119,6 +119,17 @@ export class Fabric {
     // (w19-aad W19-1).
     const aadDedup = new Map();
     this.store = new Store(join(directory, 'fabric.db'), encryption, auditSigners, { aadDedup });
+    // A wiped fabric.db beside surviving deployment artifacts is not a
+    // fresh start — re-genesis would silently forgive revocations and
+    // re-arm spent nonces (w30-store F1). Either artifact is unambiguous
+    // proof of prior operation: the keystore wraps keys minted at
+    // provisioning, and target.db holds state committed by earlier
+    // transactions. Vault-injected opens are provisioning contexts —
+    // bootstrap legitimately writes the keystore BEFORE the first boot —
+    // so the gate guards only boots that load their trust anchor from
+    // the directory. The honest escape is deleting the whole directory.
+    if (vault === null && (existsSync(join(this.directory, 'keystore.json')) || existsSync(join(this.directory, 'target.db'))) && this.store.db.prepare('SELECT COUNT(*) n FROM audit').get().n === 0)
+      throw new InvariantError('INV-503-STORAGE', 'Prior-deployment artifacts exist but the audit ledger is empty — refusing to silently re-genesis a wiped deployment; delete the deployment directory for a true fresh start', 503);
     this.target = new SimulatedTarget(join(directory, 'target.db'), encryption, { aadDedup });
     // End-of-chain commitment (w24-fixverify W24-01): every committed audit
     // append moves a vault-signed {seq,hash} watermark persisted outside the
@@ -1125,6 +1136,20 @@ export class Fabric {
     let allowed = this._allowedSuites(t);
     if (allowed !== null) requireThat((allowed ?? ['Ed25519']).includes(suite), 'INV-451-POLICY', 'Signature suite retired by constitution', 451);
   }
+  // The suites that can still sign under this tenant: every unrevoked,
+  // non-pending vault key bound to it. A constitution whose allowed_suites
+  // retires one of these can never sign its own POLICY_ACTIVATED — the
+  // gate it installs would refuse that very signature and wedge every
+  // later transaction (w30-policy F9). Retirement is legal only after the
+  // live keys have rotated off the suite.
+  _coversLiveSuites(t, candidate) {
+    const suites = candidate?.algorithms?.allowed_suites;
+    if (!suites) return true;
+    for (const [kid, e] of this.vault.keys) {
+      if (!e.revoked && !e.pending && this.ownsVaultKey(t, kid) && !suites.includes(e.suite)) return false;
+    }
+    return true;
+  }
   // The allowed-suite answer changes only with the served constitution or
   // the anchor set that vouches for it — both are digest-bound, so the
   // resolution memoizes on exactly that content (w28-http CI regression:
@@ -1926,6 +1951,17 @@ export class Fabric {
         this.store.audit(t, 'POLICY_SUPERSEDED', 'system', staged.policy.policy_id, { version: staged.policy.version, reason: 'unanchored-staged-row', policy_digest: digest(staged.policy) }, now);
         return null;
       }
+      // A staged constitution that retires a suite a live vault key still
+      // signs under can never anchor its own activation — promoting it
+      // would throw INV-451 inside this sweep's transaction and wedge every
+      // later transaction on the same due row. Supersede it honestly
+      // instead (w30-policy F9); the refusal writes under the CURRENT
+      // constitution, whose gate the live keys still satisfy.
+      if (!this._coversLiveSuites(t, staged.policy)) {
+        this.store.remove(t, 'policy', 'staged');
+        this.store.audit(t, 'POLICY_SUPERSEDED', 'system', staged.policy.policy_id, { version: staged.policy.version, reason: 'suite-retirement-under-live-keys', policy_digest: digest(staged.policy) }, now);
+        return null;
+      }
       this.store.put(t, 'policy', 'active', staged.policy, now);
       this.store.remove(t, 'policy', 'staged');
       this.store.put(t, 'policy-history', `v${staged.policy.version}`, { activated_at: now, digest: digest(staged.policy), staged: true, emergency: staged.policy.emergency_of !== undefined }, now);
@@ -2046,7 +2082,7 @@ export class Fabric {
   // rows deleted mid-table cannot un-anchor what the chain already attested.
   _auditIndex(t) {
     let idx = this.#auditIdx.get(t);
-    if (!idx) { idx = { maxSeq: 0, building: false, revoked: new Set(), attached: new Map(), proposedNonce: new Set(), proposedAt: new Map(), proposedDigest: new Map(), issued: new Set(), issuedCert: new Map(), issuedCerts: new Set(), grants: new Map(), grantMeta: new Map(), rotations: new Map(), rotationsByPrev: new Map(), rotationKeys: new Set(), policyAnchors: [], dataAccess: [], perceptionNonce: new Set(), reserved: new Set(), reservedAt: new Map(), reservedMeta: new Map(), dispatched: new Map(), dispatchedMeta: new Map(), outcomes: new Map(), outcomeDigests: new Map(), cancelled: new Set(), dryRunAt: new Map(), keyDeadAt: new Map(), parentChildren: new Map(), simulated: [], issuerDrift: new Set(), tenantDrifted: false, configSnapshot: null, decisions: new Map(), runtimeUse: [], runtimeUseByCap: new Map(), runtimeUseBySubject: new Map(), revocationDigests: new Map(), denials: [], denialsByReq: new Map(), ceremonyAcks: new Map(), ceremonyPlanned: new Map(), ceremonyCommitted: new Map(), ceremonyAborted: new Set(), ceremonyCompleted: new Set(), ceremonyNotices: new Map(), ceremonyRotationConsumed: new Map(), coverageAnchors: new Map(), coverageDeclared: new Map(), coverageTransitions: [], coverageValidations: [], perceptionSessions: new Map(), capabilities: new Set() }; this.#auditIdx.set(t, idx); }
+    if (!idx) { idx = { maxSeq: 0, building: false, revoked: new Set(), attached: new Map(), evidenceIds: new Set(), proposedNonce: new Set(), proposedAt: new Map(), proposedDigest: new Map(), proposedIdem: new Map(), issued: new Set(), issuedCert: new Map(), issuedCerts: new Set(), grants: new Map(), grantMeta: new Map(), rotations: new Map(), rotationsByPrev: new Map(), rotationKeys: new Set(), policyAnchors: [], dataAccess: [], perceptionNonce: new Set(), reserved: new Set(), reservedAt: new Map(), reservedMeta: new Map(), dispatched: new Map(), dispatchedMeta: new Map(), outcomes: new Map(), outcomeDigests: new Map(), cancelled: new Set(), dryRunAt: new Map(), keyDeadAt: new Map(), parentChildren: new Map(), simulated: [], issuerDrift: new Set(), tenantDrifted: false, configSnapshot: null, decisions: new Map(), runtimeUse: [], runtimeUseByCap: new Map(), runtimeUseBySubject: new Map(), revocationDigests: new Map(), denials: [], denialsByReq: new Map(), ceremonyAcks: new Map(), ceremonyPlanned: new Map(), ceremonyCommitted: new Map(), ceremonyAborted: new Set(), ceremonyCompleted: new Set(), ceremonyNotices: new Map(), ceremonyRotationConsumed: new Map(), coverageAnchors: new Map(), coverageDeclared: new Map(), coverageTransitions: [], coverageValidations: [], perceptionSessions: new Map(), capabilities: new Set() }; this.#auditIdx.set(t, idx); }
     // One prepared statement per index for the head probe — evaluation
     // touches the index dozens of times and a fresh prepare per call was
     // most of that cost. Semantics unchanged: the query still re-reads
@@ -2200,8 +2236,8 @@ export class Fabric {
           if (typeof meta.ceremony_id === 'string') idx.ceremonyRotationConsumed.set(meta.ceremony_id, meta.capsule_id ?? null);
           break;
         case 'ROTATION_PREPARED': if (typeof pl.reference === 'string') idx.rotationKeys.add(pl.reference); break;
-        case 'EVIDENCE_ATTACHED': { const l = idx.attached.get(pl.reference) ?? []; l.push(meta.evidence_id); idx.attached.set(pl.reference, l); if (meta.expires_at !== undefined) { const el = (idx.evidenceExpiry ??= new Map()).get(pl.reference) ?? []; el.push({ evidence_id: meta.evidence_id, expires_at: meta.expires_at }); idx.evidenceExpiry.set(pl.reference, el); } break; }
-        case 'CAPSULE_PROPOSED': idx.proposedAt.set(pl.reference, pl.time); if (meta.nonce) idx.proposedNonce.add(meta.nonce); if (meta.capsule_digest) idx.proposedDigest.set(pl.reference, meta.capsule_digest); if (typeof meta.expires_at === 'number') (idx.proposedExpiry ??= new Map()).set(pl.reference, meta.expires_at); break;
+        case 'EVIDENCE_ATTACHED': { const l = idx.attached.get(pl.reference) ?? []; l.push(meta.evidence_id); idx.attached.set(pl.reference, l); idx.evidenceIds.add(meta.evidence_id); if (meta.expires_at !== undefined) { const el = (idx.evidenceExpiry ??= new Map()).get(pl.reference) ?? []; el.push({ evidence_id: meta.evidence_id, expires_at: meta.expires_at }); idx.evidenceExpiry.set(pl.reference, el); } break; }
+        case 'CAPSULE_PROPOSED': idx.proposedAt.set(pl.reference, pl.time); if (meta.nonce) idx.proposedNonce.add(meta.nonce); if (meta.capsule_digest) idx.proposedDigest.set(pl.reference, meta.capsule_digest); if (meta.idem_key) idx.proposedIdem.set(meta.idem_key, { request: meta.idem_request, capsule_id: pl.reference }); if (typeof meta.expires_at === 'number') (idx.proposedExpiry ??= new Map()).set(pl.reference, meta.expires_at); break;
         // Anchored approval/evidence lifetimes: a capsule row rolled back
         // to a pre-approval image cannot hide a lapsed vote or envelope
         // from the resurrection veto (w24-fixverify W24-07).
@@ -2372,7 +2408,7 @@ export class Fabric {
     });
   }
   policy(t) {
-    const staged = this.store.get(t, 'policy', 'staged'), active = this.store.must(t, 'policy', 'active');
+    const staged = this.store.get(t, 'policy', 'staged'), active = this._mustAnchored(t, 'policy', 'active');
     const anchors = this._auditIndex(t).policyAnchors;
     const anchor = [...anchors].reverse().find(a => !a.staged);
     // An empty anchor must NOT vacuously pass: on the pre-upgrade ledgers
@@ -2418,7 +2454,7 @@ export class Fabric {
     const identity = Object.values(this.tenant(t).identities).find(x => x.subject_id === subject && x.device_id === device);
     requireThat(identity && !identity.revoked && identity.health_expires_at > now, 'INV-403-HEALTH', 'Configured device health evidence expired or mismatched', 403);
   }
-  getCapsule(p, id) { this.authorize(p, ['operator', 'approver', 'custodian', 'security', 'policy_admin', 'auditor']); return this.capsuleView(this.store.must(p.tenant_id, 'capsule', identifier(id))); }
+  getCapsule(p, id) { this.authorize(p, ['operator', 'approver', 'custodian', 'security', 'policy_admin', 'auditor']); return this.capsuleView(this._mustAnchored(p.tenant_id, 'capsule', identifier(id))); }
   // A capsule read never returns raw dataset rows: current_state snapshots
   // are needed internally for predicates and target equality checks, but the
   // read surface exposes only their digest (w6-tenancy F1).
@@ -2531,6 +2567,17 @@ export class Fabric {
       // The bare-key lookup also covers nonce rows written before the
       // 'capsule:'/'perception:' namespacing shipped — a legacy row must
       // still block the replay (w9-fixverify NB-5).
+      // A deleted idempotency receipt must not silently re-mint: the chain
+      // anchored the first (key, request) bind, so an anchored same-request
+      // replays to its live capsule and a divergent request dies exactly
+      // like the receipt's hash mismatch would have (w30-store F4).
+      const anchoredIdem = this._auditIndex(p.tenant_id).proposedIdem.get(idempotencyKey);
+      if (anchoredIdem) {
+        requireThat(ctEqual(anchoredIdem.request ?? '', digest(input)), 'INV-409-IDEMPOTENCY', 'Idempotency key reused for a different request', 409);
+        const live = this.store.get(p.tenant_id, 'capsule', anchoredIdem.capsule_id);
+        requireThat(live, 'INV-404-NOT-FOUND', 'Capsule shredded — the idempotency receipt retains no plaintext', 404);
+        return live;
+      }
       const prior = this.store.db.prepare('SELECT capsule FROM nonces WHERE tenant=? AND nonce IN (?, ?)').get(p.tenant_id, 'capsule:' + input.nonce, input.nonce);
       // The nonce table is a fast index, not the authority — deleting the
       // row cannot replay a nonce whose CAPSULE_PROPOSED already sits on the
@@ -2540,7 +2587,7 @@ export class Fabric {
       const record = { capsule, capsule_digest: digest(capsule), status: 'CANONICALISED', evidence: [], approvals: [], decision: null, certificate_id: null, created_at: now };
       this.store.db.prepare('INSERT INTO nonces VALUES(?,?,?)').run(p.tenant_id, 'capsule:' + input.nonce, capsule.capsule_id);
       this.store.insert(p.tenant_id, 'capsule', capsule.capsule_id, record, now);
-      this.store.audit(p.tenant_id, 'CAPSULE_PROPOSED', p.subject_id, capsule.capsule_id, { capsule_digest: record.capsule_digest, action_type: capsule.action.type, nonce: input.nonce, expires_at: capsule.expires_at }, now);
+      this.store.audit(p.tenant_id, 'CAPSULE_PROPOSED', p.subject_id, capsule.capsule_id, { capsule_digest: record.capsule_digest, action_type: capsule.action.type, nonce: input.nonce, expires_at: capsule.expires_at, idem_key: idempotencyKey, idem_request: digest(input) }, now);
       return record;
     }, {
       // The receipt must not preserve plaintext the retention shredder
@@ -2557,6 +2604,21 @@ export class Fabric {
         return live;
       }
     }));
+  }
+  // A file-writer deleting a row whose id the signed chain anchors must
+  // surface as tamper evidence, not an ordinary miss — get() first, then
+  // upgrade absent-but-anchored to INV-409 (w30-store F5).
+  _mustAnchored(tenant, kind, id) {
+    const row = this.store.get(tenant, kind, id);
+    if (row !== null) return row;
+    const idx = this._auditIndex(tenant);
+    const anchored = (kind === 'capsule' && idx.proposedDigest.has(id))
+      || (kind === 'certificate' && idx.issuedCerts.has(id))
+      || (kind === 'evidence' && idx.evidenceIds.has(id))
+      || (kind === 'policy' && id === 'active' && idx.policyAnchors.length > 0)
+      || (kind === 'config-snapshot' && id === 'current' && idx.configSnapshot !== null);
+    requireThat(!anchored, 'INV-409-INTEGRITY', `Anchored ${kind} row is missing — storage tamper`, 409);
+    requireThat(false, 'INV-404-NOT-FOUND', 'Resource not found', 404);
   }
   ensureMutable(record) { requireThat(!['DENY', 'CANCELLED', 'CERTIFIED', 'EXECUTING', 'VERIFIED', 'UNCERTAIN', 'FAILED', 'COMPENSATED'].includes(record.status), 'INV-409-STATE', 'Action is immutable in its current state', 409); }
   graph(t, record, policy = null) {
@@ -2652,7 +2714,7 @@ export class Fabric {
   attachEvidence(p, id, envelope) {
     this.authorize(p, ['operator', 'security', 'policy_admin']);
     return this.transaction(p, now => {
-      const t = p.tenant_id, record = this.store.must(t, 'capsule', id); this.ensureMutable(record);
+      const t = p.tenant_id, record = this._mustAnchored(t, 'capsule', id); this.ensureMutable(record);
       this._capsuleIntegrity(t, record);
       // Attaching wipes collected approvals by design (new evidence invalidates
       // the evaluation), so only the proposing actor may do it — a third party
@@ -2756,7 +2818,7 @@ export class Fabric {
     this.authorize(p, ['operator', 'security', 'policy_admin']);
     fields(input, ['issuer', 'kind', 'claims'], ['subject_id', 'dependencies']);
     identifier(input.issuer, 'issuer'); text(input.kind, 'evidence kind');
-    const t = p.tenant_id, record = this.store.must(t, 'capsule', capsule_id);
+    const t = p.tenant_id, record = this._mustAnchored(t, 'capsule', capsule_id);
     requireThat(record.capsule.actor.subject_id === p.subject_id, 'INV-403-SCOPE', 'Only the proposing actor may acquire evidence', 403);
     const entry = Object.entries(this.tenant(t).issuers).find(([, v]) => v.name === input.issuer || input.issuer === v.issuer_id);
     requireThat(entry, 'INV-404-NOT-FOUND', 'Issuer not found', 404);
@@ -2869,9 +2931,14 @@ export class Fabric {
       return { ...result, coverage_paths_staled: transitioned.length };
     });
   }
-  approvalChallenge(p, id) {
-    this.authorize(p, ['approver', 'custodian']); const r = this.store.must(p.tenant_id, 'capsule', id); this.ensureMutable(r);
-    const now = this.clock(), key = Object.entries(this.identities(p.tenant_id)).find(([, v]) => v.subject_id === p.subject_id);
+  approvalChallenge(p, id, signer_id = null) {
+    this.authorize(p, ['approver', 'custodian']); const r = this._mustAnchored(p.tenant_id, 'capsule', id); this.ensureMutable(r);
+    if (signer_id !== null) text(signer_id, 'signer_id', 128);
+    // The caller may pin WHICH of their enrolled keys signs — canonical
+    // ordering must not silently choose a key the caller's hardware cannot
+    // reach (w30-policy F4a).
+    const now = this.clock(), key = Object.entries(this.identities(p.tenant_id)).find(([kid, v]) => v.subject_id === p.subject_id && (signer_id === null || kid === signer_id));
+    requireThat(key, 'INV-404-NOT-FOUND', 'No enrolled signing key for this subject', 404);
     // Device quarantine applies on the approval plane too (runtime-audit F-10).
     this.assertHealthy(p.tenant_id, p.subject_id, this.identity(p).device_id, now);
     return { tenant_id: p.tenant_id, capsule_id: id, capsule_digest: r.capsule_digest, evidence_graph_digest: this.graph(p.tenant_id, r).digest, policy_digest: digest(this.policy(p.tenant_id)), signer_id: key[0], approved_at: now, expires_at: Math.min(now + 300000, r.capsule.expires_at) };
@@ -2951,7 +3018,7 @@ export class Fabric {
   evaluate(p, id) {
     this.authorize(p, ['operator', 'policy_admin', 'approver', 'custodian']);
     return this.transaction(p, now => {
-      const record = this.store.must(p.tenant_id, 'capsule', id); this.ensureMutable(record); this._capsuleIntegrity(p.tenant_id, record);
+      const record = this._mustAnchored(p.tenant_id, 'capsule', id); this.ensureMutable(record); this._capsuleIntegrity(p.tenant_id, record);
       this.assertHealthy(p.tenant_id, record.capsule.actor.subject_id, record.capsule.actor.device_id, now);
       // The decisioning principal's own device must be live too — the gate
       // revokes a device everywhere or nowhere (w11-approval F6).
@@ -2965,7 +3032,7 @@ export class Fabric {
   certificate(p, id) {
     this.authorize(p, ['operator', 'policy_admin']);
     return this.transaction(p, now => {
-      const t = p.tenant_id, r = this.store.must(t, 'capsule', id); this.ensureMutable(r); this._capsuleIntegrity(t, r);
+      const t = p.tenant_id, r = this._mustAnchored(t, 'capsule', id); this.ensureMutable(r); this._capsuleIntegrity(t, r);
       // Mint-state is ledger-derived: clearing the record field cannot
       // resurrect a second certificate — CERTIFICATE_ISSUED on the signed
       // chain is the authority (w11-redteam R8).
@@ -3013,7 +3080,7 @@ export class Fabric {
       // A certified composite binds each child to itself by an indexed
       // marker — the execute() guard resolves the parent by key, never by
       // scanning (w10-cert F4).
-      if (r.capsule.action.type === 'action.composite') for (const childId of r.capsule.requested_state.children ?? []) { const child = this.store.must(t, 'capsule', childId); child.composite_parents = [...new Set([...(child.composite_parents ?? []), id])]; this.store.put(t, 'capsule', childId, child, now); }
+      if (r.capsule.action.type === 'action.composite') for (const childId of r.capsule.requested_state.children ?? []) { const child = this._mustAnchored(t, 'capsule', childId); child.composite_parents = [...new Set([...(child.composite_parents ?? []), id])]; this.store.put(t, 'capsule', childId, child, now); }
       // Composite parentage is chain-anchored too: the children list lands
       // in the signed event, so editing the stored capsule's children (or
       // deleting the parent row) can never unbind a certified child
@@ -3028,14 +3095,14 @@ export class Fabric {
       const t = p.tenant_id, cert = verifySigned(envelope, this.executionPublic(t), 'action-certificate');
       requireThat(cert.tenant_id === t && cert.target_gate_id === this.config.gate_id, 'INV-403-SCOPE', 'Certificate scope mismatch', 403);
       requireThat(!this.revoked(t, 'key', envelope.protected.key_id) && !this.revoked(t, 'certificate', cert.certificate_id) && cert.issued_at <= now && cert.expires_at > now, 'INV-401-CERTIFICATE', 'Certificate expired or revoked', 401);
-      const stored = this.store.must(t, 'certificate', cert.certificate_id), record = this.store.get(t, 'capsule', cert.capsule_id);
+      const stored = this._mustAnchored(t, 'certificate', cert.certificate_id), record = this.store.get(t, 'capsule', cert.capsule_id);
       const idx = this._auditIndex(t);
       // A capsule the ledger attests as proposed but the store cannot
       // serve is destructive tampering — integrity, not a bare 404 that
       // erases the anchored lifecycle behind a missing-row error
       // (w29-lifecycle F5).
       requireThat(record || !idx.proposedDigest.has(cert.capsule_id), 'INV-409-INTEGRITY', 'Anchored capsule row is missing', 409);
-      if (!record) this.store.must(t, 'capsule', cert.capsule_id);
+      if (!record) this._mustAnchored(t, 'capsule', cert.capsule_id);
       this._capsuleIntegrity(t, record);
       requireThat(record.capsule.tenant_id === t, 'INV-403-SCOPE', 'Capsule tenant does not match the certificate tenant', 403);
       requireThat(digest(stored.envelope) === digest(envelope), 'INV-401-CERTIFICATE', 'Certificate does not match issued authority', 401);
@@ -3225,13 +3292,13 @@ export class Fabric {
           // not the parent reservation time — wall clock may have advanced
           // across earlier child dispatches (concurrency-audit M1).
           childNow = this.clock(); this.store.clock(childNow);
-          child = this.store.must(t, 'capsule', childId);
+          child = this._mustAnchored(t, 'capsule', childId);
           // Each child's stored capsule must still equal its chain-attested
           // proposal — a graft onto the child record (current_state or
           // action rewrite) fails before it can be dispatched under the
           // parent's composite authority (w13-timing M-3).
           this._capsuleIntegrity(t, child);
-          const childStored = this.store.must(t, 'certificate', child.certificate_id);
+          const childStored = this._mustAnchored(t, 'certificate', child.certificate_id);
           childCert = childStored.envelope.payload;
           requireThat(!this.revoked(t, 'key', childStored.envelope.protected.key_id) && !this.revoked(t, 'certificate', childCert.certificate_id) && childCert.issued_at <= childNow && childCert.expires_at > childNow, 'INV-401-CERTIFICATE', 'Child certificate expired or revoked', 401);
           // Same anchored spend-truth as a standalone execute(): mutable
@@ -3316,7 +3383,7 @@ export class Fabric {
   finishComposite(p, cert, capsule, executed, status, reason, compensations, execNow, wedged = [], attemptedFailed = []) {
     const post = [];
     const envelope = this.transaction(p, now => {
-      const t = p.tenant_id, r = this.store.must(t, 'capsule', cert.capsule_id), stored = this.store.must(t, 'certificate', cert.certificate_id);
+      const t = p.tenant_id, r = this._mustAnchored(t, 'capsule', cert.capsule_id), stored = this._mustAnchored(t, 'certificate', cert.certificate_id);
       this._certSpendIntegrity(t, this._auditIndex(t), cert.certificate_id, stored);
       requireThat(this._auditIndex(t).reserved.has(cert.certificate_id), 'INV-409-STATE', 'Certificate was never reserved for execution', 409);
       this._capsuleIntegrity(t, r);
@@ -3371,7 +3438,7 @@ export class Fabric {
       const childOutcomes = {};
       for (const done of executed) {
         const childCapsuleId = done.child.capsule.capsule_id;
-        const childRecord = this.store.must(t, 'capsule', childCapsuleId), childStored = this.store.must(t, 'certificate', done.child.certificate_id);
+        const childRecord = this._mustAnchored(t, 'capsule', childCapsuleId), childStored = this._mustAnchored(t, 'certificate', done.child.certificate_id);
         const childCertId = childStored.envelope.payload.certificate_id;
         const priorOutcome = this.store.get(t, 'outcome', childCertId);
         // A planted child outcome must scream INTEGRITY, not silently skip
@@ -3575,6 +3642,12 @@ export class Fabric {
       // A staged candidate pending activation conflicts with ANY second
       // activation — immediate or staged alike (w10-cert F2).
       if (this.store.get(t, 'policy', 'staged')) return { activation_superseded: { detail: 'POLICY_STAGED_CONFLICT' } };
+      // A constitution that retires a suite a live vault key still signs
+      // under can never anchor its own activation — the gate it installs
+      // would refuse the POLICY_ACTIVATED signature itself and wedge every
+      // later transaction. The honest verdict is a FAILED outcome before
+      // any anchor exists (w30-policy F9).
+      if (!this._coversLiveSuites(t, next)) return { activation_superseded: { detail: 'POLICY_SUITE_LAPSED' } };
       // Expiry and staged min-delay are admission-time checks in evaluation();
       // a candidate that cannot legally activate never reaches CERTIFIED.
       if (next.not_before > now) {
@@ -3745,7 +3818,7 @@ export class Fabric {
   finish(p, cert, raw, status, reason, { postRead = false } = {}) {
     const post = [];
     const envelope = this.transaction(p, now => {
-      const t = p.tenant_id, r = this.store.must(t, 'capsule', cert.capsule_id), stored = this.store.must(t, 'certificate', cert.certificate_id);
+      const t = p.tenant_id, r = this._mustAnchored(t, 'capsule', cert.capsule_id), stored = this._mustAnchored(t, 'certificate', cert.certificate_id);
       // finish is reachable only after the reservation consumed the
       // certificate — an outcome row cannot be forged ahead of dispatch
       // (w11 F4). Record integrity is re-proven before effects fire (w11 F1).
@@ -3852,7 +3925,7 @@ export class Fabric {
     return envelope;
   }
   reconcile(p, id) {
-    this.authorize(p, ['operator', 'security', 'policy_admin']); const t = p.tenant_id, stored = this.store.must(t, 'certificate', id);
+    this.authorize(p, ['operator', 'security', 'policy_admin']); const t = p.tenant_id, stored = this._mustAnchored(t, 'certificate', id);
     // A recorded outcome without a consumed reservation is always forged
     // (w11 F4) — the consumed check precedes every stored-row read, and the
     // row itself must re-verify as a vault-signed envelope before it is
@@ -3875,7 +3948,7 @@ export class Fabric {
     // destructive tampering — reconcile must scream, not die on a bare
     // 404 (w29-lifecycle F5).
     requireThat(record || !this._auditIndex(t).proposedDigest.has(cert.capsule_id), 'INV-409-INTEGRITY', 'Anchored capsule row is missing', 409);
-    if (!record) this.store.must(t, 'capsule', cert.capsule_id);
+    if (!record) this._mustAnchored(t, 'capsule', cert.capsule_id);
     // A cert bound to a LIVE composite parent settles only through
     // finishComposite — an operator reconcile landing mid-composite would
     // fire irreversible effects under a verdict the parent then
@@ -3996,7 +4069,7 @@ export class Fabric {
       // tampering — cancel must scream integrity, not a bare 404
       // (w29-lifecycle F5).
       requireThat(r || !cancelIdx.proposedDigest.has(id), 'INV-409-INTEGRITY', 'Anchored capsule row is missing', 409);
-      if (!r) this.store.must(p.tenant_id, 'capsule', id);
+      if (!r) this._mustAnchored(p.tenant_id, 'capsule', id);
       // Terminal state is derived from the anchored folds, never the
       // mutable status field: re-cancelling, cancelling a dispatched or
       // settled cert — all refuse on the signed chain's word, and a
@@ -4056,8 +4129,8 @@ export class Fabric {
       // would be silent record pollution.
       const t = p.tenant_id;
       const exists = {
-        certificate: () => this.store.get(t, 'certificate', input.id),
-        evidence: () => this.store.get(t, 'evidence', input.id),
+        certificate: () => this._mustAnchored(t, 'certificate', input.id),
+        evidence: () => this._mustAnchored(t, 'evidence', input.id),
         // Existence must be own-property — inherited Object.prototype
         // members ('constructor', 'toString', ...) are not live authorities
         // and must never mint revocation records (w8-canonical F1).
@@ -4314,6 +4387,14 @@ export class Fabric {
       // The evidence schema is reused; its capsule_digest field binds the
       // validation to this path (digest(path)) rather than to an action.
       const payload = this.verifyEvidenceEnvelope(p.tenant_id, envelope, path.action_type);
+      // Same trust bar as attachEvidence: the envelope must bind THIS
+      // tenant, carry fresh acquisition, and cite only dependencies that
+      // already exist as ledger evidence — a cross-tenant, stale or
+      // phantom-referencing envelope can never promote a coverage path
+      // (w30-issuerd F4 mirrors attachEvidence's three gates).
+      requireThat(payload.tenant_id === p.tenant_id, 'INV-403-SCOPE', 'Evidence scope mismatch', 403);
+      requireThat(payload.acquired_at > now - 7 * 86400000, 'INV-400-SCHEMA', 'Evidence too old to attach', 400);
+      for (const dep of payload.dependencies ?? []) requireThat(this.store.get(p.tenant_id, 'evidence', dep) !== null, 'INV-400-SCHEMA', 'Dependencies must resolve to ledger evidence', 400);
       // Same trust bar as attachEvidence: revoked signer, drifted connector,
       // out-of-kind envelope or a non-supporting outcome cannot promote a
       // coverage path (w5 F-6).
@@ -4492,7 +4573,7 @@ export class Fabric {
     return this.transaction(p, now => {
       const accepted = [], constraints = [];
       for (const capsuleId of input.capsule_ids) {
-        const record = this.store.must(p.tenant_id, 'capsule', capsuleId);
+        const record = this._mustAnchored(p.tenant_id, 'capsule', capsuleId);
         const matched = input.signatures.filter(sig => sig?.payload?.capsule_id === capsuleId);
         requireThat(matched.length === 1, 'INV-400-SCHEMA', `Batch must carry exactly one approval per declared action: ${capsuleId}`, 400);
         accepted.push(this.approveInner(p, capsuleId, matched[0], now));
@@ -4515,7 +4596,7 @@ export class Fabric {
     fields(payload, ['tenant_id', 'capsule_id', 'capsule_digest', 'evidence_graph_digest', 'policy_digest', 'signer_id', 'approved_at', 'expires_at']);
     requireThat(payload.tenant_id === t && payload.signer_id === envelope.protected.key_id, 'INV-403-SCOPE', 'Approval scope mismatch', 403);
     const identity = this.identities(t)[payload.signer_id]; requireThat(identity.subject_id === p.subject_id, 'INV-403-SCOPE', 'Approval signer does not match authenticated identity', 403);
-    const record = this.store.must(t, 'capsule', capsuleId); this.ensureMutable(record); this._capsuleIntegrity(t, record);
+    const record = this._mustAnchored(t, 'capsule', capsuleId); this.ensureMutable(record); this._capsuleIntegrity(t, record);
     requireThat(identity.subject_id !== record.capsule.actor.subject_id, 'INV-403-SEPARATION', 'An initiator cannot approve their own action', 403);
     requireThat(payload.capsule_digest === record.capsule_digest && payload.evidence_graph_digest === this.graph(t, record).digest && payload.policy_digest === digest(this.policy(t)), 'INV-409-STATE', 'Approval no longer matches action, evidence or policy', 409);
     integer(payload.approved_at, 'approval time', now - 300000, now + 5000); integer(payload.expires_at, 'approval expiry', now + 1, Math.min(record.capsule.expires_at, payload.approved_at + 300000));
@@ -4553,7 +4634,7 @@ export class Fabric {
   }
   retention(p, input) {
     this.authorize(p, ['security']); fields(input, ['evidence_id', 'legal_hold']); identifier(input.evidence_id); requireThat(typeof input.legal_hold === 'boolean', 'INV-400-SCHEMA', 'Legal hold must be boolean');
-    return this.transaction(p, now => { const e = this.store.must(p.tenant_id, 'evidence', input.evidence_id); e.legal_hold = input.legal_hold; this.store.put(p.tenant_id, 'evidence', input.evidence_id, e, now); this.store.audit(p.tenant_id, 'RETENTION_HOLD_CHANGED', p.subject_id, input.evidence_id, { legal_hold: input.legal_hold }, now); return { evidence_id: input.evidence_id, legal_hold: input.legal_hold }; });
+    return this.transaction(p, now => { const e = this._mustAnchored(p.tenant_id, 'evidence', input.evidence_id); e.legal_hold = input.legal_hold; this.store.put(p.tenant_id, 'evidence', input.evidence_id, e, now); this.store.audit(p.tenant_id, 'RETENTION_HOLD_CHANGED', p.subject_id, input.evidence_id, { legal_hold: input.legal_hold }, now); return { evidence_id: input.evidence_id, legal_hold: input.legal_hold }; });
   }
   retentionSweep(p) {
     this.authorize(p, ['security']);
@@ -4564,7 +4645,7 @@ export class Fabric {
       const evidenceIds = this.store.ids(p.tenant_id, 'evidence', 20000), capsuleIds = this.store.ids(p.tenant_id, 'capsule', 20000), coverageIdsList = this.store.ids(p.tenant_id, 'coverage', 10000);
       const items = [], records = [], corrupt = [], citedEvidence = new Set();
       for (const id of evidenceIds) { try { items.push(this.store.must(p.tenant_id, 'evidence', id)); } catch { corrupt.push(['evidence', id]); } }
-      for (const id of capsuleIds) { try { records.push(this.store.must(p.tenant_id, 'capsule', id)); } catch { corrupt.push(['capsule', id]); } }
+      for (const id of capsuleIds) { try { records.push(this._mustAnchored(p.tenant_id, 'capsule', id)); } catch { corrupt.push(['capsule', id]); } }
       // Coverage rows join the reference scan per-id: one corrupt coverage
       // record must not wedge the whole sweep (w8-fixverify F5).
       for (const id of coverageIdsList) { try { const c = this.store.must(p.tenant_id, 'coverage', id); if (c.technical_validation?.evidence_id) citedEvidence.add(c.technical_validation.evidence_id); } catch { corrupt.push(['coverage', id]); } }
@@ -5105,7 +5186,7 @@ export class Fabric {
       // official-looking explanation for a verdict that never happened
       // (runtime-audit F-13).
       else if (input.operation === 'explain') {
-        const record = this.store.must(p.tenant_id, 'capsule', identifier(input.capsule_id ?? ''));
+        const record = this._mustAnchored(p.tenant_id, 'capsule', identifier(input.capsule_id ?? ''));
         requireThat(record.decision, 'INV-409-STATE', 'Action has no recorded decision to explain', 409);
         // The narrated decision is the chain-anchored one — a tampered
         // decision object cannot receive an official explanation

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import http from 'node:http';
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, lstatSync, openSync, closeSync, writeSync, fstatSync, constants as fsConstants } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, lstatSync, openSync, closeSync, writeSync, fstatSync, rmSync, constants as fsConstants } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomUUID, randomBytes, timingSafeEqual, createHmac, createPrivateKey, createPublicKey } from 'node:crypto';
 import { canonical, digest, hashBytes, parseStrict } from './canonical.mjs';
@@ -172,7 +172,11 @@ export function answerQuery(issuer, request, now) {
   // The fabric's evidence verifier caps dependencies at 32 — a signed
   // envelope beyond that ceiling could never attach anywhere, so refuse
   // to mint it rather than sign an unusable artifact (w25-issuerd LOW).
-  requireThat(request.dependencies === undefined || (Array.isArray(request.dependencies) && request.dependencies.length <= 32 && request.dependencies.every(d => typeof d === 'string')), 'INV-400-SCHEMA', 'dependencies must be an array of at most 32 strings');
+  // Same shape contract the fabric's evidence verifier enforces
+  // (uniqueStrings: ≤32 unique strings of ≤128 chars each) — a signed
+  // envelope outside that grammar could never attach anywhere, so it must
+  // never be minted (w30-issuerd F7).
+  requireThat(request.dependencies === undefined || (Array.isArray(request.dependencies) && request.dependencies.length <= 32 && request.dependencies.every(d => typeof d === 'string' && d.length <= 128) && new Set(request.dependencies).size === request.dependencies.length), 'INV-400-SCHEMA', 'dependencies must be an array of at most 32 unique strings of at most 128 characters');
   const key = interpolate(rule.lookup, request.claims ?? {});
   const record = Object.hasOwn(issuer.records, key) ? issuer.records[key] : null;
   const evidence_id = randomUUID();
@@ -266,6 +270,35 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
     else if (tokenless.length)
       process.stderr.write(`issuerd: tokenless issuers unreachable in a tokened registry: ${[...new Set(tokenless.map(i => i.issuer))].join(', ')}\n`);
   }
+  // Two daemons must never share one issuance log — a failover pair on one
+  // directory forks the chain (duplicate sequence numbers under divergent
+  // digests) and permanently wedges the next boot. Hold an exclusive
+  // create-or-fail lock beside the log for the server's whole lifetime,
+  // acquired BEFORE the chain key is read or minted (w30-issuerd F1).
+  // A stale lock left by a crashed daemon is reclaimed only when its
+  // recorded pid is provably dead; an unreadable or live pid refuses
+  // honestly. Residual: pid reuse can stale-lock the log — the operator
+  // clears the file after confirming no live daemon (documented in the
+  // runbook), never silently.
+  let lockFd = null;
+  const logLockPath = logPath ? `${logPath}.lock` : null;
+  if (logLockPath) {
+    mkdirSync(resolve(logPath, '..'), { recursive: true });
+    for (let attempt = 0; attempt < 2 && lockFd === null; attempt++) {
+      try { lockFd = openSync(logLockPath, fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY, 0o600); writeSync(lockFd, `${process.pid} ${clock()}
+`); }
+      catch (e) {
+        if (e.code !== 'EEXIST') throw e;
+        let holder = null; try { holder = readFileSync(logLockPath, 'utf8').trim().split(' ')[0]; } catch { holder = null; }
+        const pid = Number(holder);
+        let alive = false;
+        if (Number.isSafeInteger(pid) && pid > 0) { try { process.kill(pid, 0); alive = true; } catch (err) { alive = err.code === 'EPERM'; } }
+        requireThat(!alive, 'INV-503-CONFIG', 'Issuance log lock is held by a live daemon — a second issuerd on one directory would fork the chain', 503);
+        rmSync(logLockPath);
+      }
+    }
+    requireThat(lockFd !== null, 'INV-503-CONFIG', 'Issuance log lock could not be acquired', 503);
+  }
   const sequence = { n: 0, previous: '0'.repeat(64) };
   // request_digest in the chained log gets the same keyed treatment —
   // request bodies can carry claim/credential material an offline log
@@ -275,7 +308,13 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
   // issuer add/remove/rotation invalidate the chain and permanently
   // refuse boot (w21-issuerd F1). Losing the key file is honest data
   // loss — the old log refuses rather than re-genesising silently.
-  const logKey = (() => {
+  // Any boot failure AFTER the lock is taken must release it — a refused
+  // boot that leaked the lockfile would falsely report a live daemon on
+  // the operator's retry (w30-issuerd F1).
+  const releaseLock = () => { if (lockFd !== null) { try { closeSync(lockFd); } catch { /* already closed */ } lockFd = null; try { rmSync(logLockPath); } catch { /* already gone */ } } };
+  let logKey = '0'.repeat(64), logMac = null;
+  try {
+  logKey = (() => {
     if (!logPath) return '0'.repeat(64);
     mkdirSync(resolve(logPath, '..'), { recursive: true });
     const keyPath = `${logPath}.key`;
@@ -292,7 +331,7 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
     writeFileSync(keyPath, k + '\n', { mode: 0o600 });
     return k;
   })();
-  const logMac = v => createHmac('sha256', logKey).update(canonical(v)).digest('hex');
+  logMac = v => createHmac('sha256', logKey).update(canonical(v)).digest('hex');
   // Continue the hash chain across restarts: seed sequence/previous from the
   // last logged record so truncation of earlier entries stays detectable
   // (issuerd-audit LOW-3). The read goes through O_NOFOLLOW + fstat, so a
@@ -344,6 +383,15 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
         requireThat(ctEqual(logMac(rest), d), 'INV-503-CONFIG', `Issuance log line ${i + 1} fails its keyed HMAC; refuse to re-genesis silently`, 503);
         previous = d; last = rec;
       }
+      if (!last) {
+        // An empty log under a live head watermark is truncation-to-zero —
+        // the watermarked history vanished, which is tamper evidence rather
+        // than a fresh segment; re-genesis would silently orphan it
+        // (w30-issuerd F3). A first-boot log carries no watermark at all.
+        let headRec = null;
+        try { headRec = JSON.parse(readFileSync(`${logPath}.head`, 'utf8')); } catch { headRec = null; }
+        requireThat(!headRec || headRec.format !== 'ISSUER-LOG-HEAD-1' || !(headRec.sequence > 0), 'INV-503-CONFIG', 'Issuance log vanished under a live head watermark — refuse to re-genesis silently', 503);
+      }
       if (last) {
         // Head watermark parity with the fabric's chain-heads.json: the
         // companion file pins the last committed sequence+MAC outside the
@@ -365,6 +413,7 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
       }
     }
   }
+  } catch (e) { releaseLock(); throw e; }
   // The log never rotates on its own: a size ceiling refuses the NEXT
   // logged event instead of letting boot-verification cost and residency
   // grow without bound — the operator archives + moves the file and the
@@ -388,7 +437,6 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
     // MAC is keyed over the claimed tail, so a file-editor cannot
     // re-anchor a truncated prefix by copying a stored digest (w25-issuerd
     // F-3).
-    writeFileSync(logPath + '.head', canonical({ format: 'ISSUER-LOG-HEAD-1', sequence: record.sequence, mac: logMac({ format: 'ISSUER-LOG-HEAD-1', sequence: record.sequence, digest: next }) }) + '\n', { mode: 0o600 });
     // O_NOFOLLOW + fstat binds the append to the inode: a dangling
     // symlink planted between checks gets ELOOP, and a FIFO/socket at
     // logPath fails isFile instead of blocking or absorbing writes
@@ -398,7 +446,18 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
       const st = fstatSync(afd);
       requireThat(st.isFile(), 'INV-503-CONFIG', 'Issuance log path must be a regular file', 503);
       requireThat((st.mode & 0o077) === 0, 'INV-503-CONFIG', 'Issuance log must not be readable by group or other users', 503);
+      // The capacity check precedes the watermark write: a routine cap
+      // refusal must never mint head-ahead-of-tail state — the next boot
+      // would read that as truncation tamper and refuse to start
+      // (w30-issuerd F2).
       requireThat(st.size < LOG_MAX_BYTES, 'INV-503-CONFIG', 'Issuance log exceeds the 64 MiB custody cap — archive and rotate it', 503);
+      // The head watermark is written BEFORE the line lands: a crashed
+      // append leaves head-ahead-of-tail (boot refuses honestly) rather
+      // than tail-ahead-of-head (a silent truncation window) (w25-issuerd).
+      // The MAC is keyed over the claimed tail, so a file-editor cannot
+      // re-anchor a truncated prefix by copying a stored digest
+      // (w25-issuerd F-3).
+      writeFileSync(logPath + '.head', canonical({ format: 'ISSUER-LOG-HEAD-1', sequence: record.sequence, mac: logMac({ format: 'ISSUER-LOG-HEAD-1', sequence: record.sequence, digest: next }) }) + '\n', { mode: 0o600 });
       writeSync(afd, canonical({ ...record, digest: next }) + '\n');
     } finally { closeSync(afd); }
     // Chain state commits only once the bytes are durable: a failed
@@ -422,14 +481,26 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
     const send = (status, data) => { const bodyOut = canonical(data); res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(bodyOut); };
     // IPv4-mapped IPv6 forms share one bucket with their dotted twin — a
     // dual-stack bind must not give a client two budgets (w21-issuerd F13).
-    const ip = (req.socket.remoteAddress ?? 'unknown').replace(/^::ffff:/, '');
+    // The bucket key must be as stable as the authority it limits: on a
+    // loopback bind every 127/8 source is one client process choosing its
+    // source address, and on remote binds an IPv6 peer rotates freely
+    // inside its /64 — both collapse to one bucket identity
+    // (w30-issuerd F6).
+    const bindLoopback = ['127.0.0.1', '::1'].includes(host);
+    const rawIp = (req.socket.remoteAddress ?? 'unknown').replace(/^::ffff:/, '');
+    const ip = bindLoopback ? '127.0.0.1' : (rawIp.includes(':') ? `${rawIp.split(':').slice(0, 4).join(':')}::/64` : rawIp);
     // The coarse gate is keyed on the PRESENTED credential when it matches
     // a configured bearer: a loopback flood holding one token spends its own
     // budget and can never starve the fabric's drift checks riding a
     // different credential from the same address (w25-issuerd F3).
     // Unauthenticated traffic keeps the shared per-IP line.
     const presented = req.headers.authorization ?? '';
+    // Only a LIVE bearer earns its own budget: an expired credential is
+    // caller input, not a principal — otherwise every stale token an
+    // attacker holds buys a fresh cred-keyed bucket on top of the IP line
+    // (w30-issuerd F5).
     const recognized = presented.startsWith('Bearer ') && Object.values(issuers).some(i => {
+      if (i.token_expires_at && i.token_expires_at <= clock()) return false;
       const di = bearerDigest(i, 'issue'), dr = bearerDigest(i, 'read');
       return (di && bearerMatches(presented, di)) || (dr && bearerMatches(presented, dr));
     });
@@ -642,7 +713,7 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
         // probing must not be invisible to provenance audit (MED-5) — but
         // the response is a uniform 404 so wrong-issuer bearers cannot
         // enumerate names (w9-deploy F4).
-        try { requireThat(issuer && issuerAuthOk(issuer, 'issue'), 'INV-404-NOT-FOUND', 'Issuer not found', 404); } catch (e) { issuanceLog({ issuer: issuer?.issuer ?? 'unknown', request_digest: logMac(request), refused: true, unauthenticated: !anyBearer('issue'), code: 'INV-404-NOT-FOUND' }); throw e; }
+        try { requireThat(issuer && issuerAuthOk(issuer, 'issue'), 'INV-404-NOT-FOUND', 'Issuer not found', 404); } catch (e) { if (anyBearer('issue') || openLoopback) take('probe'); issuanceLog({ issuer: issuer?.issuer ?? 'unknown', request_digest: logMac(request), refused: true, unauthenticated: !anyBearer('issue'), code: 'INV-404-NOT-FOUND' }); throw e; }
         issuer.metrics.requests++; const t0 = performance.now();
         try {
           const envelope = answerQuery(issuer, request, clock());
@@ -692,7 +763,7 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
   // must not exhaust the issuer daemon's file descriptors (w28-http F-03).
   let openConnections = 0;
   server.on('connection', socket => { if (++openConnections > 2048) { socket.destroy(); return; } socket.on('close', () => openConnections--); });
-  return { server, issuers, listen: () => new Promise(r => server.listen(port, host, r)), close: () => new Promise((r, j) => { server.closeAllConnections(); server.close(e => e ? j(e) : r()); }) };
+  return { server, issuers, listen: () => new Promise(r => server.listen(port, host, r)), close: () => new Promise((r, j) => { server.closeAllConnections(); server.close(e => { releaseLock(); return e ? j(e) : r(); }); }) };
 }
 
 export function writeIssuer(directory, spec) {

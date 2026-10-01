@@ -161,7 +161,10 @@ export class KeyVault {
     catch (e) { rmSync(tmp, { force: true }); throw e; }
   }
   static load(path, masterKey) {
-    const { mac, ...state } = JSON.parse(readFileSync(path, 'utf8'));
+    // A hostile or truncated vault file must classify inside the INV
+    // taxonomy like every other store corruption — never a raw
+    // SyntaxError off the boot path (w30-store F2).
+    const { mac, ...state } = (() => { try { return JSON.parse(readFileSync(path, 'utf8')); } catch (e) { throw new InvariantError('INV-503-CONFIG', 'keystore.json is unreadable or corrupt', 503, { cause: e }); } })();
     requireThat(state.format === STORE_FORMAT, 'INV-503-CONFIG', 'Unrecognised keystore format', 503);
     const vault = new KeyVault(masterKey, { firmware: state.firmware });
     requireThat(ctEqual(stateMac(vault.masterKey, state), mac), 'INV-503-CONFIG', 'Keystore integrity check failed (state MAC mismatch)', 503);

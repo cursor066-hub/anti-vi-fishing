@@ -114,6 +114,7 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
     ['/v1/grants', ['subject']], ['/v1/coverage/history', ['at']],
     ['/v1/audit/consistency', ['first']], ['/v1/audit/entries', ['cursor', 'limit', 'view']],
     ['/v1/keys/{id}/attest', ['nonce']],
+    ['/v1/action-capsules/{id}/approval-challenge', ['signer_id']],
   ]);
   const QUERY_TEMPLATES = [...QUERY_ALLOW.entries()].filter(([t]) => t.includes('{'));
     const object = v => { requireThat(v && typeof v === 'object' && !Array.isArray(v), 'INV-400-SCHEMA', 'Request body must be an object', 400); return v; };
@@ -270,7 +271,7 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       if (path === '/v1/action-capsules' && req.method === 'POST') { fabric.authorize(p, ['operator', 'workload', 'policy_admin']); const input = await body(req); fields(input, ['input', 'signature']); return send(201, fabric.capsuleView(fabric.propose(p, input.input, req.headers['idempotency-key'], input.signature))); }
       let m;
       if ((m = /^\/v1\/action-capsules\/([A-Za-z0-9-]+)$/.exec(path)) && req.method === 'GET') return send(200, fabric.getCapsule(p, m[1]));
-      if ((m = /^\/v1\/action-capsules\/([A-Za-z0-9-]+)\/approval-challenge$/.exec(path)) && req.method === 'GET') return send(200, fabric.approvalChallenge(p, m[1]));
+      if ((m = /^\/v1\/action-capsules\/([A-Za-z0-9-]+)\/approval-challenge$/.exec(path)) && req.method === 'GET') return send(200, fabric.approvalChallenge(p, m[1], url.searchParams.get('signer_id')));
       // Authorize BEFORE field-shape validation: a 400-vs-403 delta leaks
       // the route's field whitelist to unauthorized callers (w22-http F2).
       if ((m = /^\/v1\/action-capsules\/([A-Za-z0-9-]+)\/evaluate$/.exec(path)) && req.method === 'POST') { fabric.authorize(p, ['operator', 'policy_admin', 'approver', 'custodian']); const input = await body(req); fields(input, []); return send(200, fabric.evaluate(p, m[1])); }

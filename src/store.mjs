@@ -30,7 +30,11 @@ const idemAad = (tenant, scope, key) => canonical({ idempotency: true, tenant, s
 export class Store {
   constructor(path, tenantKeys, auditSigners, { aadDedup } = {}) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    this.db = new DatabaseSync(path); chmodSync(path, 0o600);
+    // A hostile or foreign file must surface inside the ledger taxonomy
+    // from the first touch — a raw ERR_SQLITE_ERROR here is a tamper no
+    // INV-* alert can see (w30-store F2).
+    try { this.db = new DatabaseSync(path); } catch (e) { throw new InvariantError('INV-503-STORAGE', 'Ledger file is unreadable or not a database', 503, { cause: e }); }
+    chmodSync(path, 0o600);
     this.tenantKeys = tenantKeys;
     // Shared with the simulated target: a byte-identical ciphertext under
     // two identities is always a transplant — the cross-DB graft only
@@ -80,18 +84,20 @@ export class Store {
       if (e instanceof InvariantError) throw e;
       if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
       if (/readonly|not authorized/i.test(e?.message ?? '')) throw new InvariantError('INV-503-STORAGE', 'Ledger database file is not writable', 503);
+      if (e?.errcode !== undefined || e?.code === 'ERR_SQLITE_ERROR' || /not a database|malformed|no such column|no such table/i.test(e?.message ?? '')) throw new InvariantError('INV-503-STORAGE', 'Ledger schema is unrecognised — refusing to interpret a foreign or corrupt database', 503, { cause: e });
       throw e;
     }
     // Migration runs BEFORE the append-only guards exist: its donor-revert
     // closures legitimately UPDATE/DELETE idempotency and dek rows
     // (w21-store F-6 ordering).
-    this._migrateAad();
+    try { this._migrateAad(); } catch (e) { if (e instanceof InvariantError) throw e; throw new InvariantError('INV-503-STORAGE', 'Ledger schema is unrecognised — refusing to interpret a foreign or corrupt database', 503, { cause: e }); }
     try {
       this._installIntegrityGuards();
     } catch (e) {
       if (e instanceof InvariantError) throw e;
       if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
       if (/readonly|not authorized/i.test(e?.message ?? '')) throw new InvariantError('INV-503-STORAGE', 'Ledger database file is not writable', 503);
+      if (e?.errcode !== undefined || e?.code === 'ERR_SQLITE_ERROR' || /not a database|malformed|no such column|no such table/i.test(e?.message ?? '')) throw new InvariantError('INV-503-STORAGE', 'Ledger schema is unrecognised — refusing to interpret a foreign or corrupt database', 503, { cause: e });
       throw e;
     }
   }
@@ -232,6 +238,7 @@ export class Store {
     // that bricks the open rather than silently seeding zero.
     this._chainFloor = 0; this._lastRecoveredAt = null;
     let floorSeeded = false;
+    try {
     for (const row of this.db.prepare('SELECT tenant,envelope FROM audit ORDER BY rowid DESC LIMIT 64').all()) {
       try {
         const env = JSON.parse(row.envelope);
@@ -259,6 +266,13 @@ export class Store {
     // a file-writer's removal impossible anyway.
     const seedRow = this.db.prepare('SELECT last FROM clock WHERE id=1').get();
     requireThat(!seedRow || seedRow.last >= this._chainFloor || (this._lastRecoveredAt !== null && seedRow.last >= this._lastRecoveredAt), 'INV-409-AUDIT-TAMPER', 'Clock floor rewound below attested chain time', 409);
+    } catch (e) {
+      // A wrong-shape table answers the probes with raw sqlite errors — a
+      // foreign database must classify as storage tamper, not escape the
+      // INV taxonomy (w30-store F2).
+      if (e instanceof InvariantError) throw e;
+      throw new InvariantError('INV-503-STORAGE', 'Ledger schema is unrecognised — refusing to interpret a foreign or corrupt database', 503, { cause: e });
+    }
   }
   // One-shot migration: re-seal every ciphertext still bound under the
   // legacy slash-form AAD space, then never consult that space again. The
@@ -389,8 +403,13 @@ export class Store {
     // destroy the outer transaction's writes (concurrency-audit L2).
     if (this.db.isTransaction) {
       const sp = `sp_${++this._sp}`;
-      this.db.exec(`SAVEPOINT ${sp}`);
+      let savepoint = false;
       try {
+        // The SAVEPOINT sits inside the try: a faulting exec has already
+        // pushed the anchor stack, so the catch must always restore it —
+        // only the rollback itself is gated on the savepoint existing
+        // (w30-store F3).
+        this.db.exec(`SAVEPOINT ${sp}`); savepoint = true;
         const result = fn();
         if (result && typeof result.then === 'function') throw new Error('Transactions must be synchronous');
         this.db.exec(`RELEASE ${sp}`);
@@ -401,7 +420,7 @@ export class Store {
         // savepoint, contention mid-rollback) — the original error still
         // surfaces, the anchors still restore, or the detector stays
         // pinned to a phantom floor for the process's life (w23 W23-06).
-        try { this.db.exec(`ROLLBACK TO ${sp}; RELEASE ${sp}`); } catch (rb) { e.rollback_error = rb?.message ?? String(rb); }
+        if (savepoint) { try { this.db.exec(`ROLLBACK TO ${sp}; RELEASE ${sp}`); } catch (rb) { e.rollback_error = rb?.message ?? String(rb); } }
         anchorsRollback();
         throw e;
       }
