@@ -12,19 +12,35 @@ const now = new Date().toISOString();
 // (w8-tooling F10).
 const checkOnly = process.argv.includes('--check-only');
 const stale = [];
+const staleDetail = [];
 const run = (cmd, args, opts = {}) => spawnSync(cmd, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, ...opts });
 const write = (path, content) => {
-  if (checkOnly) { if (!existsSync(path) || readFileSync(path, 'utf8') !== content) stale.push(path); return; }
+  if (checkOnly) {
+    const committed = existsSync(path) ? readFileSync(path, 'utf8') : null;
+    if (committed !== content) {
+      stale.push(path);
+      // First-differing-line context: a name without the diff is unfixable
+      // when the divergence only reproduces in CI's environment (w22 CI).
+      if (committed !== null) {
+        const a = committed.split('\n'), b = content.split('\n');
+        const i = a.findIndex((l, n) => l !== b[n]);
+        staleDetail.push({ path, line: i + 1, committed: a.slice(Math.max(0, i - 1), i + 2), regenerated: b.slice(Math.max(0, i - 1), i + 2) });
+      }
+    }
+    return;
+  }
   writeFileSync(path, content);
 };
 
 // ---- 1. Full test suite → tests.tap / final-regression.tap + summaries ----
 // Explicitly sort the test file list: --test's own glob expansion follows
 // readdir order, which differs across filesystems and made committed
-// tests.tap byte-unstable (w22 CI).
+// tests.tap byte-unstable (w22 CI). Byte-order compare, NOT localeCompare —
+// collation rules are locale-sensitive and diverge between dev machines
+// and the CI image (w22 CI).
 const testFiles = [];
 const collectTests = (dir) => {
-  for (const e of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+  for (const e of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) {
     const p = join(dir, e.name);
     if (e.isDirectory()) collectTests(p); else if (e.name.endsWith('.test.mjs')) testFiles.push(p);
   }
@@ -155,6 +171,6 @@ VERIFIED_IN_ENGINEERING_PROFILE means directly exercised in the declared enginee
 Independent verification: node:crypto export verifier, WebCrypto/bun export verifier, Python cryptography vector verifier — see reports/verification-*.json.
 `);
 const tapFailNames = (tapText.match(/^not ok \d+ [^\n]*/gm) ?? []).slice(0, 25);
-console.log(JSON.stringify(checkOnly ? { check_only: true, stale, tests: counts, tap_status: tap.status, tap_signal: tap.signal ?? null, tap_error: tap.error?.message ?? null, tap_failures: tapFailNames } : { regenerated: true, tests: counts, sims, ledger: statusCounts }));
+console.log(JSON.stringify(checkOnly ? { check_only: true, stale, stale_detail: staleDetail, tests: counts, tap_status: tap.status, tap_signal: tap.signal ?? null, tap_error: tap.error?.message ?? null, tap_failures: tapFailNames } : { regenerated: true, tests: counts, sims, ledger: statusCounts }));
 if (stale.length) { console.error(`stale committed reports: ${stale.join(', ')} — run node scripts/report.mjs and commit`); process.exitCode = 1; }
 if (counts.fail > 0 || tap.status !== 0) process.exitCode = 1;
