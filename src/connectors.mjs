@@ -31,6 +31,12 @@ export function signedManifest(input, key) {
   return signed(createManifest(input), key, 'connector-manifest');
 }
 
+// Canonical issuer-manifest claims: the issuerd wire contract and the
+// tenant registration must carry the same strings or every first drift
+// check reads as escalation (w20-fixverify F-14 pairing).
+export const ISSUER_MANIFEST_PERMISSIONS = ['issue signed evidence within declared kinds'];
+export const ISSUER_MANIFEST_LIMITATIONS = ['Records are authoritative only for this issuer domain', 'No claim about target-side enforcement'];
+
 export function verifyManifest(envelope, issuers, now, { max_age_ms } = {}) {
   const m = verifySigned(envelope, issuers, 'connector-manifest');
   fields(m, ['connector_id', 'version', 'domain', 'actions', 'permissions', 'limitations', 'idempotency', 'coverage_implications', 'issued_at', 'expires_at'], ['lifecycle']);

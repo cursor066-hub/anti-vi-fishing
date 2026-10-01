@@ -258,8 +258,15 @@ export function evaluatePolicy({ capsule, policy, evidence = [], approvals = [],
   if (type === 'data.export') {
     const state = p.current_state.material_fields;
     if (p.requested_state.dataset !== p.action.target_resource || state.classification !== p.requested_state.classification || state.jurisdiction !== p.requested_state.jurisdiction || !policy.runtime.classifications.includes(state.classification) || !policy.runtime.jurisdictions.includes(state.jurisdiction)) return result('DENY', [reason('DATA_CONTEXT', 'Dataset, classification or jurisdiction does not match authorised policy context.')]);
-    const columns = p.requested_state.columns.filter(c => !rule.forbidden_fields.includes(c));
-    if (columns.length !== p.requested_state.columns.length) return result(columns.length ? 'SHIELD' : 'DENY', [reason('RESTRICTED_FIELDS', 'Remove restricted columns and submit a new exact action.')], { transformation: { columns, exclusions: [...new Set([...p.exclusions, ...rule.forbidden_fields])].sort() } });
+    // The certificate path enforces the same catalog walls JIT grants and
+    // capabilities enforce: an undeclared dataset is refused outright, and
+    // columns outside allowed_columns or inside forbidden_columns shield
+    // to the compliant subset — the egress can never carry them
+    // (w20-datagate F1).
+    if (!policy.runtime.datasets.includes(p.requested_state.dataset)) return result('DENY', [reason('SCOPE_CATALOG', 'Export targets a dataset outside the declared catalog.')]);
+    const catalogExcluded = c => !policy.runtime.allowed_columns.includes(c) || policy.runtime.forbidden_columns.includes(c);
+    const columns = p.requested_state.columns.filter(c => !rule.forbidden_fields.includes(c) && !catalogExcluded(c));
+    if (columns.length !== p.requested_state.columns.length) return result(columns.length ? 'SHIELD' : 'DENY', [reason('RESTRICTED_FIELDS', 'Remove restricted columns and submit a new exact action.')], { transformation: { columns, exclusions: [...new Set([...p.exclusions, ...p.requested_state.columns.filter(c => !columns.includes(c))])].sort() } });
   }
   if (type === 'policy.change') {
     const next = p.requested_state.policy;

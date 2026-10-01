@@ -7,6 +7,7 @@ import { canonical, digest, hashBytes, parseStrict } from './canonical.mjs';
 import { signed, verifySigned, ctEqual } from './crypto.mjs';
 import { fields, text, identifier, integer, uniqueStrings } from './schema.mjs';
 import { requireThat, InvariantError } from './errors.mjs';
+import { ISSUER_MANIFEST_PERMISSIONS, ISSUER_MANIFEST_LIMITATIONS } from './connectors.mjs';
 
 // IF-ISSUER-1: an independent evidence issuer service. Each issuer is a
 // separate trust-domain process holding its own signing key and record store.
@@ -47,11 +48,15 @@ export function loadIssuers(directory) {
       // Semantics, not only shape (w18-issuerd F-6): a string ttl_ms would
       // mint dead string-dated envelopes, an object-valued expect would
       // crash every request, and a non-string extract would sign nonsense.
-      requireThat(rule.lookup === undefined || typeof rule.lookup === 'string', 'INV-400-SCHEMA', `Kind rule ${kind} lookup must be a string`);
+      // lookup and confidence are read unconditionally when serving the
+      // kind — a rule missing either crashes every request with TypeError
+      // instead of failing the boot (w20-fixverify F-13), so they are
+      // required here, not optional.
+      requireThat(typeof rule.lookup === 'string' && rule.lookup.length > 0, 'INV-400-SCHEMA', `Kind rule ${kind} lookup must be a non-empty string`);
       requireThat(rule.ttl_ms === undefined || (Number.isSafeInteger(rule.ttl_ms) && rule.ttl_ms > 0), 'INV-400-SCHEMA', `Kind rule ${kind} ttl_ms must be a positive integer`);
       requireThat(rule.extract === undefined || (Array.isArray(rule.extract) && rule.extract.every(f => typeof f === 'string')), 'INV-400-SCHEMA', `Kind rule ${kind} extract must be an array of field names`);
       requireThat(rule.expect === undefined || (rule.expect && typeof rule.expect === 'object' && !Array.isArray(rule.expect) && Object.values(rule.expect).every(v => v === null || typeof v !== 'object')), 'INV-400-SCHEMA', `Kind rule ${kind} expect values must be scalars`);
-      requireThat(rule.confidence === undefined || (Number.isSafeInteger(rule.confidence) && rule.confidence >= 0 && rule.confidence <= 100), 'INV-400-SCHEMA', `Kind rule ${kind} confidence must be an integer 0..100`);
+      requireThat(Number.isSafeInteger(rule.confidence) && rule.confidence >= 0 && rule.confidence <= 100, 'INV-400-SCHEMA', `Kind rule ${kind} confidence must be an integer 0..100`);
     }
     if (spec.token_expires_at !== undefined) requireThat(Number.isSafeInteger(spec.token_expires_at), 'INV-400-SCHEMA', 'token_expires_at must be an integer epoch-ms');
     // A malformed *_token_digest must fail at boot: bearerMatches compares
@@ -219,16 +224,25 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
   // last logged record so truncation of earlier entries stays detectable
   // (issuerd-audit LOW-3).
   if (logPath && existsSync(logPath)) {
-    try {
-      const lines = readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean);
-      const last = lines.length ? JSON.parse(lines[lines.length - 1]) : null;
-      // A present-but-unparseable tail means the chain was tampered with or
-      // truncated mid-write — refuse to start rather than orphaning the whole
-      // prior segment under a fresh genesis.
-      if (lines.length && !(last && Number.isSafeInteger(last.sequence) && /^[a-f0-9]{64}$/.test(last.digest ?? '')))
-        throw new InvariantError('INV-503-CONFIG', 'Issuance log tail is corrupt; refuse to re-genesis silently', 503);
-      if (last) { sequence.n = last.sequence; sequence.previous = last.digest; }
-    } catch (e) { if (e instanceof InvariantError) throw e; /* unreadable tail — start a fresh chain segment */ }
+    const lines = readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean);
+    // Boot verifies the WHOLE chain, not just the tail: every line must
+    // parse, sequence must be contiguous, the hash link must hold, and the
+    // keyed HMAC must verify. An unparseable or edited line — including a
+    // mid-write-truncated tail — refuses boot rather than silently
+    // orphaning the prior segment under a fresh genesis (w20-fixverify
+    // F-7/F-8). Residual: a file truncated to a VALID prefix cannot be
+    // detected — the chain has no external anchor for its head; operators
+    // must ship the log off-box to bound that.
+    let previous = '0'.repeat(64), last = null;
+    for (const [i, line] of lines.entries()) {
+      let rec = null;
+      try { rec = JSON.parse(line); } catch { throw new InvariantError('INV-503-CONFIG', `Issuance log line ${i + 1} is unparseable; refuse to re-genesis silently`, 503); }
+      requireThat(rec && Number.isSafeInteger(rec.sequence) && rec.sequence === i + 1 && rec.previous === previous && /^[a-f0-9]{64}$/.test(rec.digest ?? ''), 'INV-503-CONFIG', `Issuance log line ${i + 1} breaks the hash chain; refuse to re-genesis silently`, 503);
+      const { digest: d, ...rest } = rec;
+      requireThat(logMac(rest) === d, 'INV-503-CONFIG', `Issuance log line ${i + 1} fails its keyed HMAC; refuse to re-genesis silently`, 503);
+      previous = d; last = rec;
+    }
+    if (last) { sequence.n = last.sequence; sequence.previous = last.digest; }
   }
   function issuanceLog(entry) {
     if (!logPath) return;
@@ -383,8 +397,8 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
         requireThat(issuer && (!requestedTenant || !issuer.tenant || issuer.tenant === requestedTenant) && issuerAuthOk(issuer, 'read'), 'INV-404-NOT-FOUND', 'Issuer not found', 404);
         return send(200, signed({
           connector_id: `issuer:${issuer.issuer}`, version: issuer.version, domain: issuer.channel,
-          actions: Object.keys(issuer.kinds), permissions: ['issue signed evidence within declared kinds'],
-          limitations: ['Records are authoritative only for this issuer domain', 'No claim about target-side enforcement'],
+          actions: Object.keys(issuer.kinds), permissions: ISSUER_MANIFEST_PERMISSIONS,
+          limitations: ISSUER_MANIFEST_LIMITATIONS,
           idempotency: { mutating_retries: false, safe_read_retries: 2, timeout_ms: 10000 },
           // Manifests are short-lived so a captured replay cannot suppress
           // drift detection for weeks (w9-network F8): the consumer bounds
@@ -397,10 +411,12 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
         try {
           for await (const c of req) { size += c.length; requireThat(size <= 262144, 'INV-413-BODY', 'Request too large', 413); chunks.push(c); }
         } catch (e) {
-          // Oversize probes are probes too: they consume the same bucket
-          // and land in the issuance log — a >256KiB flood must not be
-          // invisible to provenance (w18-issuerd F-2).
-          if (!anyBearer('issue')) { take('probe'); issuanceLog({ issuer: 'unknown', request_digest: logMac({ wire_bytes: size }), refused: true, unauthenticated: true, malformed: true, code: e.code ?? 'INV-413-BODY' }); }
+          // Oversize floods must be visible and costly regardless of bearer
+          // configuration — authenticated probes consume the same bucket
+          // and land in the same log, never 413'd silently
+          // (w18-issuerd F-2, w20-fixverify F-6).
+          take('probe');
+          issuanceLog({ issuer: 'unknown', request_digest: logMac({ wire_bytes: size }), refused: true, unauthenticated: !anyBearer('issue'), malformed: true, code: e.code ?? 'INV-413-BODY' });
           throw e;
         }
         let request;
@@ -417,11 +433,13 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
           identifier(request.tenant_id, 'tenant'); identifier(request.subject_id, 'subject'); text(request.kind, 'kind', 64);
           requireThat(/^[a-f0-9]{64}$/.test(request.capsule_digest), 'INV-400-SCHEMA', 'capsule_digest must be a digest');
         } catch (e) {
-          // Malformed unauthenticated probes are logged too — a
-          // schema-failing flood must not be any more invisible to
-          // provenance than a well-formed one (w18-http F-5); the probe
-          // bucket bounds the entries.
-          if (!anyBearer('issue')) { take('probe'); issuanceLog({ issuer: 'unknown', request_digest: logMac(request ?? { wire_bytes: size }), refused: true, unauthenticated: true, malformed: true, code: e.code ?? 'INV-400-SCHEMA' }); }
+          // Malformed floods are logged+charged regardless of bearer
+          // configuration — a schema-failing flood under a valid token
+          // must not be any more invisible to provenance than an
+          // unauthenticated one (w18-http F-5, w20-fixverify F-6); the
+          // probe bucket bounds the entries.
+          take('probe');
+          issuanceLog({ issuer: 'unknown', request_digest: logMac(request ?? { wire_bytes: size }), refused: true, unauthenticated: !anyBearer('issue'), malformed: true, code: e.code ?? 'INV-400-SCHEMA' });
           throw e;
         }
         // 'refused' is logged only when the request is actually refused —

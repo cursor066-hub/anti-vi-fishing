@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID, createHmac } from 'node:crypto';
 import { fixture, hasCode } from './helpers.mjs';
 import { createIssuerServer, writeIssuer, answerQuery, loadIssuers } from '../src/issuerd.mjs';
 import { ISSUER_RULES, issuerRecords } from '../src/bootstrap.mjs';
@@ -192,10 +192,21 @@ test('w18-issuerd F-9: issuance log is an HMAC-keyed chain', async t => {
   const lines = readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
   assert.equal(lines.length, 3);
   for (let i = 1; i < lines.length; i++) assert.equal(lines[i].previous, lines[i - 1].digest, 'each entry chains to the keyed digest of the previous');
-  // Deleting a middle entry leaves a gap the next append cannot hide: the
-  // digest chain is keyed — recomputing it requires the issuers' private
-  // material, so the truncated tail diverges on the next record.
-  assert.notEqual(lines[0].digest, lines[2].previous, 'chain positions are bound to their own entry');
+  // The KEYING is the load-bearing property: an attacker who rewrites the
+  // tail must recompute the chain digest — prove an unkeyed recompute
+  // diverges while the custody holder's keyed recompute matches exactly
+  // (w20-ledger F-2: the previous asserts held under an unkeyed chain too).
+  const record = lines[1];
+  const { digest: stored, ...body } = record;
+  assert.notEqual(digest(canonical(body)), stored, 'an unkeyed recompute of a logged record must diverge — the chain is HMAC-keyed, not merely hashed');
+  const logKey = digest(Object.values(loadIssuers(dir)).map(i => i.key?.private_key ?? '').sort().join('|'));
+  const keyed = createHmac('sha256', logKey).update(canonical(body)).digest('hex');
+  assert.equal(keyed, stored, 'the custody holder recomputes the exact keyed digest');
+  // The selective-delete attack the code comment describes: splicing the
+  // tail past a removed middle record leaves an unsatisfiable previous
+  // link — the rewritten history diverges and cannot be re-extended without
+  // the issuers' custody material.
+  assert.notEqual(lines[0].digest, lines[2].previous, 'a spliced tail cannot satisfy its previous link');
 });
 
 // F-10 — writeIssuer validates the issuer name against the identifier

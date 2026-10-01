@@ -89,6 +89,76 @@ for (const file of files) {
   for (const [name, regex] of rules) if (regex.test(s)) { console.error(`${file}: ${name}`); failed = true; }
 }
 
+// Route-role parity: every role list the OpenAPI generator declares must
+// match the role gate actually executed — either the authorize() call on
+// the handler line(s) in server.mjs or the first authorize() inside the
+// delegated fabric method (w20-ledger F-4: the generator table is
+// hand-maintained, so without this a drifted contract is "verified"
+// only by its own output).
+{
+  const server = readFileSync('src/server.mjs', 'utf8').split('\n');
+  const fabric = readFileSync('src/fabric.mjs', 'utf8').split('\n');
+  const gen = readFileSync('scripts/generate-contracts.mjs', 'utf8');
+  const rows = [...gen.matchAll(/\['(\/[^']+)',\s*'([a-z]+)',\s*'[^']*',\s*'([^']+)'/g)].map(m => ({ path: m[1], method: m[2], roles: m[3].split(',').map(s => s.trim()) }));
+  const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unauthenticated']);
+  const sortR = r => [...r].sort().join(',');
+  const isIf = l => /^\s*if \(/.test(l);
+  const authorizeAt = (lines, from, depth = 6) => {
+    for (let i = from; i < Math.min(from + depth, lines.length); i++) {
+      if (i !== from && isIf(lines[i])) break;
+      const m = /authorize\(p,\s*\[([^\]]+)\]/.exec(lines[i]);
+      if (m) return m[1].split(',').map(s => s.trim().replace(/['"]/g, ''));
+    }
+    return null;
+  };
+  const fabricRoles = name => {
+    const idx = fabric.findIndex(l => new RegExp(`^\\s{2}(async )?${name}\\(`).test(l));
+    if (idx === -1) return null;
+    for (let i = idx; i < Math.min(idx + 140, fabric.length); i++) {
+      if (i !== idx && /^\s{2}(async )?[a-zA-Z_]+\(/.test(fabric[i])) break;
+      const m = /this\.authorize\(p,\s*\[([^\]]+)\]/.exec(fabric[i]);
+      if (m) return m[1].split(',').map(s => s.trim().replace(/['"]/g, ''));
+      const r = /roles\?*\.includes\('([^']+)'\)/.exec(fabric[i]);
+      if (r && /requireThat/.test(fabric[i])) return [r[1]];
+    }
+    return null;
+  };
+  for (const r of rows) {
+    if (r.roles.length === 1 && NONROLE.has(r.roles[0])) continue;
+    const segs = r.path.split('/').filter(Boolean);
+    const staticSegs = segs.filter(s => !s.startsWith('{'));
+    const param = r.path.includes('{');
+    const hi = server.findIndex(l =>
+      isIf(l) && l.includes(`req.method === '${r.method.toUpperCase()}'`) &&
+      (l.includes(`path === '${r.path}'`) || (param && /\^\\\//.test(l) && staticSegs.every(s => l.includes(s)))));
+    let code = null;
+    if (hi !== -1) {
+      code = authorizeAt(server, hi);
+      if (!code) {
+        for (let i = hi; i < Math.min(hi + 8, server.length); i++) {
+          if (i !== hi && isIf(server[i]) && !/m\[2\]/.test(server[i])) break;
+          const verb = segs[segs.length - 1];
+          if (param && !verb.startsWith('{') && !server[i].includes(verb)) continue;
+          const names = [...server[i].matchAll(/fabric\.([a-zA-Z_]+)\(p[\s,)]/g)].map(x => x[1]);
+          const vkey = verb.replace(/-/g, '').toLowerCase();
+          const name = names.find(n => n.toLowerCase().includes(vkey)) ?? names[0];
+          if (name) { code = fabricRoles(name); break; }
+        }
+      }
+    }
+    if (!code) { console.error(`route-role parity: ${r.method} ${r.path} — cannot resolve the role gate`); failed = true; }
+    else if (sortR(code) !== sortR(r.roles)) { console.error(`route-role parity: ${r.method} ${r.path} — code=[${sortR(code)}] openapi=[${sortR(r.roles)}]`); failed = true; }
+  }
+}
+
+// The README's declared suite size must equal the committed test summary —
+// a stale count is a doc claim contradicted by the suite (w20-ledger F-5).
+{
+  const m = /(\d+)-test suite/.exec(readFileSync('README.md', 'utf8'));
+  const summary = existsSync('reports/test-summary.json') ? JSON.parse(readFileSync('reports/test-summary.json', 'utf8')) : null;
+  if (!m || !summary || Number(m[1]) !== summary.tests) { console.error(`README test count (${m?.[1] ?? 'missing'}) != reports/test-summary.json (${summary?.tests ?? 'missing'})`); failed = true; }
+}
+
 // MANIFEST.sha256 must describe exactly the tracked tree — silent drift fails.
 const mf = spawnSync(process.execPath, ['scripts/manifest.mjs', '--verify'], { encoding: 'utf8' });
 if (mf.status !== 0) { console.error(mf.stderr || mf.stdout); failed = true; }

@@ -79,12 +79,15 @@ test('w18-fv F2c: a completed ceremony cannot replay via a row-status flip', t =
 test('w18-fv F4: forged capability ids do not un-budget denial writes', t => {
   const h = fixture(t);
   const count = () => h.f.store.db.prepare("SELECT COUNT(*) c FROM records WHERE tenant='acme' AND kind='containment'").get().c;
+  // Well-formed requests whose envelopes fail verification inside the
+  // containment-wrapped section — the dedup path must actually run
+  // (w20-ledger F-1: the previous shape died at fields() long before
+  // recordContainment, so the bound was never exercised).
+  const cap = h.f.runtime.issue(h.p(), runtimeInput());
+  const forged = { ...cap, payload: { ...cap.payload, max_cost: cap.payload.max_cost + 1 } };
   const before = count();
   for (let i = 0; i < 8; i++) {
-    assert.throws(() => h.f.runtime.consume(h.p(), {
-      device_id: 'operator-device', resource: 'dataset-1', action: 'data.read', request_id: randomUUID(),
-      capability: { payload: { capability_id: randomUUID() } }
-    }), e => e instanceof Error);
+    assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(forged)), e => e instanceof Error);
   }
   assert.ok(count() - before <= 1, `denial flood must stay bounded — got ${count() - before} rows for 8 forged denials`);
 });
@@ -173,11 +176,17 @@ test('w18-fv F11: an aborted seal leaves no phantom-consumed index state', t => 
   const head = h.f.store.db.prepare('SELECT seq,hash FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1').get('acme');
   h.f.store.db.prepare("INSERT INTO audit (tenant,seq,previous,hash,envelope) VALUES ('acme',?,?,'deadbeef','{}')").run(head.seq + 1, head.hash);
   const orig = h.f.store.audit.bind(h.f.store);
-  h.f.store.audit = (tt, type, ...rest) => { if (type === 'AUDIT_SEALED') throw new Error('injected seal fault'); return orig(tt, type, ...rest); };
+  // Fold mid-abort: a read inside the failing tx folds the uncommitted
+  // seal writes (the planted tail deleted) into the cached index — the
+  // catch-path index burn is what stops that phantom state surviving the
+  // rollback (w20-ledger F-8: without it this test masked the defect).
+  h.f.store.audit = (tt, type, ...rest) => {
+    if (type === 'AUDIT_SEALED') { h.f.revoked('acme', 'subject', 'phantom-probe'); throw new Error('injected seal fault'); }
+    return orig(tt, type, ...rest);
+  };
   assert.throws(() => h.f.sealAuditChain(h.p('security')), /injected seal fault/);
   h.f.store.audit = orig;
-  h.f.invalidateAuditIndex('acme');
-  assert.throws(() => h.f.revoked('acme', 'subject', 'x'), hasCode('INV-409-AUDIT-TAMPER'), 'the still-planted tail wedges honestly, never phantom-consumed');
+  assert.throws(() => h.f.revoked('acme', 'subject', 'x'), hasCode('INV-409-AUDIT-TAMPER'), 'the still-planted tail wedges honestly — a phantom mid-tx fold must not survive the abort');
   const seal = h.f.sealAuditChain(h.p('security'));
   assert.equal(seal.sealed, true, 'a clean seal cuts the poison after the aborted attempt');
   assert.equal(h.f.revoked('acme', 'subject', 'x'), false, 'index rebuilds and keeps serving');

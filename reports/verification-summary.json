@@ -1,9 +1,9 @@
 {
   "generated_by": "scripts/report.mjs",
-  "engineering_checks": "PASS",
+  "engineering_checks": "FAIL",
   "production_release": "BLOCKED (expected)",
-  "unique_test_cases_executed": 661,
-  "failed": 0,
+  "unique_test_cases_executed": 659,
+  "failed": 6,
   "scenarios_run": 22,
   "requirement_status_counts": {
     "VERIFIED_IN_ENGINEERING_PROFILE": 173,

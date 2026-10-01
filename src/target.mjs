@@ -23,19 +23,27 @@ export class SimulatedTarget {
     // Shared with the ledger store — the same ciphertext must never mint
     // canonical bindings on both sides of a cross-DB graft (w19-aad W19-1).
     this._aadDedup = aadDedup ?? new Map();
-    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=30000; PRAGMA secure_delete=ON;
-      CREATE TABLE IF NOT EXISTS resources(tenant TEXT, id TEXT, version INTEGER, value TEXT, PRIMARY KEY(tenant,id));
-      CREATE TABLE IF NOT EXISTS transactions(tenant TEXT,id TEXT,value TEXT,PRIMARY KEY(tenant,id));
-      CREATE TABLE IF NOT EXISTS dataset_rows(tenant TEXT, dataset TEXT, row_id TEXT, data TEXT, PRIMARY KEY(tenant,dataset,row_id));
-      CREATE TABLE IF NOT EXISTS data_access(tenant TEXT, subject TEXT, dataset TEXT, row_id TEXT, column_name TEXT, at INTEGER);
-      CREATE INDEX IF NOT EXISTS data_access_ix ON data_access(tenant,subject,dataset,at);
-      CREATE TABLE IF NOT EXISTS secrets_registry(tenant TEXT, secret_id TEXT, version INTEGER, value TEXT, PRIMARY KEY(tenant,secret_id));
-      CREATE TABLE IF NOT EXISTS grants(tenant TEXT, grant_id TEXT, value TEXT, PRIMARY KEY(tenant,grant_id));
-      CREATE INDEX IF NOT EXISTS grants_subject ON grants(tenant);`);
-    // Crash residue: a post-delete checkpoint that never ran leaves superseded
-    // ciphertext in the WAL — truncate at open like the ledger store does
-    // (w8-fixverify F3).
-    this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    // Same contention contract as the ledger store: constructor writes lose
+    // a busy-timeout race as INV-503-LEDGER, never a raw sqlite error
+    // (w20-fixverify F-12).
+    try {
+      this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=30000; PRAGMA secure_delete=ON;
+        CREATE TABLE IF NOT EXISTS resources(tenant TEXT, id TEXT, version INTEGER, value TEXT, PRIMARY KEY(tenant,id));
+        CREATE TABLE IF NOT EXISTS transactions(tenant TEXT,id TEXT,value TEXT,PRIMARY KEY(tenant,id));
+        CREATE TABLE IF NOT EXISTS dataset_rows(tenant TEXT, dataset TEXT, row_id TEXT, data TEXT, PRIMARY KEY(tenant,dataset,row_id));
+        CREATE TABLE IF NOT EXISTS data_access(tenant TEXT, subject TEXT, dataset TEXT, row_id TEXT, column_name TEXT, at INTEGER);
+        CREATE INDEX IF NOT EXISTS data_access_ix ON data_access(tenant,subject,dataset,at);
+        CREATE TABLE IF NOT EXISTS secrets_registry(tenant TEXT, secret_id TEXT, version INTEGER, value TEXT, PRIMARY KEY(tenant,secret_id));
+        CREATE TABLE IF NOT EXISTS grants(tenant TEXT, grant_id TEXT, value TEXT, PRIMARY KEY(tenant,grant_id));
+        CREATE INDEX IF NOT EXISTS grants_subject ON grants(tenant);`);
+      // Crash residue: a post-delete checkpoint that never ran leaves superseded
+      // ciphertext in the WAL — truncate at open like the ledger store does
+      // (w8-fixverify F3).
+      this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    } catch (e) {
+      if (e?.errcode === 5 || /database is locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
+      throw e;
+    }
     this._migrateAad();
   }
   // One-shot migration out of the legacy slash-form AAD space — same shape
@@ -57,6 +65,10 @@ export class SimulatedTarget {
     // silently (w19-aad W19-1/W19-2).
     const stats = this.aadMigration = new Map();
     const mark = (tenant, k) => { const s = stats.get(tenant) ?? { migrated: 0, transplants: 0, ambiguous: 0, skipped: 0 }; s[k]++; stats.set(tenant, s); };
+    // Same honest accounting as the store migrator: a grafted donor is
+    // reverted, and its 'migrated' mark must unwind with it — the sibling
+    // migrator's dedup hit invokes this closure (w20-fixverify F-9).
+    const unmark = tenant => { const s = stats.get(tenant); if (s && s.migrated > 0) { s.migrated--; s.reverted = (s.reverted ?? 0) + 1; } };
     const seen = this._aadDedup;
     const slashy = (...parts) => parts.some(p => typeof p === 'string' && p.includes('/'));
     this.db.exec('BEGIN IMMEDIATE');
@@ -70,12 +82,12 @@ export class SimulatedTarget {
           const [tuple, legacy] = aads(r);
           try { decrypt(r[col], this.key(r.tenant), tuple); continue; } catch { /* legacy-sealed or corrupt */ }
           const prior = seen.get(r[col]);
-          if (prior) { prior.revert?.(); mark(r.tenant, 'transplants'); continue; }
+          if (prior) { prior.revert?.(); prior.unmark?.(); mark(r.tenant, 'transplants'); continue; }
           if (slashy(r.tenant, r.id, r.dataset, r.row_id, r.secret_id, r.grant_id)) { seen.set(r[col], {}); mark(r.tenant, 'ambiguous'); continue; }
           try {
             const plain = decrypt(r[col], this.key(r.tenant), legacy);
             const upd = this.db.prepare(`UPDATE ${table} SET ${col}=? WHERE ${where}`), orig = r[col];
-            seen.set(orig, { revert: () => upd.run(orig, ...pks(r)) });
+            seen.set(orig, { revert: () => upd.run(orig, ...pks(r)), unmark: () => unmark(r.tenant) });
             upd.run(encrypt(plain, this.key(r.tenant), tuple), ...pks(r));
             mark(r.tenant, 'migrated');
           } catch { mark(r.tenant, 'skipped'); }
@@ -213,11 +225,16 @@ export class SimulatedTarget {
   }
   // Verified dataset read: caller scope is compiled into a QueryPlan, rebound
   // against the authorising grant, then executed with bound parameters only.
-  readDataset(tenant, id, columns, rowIds, ceiling) {
+  readDataset(tenant, id, columns, rowIds, ceiling, grant = null) {
     const dataset = this.state(tenant, id).material_fields;
     requireThat(Array.isArray(dataset.columns), 'INV-404-NOT-FOUND', 'Dataset not found', 404);
     const plan = buildPlan({ dataset: id, columns, row_ids: rowIds, max_rows: ceiling }, dataset.columns);
-    verifyPlan(plan, { dataset: id, columns, row_ids: rowIds, max_rows: ceiling });
+    // The plan rebinds to the authorising scope when a distinct authority
+    // exists (the capability payload on the consume path); on the certified
+    // export path the capsule's requested_state IS the authority — the
+    // reflexive check stays as a shape guard, and the finish-time
+    // exactOutput recompute is the real binding (w20-datagate F8).
+    verifyPlan(plan, grant ?? { dataset: id, columns, row_ids: rowIds, max_rows: ceiling });
     const rows = executePlan(this.db, plan, tenant, (row, r) => this._dec(r.data, tenant, AAD('target', 'dataset', tenant, id, row)));
     return rows;
   }

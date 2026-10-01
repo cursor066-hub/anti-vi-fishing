@@ -155,7 +155,7 @@ test('w11 F6: a quarantined caller cannot evaluate, certify or deal', t => {
 test('w11 F7a: born-expired and ghost-custodian ceremonies are refused', t => {
   const h = fixture(t);
   assert.throws(() => h.f.createCeremony(h.p('security'), { ceremony_id: 'cer-dead', purpose: 'x', threshold: 2, custodians: CUSTODIANS, valid_until: h.now() - 1, min_delay_ms: 120000 }), hasCode('INV-400-SCHEMA'));
-  assert.throws(() => h.f.createCeremony(h.p('security'), { ceremony_id: 'cer-ghost', purpose: 'x', threshold: 2, custodians: ['custodian-1', 'ghost-1'], valid_until: h.now() + 3600000, min_delay_ms: 120000 }), hasCode('INV-404-NOT-FOUND'));
+  assert.throws(() => h.f.createCeremony(h.p('security'), { ceremony_id: 'cer-ghost', purpose: 'x', threshold: 2, custodians: ['custodian-1', 'ghost-1'], valid_until: h.now() + 3600000, min_delay_ms: 120000 }), hasCode('INV-403-ROLE'), 'a custodian without a live custodian-role enrolment refuses at plan (w20-ceremony F-4)');
 });
 
 test('w11 F7b: abort retires a live ceremony — no consent, no shares, no reconstruct', t => {

@@ -121,6 +121,10 @@ export class RuntimeGate {
       requireThat(used + cost <= (constrained ? Math.floor(cap.max_cost / 2) : cap.max_cost), 'INV-429-BUDGET', 'Capability volume exhausted', 429);
       // No caller-provided byte counts: charge observed requested information units.
       for (const window of r.windows) {
+        // The rolling budget is deliberately per (subject, resource): a
+        // per-dataset anti-enumeration bound, not a subject-wide quota —
+        // the subject-wide spend ceiling is carried by cap.max_cost /
+        // rate / fanout separately (w20-datagate F7, documented semantic).
         const total = bySubject.filter(u => u.resource === cap.resource && u.at > now - window.duration_ms).reduce((n, u) => n + (u.cost ?? 0), 0);
         requireThat(total + cost <= window.limit, 'INV-429-BUDGET', 'Rolling information budget exhausted', 429);
       }
@@ -135,8 +139,17 @@ export class RuntimeGate {
         // DAT-009: cumulative overlap/reconstruction check BEFORE release.
         recon = reconstructionCheck(this.f.store.db, this.f.target.db, { tenant: t, subject: cap.subject_id, dataset: cap.resource, rows: input.row_ids, columns: input.columns, now, policy: r.reconstruction, access: this.f._auditIndex(t).dataAccess });
         requireThat(recon.allowed, 'INV-429-BUDGET', `Reconstruction limit reached (${recon.coverage_percent}% of dataset rows touched)`, 429, { row_count: recon.row_count, column_count: recon.column_count, coverage_percent: recon.coverage_percent });
-        rows = this.f.target.readDataset(t, cap.resource, input.columns, input.row_ids, input.row_ids.length);
-        if (cap.transforms) rows = applyTransforms(rows, cap.transforms, { tenant: t, dataset: cap.resource, tenantKey: this.f.target.key(t).toString('base64url') });
+        // The plan rebinds to the authorising capability — the request's
+        // own fields are not the grant (w20-datagate F8).
+        rows = this.f.target.readDataset(t, cap.resource, input.columns, input.row_ids, input.row_ids.length, { dataset: cap.resource, columns: cap.columns, row_ids: cap.row_ids, max_rows: cap.row_ids.length });
+        if (cap.transforms) {
+          // Pseudonyms get their own primitive: tokenise never shares the
+          // row-encryption key — the same fusion the watermark path
+          // refuses (w20-datagate F5).
+          const tokeniseKey = this.f.dataKey(t, 'tokenise');
+          requireThat(tokeniseKey, 'INV-503-CONFIG', `Tenant ${t} has no tokenise data key`, 503);
+          rows = applyTransforms(rows, cap.transforms, { tenant: t, dataset: cap.resource, tenantKey: tokeniseKey });
+        }
         // DAT-011: attribution watermark on released rows — returned as
         // separate marks, never injected into the authorised columns.
         // Attribution marks require the dedicated watermark key — the
@@ -149,7 +162,10 @@ export class RuntimeGate {
       this.f.store.db.prepare('INSERT INTO usage VALUES(?,?,?,?,?,?,?)').run(t, cap.subject_id, cap.resource, now, cost, cap.capability_id, input.request_id);
       // The disclosure is attested on the signed chain — the data_access
       // table is only a mirror of this event (w11-redteam R9).
-      if (cap.action === 'data.read') this.f.store.audit(t, 'DATA_ACCESSED', cap.subject_id, cap.subject_id, { dataset: cap.resource, row_ids: input.row_ids, columns: input.columns, at: now }, now);
+      // The disclosure event binds the authorising capability and request
+      // — a consume-path attestation is traceable to its authority, same
+      // as the export path's certificate_id binding (w20-datagate F6).
+      if (cap.action === 'data.read') this.f.store.audit(t, 'DATA_ACCESSED', cap.subject_id, cap.subject_id, { dataset: cap.resource, row_ids: input.row_ids, columns: input.columns, at: now, capability_id: cap.capability_id, request_id: input.request_id }, now);
       this.f.store.audit(t, 'RUNTIME_ALLOWED', principal.subject_id, cap.capability_id, { cost, resource: cap.resource, selection_digest: digest({ columns: input.columns, rows: input.row_ids }), request_id: input.request_id, watermarked: cap.action === 'data.read' }, now);
       return { decision: 'ALLOW', cost, remaining_capability_cost: cap.max_cost - used - cost, rows, watermarks, reconstruction: recon && { row_count: recon.row_count, coverage_percent: recon.coverage_percent }, attribution: { tenant_id: t, subject_id: principal.subject_id, request_id: input.request_id }, simulation: true, limitation: cap.action === 'service.connect' ? 'Software decision only; no packet or socket enforcement is provided.' : 'Reads the isolated synthetic dataset only.' };
       });

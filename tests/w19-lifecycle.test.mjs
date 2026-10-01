@@ -153,7 +153,7 @@ test('w19-F6: lifecycle state bounds designation honestly', t => {
   const cid = h.f.store.db.prepare("SELECT id FROM records WHERE tenant='acme' AND kind='ceremony' ORDER BY created DESC LIMIT 1").get().id;
   const idx = h.f._auditIndex('acme');
   idx.ceremonyCompleted.add(cid);
-  idx.ceremonyRotationConsumed.add(cid);
+  idx.ceremonyRotationConsumed.set(cid, 'cap-spent');
   assert.equal(h.f.ceremonyDesignated('acme', pending.key_id, 'execution'), true, 'a completed/spent ceremony still designates its anchored key — the successor must sign its own landing');
   idx.ceremonyAborted.add(cid);
   assert.equal(h.f.ceremonyDesignated('acme', pending.key_id, 'execution'), false, 'an aborted ceremony designates nothing');
@@ -223,6 +223,19 @@ test('w19-F8b: a committed seal clears the unverifiable wedge', t => {
   assert.ok(h.f.recoverClock(h.p('security')).unverifiable_tenants.includes('acme'));
   const head = h.f.store.db.prepare("SELECT seq,hash FROM audit WHERE tenant='acme' ORDER BY seq DESC LIMIT 1").get();
   h.f.store.db.prepare("INSERT INTO audit (tenant,seq,previous,hash,envelope) VALUES ('acme',?,?,'deadbeef','{}')").run(head.seq + 1, head.hash);
+  // Placement binding (w20-ledger F-8): the flag must still be set while
+  // the seal's AUDIT_SEALED event is being emitted inside the tx — a
+  // clear that ran inside the tx (or before the emit) would unwedge the
+  // tenant even when the commit later fails.
+  let flagDuringEmit = null;
+  const orig = h.f.store.audit.bind(h.f.store);
+  h.f.store.audit = (tt, type, ...rest) => {
+    if (type === 'AUDIT_SEALED') flagDuringEmit = h.f._clockRecoveryUnverifiable.has('acme');
+    return orig(tt, type, ...rest);
+  };
   h.f.sealAuditChain(h.p('security'));
+  h.f.store.audit = orig;
+  assert.equal(flagDuringEmit, true, 'the wedge must outlive the in-transaction seal emit — clearing is post-commit only');
+  assert.equal(h.f._clockRecoveryUnverifiable.has('acme'), false, 'the committed seal cleared the wedge');
   assert.ok(h.proposed(), 'the committed seal released the wedge');
 });

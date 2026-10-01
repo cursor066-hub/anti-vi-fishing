@@ -1,4 +1,4 @@
-import { randomUUID, randomBytes, createHmac } from 'node:crypto';
+import { randomUUID, randomBytes, createHmac, createPrivateKey, createPublicKey } from 'node:crypto';
 import { Store } from './store.mjs';
 import { SimulatedTarget } from './target.mjs';
 import { RuntimeGate } from './runtime.mjs';
@@ -6,7 +6,7 @@ import { digest, clone, canonical } from './canonical.mjs';
 import { verifySigned, decrypt, ctEqual } from './crypto.mjs';
 import { KeyVault, derivePublic } from './keystore.mjs';
 import { merkleRoot, inclusionProof, consistencyProof, verifyInclusion } from './merkle.mjs';
-import { httpJson, postOnce, readWithRetry, driftCheck } from './connectors.mjs';
+import { httpJson, postOnce, readWithRetry, driftCheck, verifyManifest } from './connectors.mjs';
 import { createCeremony, acknowledge, commitShares, splitSecret, reconstructSecret, ceremonyReport } from './ceremony.mjs';
 import { decodeShare, encodeShare } from './shamir.mjs';
 import { SUITES } from './crypto.mjs';
@@ -14,7 +14,7 @@ import { openSession, releaseFields, workspaceFallback } from './secureview.mjs'
 import { extract, explain, classifyIntent } from './advisory.mjs';
 import { fields, text, identifier, integer, uniqueStrings, validateProposal } from './schema.mjs';
 import { evaluatePolicy, validatePolicy, policyDiff } from './policy.mjs';
-import { declarePath, coverageManifest, applyDriftToPaths, coverageAt, effectiveStatus } from './coverage.mjs';
+import { declarePath, coverageManifest, applyDriftToPaths, effectiveStatus } from './coverage.mjs';
 import { watermark, reconstructionCheck } from './datagate.mjs';
 import { requireThat, InvariantError } from './errors.mjs';
 import { join } from 'node:path';
@@ -326,7 +326,10 @@ export class Fabric {
       // designation to exactly one kid regardless (w19-lifecycle F6).
       if (idx.ceremonyAborted?.has(cid)) continue;
       const ceremony = this.store.get(t, 'ceremony', cid);
-      if (!ceremony || ceremony.rotation?.new_key_id !== kid || ceremony.rotation?.key_class !== klass) continue;
+      // Only a key.rotate ceremony designates a signer — a recovery-labeled
+      // ceremony carrying a rotation spec is outside the designation
+      // contract (w20-ceremony residual).
+      if (!ceremony || ceremony.purpose !== 'key.rotate' || ceremony.rotation?.new_key_id !== kid || ceremony.rotation?.key_class !== klass) continue;
       const planDigest = this._ceremonyPlanDigest(ceremony);
       if (planDigest === null || !ctEqual(planDigest, plannedDigest)) continue;
       // The designation bar is the live quorum, not a raw anchored-ack
@@ -352,6 +355,20 @@ export class Fabric {
     const planDigest = this._ceremonyPlanDigest(ceremony);
     return planned !== undefined && planDigest !== null && ctEqual(planDigest, planned);
   }
+  // The consent epoch a custodian must have signed: the plan digest
+  // pre-commit, or the commit rebind recomputed from anchored terms and
+  // the ANCHORED commitment set post-commit. A share_commitments row that
+  // diverges from the anchored commitments_digest can never name a consent
+  // epoch — null fails every digest comparison closed (w20-ceremony W20-2).
+  _ceremonyConsentDigest(t, ceremony) {
+    const committed = this._auditIndex(t).ceremonyCommitted?.get(ceremony.ceremony_id);
+    if (!committed) return this._ceremonyPlanDigest(ceremony);
+    if (typeof committed.commitments_digest !== 'string') return null;
+    try {
+      if (digest(ceremony.share_commitments ?? []) !== committed.commitments_digest) return null;
+      return digest({ ceremony_id: ceremony.ceremony_id, tenant_id: ceremony.tenant_id, purpose: ceremony.purpose, threshold: ceremony.threshold, custodians: ceremony.custodians, valid_until: ceremony.valid_until, min_delay_ms: ceremony.min_delay_ms, share_commitments: ceremony.share_commitments.map(c => c.commitment) });
+    } catch { return null; }
+  }
   custodianQuorum(t, ceremony) {
     // The ceremony row must descend from an anchored plan: its governance
     // fields (threshold, custodians, validity, rotation) must recompute to
@@ -361,12 +378,27 @@ export class Fabric {
     // (w19-lifecycle F1).
     if (!this._ceremonyPlanAnchored(t, ceremony))
       return { count: ceremony.acknowledgements?.length ?? 0, live: 0, custodians: new Set(), planAnchored: false };
+    // The digest a custodian must have signed is computed from anchored
+    // terms, never the mutable artifact_digest row field: pre-commit it is
+    // the plan digest; post-commit it is the commit rebind recomputed from
+    // anchored terms + the anchored commitment set. A flipped
+    // artifact_digest can neither resurrect superseded consent nor wedge
+    // live consent (w20-ceremony W20-2).
+    const consentDigest = this._ceremonyConsentDigest(t, ceremony);
+    if (consentDigest === null)
+      return { count: ceremony.acknowledgements?.length ?? 0, live: 0, custodians: new Set(), planAnchored: true };
     const ids = this.identities(t);
     const domains = new Set(), live = new Set();
     for (const a of ceremony.acknowledgements) {
-      // Only consent to the CURRENT artifact counts: an acknowledgement
-      // bound to a superseded digest attested different terms (w7-seam F4).
-      if (a.payload?.artifact_digest !== ceremony.artifact_digest) continue;
+      // Only consent to the CURRENT anchored epoch counts: an
+      // acknowledgement bound to a superseded digest attested different
+      // terms (w7-seam F4).
+      if (a.payload?.artifact_digest !== consentDigest) continue;
+      // One custodian contributes exactly one seat no matter how many
+      // envelopes or enrolments they carry — the live count is distinct
+      // subjects, and domains is the diversity view over the SAME subjects
+      // (w20-ceremony W20-1).
+      if (live.has(a.payload?.custodian)) continue;
       // Consent is attributed to the failure domain of the exact identity
       // whose key signed the ack — a subject carrying several identities
       // cannot smuggle a second domain into the quorum count
@@ -389,12 +421,24 @@ export class Fabric {
     // the chain is the evidence (w19-lifecycle F5). Revocation is still
     // consulted live: a revoked custodian's anchored consent lapses.
     for (const [custodian, ack] of this._auditIndex(t).ceremonyAcks.get(ceremony.ceremony_id) ?? new Map()) {
-      if (live.has(custodian) || ack?.artifact_digest !== ceremony.artifact_digest) continue;
+      if (live.has(custodian) || ack?.artifact_digest !== consentDigest) continue;
       const identity = ids[ack.key_id];
       if (!identity || identity.revoked || identity.subject_id !== custodian) continue;
       live.add(custodian); domains.add(identity.failure_domain ?? custodian);
     }
     return { count: ceremony.acknowledgements.length, live: domains.size, custodians: live, planAnchored: true };
+  }
+  // The served lifecycle status comes from the chain, not the row: the
+  // fold's anchored lifecycle always wins over a mutated status field
+  // (w20-ceremony residual — GET /v1/ceremonies must not echo tampered
+  // rows to operators).
+  ceremonyStatus(t, ceremony) {
+    const idx = this._auditIndex(t);
+    if (idx.ceremonyAborted?.has(ceremony.ceremony_id)) return 'aborted';
+    if (idx.ceremonyCompleted?.has(ceremony.ceremony_id)) return 'completed';
+    if (idx.ceremonyCommitted?.has(ceremony.ceremony_id)) return 'committed';
+    if (idx.ceremonyPlanned?.has(ceremony.ceremony_id)) return 'live';
+    return 'unanchored';
   }
   close() { this.target.close(); this.store.close(); }
   // Own-property only: an inherited member must never resolve into a
@@ -684,7 +728,19 @@ export class Fabric {
         auditSuccessions.set(env.payload.reference, meta.previous_key_id); // newest last, keyed by new key
       }
     }
-    if (firstBad === null) return { sealed: false, reason: 'chain already verifies' };
+    if (firstBad === null) {
+      // A wedge planted by the cert sweep (not by a broken chain) can only
+      // clear when the sweep itself re-verifies — 'already verifies' must
+      // not strand the flag on the repair path that is documented to lift
+      // it (w20-fixverify F-4).
+      if (this._clockRecoveryUnverifiable?.has(t)) {
+        let sweepOk = false;
+        try { sweepOk = this._certIntegritySweep(t); } catch { sweepOk = false; }
+        if (sweepOk) { this._clockRecoveryUnverifiable.delete(t); return { sealed: false, reason: 'chain already verifies', unverifiable_cleared: true }; }
+        return { sealed: false, reason: 'certificate sweep still fails — anchored rows must be restored before the wedge clears' };
+      }
+      return { sealed: false, reason: 'chain already verifies' };
+    }
     const [iid, ident] = Object.entries(this.tenant(t).identities).find(([, v]) => v.subject_id === p.subject_id) ?? [];
     const callerRefs = [`subject:${p.subject_id}`, `key:${iid}`, ...(ident?.device_id ? [`device:${ident.device_id}`] : [])];
     requireThat(!callerRefs.some(ref => revokedSeen.has(ref)), 'INV-403-QUARANTINE', 'A revoked identity cannot seal the audit chain', 403);
@@ -771,8 +827,16 @@ export class Fabric {
       // config repoint but a still-pending vault key bricks every
       // audit-emitting operation with INV-401-SIGNATURE (w19-lifecycle F4).
       // In-memory bookkeeping likewise applies only once the tx committed
-      // (w19-lifecycle F8).
-      if (activated) this.persistVault();
+      // (w19-lifecycle F8). A persist fault here must NOT undo the repoint —
+      // memory would diverge from the committed ledger — and must not skip
+      // the wedge clear: the seal the flag waited for landed. The fault is
+      // reported on the result so the operator sees durability is pending
+      // (w20-fixverify F-5).
+      try { if (activated) this.persistVault(); }
+      catch (persistErr) {
+        if (clearUnverifiable) this._clockRecoveryUnverifiable?.delete(t);
+        return { ...out, vault_persist_error: persistErr instanceof Error ? persistErr.message : String(persistErr) };
+      }
       if (clearUnverifiable) this._clockRecoveryUnverifiable?.delete(t);
       return out;
     } catch (sealErr) {
@@ -784,6 +848,21 @@ export class Fabric {
       // committed head (w18-fixverify F10/F11).
       repointUndo?.(); this.#auditIdx?.delete(t); throw sealErr;
     }
+  }
+  // The integrity half of recoverClock's sweep: every chain-anchored issued
+  // certificate must still exist as a verifiable row — a missing or
+  // divergent anchored row is the unverifiable condition sealAuditChain's
+  // repair path is allowed to clear once it re-verifies (w20-fixverify F-4).
+  _certIntegritySweep(tenant) {
+    const idx = this._auditIndex(tenant);
+    for (const id of idx.issuedCerts ?? []) {
+      let c; try { c = this.store.get(tenant, 'certificate', id); } catch { c = null; }
+      if (!c) return false;
+      if (idx.outcomes.has(id) || idx.reserved.has(id)) continue;
+      let envOk = false; try { envOk = !!verifySigned(c.envelope, this.executionPublic(tenant), 'action-certificate'); } catch { envOk = false; }
+      if (!envOk) return false;
+    }
+    return true;
   }
   recoverClock(p) {
     this.authorize(p, ['security', 'policy_admin']);
@@ -1100,7 +1179,7 @@ export class Fabric {
     return {
       identities: digest(tenant.identities), issuers: digest(tenant.issuers), genesis_policy: digest(tenant.genesis_policy), gate_id: digest(this.config.gate_id),
       auth: digest(tenant.auth ?? {}), keys: digest(keys), components: digest(tenant.components ?? {}),
-      data_keys: digest({ encryption_key_wrapped: tenant.encryption_key_wrapped ?? null, encryption_key: tenant.encryption_key ? digest(tenant.encryption_key) : null, watermark_key_wrapped: tenant.watermark_key_wrapped ?? null, watermark_key: tenant.watermark_key ? digest(tenant.watermark_key) : null })
+      data_keys: digest({ encryption_key_wrapped: tenant.encryption_key_wrapped ?? null, encryption_key: tenant.encryption_key ? digest(tenant.encryption_key) : null, watermark_key_wrapped: tenant.watermark_key_wrapped ?? null, watermark_key: tenant.watermark_key ? digest(tenant.watermark_key) : null, tokenise_key_wrapped: tenant.tokenise_key_wrapped ?? null, tokenise_key: tenant.tokenise_key ? digest(tenant.tokenise_key) : null })
     };
   }
   // Record-provenance layer (w11-redteam R1-R16): every security-significant
@@ -1114,7 +1193,7 @@ export class Fabric {
   _auditIndex(t) {
     const maxSeq = this.store.db.prepare('SELECT COALESCE(MAX(seq),0) m FROM audit WHERE tenant=?').get(t).m;
     let idx = this.#auditIdx.get(t);
-    if (!idx) { idx = { maxSeq: 0, building: false, revoked: new Set(), attached: new Map(), proposedNonce: new Set(), proposedAt: new Map(), proposedDigest: new Map(), issued: new Set(), issuedCert: new Map(), issuedCerts: new Set(), grants: new Map(), grantMeta: new Map(), rotations: new Map(), rotationsByPrev: new Map(), rotationKeys: new Set(), policyAnchors: [], dataAccess: [], perceptionNonce: new Set(), reserved: new Set(), dispatched: new Map(), outcomes: new Map(), keyDeadAt: new Map(), parentChildren: new Map(), simulated: [], issuerDrift: new Set(), tenantDrifted: false, configSnapshot: null, decisions: new Map(), runtimeUse: [], runtimeUseByCap: new Map(), runtimeUseBySubject: new Map(), revocationDigests: new Map(), denials: [], denialsByReq: new Map(), ceremonyAcks: new Map(), ceremonyPlanned: new Map(), ceremonyCommitted: new Map(), ceremonyAborted: new Set(), ceremonyCompleted: new Set(), ceremonyNotices: new Map(), ceremonyRotationConsumed: new Set(), coverageAnchors: new Map(), perceptionSessions: new Map() }; this.#auditIdx.set(t, idx); }
+    if (!idx) { idx = { maxSeq: 0, building: false, revoked: new Set(), attached: new Map(), proposedNonce: new Set(), proposedAt: new Map(), proposedDigest: new Map(), issued: new Set(), issuedCert: new Map(), issuedCerts: new Set(), grants: new Map(), grantMeta: new Map(), rotations: new Map(), rotationsByPrev: new Map(), rotationKeys: new Set(), policyAnchors: [], dataAccess: [], perceptionNonce: new Set(), reserved: new Set(), dispatched: new Map(), outcomes: new Map(), keyDeadAt: new Map(), parentChildren: new Map(), simulated: [], issuerDrift: new Set(), tenantDrifted: false, configSnapshot: null, decisions: new Map(), runtimeUse: [], runtimeUseByCap: new Map(), runtimeUseBySubject: new Map(), revocationDigests: new Map(), denials: [], denialsByReq: new Map(), ceremonyAcks: new Map(), ceremonyPlanned: new Map(), ceremonyCommitted: new Map(), ceremonyAborted: new Set(), ceremonyCompleted: new Set(), ceremonyNotices: new Map(), ceremonyRotationConsumed: new Map(), coverageAnchors: new Map(), coverageDeclared: new Map(), coverageTransitions: [], coverageValidations: [], perceptionSessions: new Map() }; this.#auditIdx.set(t, idx); }
     // Re-entrancy must fail closed: a nested caller handed the mid-fold
     // partial projection could observe anchors that the committed chain
     // never attested (w17-idx F9). Nothing inside the fold recurses
@@ -1198,7 +1277,12 @@ export class Fabric {
           // Anchored ceremony spend: a mutable rotation_consumed row flag
           // can neither erase nor fake a spend the ledger recorded
           // (w18-fixverify F13).
-          if (typeof meta.ceremony_id === 'string') idx.ceremonyRotationConsumed.add(meta.ceremony_id);
+          // Anchored ceremony spend maps to the capsule that consumed it —
+          // a mutable rotation_consumed row flag can neither erase nor fake
+          // a spend the ledger recorded, and never wedges a live rotation
+          // (w18-fixverify F13, w20-ceremony residual). Pre-capsule anchors
+          // carry null and fail closed.
+          if (typeof meta.ceremony_id === 'string') idx.ceremonyRotationConsumed.set(meta.ceremony_id, meta.capsule_id ?? null);
           break;
         case 'ROTATION_PREPARED': if (typeof pl.reference === 'string') idx.rotationKeys.add(pl.reference); break;
         case 'EVIDENCE_ATTACHED': { const l = idx.attached.get(pl.reference) ?? []; l.push(meta.evidence_id); idx.attached.set(pl.reference, l); break; }
@@ -1217,14 +1301,22 @@ export class Fabric {
         // bounded — a linear pass over the whole runtime history per
         // request was a quadratic wall-clock sink (w17-idx F8).
         case 'RUNTIME_ALLOWED': { const u = { capability: pl.reference, subject: pl.actor, resource: meta.resource ?? null, request_id: meta.request_id ?? null, cost: typeof meta.cost === 'number' ? meta.cost : 0, at: pl.time }; idx.runtimeUse.push(u); const cl = idx.runtimeUseByCap.get(u.capability) ?? []; cl.push(u); idx.runtimeUseByCap.set(u.capability, cl); const sl = idx.runtimeUseBySubject.get(u.subject) ?? []; sl.push(u); idx.runtimeUseBySubject.set(u.subject, sl); break; }
-        case 'PERCEPTION_SESSION': if (meta.nonce) idx.perceptionNonce.add(meta.nonce); if (meta.channel_digest) idx.perceptionSessions.set(pl.reference, { creator: meta.creator ?? null, expires_at: meta.expires_at ?? null, channel_digest: meta.channel_digest, component: meta.component ?? null }); break;
+        case 'PERCEPTION_SESSION': if (meta.nonce) idx.perceptionNonce.add(meta.nonce); if (meta.channel_digest) idx.perceptionSessions.set(pl.reference, { creator: meta.creator ?? null, expires_at: meta.expires_at ?? null, channel_digest: meta.channel_digest, component: meta.component ?? null, signing_key_id: meta.signing_key_id ?? null }); break;
         case 'DATA_ACCESSED': idx.dataAccess.push({ subject: pl.reference, dataset: meta.dataset, row_ids: meta.row_ids ?? [], columns: meta.columns ?? [], at: meta.at ?? pl.time, certificate_id: meta.certificate_id ?? null }); break;
         case 'EXECUTION_RESERVED': idx.reserved.add(pl.reference); break;
         case 'EXECUTION_DISPATCHED': if (meta.journal_digest) idx.dispatched.set(pl.reference, meta.journal_digest); break;
         case 'EXECUTION_OUTCOME': idx.outcomes.set(pl.reference, meta.status); break;
         case 'ACTION_CANCELLED': if (meta.certificate_id) idx.outcomes.set(meta.certificate_id, 'CANCELLED'); break;
         case 'RUNTIME_DENIED': { const d = { request_id: pl.reference, actor: pl.actor, code: meta.code ?? null, capability_id: meta.capability_id ?? null, at: pl.time }; idx.denials.push(d); const rl = idx.denialsByReq.get(d.request_id) ?? []; rl.push(d); idx.denialsByReq.set(d.request_id, rl); break; }
-        case 'COVERAGE_DECLARED': if (meta.digest) idx.coverageAnchors.set(pl.reference, meta.digest); break;
+        case 'COVERAGE_DECLARED':
+          if (meta.identity_digest ?? meta.digest) idx.coverageAnchors.set(pl.reference, meta.identity_digest ?? meta.digest);
+          (idx.coverageDeclared ??= new Map()).set(pl.reference, { status: meta.status, at: pl.time, evidence_at: meta.status === 'UNCOVERED' ? null : pl.time, max_age_ms: meta.max_age_ms ?? null });
+          break;
+        case 'COVERAGE_TRANSITION': (idx.coverageTransitions ??= []).push({ path_id: pl.reference, to: meta.to, cause: meta.cause, at: meta.at ?? pl.time, evidence_at: meta.evidence_at ?? null, seq: e.sequence }); break;
+        // Validations are replay events too: refreshing an already-ENFORCED
+        // path emits no transition, so the anchored replay must apply the
+        // validation's own evidence_at refresh (w20-fixverify regression).
+        case 'COVERAGE_TECHNICAL_VALIDATION': (idx.coverageValidations ??= []).push({ path_id: pl.reference, evidence_id: meta.evidence_id ?? null, issuer: meta.issuer, at: pl.time, seq: e.sequence, validation: true }); break;
         case 'CEREMONY_PLANNED': if (meta.digest) idx.ceremonyPlanned.set(pl.reference, meta.digest); break;
         case 'CEREMONY_SHARES_COMMITTED': idx.ceremonyCommitted.set(pl.reference, { at: pl.time, commitments_digest: meta.commitments_digest ?? null }); break;
         // Only a chain-recorded acknowledgement attests that the consent
@@ -1365,8 +1457,12 @@ export class Fabric {
   }
   _assertHealthy(t, subject, device, now) {
     requireThat(!this.revoked(t, 'subject', subject) && !this.revoked(t, 'device', device), 'INV-403-QUARANTINE', 'Subject or device quarantined', 403, { quarantine_denial: true, subject, device });
-    const identity = Object.values(this.tenant(t).identities).find(x => x.subject_id === subject);
-    requireThat(identity && identity.device_id === device && identity.health_expires_at > now, 'INV-403-HEALTH', 'Configured device health evidence expired or mismatched', 403);
+    // The health binding must follow the (subject, device) enrolment the
+    // caller actually presents — first-found resolution would let a stale
+    // second enrolment sign while the healthy first is checked
+    // (w20-ceremony W20-3).
+    const identity = Object.values(this.tenant(t).identities).find(x => x.subject_id === subject && x.device_id === device);
+    requireThat(identity && !identity.revoked && identity.health_expires_at > now, 'INV-403-HEALTH', 'Configured device health evidence expired or mismatched', 403);
   }
   getCapsule(p, id) { this.authorize(p, ['operator', 'approver', 'custodian', 'security', 'policy_admin', 'auditor']); return this.capsuleView(this.store.must(p.tenant_id, 'capsule', identifier(id))); }
   // A capsule read never returns raw dataset rows: current_state snapshots
@@ -1729,15 +1825,13 @@ export class Fabric {
     }
     let observedPayload;
     try {
-      observedPayload = verifySigned(observed, { [key_id]: issuer }, 'connector-manifest');
+      // verifyManifest runs the shared contract — signature, schema,
+      // expiry, issued-at sanity and the declared freshness floor (a
+      // manifest minted before the window replays stale issuer state as
+      // "no drift", w9-network F8). The suite gate and the signed-horizon
+      // cap stay gate-side (w20-fixverify F-15).
+      observedPayload = verifyManifest(observed, { [key_id]: issuer }, this.clock(), { max_age_ms: 300000 });
       this.assertSuiteAllowed(p.tenant_id, observed.protected.suite);
-      fields(observedPayload, ['connector_id', 'version', 'domain', 'actions', 'permissions', 'limitations', 'idempotency', 'coverage_implications', 'issued_at', 'expires_at']);
-      requireThat(observedPayload.expires_at > this.clock(), 'INV-401-CONNECTOR', 'Connector manifest expired', 401);
-      requireThat(Number.isSafeInteger(observedPayload.issued_at) && observedPayload.issued_at <= this.clock() + 300000, 'INV-401-CONNECTOR', 'Connector manifest issued-at is implausible', 401);
-      // Freshness floor: a manifest minted before the window replays stale
-      // issuer state as "no drift" (w9-network F8). The signed horizon is
-      // capped too — an issuer cannot extend its own replay window.
-      requireThat(observedPayload.issued_at >= this.clock() - 300000, 'INV-401-CONNECTOR', 'Connector manifest is stale', 401);
       requireThat(observedPayload.expires_at <= this.clock() + 900000, 'INV-401-CONNECTOR', 'Connector manifest horizon too long', 401);
     } catch (e) {
       // A tampered or mis-signed manifest is drift, not just an error: the
@@ -1748,8 +1842,8 @@ export class Fabric {
       }
       throw e;
     }
-    const registered = { connector_id: `issuer:${issuer.name}`, version: issuer.version ?? '1.0.0', actions: issuer.kinds, channel: issuer.channel, key_id };
-    const result = driftCheck(registered, { connector_id: observedPayload.connector_id, version: observedPayload.version, actions: observedPayload.actions, channel: observedPayload.domain, key_id: observed.protected.key_id }, this.clock());
+    const registered = { connector_id: `issuer:${issuer.name}`, version: issuer.version ?? '1.0.0', actions: issuer.kinds, channel: issuer.channel, key_id, permissions: issuer.permissions ?? [], limitations: issuer.limitations ?? [] };
+    const result = driftCheck(registered, { connector_id: observedPayload.connector_id, version: observedPayload.version, actions: observedPayload.actions, channel: observedPayload.domain, key_id: observed.protected.key_id, permissions: observedPayload.permissions, limitations: observedPayload.limitations }, this.clock());
     return this.transaction(p, now => {
       // A clean re-check clears the suspension; a drifted one records it and
       // stops the issuer's evidence until then (MED-2).
@@ -1865,6 +1959,11 @@ export class Fabric {
       // Minting on behalf of another actor still requires the minting
       // principal's device to be healthy (w11-approval F6).
       if (p.subject_id !== r.capsule.actor.subject_id) this.assertHealthy(t, p.subject_id, this.identity(p).device_id, now);
+      // A data.export certificate is only mintable when the watermark key
+      // already exists — resolving it after irrevocable egress would wedge
+      // the cert EXECUTING with the disclosure unattestable (w20-datagate
+      // F3). Fail before the certificate exists, not after the journal.
+      if (r.capsule.action.type === 'data.export') requireThat(this.dataKey(t, 'watermark'), 'INV-503-CONFIG', `Tenant ${t} has no watermark data key`, 503);
       // Resolve the signing key BEFORE any further work — a revoked
       // execution key must not dead-end certificate minting while a pending
       // successor exists (w11-lifecycle F1).
@@ -2334,7 +2433,12 @@ export class Fabric {
         // The ceremony was consumed atomically at reservation — this may
         // only be consumed by THIS capsule and stay bound to this rotation.
         const cidxR = this._auditIndex(t);
-        preconditions = preconditions && ceremony && ceremony.purpose === 'key.rotate' && ceremony.rotation_consumed === r.capsule.capsule_id
+        // The anchored spend names the consuming capsule; a tampered
+        // rotation_consumed row flag can neither keep a second rotation
+        // alive nor wedge this one — when no spend is anchored yet the
+        // ledger has no opinion and the flag is display-only.
+        const anchoredSpend = cidxR.ceremonyRotationConsumed.get(req.ceremony_id);
+        preconditions = preconditions && ceremony && ceremony.purpose === 'key.rotate' && (anchoredSpend === undefined || anchoredSpend === r.capsule.capsule_id)
           && ceremony.rotation?.key_class === req.key_class && ceremony.rotation?.new_key_id === req.new_key_id
           && !(cidxR.ceremonyAborted?.has(req.ceremony_id) || cidxR.ceremonyCompleted?.has(req.ceremony_id));
       }
@@ -2349,7 +2453,7 @@ export class Fabric {
       // what was actually done, never a hardcoded true (w7-seam F7).
       const revokeOld = req.revoke_old !== false;
       this.store.put(t, 'key-rotation', req.new_key_id, { new_key_id: req.new_key_id, new_public_key: req.new_public_key, key_class: klass, previous_key_id: previous.key_id, previous_public_key: previous.public_key, revoke_old: revokeOld, rotated_at: now, capsule_id: r.capsule.capsule_id }, now);
-      this.store.audit(t, 'KEY_ROTATED', p.subject_id, req.new_key_id, { key_class: klass, previous_key_id: previous.key_id, ceremony_id: req.ceremony_id, revoke_old: revokeOld }, now);
+      this.store.audit(t, 'KEY_ROTATED', p.subject_id, req.new_key_id, { key_class: klass, previous_key_id: previous.key_id, ceremony_id: req.ceremony_id, capsule_id: r.capsule.capsule_id, revoke_old: revokeOld }, now);
       post.push(() => {
         this.vault.activate(req.new_key_id);
         const tn = clone(this.tenant(t));
@@ -2408,7 +2512,16 @@ export class Fabric {
     // F17): the row is a billing projection, the chain decides.
     if (!alreadyCharged)
       this.store.db.prepare('INSERT INTO usage VALUES(?,?,?,?,?,?,?) ON CONFLICT(tenant,capability,request) DO UPDATE SET cost=cost+excluded.cost,at=excluded.at').run(t, subject, requested.dataset, now, cost, requestKey, cert.certificate_id);
-    if (!recon.allowed) return { gate_denied: { code: 'INV-429-BUDGET', detail: { row_count: recon.row_count, column_count: recon.column_count, coverage_percent: recon.coverage_percent } } };
+    // A denied egress still disclosed — the journal committed the rows
+    // before this check ran. The chain must attest that honestly: the
+    // DATA_ACCESSED event carries gate_denied so the denied disclosure is
+    // never invisible to the ledger, and the same anchor makes the charge
+    // exactly-once on any later re-fire (w20-datagate F4).
+    if (!recon.allowed) {
+      if (!alreadyCharged)
+        this.store.audit(t, 'DATA_ACCESSED', subject, subject, { dataset: requested.dataset, row_ids: requested.row_ids, columns: requested.columns, at: now, certificate_id: cert.certificate_id, gate_denied: true }, now);
+      return { gate_denied: { code: 'INV-429-BUDGET', detail: { row_count: recon.row_count, column_count: recon.column_count, coverage_percent: recon.coverage_percent } } };
+    }
     // Egress disclosure is attested on the signed chain — the touch table
     // is a mirror; wiping it can never reset coverage (w11-redteam R9).
     if (!alreadyCharged)
@@ -2698,6 +2811,11 @@ export class Fabric {
     // never throw INV-409 inside the caller's transaction and roll back the
     // drift record itself (w8-composite F12).
     this.store.put(tenant, 'coverage-event', `${path.path_id}:${now}:${cause}`, { type: 'transitioned', path_id: path.path_id, to, evidence_at: path.evidence_at, at: now, cause }, now);
+    // The transition anchors on the signed chain — served manifests and
+    // coverageAt history derive status from these events, so a forged
+    // coverage row can never mint ENFORCED under the gate's signature
+    // (w20-datagate F2).
+    this.store.audit(tenant, 'COVERAGE_TRANSITION', 'system', path.path_id, { to, cause, at: now, evidence_at: path.evidence_at }, now);
     // Owner tasks exist only for degraded/unprotected states — a promotion
     // is a resolution, not a new obligation. UNCOVERED means the path is
     // declared unprotected: the owner must close it or enforce it.
@@ -2729,8 +2847,31 @@ export class Fabric {
       // a forged coverage row cannot claim ENFORCED under the gate's
       // signature; planted rows are reported separately, never attested
       // (w17-redteam A3).
-      const anchoredRows = rows.filter(path => (idx.coverageAnchors ?? new Map()).has(path.path_id));
-      const unanchored = rows.filter(path => !(idx.coverageAnchors ?? new Map()).has(path.path_id)).map(path => path.path_id);
+      // Anchoring binds the declared identity tuple AND the chain-attested
+      // status: a forged row over a declared path_id serves its anchored
+      // status (never a planted ENFORCED), and identity-divergent rows
+      // demote to unanchored_rows (w20-datagate F2).
+      const anchoredIdentity = path => {
+        try { return digest({ path_id: path.path_id, action_type: path.action_type, target: path.target, environment: path.environment, connector_version: path.connector_version, owner: path.owner, path_class: path.path_class, configuration_digest: path.configuration_digest, max_age_ms: path.max_age_ms }); } catch { return null; }
+      };
+      const anchoredStatus = path => {
+        const declared = idx.coverageDeclared?.get(path.path_id);
+        if (!declared) return null;
+        let s = { status: declared.status, evidence_at: declared.evidence_at };
+        const events = [...(idx.coverageTransitions ?? []), ...(idx.coverageValidations ?? [])].sort((a, b) => a.seq - b.seq);
+        for (const e of events) if (e.path_id === path.path_id) {
+          if (e.validation) s.evidence_at = e.at;
+          else { if (e.to !== undefined) s.status = e.to; s.evidence_at = e.evidence_at; }
+        }
+        return s;
+      };
+      const anchoredRows = rows.filter(path => anchoredStatus(path) !== null && idx.coverageAnchors.get(path.path_id) === anchoredIdentity(path))
+        .map(path => {
+          const anchored = anchoredStatus(path);
+          const validated = (idx.coverageValidations ?? []).filter(v => v.path_id === path.path_id).at(-1);
+          return { ...path, status: anchored.status, evidence_at: anchored.evidence_at, technical_validation: validated && path.technical_validation?.evidence_id === validated.evidence_id ? path.technical_validation : null, row_status: anchored.status !== path.status ? path.status : null };
+        });
+      const unanchored = rows.filter(path => !anchoredRows.some(a => a.path_id === path.path_id)).map(path => path.path_id);
       return coverageManifest(p.tenant_id, anchoredRows, now, payload => this.signAudit(p.tenant_id, payload, 'coverage'), { unanchored });
     });
   }
@@ -2742,8 +2883,24 @@ export class Fabric {
     // Events replay in write order — store.list is newest-first and id
     // ordering is lexical, so neither can be trusted for same-ms ties
     // (w8-composite F10). rowid is the durable insertion sequence.
-    const events = this.store.db.prepare("SELECT id,value FROM records WHERE tenant=? AND kind='coverage-event' ORDER BY rowid").all(p.tenant_id).map(row => this.store.readValue(p.tenant_id, 'coverage-event', row.id, row.value));
-    return { at: atTime, paths: coverageAt(events, atTime) };
+    // History replays chain-anchored events only — forged coverage-event
+    // rows can never rewrite the past a signed manifest attests
+    // (w20-datagate F2). The mutable table stays as a display mirror.
+    const idx = this._auditIndex(p.tenant_id), paths = {};
+    for (const [path_id, d] of idx.coverageDeclared ?? new Map()) if (d.at <= atTime) paths[path_id] = { path_id, status: d.status, evidence_at: d.evidence_at, max_age_ms: d.max_age_ms };
+    // Ledger order (seq), not wall time, decides replay order — a refresh
+    // validation on an already-ENFORCED path writes no transition, so both
+    // event streams merge by seq into one honest history.
+    const events = [...(idx.coverageTransitions ?? []), ...(idx.coverageValidations ?? [])].sort((a, b) => a.seq - b.seq);
+    for (const e of events) {
+      if (e.at > atTime || !paths[e.path_id]) continue;
+      if (e.validation) { paths[e.path_id].evidence_at = e.at; continue; }
+      if (e.to !== undefined) paths[e.path_id].status = e.to;
+      paths[e.path_id].evidence_at = e.evidence_at;
+    }
+    const out = {};
+    for (const [id, s] of Object.entries(paths)) out[id] = { ...s, status: effectiveStatus(s, atTime), stored_status: s.status };
+    return { at: atTime, paths: out };
   }
   declareCoverage(p, input) {
     this.authorize(p, ['security']); return this.transaction(p, now => {
@@ -2760,7 +2917,11 @@ export class Fabric {
       this.store.put(p.tenant_id, 'coverage-event', `${path.path_id}:${now}:declared`, { type: 'declared', path_id: path.path_id, path, at: now }, now);
       if (path.status === 'UNKNOWN') this.store.put(p.tenant_id, 'coverage-task', `declared-unknown:${path.path_id}`, { path_id: path.path_id, owner: path.owner, cause: 'declared-unknown', opened_at: now, status: 'open', required_action: 'attach independently executed technical validation evidence' }, now);
       if (path.status === 'UNCOVERED') this.store.put(p.tenant_id, 'coverage-task', `declared-uncovered:${path.path_id}`, { path_id: path.path_id, owner: path.owner, cause: 'declared-uncovered', opened_at: now, status: 'open', required_action: 'close this declared-unprotected path or bring it under enforced coverage' }, now);
-      this.store.audit(p.tenant_id, 'COVERAGE_DECLARED', p.subject_id, path.path_id, { digest: digest(path), status: path.status }, now); return path;
+      // The anchor binds the immutable identity tuple — status and evidence
+      // fields legitimately drift through anchored transitions, so they are
+      // excluded from the identity digest and verified through the chain
+      // instead (w20-datagate F2).
+      this.store.audit(p.tenant_id, 'COVERAGE_DECLARED', p.subject_id, path.path_id, { digest: digest(path), identity_digest: digest({ path_id: path.path_id, action_type: path.action_type, target: path.target, environment: path.environment, connector_version: path.connector_version, owner: path.owner, path_class: path.path_class, configuration_digest: path.configuration_digest, max_age_ms: path.max_age_ms }), status: path.status, max_age_ms: path.max_age_ms }, now); return path;
     });
   }
   // COV-010: technical validation attaches an independently executed bypass
@@ -2805,7 +2966,7 @@ export class Fabric {
       this.store.put(p.tenant_id, 'coverage-event', `${path.path_id}:${now}:validation`, { type: 'technical_validation', path_id: path.path_id, validation: path.technical_validation, at: now }, now);
       this.store.remove(p.tenant_id, 'coverage-task', `declared-unknown:${path.path_id}`);
       this.store.remove(p.tenant_id, 'coverage-task', `declared-uncovered:${path.path_id}`);
-      this.store.audit(p.tenant_id, 'COVERAGE_TECHNICAL_VALIDATION', p.subject_id, path.path_id, { issuer: envelope.protected.key_id }, now);
+      this.store.audit(p.tenant_id, 'COVERAGE_TECHNICAL_VALIDATION', p.subject_id, path.path_id, { issuer: envelope.protected.key_id, evidence_id: payload.evidence_id }, now);
       return path;
     });
   }
@@ -2911,7 +3072,7 @@ export class Fabric {
       const PROJECTIONS = {
         finance: ['CAPSULE_PROPOSED', 'EVIDENCE_ATTACHED', 'EXACT_ACTION_APPROVED', 'BATCH_APPROVED', 'CERTIFICATE_ISSUED', 'EXECUTION_RESERVED', 'EXECUTION_OUTCOME', 'EXECUTION_DRY_RUN', 'ACTION_CANCELLED', 'EXECUTION_COMPLETED_POST_REVOCATION', 'POLICY_EVALUATED'],
         privacy: ['RETENTION_DELETED', 'RETENTION_HOLD_CHANGED', 'CAPABILITY_ISSUED', 'RUNTIME_ALLOWED', 'PERCEPTION_SESSION', 'PERCEPTION_RELEASE', 'PERCEPTION_FALLBACK', 'AUDIT_ACCESSED'],
-        technical: ['CONFIG_DRIFT', 'CONFIG_REASSERTED', 'CONFIG_SNAPSHOT', 'CONNECTOR_DRIFT', 'COVERAGE_DECLARED', 'COVERAGE_STALED', 'COVERAGE_TECHNICAL_VALIDATION', 'CLOCK_RECOVERED', 'KEY_ROTATED', 'ROTATION_PREPARED', 'CEREMONY_PLANNED', 'CEREMONY_ACKNOWLEDGED', 'CEREMONY_SHARES_COMMITTED', 'CEREMONY_RECONSTRUCTED', 'EVIDENCE_ACQUISITION_FAILED', 'REMEDIATION_REQUESTED', 'JIT_GRANT_ISSUED', 'RECOVERY_NOTICE_ISSUED', 'POLICY_GENESIS', 'POLICY_STAGED', 'POLICY_SIMULATED', 'POLICY_SUPERSEDED', 'EMERGENCY_POLICY_ACTIVATED', 'AI_ADVISORY', 'SECURITY_OPERATION_REJECTED', 'AUTHORITY_REVOKED'],
+        technical: ['CONFIG_DRIFT', 'CONFIG_REASSERTED', 'CONFIG_SNAPSHOT', 'CONNECTOR_DRIFT', 'COVERAGE_DECLARED', 'COVERAGE_STALED', 'COVERAGE_TECHNICAL_VALIDATION', 'COVERAGE_TRANSITION', 'CLOCK_RECOVERED', 'KEY_ROTATED', 'ROTATION_PREPARED', 'CEREMONY_PLANNED', 'CEREMONY_ACKNOWLEDGED', 'CEREMONY_SHARES_COMMITTED', 'CEREMONY_RECONSTRUCTED', 'EVIDENCE_ACQUISITION_FAILED', 'REMEDIATION_REQUESTED', 'JIT_GRANT_ISSUED', 'RECOVERY_NOTICE_ISSUED', 'POLICY_GENESIS', 'POLICY_STAGED', 'POLICY_SIMULATED', 'POLICY_SUPERSEDED', 'EMERGENCY_POLICY_ACTIVATED', 'AI_ADVISORY', 'SECURITY_OPERATION_REJECTED', 'AUTHORITY_REVOKED'],
       };
       requireThat(Object.hasOwn(PROJECTIONS, options.view), 'INV-400-SCHEMA', `Unknown audit projection ${options.view}`);
       const types = new Set(PROJECTIONS[options.view]);
@@ -3082,8 +3243,12 @@ export class Fabric {
       const members = Object.values(this.identities(t));
       const domains = new Set();
       for (const c of input.custodians ?? []) {
-        const identity = members.find(i => i.subject_id === c);
-        requireThat(identity, 'INV-404-NOT-FOUND', `Ceremony custodian ${c} is not a registered identity subject`, 404);
+        const identity = members.find(i => i.subject_id === c && !i.revoked && i.roles?.includes('custodian'));
+        // Existence alone is not consentability: a subject without a live
+        // custodian-role enrolment can never ack — the ceremony would wedge
+        // below threshold forever and burn its anchored id (w20-ceremony
+        // W20-4).
+        requireThat(identity, 'INV-403-ROLE', `Ceremony custodian ${c} holds no live custodian-role enrolment`, 403);
         domains.add(identity.failure_domain ?? c);
       }
       requireThat(domains.size >= (input.threshold ?? 0), 'INV-400-SCHEMA', 'Custodian failure domains cannot meet the ceremony threshold', 400);
@@ -3102,9 +3267,15 @@ export class Fabric {
     this.authorize(p, ['custodian']);
     return this.transaction(p, now => {
       const t = p.tenant_id, payload = verifySigned(envelope, this.identities(t), 'ceremony-acknowledgement');
-      this.assertHealthy(t, p.subject_id, this.identity(p).device_id, now);
       this.assertSuiteAllowed(t, envelope.protected.suite);
       fields(payload, ['ceremony_id', 'artifact_digest', 'custodian', 'acknowledged_at']);
+      // Health is checked on the enrolment that actually signed the ack —
+      // not the subject's first-found one — so a stale second enrolment
+      // cannot attest while the healthy first answers for it
+      // (w20-ceremony W20-3).
+      const ackIdentity = this.identities(t)[envelope.protected.key_id];
+      requireThat(ackIdentity?.subject_id === p.subject_id, 'INV-403-SCOPE', 'Acknowledgement signer does not match the custodian identity', 403);
+      this.assertHealthy(t, p.subject_id, ackIdentity.device_id, now);
       const ceremony = this.store.must(t, 'ceremony', identifier(payload.ceremony_id));
       // Anchored lifecycle wins over the mutable row: a status flip can
       // never re-open consent on a ceremony the ledger already closed
@@ -3115,17 +3286,21 @@ export class Fabric {
       // actually planned — a planted row must not collect anchored
       // consent (w19-lifecycle F7).
       requireThat(this._ceremonyPlanAnchored(t, ceremony), 'INV-409-INTEGRITY', 'Ceremony has no anchored plan', 409);
-      requireThat(payload.custodian === p.subject_id && payload.artifact_digest === ceremony.artifact_digest, 'INV-403-SCOPE', 'Acknowledgement scope mismatch', 403);
-      // The signing key must belong to the claimed custodian identity — the
-      // same binding rule approvals enforce (HTTP-audit finding).
-      const ackIdentity = this.identities(t)[envelope.protected.key_id];
-      requireThat(ackIdentity?.subject_id === p.subject_id, 'INV-403-SCOPE', 'Acknowledgement signer does not match the custodian identity', 403);
+      // Consent binds to the anchored epoch, not the mutable
+      // artifact_digest the row carries: post-commit the epoch is the
+      // commit rebind, so flipping artifact_digest cannot erase the acks
+      // that were already verified (w20-ceremony W20-2).
+      requireThat(payload.custodian === p.subject_id && payload.artifact_digest === this._ceremonyConsentDigest(t, ceremony), 'INV-403-SCOPE', 'Acknowledgement scope mismatch', 403);
       // Ceremony-bound device pinning: when the ceremony declared which
       // device a custodian acknowledges from, the live identity must match
       // (w6 F7).
       if (ceremony.devices?.[p.subject_id]) requireThat(ackIdentity.device_id === ceremony.devices[p.subject_id], 'INV-403-SCOPE', 'Acknowledgement device does not match the ceremony binding', 403);
       requireThat(Math.abs(payload.acknowledged_at - now) <= 300000, 'INV-409-STATE', 'Acknowledgement timestamp outside window', 409);
       acknowledge(ceremony, p.subject_id, envelope, now);
+      // The stored digest tracks the consent epoch the acks attest — the
+      // commit rebind after shares commit — so an artifact_digest flip can
+      // never widen what was acknowledged (w20-ceremony W20-2).
+      ceremony.artifact_digest = this._ceremonyConsentDigest(t, ceremony);
       this.store.put(t, 'ceremony', ceremony.ceremony_id, ceremony, now);
       // The acknowledged artifact + signing key ride the anchor so a
       // truncated ack array cannot wedge quorum — the chain re-supplies
@@ -3198,6 +3373,15 @@ export class Fabric {
       // share must belong to a custodian who acknowledged the committed
       // artifact, and the acknowledgements themselves must span distinct
       // failure domains with all custodians still live (w6 F5/F7/F9).
+      // Committed-set divergence is an integrity event, not a state one —
+      // it must report before the quorum denial so tampering can never
+      // hide behind an innocent-looking refusal (w20-ceremony W20-2).
+      const anchoredCommitted = cidx.ceremonyCommitted?.get(ceremony.ceremony_id);
+      requireThat(anchoredCommitted !== undefined, 'INV-409-INTEGRITY', 'Ceremony share commitment is not ledger-anchored', 409);
+      // Ceremonies committed before the digest existed carry no field —
+      // grandfathered events pass on the anchor alone, every event minted
+      // since binds the commitment bytes exactly (w20-fixverify F-3).
+      requireThat(anchoredCommitted.commitments_digest === null || (typeof anchoredCommitted.commitments_digest === 'string' && digest(ceremony.share_commitments) === anchoredCommitted.commitments_digest), 'INV-409-INTEGRITY', 'Ceremony share commitments diverge from the anchored commitment set', 409);
       const quorum = this.custodianQuorum(t, ceremony);
       // Same F1 contract as the rotation bond: the plan anchor is required
       // and the floor is at least one live custodian — a row-minted
@@ -3213,15 +3397,8 @@ export class Fabric {
       for (const s of shares) requireThat(quorum.custodians.has(ceremony.custodians[s.x - 1]), 'INV-403-ROLE', 'Share presented for a custodian who did not acknowledge or is no longer live', 403);
       // The delay clock runs on the anchored commitment time, not the
       // mutable row field — a rewritten committed_at cannot pre-date the
-      // share commitment the ledger actually attested (w17-redteam A2
-      // residual). A ceremony with no anchored commit cannot reconstruct.
-      const anchoredCommitted = cidx.ceremonyCommitted?.get(ceremony.ceremony_id);
-      requireThat(anchoredCommitted !== undefined, 'INV-409-INTEGRITY', 'Ceremony share commitment is not ledger-anchored', 409);
-      // The commitment bytes themselves are anchored — a rewritten
-      // share_commitments list under an untouched artifact_digest swaps
-      // the reconstructed secret while honest acks still match
-      // (w19-lifecycle F2).
-      requireThat(typeof anchoredCommitted.commitments_digest === 'string' && digest(ceremony.share_commitments) === anchoredCommitted.commitments_digest, 'INV-409-INTEGRITY', 'Ceremony share commitments diverge from the anchored commitment set', 409);
+      // share commitment the ledger actually attested, and the commitment
+      // bytes were proven anchored above (w17-redteam A2, w19 F2).
       // 'Every custodian was notified' attests through the chain, not the
       // mutable notices array — a padded or truncated row can neither fake
       // coverage nor wedge a legitimate reconstruction (w18-fixverify F15).
@@ -3286,7 +3463,9 @@ export class Fabric {
     return this.transaction(p, now => {
       // KEY-007: a rotated key keeps the class's purpose binding — 'any' would
       // destroy the separation genesis established (w5 F-4).
-      const pending = this.vault.generate(this._keyPurposes?.[key_class] ?? 'any', { pending: true, suite, tenant_id: p.tenant_id });
+      const purpose = this._keyPurposes?.[key_class];
+      requireThat(purpose, 'INV-503-CONFIG', `No purpose map for key class ${key_class} — a pending key minted 'any' would float across classes`, 503);
+      const pending = this.vault.generate(purpose, { pending: true, suite, tenant_id: p.tenant_id });
       this.persistVault();
       // The record states the requirement, not a binding that exists yet —
       // the bond materializes only when a ceremony references this key
@@ -3323,7 +3502,7 @@ export class Fabric {
       // and the ECDH pair digest ride in the signed event so a planted or
       // rewritten session row can never swap the release key, stretch the
       // TTL or hijack the creator binding (w18-issuerd F-1).
-      this.store.audit(t, 'PERCEPTION_SESSION', p.subject_id, session.session_id, { component: session.component, assurance: session.assurance, firmware: session.firmware_version, nonce: attestation.payload.nonce, creator: p.subject_id, expires_at: session.expires_at, channel_digest: digest({ component_ecdh: session.component_ecdh, server_ephemeral: session.server_ephemeral }) }, now);
+      this.store.audit(t, 'PERCEPTION_SESSION', p.subject_id, session.session_id, { component: session.component, assurance: session.assurance, firmware: session.firmware_version, nonce: attestation.payload.nonce, creator: p.subject_id, expires_at: session.expires_at, channel_digest: digest({ component_ecdh: session.component_ecdh, server_ephemeral: session.server_ephemeral }), signing_key_id: component.signing.key_id }, now);
       return { session_id: session.session_id, assurance: session.assurance, production: false, component: session.component, expires_at: session.expires_at, ephemeral_public: session.server_ephemeral };
     });
   }
@@ -3341,11 +3520,21 @@ export class Fabric {
       // (w18-issuerd F-1).
       const anchoredSession = this._auditIndex(t).perceptionSessions.get(sid);
       requireThat(anchoredSession && anchoredSession.creator === session.creator && anchoredSession.expires_at === session.expires_at && anchoredSession.channel_digest === digest({ component_ecdh: session.component_ecdh, server_ephemeral: session.server_ephemeral }), 'INV-409-INTEGRITY', 'Perception session diverges from its ledger-anchored binding', 409);
-      // Component credential revocation reaches live sessions: a revoked
-      // component signing key ends releases immediately, not only when the
-      // session TTL lapses (w18-issuerd F-5).
+      // The anchored digest binds only the public halves of the ECDH pair —
+      // the seal key comes from the stored private half. Re-prove the pair:
+      // a swapped _server_private can never re-key the release to an
+      // attacker, and an honest session's private always re-derives the
+      // anchored ephemeral (w20-fixverify F-1).
+      requireThat(createPublicKey(createPrivateKey(session._server_private)).export({ type: 'spki', format: 'pem' }) === session.server_ephemeral, 'INV-409-INTEGRITY', 'Perception session private half diverges from the anchored ephemeral', 409);
+      // Component credential revocation reaches live sessions and binds the
+      // ATTESTING key the session anchored — a rotated component cannot
+      // launder sessions its retired key minted, and revoking that key still
+      // reaches them after the config moved on (w18-issuerd F-5,
+      // w20-fixverify F-2). Sessions minted before the anchor carried the
+      // key id fall back to the current config key.
       const releaseComponent = this.perceptionComponents[t]?.[anchoredSession.component];
-      requireThat(releaseComponent && !this.revoked(t, 'key', releaseComponent.signing.key_id), 'INV-403-SCOPE', 'Perception component signing credential is revoked or unknown', 403);
+      const attestingKid = anchoredSession.signing_key_id ?? releaseComponent?.signing.key_id;
+      requireThat(releaseComponent && attestingKid && !this.revoked(t, 'key', attestingKid), 'INV-403-SCOPE', 'Perception component signing credential is revoked or unknown', 403);
       // Release provenance must be real: a cited capsule or evidence record
       // that does not exist would write forged authority into the signed
       // audit trail (runtime-audit F-6).

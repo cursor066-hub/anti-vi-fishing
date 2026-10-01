@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { createServer } from '../src/server.mjs';
 import { createIssuerServer, writeIssuer, loadIssuers } from '../src/issuerd.mjs';
 import { ISSUER_RULES, issuerRecords } from '../src/bootstrap.mjs';
-import { generateKey } from '../src/crypto.mjs';
+import { generateKey, signed } from '../src/crypto.mjs';
 import { httpJson } from '../src/connectors.mjs';
 import { fixture, hasCode } from './helpers.mjs';
 
@@ -65,6 +65,20 @@ test('w18 F-3: forged tail row defeats a warm page-verify memo', t => {
   assert.throws(() => h.f.auditPageScoped(h.p('security'), {}), e => /^INV-/.test(e.code ?? ''));
   assert.throws(() => h.f.store.db.prepare("UPDATE audit SET envelope='{}' WHERE tenant='acme' AND seq=1").run(),
     e => e.code === 'ERR_SQLITE_ERROR', 'the append-only trigger already denies envelope rewrites');
+});
+
+// F-3b: the digest(envelope) component of the memo key is load-bearing —
+// a second envelope under the same key id and purpose must never be
+// served the first envelope's verified payload (w20-ledger F-3).
+test('w18 F-3b: the verify memo binds the verified bytes, not just purpose', t => {
+  const h = fixture(t);
+  const key = generateKey();
+  const keys = { [key.key_id]: { public_key: key.public_key } };
+  const envA = signed({ verdict: 'legit', time: h.now() }, key, 'action-approval');
+  const envB = signed({ verdict: 'forged', time: h.now() }, key, 'action-approval');
+  assert.equal(h.f._verifyCached(envA, keys, 'action-approval').verdict, 'legit');
+  assert.equal(h.f._verifyCached(envB, keys, 'action-approval').verdict, 'forged',
+    'a purpose-only memo would serve envA\'s payload for envB — the envelope digest must be in the key');
 });
 
 // F-1: the grants surface is operator/security/auditor end-to-end — the

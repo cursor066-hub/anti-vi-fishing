@@ -14,9 +14,11 @@ import { requireThat, InvariantError } from './errors.mjs';
 const recAad = (tenant, kind, id) => canonical({ tenant, kind, id });
 const dekAad = (tenant, kind, id) => canonical({ tenant, kind, id, dek: true });
 // Rows sealed before the canonical-tuple AAD change carry '/`-joined AADs.
-// Reads fall back to the legacy form so an upgraded store never strands (or,
-// worse, shreds) live ciphertext; every put() re-seals under the tuple form
-// (w8-fixverify F1).
+// There is no legacy read path — pre-upgrade ciphertext stays sealed until
+// _migrateAad re-seals it under the tuple form (fail-closed: a ciphertext
+// that cannot be attributed to exactly one (tenant,kind,id) is quarantined,
+// never guessed at). The legacy constants exist only so the migrator can
+// enumerate and re-seal old rows (w8-fixverify F1, w19-aad).
 const legacyAad = (tenant, kind, id) => `${tenant}/${kind}/${id}`;
 const legacyDekAad = (tenant, kind, id) => `${tenant}/${kind}/${id}/dek`;
 // The idempotency cache seals under its own disjoint tuple domain — the
@@ -43,68 +45,79 @@ export class Store {
     // busy_timeout bounds queueing behind a contending writer at 30s; a
     // contender that still loses gets INV-503-LEDGER, not a raw sqlite error
     // (concurrency-audit H2). Long writers should stay chunked regardless.
-    this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=30000; PRAGMA secure_delete=ON;');
-    // Crash window (crypto-audit M-4): if the process died between a shred's
-    // committed DELETE and the post-commit TRUNCATE, wrapped-DEK copies stay
-    // reachable in the WAL. Truncating at open bounds that residue to uptime.
-    // (Physical slack on disk sectors is out of scope — see SECURITY.md.)
-    this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
-    const version = this.db.prepare('PRAGMA user_version').get().user_version;
-    requireThat(version <= 1, 'INV-503-STORAGE', 'Database schema is newer than this application', 503);
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS records (tenant TEXT NOT NULL, kind TEXT NOT NULL, id TEXT NOT NULL,
-        value TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY(tenant,kind,id));
-      CREATE TABLE IF NOT EXISTS audit (tenant TEXT NOT NULL, seq INTEGER NOT NULL, previous TEXT NOT NULL,
-        hash TEXT NOT NULL, envelope TEXT NOT NULL, PRIMARY KEY(tenant,seq));
-      CREATE TRIGGER IF NOT EXISTS no_audit_update BEFORE UPDATE ON audit BEGIN SELECT RAISE(ABORT, 'append-only audit'); END;
-      CREATE TRIGGER IF NOT EXISTS no_audit_delete BEFORE DELETE ON audit BEGIN SELECT RAISE(ABORT, 'append-only audit'); END;
-      -- Chain-squat guard (store-audit MED-1): an insert must extend the head
-      -- exactly; earlier positions and gaps are rejected by the engine.
-      CREATE TRIGGER IF NOT EXISTS audit_seq_guard BEFORE INSERT ON audit
-        WHEN NEW.seq <> (SELECT COALESCE(MAX(seq),0)+1 FROM audit WHERE tenant=NEW.tenant)
-        BEGIN SELECT RAISE(ABORT, 'audit sequence must extend the head'); END;
-      CREATE TABLE IF NOT EXISTS nonces (tenant TEXT NOT NULL, nonce TEXT NOT NULL, capsule TEXT NOT NULL, PRIMARY KEY(tenant,nonce));
-      CREATE TABLE IF NOT EXISTS idempotency (tenant TEXT NOT NULL, scope TEXT NOT NULL, key TEXT NOT NULL,
-        hash TEXT NOT NULL, result TEXT NOT NULL, PRIMARY KEY(tenant,scope,key));
-      CREATE TABLE IF NOT EXISTS deks (tenant TEXT NOT NULL, kind TEXT NOT NULL, id TEXT NOT NULL,
-        wrapped TEXT NOT NULL, PRIMARY KEY(tenant,kind,id));
-      CREATE TABLE IF NOT EXISTS usage (tenant TEXT NOT NULL, subject TEXT NOT NULL, resource TEXT NOT NULL,
-        at INTEGER NOT NULL, cost INTEGER NOT NULL, capability TEXT NOT NULL, request TEXT NOT NULL,
-        PRIMARY KEY(tenant,capability,request));
-      CREATE INDEX IF NOT EXISTS usage_window ON usage(tenant,subject,resource,at);
-      CREATE TABLE IF NOT EXISTS clock (id INTEGER PRIMARY KEY CHECK(id=1), last INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS data_access(tenant TEXT, subject TEXT, dataset TEXT, row_id TEXT, column_name TEXT, at INTEGER);
-      CREATE INDEX IF NOT EXISTS data_access_ix ON data_access(tenant,subject,dataset,at);
-      PRAGMA user_version=1;
-    `);
-    // A DB file whose append-only/seq triggers were weakened out-of-band is a
-    // tampered ledger — refuse to open rather than silently audit into a
-    // writable chain (w11-redteam R18). A plain DROP is healed by the CREATE
-    // statements above; what survives is a same-name trigger whose body no
-    // longer aborts, so the check binds the trigger text, not just the name.
-    const triggers = new Map(this.db.prepare("SELECT name, sql FROM sqlite_master WHERE type='trigger'").all().map(x => [x.name, x.sql ?? '']));
-    for (const name of ['no_audit_update', 'no_audit_delete', 'audit_seq_guard'])
-      if (!triggers.get(name)?.includes('RAISE(ABORT')) throw new Error(`audit integrity trigger missing or weakened: ${name}`);
-    // The append-only pair must fire unconditionally — a WHEN-gated or
-    // re-tabled same-name trigger is a smuggled no-op.
-    for (const name of ['no_audit_update', 'no_audit_delete'])
-      if (/WHEN/i.test(triggers.get(name)) || !triggers.get(name).includes('ON audit')) throw new Error(`audit integrity trigger weakened: ${name}`);
-    // Text checks are evadable (a shadow trigger can carry a matching
-    // name/body while never firing on `audit`) — the definitive test is
-    // functional: attempt each forbidden write inside a savepoint and
-    // require the abort (w13-timing H-1). The probe tenant's rows are
-    // rolled back, so boot never mutates the chain.
-    const probe = fn => {
-      this.db.exec('SAVEPOINT integrity_probe');
-      let aborted = false;
-      try { fn(); } catch { aborted = true; }
-      finally { this.db.exec('ROLLBACK TO integrity_probe'); this.db.exec('RELEASE integrity_probe'); }
-      return aborted;
-    };
-    const pt = '__integrity_probe__';
-    requireThat(probe(() => { this.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run(pt, 1, 'x', 'x', '{}'); this.db.prepare('UPDATE audit SET hash=? WHERE tenant=?').run('y', pt); }), 'INV-503-STORAGE', 'Audit append-only UPDATE trigger not enforced', 503);
-    requireThat(probe(() => { this.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run(pt, 1, 'x', 'x', '{}'); this.db.prepare('DELETE FROM audit WHERE tenant=?').run(pt); }), 'INV-503-STORAGE', 'Audit append-only DELETE trigger not enforced', 503);
-    requireThat(probe(() => this.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run(pt, 7, 'x', 'x', '{}')), 'INV-503-STORAGE', 'Audit sequence guard not enforced', 503);
+    // Constructor pragma/schema/probe writes contend behind writers too — a
+    // lost busy-timeout race must surface in the ledger taxonomy, not as raw
+    // sqlite internals (w20-fixverify F-12).
+    try {
+      this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=30000; PRAGMA secure_delete=ON;');
+      // Crash window (crypto-audit M-4): if the process died between a shred's
+      // committed DELETE and the post-commit TRUNCATE, wrapped-DEK copies stay
+      // reachable in the WAL. Truncating at open bounds that residue to uptime.
+      // (Physical slack on disk sectors is out of scope — see SECURITY.md.)
+      this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+      const version = this.db.prepare('PRAGMA user_version').get().user_version;
+      requireThat(version <= 1, 'INV-503-STORAGE', 'Database schema is newer than this application', 503);
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS records (tenant TEXT NOT NULL, kind TEXT NOT NULL, id TEXT NOT NULL,
+          value TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY(tenant,kind,id));
+        CREATE TABLE IF NOT EXISTS audit (tenant TEXT NOT NULL, seq INTEGER NOT NULL, previous TEXT NOT NULL,
+          hash TEXT NOT NULL, envelope TEXT NOT NULL, PRIMARY KEY(tenant,seq));
+        CREATE TRIGGER IF NOT EXISTS no_audit_update BEFORE UPDATE ON audit BEGIN SELECT RAISE(ABORT, 'append-only audit'); END;
+        CREATE TRIGGER IF NOT EXISTS no_audit_delete BEFORE DELETE ON audit BEGIN SELECT RAISE(ABORT, 'append-only audit'); END;
+        -- Chain-squat guard (store-audit MED-1): an insert must extend the head
+        -- exactly; earlier positions and gaps are rejected by the engine.
+        CREATE TRIGGER IF NOT EXISTS audit_seq_guard BEFORE INSERT ON audit
+          WHEN NEW.seq <> (SELECT COALESCE(MAX(seq),0)+1 FROM audit WHERE tenant=NEW.tenant)
+          BEGIN SELECT RAISE(ABORT, 'audit sequence must extend the head'); END;
+        CREATE TABLE IF NOT EXISTS nonces (tenant TEXT NOT NULL, nonce TEXT NOT NULL, capsule TEXT NOT NULL, PRIMARY KEY(tenant,nonce));
+        CREATE TABLE IF NOT EXISTS idempotency (tenant TEXT NOT NULL, scope TEXT NOT NULL, key TEXT NOT NULL,
+          hash TEXT NOT NULL, result TEXT NOT NULL, PRIMARY KEY(tenant,scope,key));
+        CREATE TABLE IF NOT EXISTS deks (tenant TEXT NOT NULL, kind TEXT NOT NULL, id TEXT NOT NULL,
+          wrapped TEXT NOT NULL, PRIMARY KEY(tenant,kind,id));
+        CREATE TABLE IF NOT EXISTS usage (tenant TEXT NOT NULL, subject TEXT NOT NULL, resource TEXT NOT NULL,
+          at INTEGER NOT NULL, cost INTEGER NOT NULL, capability TEXT NOT NULL, request TEXT NOT NULL,
+          PRIMARY KEY(tenant,capability,request));
+        CREATE INDEX IF NOT EXISTS usage_window ON usage(tenant,subject,resource,at);
+        CREATE TABLE IF NOT EXISTS clock (id INTEGER PRIMARY KEY CHECK(id=1), last INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS data_access(tenant TEXT, subject TEXT, dataset TEXT, row_id TEXT, column_name TEXT, at INTEGER);
+        CREATE INDEX IF NOT EXISTS data_access_ix ON data_access(tenant,subject,dataset,at);
+        PRAGMA user_version=1;
+      `);
+      // A DB file whose append-only/seq triggers were weakened out-of-band is a
+      // tampered ledger — refuse to open rather than silently audit into a
+      // writable chain (w11-redteam R18). A plain DROP is healed by the CREATE
+      // statements above; what survives is a same-name trigger whose body no
+      // longer aborts, so the check binds the trigger text, not just the name.
+      const triggers = new Map(this.db.prepare("SELECT name, sql FROM sqlite_master WHERE type='trigger'").all().map(x => [x.name, x.sql ?? '']));
+      for (const name of ['no_audit_update', 'no_audit_delete', 'audit_seq_guard'])
+        if (!triggers.get(name)?.includes('RAISE(ABORT')) throw new Error(`audit integrity trigger missing or weakened: ${name}`);
+      // The append-only pair must fire unconditionally — a WHEN-gated or
+      // re-tabled same-name trigger is a smuggled no-op.
+      for (const name of ['no_audit_update', 'no_audit_delete'])
+        if (/WHEN/i.test(triggers.get(name)) || !triggers.get(name).includes('ON audit')) throw new Error(`audit integrity trigger weakened: ${name}`);
+      // Text checks are evadable (a shadow trigger can carry a matching
+      // name/body while never firing on `audit`) — the definitive test is
+      // functional: attempt each forbidden write inside a savepoint and
+      // require the abort (w13-timing H-1). The probe tenant's rows are
+      // rolled back, so boot never mutates the chain.
+      const probe = fn => {
+        this.db.exec('SAVEPOINT integrity_probe');
+        let aborted = false;
+        // A contention error is not a trigger abort — it must propagate to
+        // the constructor's INV-503-LEDGER translation, never masquerade
+        // as a passing integrity probe (w20-fixverify F-12).
+        try { fn(); } catch (e) { if (e?.errcode === 5 || /database is locked/i.test(e?.message ?? '')) throw e; aborted = true; }
+        finally { this.db.exec('ROLLBACK TO integrity_probe'); this.db.exec('RELEASE integrity_probe'); }
+        return aborted;
+      };
+      const pt = '__integrity_probe__';
+      requireThat(probe(() => { this.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run(pt, 1, 'x', 'x', '{}'); this.db.prepare('UPDATE audit SET hash=? WHERE tenant=?').run('y', pt); }), 'INV-503-STORAGE', 'Audit append-only UPDATE trigger not enforced', 503);
+      requireThat(probe(() => { this.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run(pt, 1, 'x', 'x', '{}'); this.db.prepare('DELETE FROM audit WHERE tenant=?').run(pt); }), 'INV-503-STORAGE', 'Audit append-only DELETE trigger not enforced', 503);
+      requireThat(probe(() => this.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run(pt, 7, 'x', 'x', '{}')), 'INV-503-STORAGE', 'Audit sequence guard not enforced', 503);
+    } catch (e) {
+      if (e?.errcode === 5 || /database is locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
+      throw e;
+    }
     this._migrateAad();
   }
   // One-shot migration: re-seal every ciphertext still bound under the
@@ -122,6 +135,11 @@ export class Store {
     // (w19-aad W19-2).
     const stats = this.aadMigration = new Map();
     const mark = (tenant, k) => { const s = stats.get(tenant) ?? { migrated: 0, transplants: 0, ambiguous: 0, skipped: 0 }; s[k]++; stats.set(tenant, s); };
+    // A grafted donor is reverted, not migrated — the accounting must undo
+    // the donor's mark too or the AAD_MIGRATION event claims a migration
+    // that was undone (w20-fixverify F-9). The closure travels inside the
+    // dedup entry because the donor may belong to the sibling migrator.
+    const unmark = tenant => { const s = stats.get(tenant); if (s && s.migrated > 0) { s.migrated--; s.reverted = (s.reverted ?? 0) + 1; } };
     // A byte-identical ciphertext under two identities can never be
     // legitimate — fresh IVs forbid it. On a collision BOTH rows stay
     // legacy-sealed: the donor cannot be proven, so neither earns a
@@ -129,10 +147,11 @@ export class Store {
     // are restored in the same transaction.
     const seen = this._aadDedup;
     // A slash anywhere in an AAD component makes the legacy string
-    // non-unique, and a records row named like a DEK ('…/dek' tail) or
-    // 'idempotency' row aliases those spaces outright; records rows whose
-    // kind names a target table alias that space exactly. None can be
-    // proven non-transplanted — they stay sealed for operator review.
+    // non-unique, and a records id ending '/dek' aliases the four-segment
+    // dek space exactly ('id=dek' alone cannot — a three-segment record
+    // AAD never equals a four-segment dek AAD, w20-fixverify F-11);
+    // records rows whose kind names a target table alias that space.
+    // None can be proven non-transplanted — they stay sealed for review.
     const slashy = (...parts) => parts.some(p => typeof p === 'string' && p.includes('/'));
     const spaceAlias = kind => ['resource', 'transaction', 'secret', 'grant', 'idempotency'].includes(kind);
     this.db.exec('BEGIN IMMEDIATE');
@@ -143,12 +162,12 @@ export class Store {
       for (const r of this.db.prepare('SELECT tenant,kind,id,wrapped FROM deks').all()) {
         try { decrypt(r.wrapped, master(r.tenant), dekAad(r.tenant, r.kind, r.id)); continue; } catch { /* legacy-sealed or corrupt */ }
         const prior = seen.get(r.wrapped);
-        if (prior) { prior.revert?.(); mark(r.tenant, 'transplants'); continue; }
+        if (prior) { prior.revert?.(); prior.unmark?.(); mark(r.tenant, 'transplants'); continue; }
         if (slashy(r.tenant, r.kind, r.id)) { seen.set(r.wrapped, {}); mark(r.tenant, 'ambiguous'); continue; }
         try {
           const bare = decrypt(r.wrapped, master(r.tenant), legacyDekAad(r.tenant, r.kind, r.id));
           const upd = this.db.prepare('UPDATE deks SET wrapped=? WHERE tenant=? AND kind=? AND id=?'), orig = r.wrapped;
-          seen.set(orig, { revert: () => upd.run(orig, r.tenant, r.kind, r.id) });
+          seen.set(orig, { revert: () => upd.run(orig, r.tenant, r.kind, r.id), unmark: () => unmark(r.tenant) });
           upd.run(encrypt(bare, master(r.tenant), dekAad(r.tenant, r.kind, r.id)), r.tenant, r.kind, r.id);
           mark(r.tenant, 'migrated');
         } catch { mark(r.tenant, 'skipped'); }
@@ -160,16 +179,24 @@ export class Store {
           const d = dekRow.get(r.tenant, r.kind, r.id);
           const key = d ? Buffer.from(decrypt(d.wrapped, master(r.tenant), dekAad(r.tenant, r.kind, r.id)), 'base64url') : master(r.tenant);
           try { decrypt(r.value, key, recAad(r.tenant, r.kind, r.id)); continue; } catch { /* legacy-sealed or corrupt */ }
-        } catch { mark(r.tenant, 'skipped'); continue; }
+        } catch {
+          // A dedup hit lives here too: a cross-DB graft may fail the local
+          // DEK unwrap before ever reaching the canonical check — it is a
+          // detected transplant, not a skipped row (w20-fixverify F-10).
+          const grafted = seen.get(r.value);
+          if (grafted) { grafted.revert?.(); grafted.unmark?.(); mark(r.tenant, 'transplants'); }
+          else mark(r.tenant, 'skipped');
+          continue;
+        }
         const prior = seen.get(r.value);
-        if (prior) { prior.revert?.(); mark(r.tenant, 'transplants'); continue; }
-        if (slashy(r.tenant, r.kind, r.id) || spaceAlias(r.kind) || (r.kind + '/' + r.id).endsWith('/dek')) { seen.set(r.value, {}); mark(r.tenant, 'ambiguous'); continue; }
+        if (prior) { prior.revert?.(); prior.unmark?.(); mark(r.tenant, 'transplants'); continue; }
+        if (slashy(r.tenant, r.kind, r.id) || spaceAlias(r.kind) || r.id.endsWith('/dek')) { seen.set(r.value, {}); mark(r.tenant, 'ambiguous'); continue; }
         try {
           const d = dekRow.get(r.tenant, r.kind, r.id);
           const key = d ? Buffer.from(decrypt(d.wrapped, master(r.tenant), dekAad(r.tenant, r.kind, r.id)), 'base64url') : master(r.tenant);
           const plain = decrypt(r.value, key, legacyAad(r.tenant, r.kind, r.id));
           const upd = this.db.prepare('UPDATE records SET value=? WHERE tenant=? AND kind=? AND id=?'), orig = r.value;
-          seen.set(orig, { revert: () => upd.run(orig, r.tenant, r.kind, r.id) });
+          seen.set(orig, { revert: () => upd.run(orig, r.tenant, r.kind, r.id), unmark: () => unmark(r.tenant) });
           upd.run(encrypt(plain, key, recAad(r.tenant, r.kind, r.id)), r.tenant, r.kind, r.id);
           mark(r.tenant, 'migrated');
         } catch { mark(r.tenant, 'skipped'); }
@@ -177,12 +204,12 @@ export class Store {
       for (const r of this.db.prepare('SELECT tenant,scope,key,result FROM idempotency').all()) {
         try { decrypt(r.result, master(r.tenant), idemAad(r.tenant, r.scope, r.key)); continue; } catch { /* legacy-sealed or corrupt */ }
         const prior = seen.get(r.result);
-        if (prior) { prior.revert?.(); mark(r.tenant, 'transplants'); continue; }
+        if (prior) { prior.revert?.(); prior.unmark?.(); mark(r.tenant, 'transplants'); continue; }
         if (slashy(r.tenant, r.scope, r.key)) { seen.set(r.result, {}); mark(r.tenant, 'ambiguous'); continue; }
         try {
           const plain = decrypt(r.result, master(r.tenant), `${r.tenant}/idempotency/${r.scope}/${r.key}`);
           const upd = this.db.prepare('UPDATE idempotency SET result=? WHERE tenant=? AND scope=? AND key=?'), orig = r.result;
-          seen.set(orig, { revert: () => upd.run(orig, r.tenant, r.scope, r.key) });
+          seen.set(orig, { revert: () => upd.run(orig, r.tenant, r.scope, r.key), unmark: () => unmark(r.tenant) });
           upd.run(encrypt(plain, master(r.tenant), idemAad(r.tenant, r.scope, r.key)), r.tenant, r.scope, r.key);
           mark(r.tenant, 'migrated');
         } catch { mark(r.tenant, 'skipped'); }

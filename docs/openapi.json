@@ -1973,7 +1973,7 @@
       "get": {
         "operationId": "get_v1_grants",
         "summary": "Active JIT grants",
-        "description": "Roles: operator, security, auditor, policy_admin. Engineering profile; all target mutations are simulated.",
+        "description": "Roles: operator, security, auditor. Engineering profile; all target mutations are simulated.",
         "tags": [
           "Control"
         ],

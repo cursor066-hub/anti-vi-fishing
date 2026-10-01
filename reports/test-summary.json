@@ -1,7 +1,7 @@
 {
-  "tests": 661,
-  "pass": 661,
-  "fail": 0,
+  "tests": 665,
+  "pass": 659,
+  "fail": 6,
   "runner": "node --test --test-reporter=tap tests/",
   "generated_at": "regenerated on demand by scripts/report.mjs",
   "note": "Live counts; per-test durations are stripped so the artifact is deterministic."

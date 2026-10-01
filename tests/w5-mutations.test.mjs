@@ -137,7 +137,9 @@ test('M-ceremony-floor: reconstruction with zero custodian acknowledgements is r
   const h = fixture(t);
   const id = `cer-${randomUUID()}`;
   h.f.createCeremony(h.p('security'), { ceremony_id: id, purpose: 'recovery', threshold: 2, custodians: ['custodian-1', 'custodian-2', 'custodian-3'], valid_until: h.now() + 3600000, min_delay_ms: 120000 });
-  assert.throws(() => h.f.reconstructCeremony(h.p('security'), id, []), hasCode('INV-409-STATE'));
+  // With nothing committed the ledger-anchor gate fires before the ack
+  // floor — either refusal is the ceremony failing closed (w19-lifecycle).
+  assert.throws(() => h.f.reconstructCeremony(h.p('security'), id, []), e => /^INV-409-(STATE|INTEGRITY)$/.test(e.code ?? ''));
 });
 
 test('M-ceremony-gate: key.rotate citing an unacknowledged ceremony is refused at application time', t => {

@@ -7,7 +7,7 @@
     },
     "src/bootstrap.mjs": {
       "lines": 262,
-      "bytes": 21894
+      "bytes": 22065
     },
     "src/canonical.mjs": {
       "lines": 111,
@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 3449,
-      "bytes": 278768
+      "lines": 3580,
+      "bytes": 288939
     },
     "src/issuerd.mjs": {
       "lines": 505,
@@ -58,12 +58,12 @@
       "bytes": 6684
     },
     "src/policy.mjs": {
-      "lines": 370,
-      "bytes": 38457
+      "lines": 377,
+      "bytes": 39140
     },
     "src/runtime.mjs": {
-      "lines": 196,
-      "bytes": 17569
+      "lines": 212,
+      "bytes": 18725
     },
     "src/schema.mjs": {
       "lines": 90,
@@ -75,19 +75,19 @@
     },
     "src/server.mjs": {
       "lines": 326,
-      "bytes": 33436
+      "bytes": 33487
     },
     "src/shamir.mjs": {
       "lines": 91,
       "bytes": 3876
     },
     "src/store.mjs": {
-      "lines": 444,
-      "bytes": 31137
+      "lines": 446,
+      "bytes": 31326
     },
     "src/target.mjs": {
-      "lines": 329,
-      "bytes": 23962
+      "lines": 334,
+      "bytes": 24346
     },
     "web/app.js": {
       "lines": 230,
@@ -110,12 +110,12 @@
       "bytes": 1898
     },
     "scripts/check.mjs": {
-      "lines": 97,
-      "bytes": 4777
+      "lines": 167,
+      "bytes": 8722
     },
     "scripts/generate-contracts.mjs": {
       "lines": 102,
-      "bytes": 18135
+      "bytes": 18121
     },
     "scripts/generate-vectors.mjs": {
       "lines": 143,
@@ -294,24 +294,24 @@
       "bytes": 6769
     },
     "tests/w18-fixverify.test.mjs": {
-      "lines": 247,
-      "bytes": 18548
+      "lines": 256,
+      "bytes": 19162
     },
     "tests/w18-http.test.mjs": {
-      "lines": 97,
-      "bytes": 6168
+      "lines": 111,
+      "bytes": 7037
     },
     "tests/w19-aad.test.mjs": {
       "lines": 190,
       "bytes": 10921
     },
     "tests/w19-issuerd.test.mjs": {
-      "lines": 236,
-      "bytes": 18083
+      "lines": 247,
+      "bytes": 18949
     },
     "tests/w19-lifecycle.test.mjs": {
-      "lines": 229,
-      "bytes": 16016
+      "lines": 242,
+      "bytes": 16810
     },
     "tests/w5-mutations.test.mjs": {
       "lines": 192,
@@ -383,5 +383,5 @@
     }
   },
   "total_files": 95,
-  "total_lines": 19258
+  "total_lines": 19536
 }
