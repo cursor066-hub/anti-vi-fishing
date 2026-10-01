@@ -3,7 +3,7 @@ import { Store } from './store.mjs';
 import { SimulatedTarget } from './target.mjs';
 import { RuntimeGate } from './runtime.mjs';
 import { digest, clone, canonical } from './canonical.mjs';
-import { verifySigned, decrypt } from './crypto.mjs';
+import { verifySigned, decrypt, ctEqual } from './crypto.mjs';
 import { KeyVault, derivePublic } from './keystore.mjs';
 import { merkleRoot, inclusionProof, consistencyProof, verifyInclusion } from './merkle.mjs';
 import { httpJson, postOnce, readWithRetry, driftCheck } from './connectors.mjs';
@@ -193,6 +193,12 @@ export class Fabric {
   // phantom tenant (w10-fixverify F-12 — loadConfiguration also refuses
   // proto-named tenants at boot, defence in depth).
   tenant(t) { const row = Object.hasOwn(this.#tenants, t) ? this.#tenants[t] : undefined; requireThat(row, 'INV-404-NOT-FOUND', 'Resource not found', 404); return row; }
+  // The authoritative tenant set for readers outside the class — a shallow
+  // copy so a caller cannot write into #tenants itself (values are already
+  // deep-frozen by #setTenant). server.mjs authenticateToken MUST use this,
+  // not config.tenants — the mirror is writable in-process (w12-supply
+  // W12-02 / w13-supply amplifier).
+  tenantMap() { return { ...this.#tenants }; }
   // the drift snapshot is computed once at boot, so a live in-process edit
   // of identities/issuers/keys would take effect with no drift flag
   // (w11-redteam R12). Legitimate changes (key rotation) replace the record
@@ -288,7 +294,17 @@ export class Fabric {
   // the truth about which authority signed.
   _signingKeyId(t, klass) {
     const configured = this.keys(t)[klass]?.key_id;
-    if (configured && !this.revoked(t, 'key', configured) && this.vault.has(configured)) return { key_id: configured, recovery: false };
+    // A committed-but-not-yet-activated rotation also supersedes the
+    // configured key: activation is post-commit by design (ledger-first),
+    // so rows written later in the SAME transaction must already attest
+    // under the successor — otherwise the signing window would see the
+    // retiring key signing past its own KEY_ROTATED row (w14 W13-01).
+    if (configured && !this.revoked(t, 'key', configured) && this.vault.has(configured)) {
+      const rotatedTo = this.store.list(t, 'key-rotation', 100)
+        .find(r => r.key_class === klass && r.previous_key_id === configured && this.vault.keys.get(r.new_key_id)?.pending && !this.vault.keys.get(r.new_key_id)?.revoked);
+      if (!rotatedTo) return { key_id: configured, recovery: false };
+      return { key_id: rotatedTo.new_key_id, recovery: true, superseded: configured };
+    }
     const needed = this._keyPurposes[klass] ?? [];
     const successor = [...this.vault.keys.entries()].find(([kid, e]) => e.pending && !e.revoked && this.ownsVaultKey(t, kid)
       && (e.purpose === 'any' || needed.every(x => (Array.isArray(e.purpose) ? e.purpose : [e.purpose]).includes(x))));
@@ -297,6 +313,19 @@ export class Fabric {
   }
   _recoveryBody(sel, payload) {
     return sel.recovery ? { ...payload, recovery_signing: { superseded_key: sel.superseded } } : payload;
+  }
+  // Signature results are pure functions of (keyset, envelope, purpose) —
+  // the evaluate/graph path re-verifies the same fixed envelopes on every
+  // call. Memoize the verified payload by key fingerprint + envelope
+  // digest; the cache is evidence of nothing beyond crypto cost (w14 perf).
+  _verifyCached(envelope, keys, purpose) {
+    this._verifyMemo ??= new Map();
+    const ck = `${Object.keys(keys).sort().join(',')}|${purpose}|${digest(envelope)}`;
+    if (this._verifyMemo.has(ck)) return this._verifyMemo.get(ck);
+    const pl = verifySigned(envelope, keys, purpose);
+    if (this._verifyMemo.size >= 16384) this._verifyMemo.clear();
+    this._verifyMemo.set(ck, pl);
+    return pl;
   }
   signExecution(t, payload, purpose) {
     const sel = this._signingKeyId(t, 'execution');
@@ -350,6 +379,56 @@ export class Fabric {
   // deliberately bypasses transaction() and requires a security actor; the
   // recovery is audited. It moves the clock forward only — a backward step
   // would resurrect expired certificates (w9-network F4) and is refused.
+  // Remediation for a poisoned tail: an unverifiable audit row wedges the
+  // index by design, but the wedge must not be permanent. A security
+  // operator seals the chain at the last verifiable row — every row after
+  // it is removed under a signed AUDIT_SEALED event that records what was
+  // dropped, so the tamper stays on the ledger's own evidence trail
+  // (w13-timing NEW-MED-1). The append-only triggers are suspended only
+  // inside this transaction: mid-chain corruption (a rewritten row below
+  // the tail) cannot be sealed this way — that case fails loudly and
+  // requires restore-check remediation instead.
+  sealAuditChain(p) {
+    const t = p.tenant_id;
+    // Break-glass authorization: the usual chain-derived checks are exactly
+    // what the seal repairs — a poisoned row wedges _auditIndex and would
+    // take authorize() down with it. Gate on the frozen tenant identity
+    // set instead (role asserted, revocation unknowable until the seal
+    // lands — the seal itself is signed and records who ran it).
+    const identity = Object.values(this.tenant(t).identities).find(v => v.subject_id === p.subject_id);
+    requireThat(identity?.roles?.includes('security'), 'INV-403-ROLE', 'Role denied for security', 403);
+    const keys = this.auditPublicKeys(t);
+    const rows = this.store.db.prepare('SELECT seq,hash,envelope FROM audit WHERE tenant=? ORDER BY seq').all(t);
+    let previous = '0'.repeat(64), firstBad = null;
+    for (const r of rows) {
+      let ok = false;
+      try {
+        const env = JSON.parse(r.envelope);
+        ok = ctEqual(digest(env.payload), r.hash) && env.payload.sequence === r.seq && ctEqual(env.payload.previous, previous)
+          && verifySigned(env, keys, 'audit').tenant_id === t;
+      } catch { ok = false; }
+      if (!ok) { firstBad = r.seq; break; }
+      previous = r.hash;
+    }
+    if (firstBad === null) return { sealed: false, reason: 'chain already verifies' };
+    const removed = rows.filter(r => r.seq >= firstBad).map(r => r.hash);
+    return this.store.tx(() => {
+      const now = this.clock();
+      // Suspend and restore the guards inside one transaction — if the
+      // recreate fails the delete rolls back with it.
+      for (const tr of this.store.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all()) this.store.db.exec(`DROP TRIGGER ${tr.name}`);
+      this.store.db.prepare('DELETE FROM audit WHERE tenant=? AND seq>=?').run(t, firstBad);
+      this.store.db.exec(`
+        CREATE TRIGGER no_audit_update BEFORE UPDATE ON audit BEGIN SELECT RAISE(ABORT, 'append-only audit'); END;
+        CREATE TRIGGER no_audit_delete BEFORE DELETE ON audit BEGIN SELECT RAISE(ABORT, 'append-only audit'); END;
+        CREATE TRIGGER audit_seq_guard BEFORE INSERT ON audit
+          WHEN NEW.seq <> (SELECT COALESCE(MAX(seq),0)+1 FROM audit WHERE tenant=NEW.tenant)
+          BEGIN SELECT RAISE(ABORT, 'audit sequence must extend the head'); END;`);
+      this.store.audit(t, 'AUDIT_SEALED', p.subject_id, 'audit', { sealed_at_seq: firstBad, removed_count: removed.length, removed_head: removed[0] ?? null, removed_tail: removed.at(-1) ?? null }, now);
+      this._auditIdx?.delete(t);
+      return { sealed: true, sealed_at_seq: firstBad, removed_count: removed.length };
+    });
+  }
   recoverClock(p) {
     this.authorize(p, ['security', 'policy_admin']);
     return this.store.tx(() => {
@@ -411,7 +490,9 @@ export class Fabric {
     // proves the denial happened, just not at request frequency
     // (w11-timing NEW-LOW-1). Best-effort, in-memory across restarts.
     this._denyAudit ??= new Map();
-    const key = `${t}${subject_id}${code}${String(message).slice(0, 200)}`, last = this._denyAudit.get(key);
+    // The dedup key excludes the free-text message — an attacker varying
+    // the string cannot un-budget the ledger (w13-timing M-1).
+    const key = `${t}${subject_id}${code}`, last = this._denyAudit.get(key);
     if (last !== undefined && now - last < 60_000) return;
     this._denyAudit.set(key, now);
     try { this.store.audit(t, 'AUTHORIZATION_DENIED', subject_id ?? 'anonymous', null, { code, message: String(message).slice(0, 200) }, now); } catch { /* ledger write failure does not change the verdict */ }
@@ -437,6 +518,11 @@ export class Fabric {
     const { request_intent, capsule_id, tenant_id, received_at, ...signedInput } = record.capsule;
     requireThat(digest(payload) === digest(signedInput), 'INV-409-INTEGRITY', 'Stored capsule diverged from the signed request intent', 409);
     requireThat(record.capsule_digest === digest(record.capsule), 'INV-409-INTEGRITY', 'Stored capsule digest does not match its contents', 409);
+    // The chain-attested proposal digest is the unforgeable binding: an
+    // in-place rewrite of the stored capsule (e.g. a composite's children
+    // list) recomputes away from the anchored value no matter which of
+    // the two fields the writer edits (w13-timing M-3).
+    requireThat(record.capsule_digest === this._auditIndex(t).proposedDigest.get(record.capsule.capsule_id), 'INV-409-INTEGRITY', 'Capsule diverges from its ledger-anchored proposal', 409);
     return payload;
   }
   // A stored outcome is only trustworthy as a vault-signed envelope — a
@@ -526,6 +612,11 @@ export class Fabric {
       return this.store.tx(() => { const now = this.clock(); this.store.clock(now); this.activateDuePolicies(principal.tenant_id, now); return fn(now); });
     }
     catch (error) {
+      // A rolled-back transaction may have let a reader project chain rows
+      // that never committed — the cached index would retain a phantom
+      // anchor forever (w12-provenance F11). Drop it; the next build
+      // re-projects only committed events.
+      this._auditIdx?.delete(principal?.tenant_id);
       // Every gate-level refusal — schema, actor, intent, health, role —
       // lands in the ledger even when it fired before the transaction could
       // commit (w11-redteam R13). The 60s identical-denial bound inside
@@ -573,10 +664,18 @@ export class Fabric {
   _auditIndex(t) {
     const maxSeq = this.store.db.prepare('SELECT COALESCE(MAX(seq),0) m FROM audit WHERE tenant=?').get(t).m;
     let idx = this._auditIdx?.get(t);
-    if (!idx) { idx = { maxSeq: 0, building: false, revoked: new Set(), attached: new Map(), proposedNonce: new Set(), proposedAt: new Map(), issued: new Set(), grants: new Map(), policyAnchors: [], dataAccess: [], perceptionNonce: new Set(), reserved: new Set(), dispatched: new Map(), outcomes: new Map() }; this._auditIdx ??= new Map(); this._auditIdx.set(t, idx); }
+    if (!idx) { idx = { maxSeq: 0, building: false, revoked: new Set(), attached: new Map(), proposedNonce: new Set(), proposedAt: new Map(), proposedDigest: new Map(), issued: new Set(), grants: new Map(), policyAnchors: [], dataAccess: [], perceptionNonce: new Set(), reserved: new Set(), dispatched: new Map(), outcomes: new Map(), keyDeadAt: new Map() }; this._auditIdx ??= new Map(); this._auditIdx.set(t, idx); }
     // Re-entrancy: auditPublicKeys -> revoked -> _auditIndex would recurse
     // forever mid-build, so nested readers see the partial projection.
-    if (idx.maxSeq === maxSeq || idx.building) return idx;
+    if (idx.building) return idx;
+    // Same-seq head replacement cannot resync silently: the stored head row
+    // must still carry the hash the index last consumed — otherwise a
+    // tail rewrite slipped under the MAX(seq) watermark (w12-provenance F10).
+    if (idx.maxSeq > 0 && idx.headHash !== undefined) {
+      const head = this.store.db.prepare('SELECT hash FROM audit WHERE tenant=? AND seq=?').get(t, idx.maxSeq);
+      requireThat(head && ctEqual(head.hash, idx.headHash), 'INV-409-AUDIT-TAMPER', 'Audit head diverged from the consumed index', 409);
+    }
+    if (idx.maxSeq === maxSeq) return idx;
     // Signature-trust boundary: the seq trigger lets an in-process writer
     // append a self-consistent row whose hash and `previous` link are forged
     // but whose envelope cannot be vault-signed. Every consumed event must
@@ -587,15 +686,37 @@ export class Fabric {
     // chain time may legitimately regress across racing writers.
     idx.building = true;
     const keys = this.auditPublicKeys(t);
+    idx.keyDeadAt ??= new Map();
+    idx.proposedDigest ??= new Map();
+    const consumeNow = this.clock();
+    let prevPlTime = idx.prevPlTime ?? 0;
     try {
       for (const e of this.store.auditPage(t, { after: idx.maxSeq, limit: 2_000_000 }).entries) {
-      let pl; try { pl = e.envelope ? verifySigned(e.envelope, keys, 'audit') : null; } catch { pl = null; }
+      // Signing-window enforcement (w13-supply W13-01): a revoked or
+      // rotated-out key keeps verifying entries signed during its
+      // authority but can never mint an entry appended AFTER its on-chain
+      // death — the verification set is still every legitimate key, the
+      // window binds which seqs it may cover.
+      const kid = e.envelope?.protected?.key_id, deadAt = kid !== undefined ? idx.keyDeadAt.get(kid) : undefined;
+      let pl; try { pl = e.envelope && !(deadAt !== undefined && deadAt < e.sequence) ? verifySigned(e.envelope, keys, 'audit') : null; } catch { pl = null; }
       requireThat(pl && pl.tenant_id === t, 'INV-409-INTEGRITY', 'Audit row fails ledger signature verification', 409);
+      // Time-sanity bound (w13-supply W13-04): a forged row claiming a
+      // far-future timestamp can never be consumed silently — chain time
+      // may exceed the operator clock only by the previous entry's own
+      // stamp (legitimate rewinds) plus a read-race allowance. Rows that
+      // fail wedge the index; remediation is the seal runbook.
+      requireThat(typeof pl.time !== 'number' || pl.time <= Math.max(consumeNow, prevPlTime) + 60_000, 'INV-409-INTEGRITY', 'Audit row claims an impossible future timestamp', 409);
+      prevPlTime = Math.max(prevPlTime, typeof pl.time === 'number' ? pl.time : prevPlTime);
       const meta = pl.metadata ?? {};
       switch (pl.type) {
-        case 'AUTHORITY_REVOKED': idx.revoked.add(pl.reference); break;
+        case 'AUTHORITY_REVOKED': idx.revoked.add(pl.reference);
+          // The revocation row itself may still be signed by the dying
+          // key — the window closes only for LATER seqs.
+          if (typeof pl.reference === 'string' && pl.reference.startsWith('key:')) idx.keyDeadAt.set(pl.reference.slice(4), e.sequence);
+          break;
+        case 'KEY_ROTATED': if (meta.key_class === 'audit' && meta.previous_key_id) idx.keyDeadAt.set(meta.previous_key_id, e.sequence); break;
         case 'EVIDENCE_ATTACHED': { const l = idx.attached.get(pl.reference) ?? []; l.push(meta.evidence_id); idx.attached.set(pl.reference, l); break; }
-        case 'CAPSULE_PROPOSED': idx.proposedAt.set(pl.reference, pl.time); if (meta.nonce) idx.proposedNonce.add(meta.nonce); break;
+        case 'CAPSULE_PROPOSED': idx.proposedAt.set(pl.reference, pl.time); if (meta.nonce) idx.proposedNonce.add(meta.nonce); if (meta.capsule_digest) idx.proposedDigest.set(pl.reference, meta.capsule_digest); break;
         case 'CERTIFICATE_ISSUED': idx.issued.add(pl.reference); break;
         case 'JIT_GRANT_ISSUED': idx.grants.set(meta.grant_id, meta.scope_digest); break;
         case 'POLICY_GENESIS': case 'POLICY_ACTIVATED': case 'EMERGENCY_POLICY_ACTIVATED': if (meta.policy_digest) idx.policyAnchors.push({ staged: false, digest: meta.policy_digest }); break;
@@ -609,7 +730,12 @@ export class Fabric {
       }
         idx.maxSeq = Math.max(idx.maxSeq, e.sequence ?? 0);
       }
-      idx.maxSeq = maxSeq;
+      // Stamp the LAST CONSUMED seq, not the page head — a tenant over the
+      // page limit must not claim full coverage while mid-table rows went
+      // unread (w12-supply W12-04). The head pin tracks the consumed tip.
+      const tip = this.store.db.prepare('SELECT hash FROM audit WHERE tenant=? AND seq=?').get(t, idx.maxSeq);
+      idx.headHash = tip?.hash;
+      idx.prevPlTime = prevPlTime;
       // Unanchored floor = tamper: every 'revocation' record row must trace
       // to a consumed AUTHORITY_REVOKED event. Deleting the event before
       // the index consumes it can no longer silently un-revoke — the
@@ -640,8 +766,16 @@ export class Fabric {
     try {
       this._assertHealthy(t, subject, device, now);
     } catch (error) {
-      // Pre-transaction quarantine denials audit themselves (w11 F7).
-      if (error instanceof InvariantError && !this.store.db.isTransaction) this._rejectionAudit(t, subject, error.code, error.message, error.details);
+      // Pre-transaction quarantine denials audit themselves (w11 F7) — and
+      // land the same containment row the in-transaction path would write,
+      // so a quarantined actor hammering proposals is reconstructible from
+      // the containment ledger too (w11-lifecycle F5).
+      if (error instanceof InvariantError && !this.store.db.isTransaction) {
+        this._rejectionAudit(t, subject, error.code, error.message, error.details);
+        if (error.code === 'INV-403-QUARANTINE' && error.details?.quarantine_denial) {
+          try { const n0 = this.clock(); this.store.tx(() => this.store.put(t, 'containment', `deny:${randomUUID()}`, { contained_at: n0, subject_id: subject, device_id: error.details.device ?? null, capability_id: null, resource: null, destination: null, action: null, code: error.code, request_id: 'gate-deny', dropped_requests: 1 }, n0)); } catch { /* containment logging never masks the original denial */ }
+        }
+      }
       throw error;
     }
   }
@@ -662,7 +796,9 @@ export class Fabric {
       // carry secret VALUES that the capsule binds only by digest — readers
       // get the binding proof, never the bytes (w11-timing LOW-7).
       if (material_fields && typeof material_fields === 'object') {
-        const secretKey = (k, x) => /secret|private|password|token|share|credential|_key$|^key$/i.test(k) || (k === 'value' && x !== null && typeof x === 'object');
+        // 'value' is redacted unconditionally — a scalar under that key is
+        // exactly the shape a registry secret takes (w13-timing M-2).
+        const secretKey = (k, x) => /secret|private|password|token|share|credential|_key$|^key$/i.test(k) || k === 'value';
         const scrub = v => (v && typeof v === 'object' && !Array.isArray(v)) ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, secretKey(k, x) ? '«redacted»' : scrub(x)])) : v;
         return scrub(material_fields);
       }
@@ -771,7 +907,10 @@ export class Fabric {
     const claimOf = x => x?.envelope?.payload?.claim;
     const kindOf = x => x?.envelope?.payload?.kind, kidOf = x => x?.envelope?.protected?.key_id;
     const superseded = new Map();
-    rows.forEach((x, i) => { if (x.e && claimOf(x.e) !== 'conflict') { const j = rows.findLastIndex(y => y.e && kindOf(y.e) === kindOf(x.e) && kidOf(y.e) === kidOf(x.e)); if (j > i) superseded.set(x.id, rows[j].id); } });
+    // The issuer's LATEST signed statement wins for its own kind — including
+    // a supports envelope that retracts an earlier conflict. A veto only
+    // stays sticky against a DIFFERENT issuer (w11-lifecycle F4).
+    rows.forEach((x, i) => { if (x.e) { const j = rows.findLastIndex(y => y.e && kindOf(y.e) === kindOf(x.e) && kidOf(y.e) === kidOf(x.e)); if (j > i) superseded.set(x.id, rows[j].id); } });
     const items = rows.map(({ id, e }) => {
       if (!e) {
         const tombstone = this.store.must(t, 'evidence-tombstone', id);
@@ -789,12 +928,31 @@ export class Fabric {
       // planted rows with forged signatures die here regardless of how the
       // id entered the attach ledger (w11-redteam R3).
       requireThat(typeof iss?.public_key === 'string', 'INV-401-EVIDENCE', 'Unknown evidence issuer', 401);
-      verifySigned(e.envelope, { [e.envelope.protected.key_id]: { public_key: iss.public_key, suite: iss.suite } }, 'evidence');
+      this._verifyCached(e.envelope, { [e.envelope.protected.key_id]: { public_key: iss.public_key, suite: iss.suite } }, 'evidence');
+      // Evaluation re-derives the attach-time scope: a real envelope
+      // transplanted under this action's chain-attested id still dies —
+      // its signed capsule_digest names the action it was issued for
+      // (w12-provenance F2 / EXP-02).
+      requireThat(e.envelope.payload.tenant_id === t && e.envelope.payload.capsule_digest === record.capsule_digest, 'INV-409-INTEGRITY', 'Attached evidence names a different action', 409);
+      // Supports claims must still bind to this capsule's fields under the
+      // ACTIVE policy — a binding tightened since attach cannot be
+      // satisfied by claims signed for the old one. A failed item stays in
+      // the graph/digest trail but cannot satisfy requirements.
+      let binding_failed = false;
+      if (e.envelope.payload.claim === 'supports') {
+        const bindings = (this.policy(t).rules[record.capsule.action.type]?.evidence_bindings ?? {})[e.envelope.payload.kind] ?? {};
+        const scalar = v => v === null || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean';
+        for (const [cf, path] of Object.entries(bindings)) {
+          const expected = path.split('.').reduce((o, k) => (o !== null && typeof o === 'object' && Object.hasOwn(o, k)) ? o[k] : undefined, record.capsule);
+          const actual = e.envelope.payload.claims?.[cf];
+          if (!(scalar(expected) && scalar(actual) && canonical(actual) === canonical(expected))) { binding_failed = true; break; }
+        }
+      }
       // Only the issuer's semantic identity is digest-bound — credential
       // fields (tokens, expiry, endpoint) rotate by design and must never
       // invalidate a minted certificate or pending approval (w5 F-3).
       const semantic = iss ? { public_key: iss.public_key, name: iss.name, issuer_id: iss.issuer_id, failure_domain: iss.failure_domain, channel: iss.channel, kinds: iss.kinds, version: iss.version } : iss;
-      return { ...e, superseded_by: superseded.get(id) ?? null, revoked: this.revoked(t, 'evidence', id) || this.revoked(t, 'issuer', e.envelope.protected.key_id) || this.revoked(t, 'key', e.envelope.protected.key_id), drifted: !!this.store.get(t, 'issuer-drift', e.envelope.protected.key_id), issuer: semantic };
+      return { ...e, binding_failed, superseded_by: superseded.get(id) ?? null, revoked: this.revoked(t, 'evidence', id) || this.revoked(t, 'issuer', e.envelope.protected.key_id) || this.revoked(t, 'key', e.envelope.protected.key_id), drifted: !!this.store.get(t, 'issuer-drift', e.envelope.protected.key_id), issuer: semantic };
     });
     const graph_digest = digest(items.map(e => ({ envelope_digest: digest(e.envelope), issuer_digest: digest(e.issuer), revoked: e.revoked })).sort((a, b) => a.envelope_digest < b.envelope_digest ? -1 : 1));
     return { items, digest: graph_digest };
@@ -843,15 +1001,15 @@ export class Fabric {
       requireThat(issuer.kinds.includes(payload.kind), 'INV-403-SCOPE', 'Issuer is not trusted for this evidence kind', 403);
       // Evidence supersession (w11-lifecycle F4): a fresh envelope from the
       // same issuer+kind retires its predecessors, so one expired/stale
-      // envelope cannot wedge the capsule forever. Two classes stay sticky
-      // and are never superseded — 'conflict' claims (a signed veto must
-      // outlive later supports, or conflicts could be laundered away) and
-      // envelopes whose issuer/key was since revoked (a revocation is an
-      // authority statement, not staleness). The superseded rows stay in
-      // record.evidence — the trail is never erased, only evaluated out.
+      // envelope cannot wedge the capsule forever — and the issuer's own
+      // signed retraction may retire an earlier conflict the same way.
+      // Envelopes whose issuer/key was since revoked still cannot be
+      // superseded (a revocation is an authority statement, not staleness).
+      // The superseded rows stay in record.evidence — the trail is never
+      // erased, only evaluated out.
       for (const eid of attached) {
         const e = this.store.get(t, 'evidence', eid);
-        if (e && !e.superseded_by && e.envelope?.protected?.key_id === envelope.protected.key_id && e.envelope?.payload?.kind === payload.kind && e.envelope?.payload?.claim !== 'conflict' && !this.revoked(t, 'issuer', e.envelope.protected.key_id) && !this.revoked(t, 'key', e.envelope.protected.key_id)) {
+        if (e && !e.superseded_by && e.envelope?.protected?.key_id === envelope.protected.key_id && e.envelope?.payload?.kind === payload.kind && !this.revoked(t, 'issuer', e.envelope.protected.key_id) && !this.revoked(t, 'key', e.envelope.protected.key_id)) {
           e.superseded_by = payload.evidence_id;
           this.store.put(t, 'evidence', eid, e, now);
         }
@@ -1056,7 +1214,7 @@ export class Fabric {
     // (with a synced stored digest) must silently drop out (w11 F2).
     const capsuleDigest = digest(record.capsule);
     const approvals = record.approvals.filter(a => a.payload.policy_digest === digest(policy) && a.payload.evidence_graph_digest === graph.digest && a.payload.capsule_digest === capsuleDigest).map(a => {
-      try { return verifySigned(a, identities, 'action-approval'); } catch { return null; }
+      try { return this._verifyCached(a, identities, 'action-approval'); } catch { return null; }
     }).filter(Boolean);
     // Superseded evidence keeps its seat in the graph/digest (the signed
     // trail is never rewritten) but is retired from evaluation — only the
@@ -1066,7 +1224,7 @@ export class Fabric {
     // past its cooldown window (w11-redteam R7).
     const anchored = this._auditIndex(t).proposedAt.get(record.capsule.capsule_id);
     const capsuleForEval = anchored !== undefined ? { ...record.capsule, received_at: anchored } : record.capsule;
-    return evaluatePolicy({ capsule: capsuleForEval, policy, evidence: graph.items.filter(e => !e.superseded_by), approvals, identities, quarantined: this.revoked(t, 'subject', record.capsule.actor.subject_id) || this.revoked(t, 'device', record.capsule.actor.device_id), now });
+    return evaluatePolicy({ capsule: capsuleForEval, policy, evidence: graph.items.filter(e => !e.superseded_by && !e.binding_failed), approvals, identities, quarantined: this.revoked(t, 'subject', record.capsule.actor.subject_id) || this.revoked(t, 'device', record.capsule.actor.device_id), now });
   }
   evaluate(p, id) {
     this.authorize(p, ['operator', 'policy_admin', 'approver', 'custodian']);
@@ -1275,6 +1433,11 @@ export class Fabric {
           // across earlier child dispatches (concurrency-audit M1).
           childNow = this.clock(); this.store.clock(childNow);
           child = this.store.must(t, 'capsule', childId);
+          // Each child's stored capsule must still equal its chain-attested
+          // proposal — a graft onto the child record (current_state or
+          // action rewrite) fails before it can be dispatched under the
+          // parent's composite authority (w13-timing M-3).
+          this._capsuleIntegrity(t, child);
           const childStored = this.store.must(t, 'certificate', child.certificate_id);
           childCert = childStored.envelope.payload;
           requireThat(!this.revoked(t, 'key', childStored.envelope.protected.key_id) && !this.revoked(t, 'certificate', childCert.certificate_id) && childCert.issued_at <= childNow && childCert.expires_at > childNow, 'INV-401-CERTIFICATE', 'Child certificate expired or revoked', 401);
@@ -1522,7 +1685,6 @@ export class Fabric {
       // revoke) runs post-commit — a failed outcome write can never leave
       // the vault/config repointed against a ledger that shows no rotation
       // (w11-lifecycle F2c). _reconcileLedger heals crash-between windows.
-      const previousRevoked = this.revoked(t, 'key', previous.key_id);
       // revoke_old is the operator's declared choice — the ledger attests
       // what was actually done, never a hardcoded true (w7-seam F7).
       const revokeOld = req.revoke_old !== false;
@@ -1537,12 +1699,12 @@ export class Fabric {
         if (revokeOld) this.vault.revoke(previous.key_id);
         this.persistVault();
       });
-      // Only an audit-class rotation changes the outcome signer. When the
-      // retiring key is already ledger-revoked it cannot attest its own
-      // succession — the outcome is signed by the incoming key (still
-      // pending until post-commit activation) via the scoped allowPending
-      // path instead of throwing and rolling the rotation back (w11 F2).
-      if (klass === 'audit') return { outcome_key_id: previousRevoked ? req.new_key_id : previous.key_id, outcome_allow_pending: previousRevoked };
+      // Only an audit-class rotation changes the outcome signer. The
+      // incoming (still-pending) successor always attests the succession —
+      // via the scoped allowPending path — so the retiring key never signs
+      // past its own KEY_ROTATED row; the signing window closes exactly at
+      // the event, with no grace seq a dead key could exploit (w13 W13-01).
+      if (klass === 'audit') return { outcome_key_id: req.new_key_id, outcome_allow_pending: true };
       return null;
     }
     if (type === 'identity.jit.grant') {
@@ -1983,9 +2145,12 @@ export class Fabric {
     // vault-signed entry, not an in-process forgery appended under the seq
     // trigger (w12 red-team). A row that fails signature verification flags
     // loudly rather than blending into history.
-    const keys = this.auditPublicKeys(p.tenant_id);
+    const keys = this.auditPublicKeys(p.tenant_id), deadAt = this._auditIndex(p.tenant_id).keyDeadAt;
     for (const e of page.entries) {
-      let ok = false; try { ok = e.envelope ? verifySigned(e.envelope, keys, 'audit').tenant_id === p.tenant_id : false; } catch { ok = false; }
+      let ok = false; try {
+        const kid = e.envelope?.protected?.key_id, dead = kid !== undefined ? deadAt.get(kid) : undefined;
+        ok = e.envelope && !(dead !== undefined && dead < e.sequence) ? verifySigned(e.envelope, keys, 'audit').tenant_id === p.tenant_id : false;
+      } catch { ok = false; }
       requireThat(ok, 'INV-409-INTEGRITY', 'Audit page contains a row whose ledger signature does not verify', 409);
     }
     // AUD-010: named domain projections filter the verified page. Integrity

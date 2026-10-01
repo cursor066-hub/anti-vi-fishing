@@ -62,9 +62,13 @@ if (head.status === 0 && tracked.status === 0) {
 const allowSkips = process.argv.includes('--allow-skips');
 if (skipped.length && !allowSkips) fail('INV-412-PROVENANCE', `provenance checks skipped without --allow-skips: ${skipped.join(', ')}`);
 // --require-ci asserts the attestation binds a CI run (w11-supply SC-07):
-// run identity fields must be present and non-empty.
+// run identity fields must be present and non-empty, and the attested CI
+// sha must name the same commit the tree was minted from — a stitched
+// attestation (CI claims pasted onto a laptop build) fails the bind
+// (w13-supply W12-03).
 if (process.argv.includes('--require-ci')) {
   const ci = payload.invocation?.ci;
   if (!ci?.run_id || !ci?.repository || !ci?.sha) fail('INV-412-PROVENANCE', 'attestation does not bind a CI run (--require-ci)');
+  if (ci.sha !== payload.invocation?.source_commit) fail('INV-412-PROVENANCE', 'attested CI sha does not match the attested source commit');
 }
 console.log(JSON.stringify({ valid: true, key_id: attestation.protected.key_id, commit: payload.invocation.source_commit, manifest_sha256: manifestSha, timestamp: payload.timestamp, ...(payload.invocation?.ci ? { ci: payload.invocation.ci } : {}), ...(skipped.length ? { skipped_checks: skipped } : {}) }));

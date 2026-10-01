@@ -175,13 +175,22 @@ test('w11-lifecycle F4: fresh same-issuer evidence supersedes the expired envelo
   assert.ok(!d2.reasons.some(x => x.code === 'EVIDENCE_EXPIRED' || x.code === 'EVIDENCE_STALE'), JSON.stringify(d2.reasons));
 });
 
-test('w11-lifecycle F4: a conflict claim is never superseded by later supports', t => {
+// w14: the issuer's own later supports envelope is a signed retraction and
+// DOES supersede its conflict — a veto is sticky only against a different
+// issuer, or there would be no honest way to resolve one (w11-lifecycle F4).
+test('w11-lifecycle F4: a conflict survives supports from a different issuer, but its own issuer may retract it', t => {
   const h = fixture(t);
   const r = h.proposed();
   h.evidence(r, { claim: 'conflict' });
-  h.evidence(r, {}); // fresh 'supports' from same issuer+kind
-  const d = h.f.evaluate(h.p(), r.capsule.capsule_id);
-  assert.ok(d.reasons.some(x => x.code === 'EVIDENCE_CONFLICT'), JSON.stringify(d.reasons));
+  // A DIFFERENT issuer's later supports cannot launder the veto away.
+  h.evidence(r, { issuer: 'registry' });
+  assert.ok(h.f.evaluate(h.p(), r.capsule.capsule_id).reasons.some(x => x.code === 'EVIDENCE_CONFLICT'));
+  // The vetoing issuer itself may retract it with a fresh supports envelope.
+  const s = h.proposed();
+  h.evidence(s, { claim: 'conflict' });
+  h.evidence(s, {}); // same issuer+kind — a signed retraction
+  const d = h.f.evaluate(h.p(), s.capsule.capsule_id);
+  assert.ok(!d.reasons.some(x => x.code === 'EVIDENCE_CONFLICT'), JSON.stringify(d.reasons));
 });
 
 // ---- lifecycle F6/F7: re-revoke and terminal-status cancels are refused ----

@@ -118,3 +118,15 @@ test('CI-bound provenance verifies under --require-ci only with ci claims', () =
   assert.equal(res.valid, true);
   assert.equal(res.ci.run_id, '123');
 });
+
+test('w14 W12-03: a stitched attestation (CI sha ≠ source commit) fails --require-ci', () => {
+  const dir = scratch(), { keys, sign, anchors } = fixture(dir);
+  // Attest CI claims for a DIFFERENT sha than the signed tree — the bind
+  // must fail even though every field is present.
+  const ciEnv = { ...process.env, IF_TEST_ANCHORS: '1', GITHUB_ACTIONS: 'true', GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '1', GITHUB_REPOSITORY: 'o/r', GITHUB_REF: 'refs/tags/v1', GITHUB_SHA: '0'.repeat(40) };
+  const signedInCi = spawnSync(process.execPath, ['scripts/release-sign.mjs', '--key', `${keys}/release-key.pem`, '--public-key', `${keys}/release-key.pub`, '--out', `${keys}/attestation.json`], { cwd: dir, encoding: 'utf8', env: ciEnv });
+  anchors(ok(signedInCi));
+  const res = run(['scripts/verify-release.mjs', `${keys}/attestation.json`, `${keys}/anchors.json`, '--require-ci'], dir);
+  assert.notEqual(res.status, 0);
+  assert.match(res.stderr, /CI sha does not match/);
+});

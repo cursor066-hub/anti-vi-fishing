@@ -37,7 +37,7 @@ export const ROUTE_METHODS = new Map(Object.entries({
   '/v1/ceremonies/{id}/split': 'POST', '/v1/ceremonies/{id}/reconstruct': 'POST',
   '/v1/ceremonies/{id}/abort': 'POST',
   '/v1/keys': 'GET', '/v1/keys/rotate-prepare': 'POST', '/v1/keys/{id}/attest': 'GET',
-  '/v1/config-drift': 'GET', '/v1/config-drift/reassert': 'POST', '/v1/clock/recover': 'POST',
+  '/v1/config-drift': 'GET', '/v1/config-drift/reassert': 'POST', '/v1/clock/recover': 'POST', '/v1/audit/seal': 'POST',
   '/v1/secure-perception/sessions': 'POST', '/v1/secure-perception/release': 'POST',
   '/v1/secure-perception/fallback': 'POST', '/v1/advisory': 'POST',
 }).map(([k, v]) => [k, v.split(',')]));
@@ -62,7 +62,7 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
   function authenticateToken(token) {
     requireThat(typeof token === 'string' && /^[A-Za-z0-9_-]{43}$/.test(token), 'INV-401-AUTH', 'Authentication required', 401);
     const hash = hashBytes(token);
-    for (const [tenant, t] of Object.entries(fabric.config.tenants)) {
+    for (const [tenant, t] of Object.entries(fabric.tenantMap())) {
       const entry = t.auth[hash];
       if (entry && entry.expires_at > fabric.clock() && !fabric.revoked(tenant, 'token', hash)) {
         const principal = { tenant_id: tenant, subject_id: entry.subject_id };
@@ -261,6 +261,7 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       if (path === '/v1/keys/rotate-prepare' && req.method === 'POST') { const input = await body(req); fields(input, ['key_class'], ['suite']); return send(201, fabric.prepareRotation(p, input.key_class, input.suite)); }
       if (path === '/v1/config-drift/reassert' && req.method === 'POST') return send(200, fabric.reassertConfig(p));
       if (path === '/v1/clock/recover' && req.method === 'POST') return send(200, fabric.recoverClock(p));
+      if (path === '/v1/audit/seal' && req.method === 'POST') return send(200, fabric.sealAuditChain(p));
       if (path === '/v1/config-drift' && req.method === 'GET') return send(200, fabric.configDriftStatus(p));
       if ((m = /^\/v1\/keys\/([A-Za-z0-9_.:-]+)\/attest$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['security', 'auditor']); const e = fabric.vault.keys.get(m[1]); requireThat(e && fabric.ownsVaultKey(p.tenant_id, m[1]), 'INV-404-NOT-FOUND', 'Key not found', 404); return send(200, fabric.vault.attest(m[1])); }
       if (path === '/v1/secure-perception/sessions' && req.method === 'POST') { const input = await body(req); fields(input, ['attestation']); return send(201, fabric.perceptionSession(p, input.attestation)); }

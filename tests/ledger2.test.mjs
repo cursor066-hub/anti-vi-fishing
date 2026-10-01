@@ -98,6 +98,10 @@ test('UX-006: a batch approves each declared action; hidden additions and omissi
 test('KEY-005: rotating the audit key Ed25519 -> ES256 keeps old entries verifiable', t => {
   const h = fixture(t);
   h.ready(); // entries under the original Ed25519 audit key
+  // Suite migration is policy-driven: the constitution must allow the
+  // incoming suite or the successor cannot sign its own succession
+  // outcome (w14 W13-01 — the outcome now attests under the new key).
+  installPolicy(h, p => { p.algorithms.allowed_suites = ['Ed25519', 'ES256']; });
   const oldHead = h.f.store.auditHashes('acme').at(-1);
   const pending = h.f.prepareRotation(h.p('security'), 'audit', 'ES256');
   const custodians = ['custodian-1', 'custodian-2'];

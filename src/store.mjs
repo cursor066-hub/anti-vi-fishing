@@ -83,6 +83,22 @@ export class Store {
     // re-tabled same-name trigger is a smuggled no-op.
     for (const name of ['no_audit_update', 'no_audit_delete'])
       if (/WHEN/i.test(triggers.get(name)) || !triggers.get(name).includes('ON audit')) throw new Error(`audit integrity trigger weakened: ${name}`);
+    // Text checks are evadable (a shadow trigger can carry a matching
+    // name/body while never firing on `audit`) — the definitive test is
+    // functional: attempt each forbidden write inside a savepoint and
+    // require the abort (w13-timing H-1). The probe tenant's rows are
+    // rolled back, so boot never mutates the chain.
+    const probe = fn => {
+      this.db.exec('SAVEPOINT integrity_probe');
+      let aborted = false;
+      try { fn(); } catch { aborted = true; }
+      finally { this.db.exec('ROLLBACK TO integrity_probe'); this.db.exec('RELEASE integrity_probe'); }
+      return aborted;
+    };
+    const pt = '__integrity_probe__';
+    requireThat(probe(() => { this.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run(pt, 1, 'x', 'x', '{}'); this.db.prepare('UPDATE audit SET hash=? WHERE tenant=?').run('y', pt); }), 'INV-503-STORAGE', 'Audit append-only UPDATE trigger not enforced', 503);
+    requireThat(probe(() => { this.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run(pt, 1, 'x', 'x', '{}'); this.db.prepare('DELETE FROM audit WHERE tenant=?').run(pt); }), 'INV-503-STORAGE', 'Audit append-only DELETE trigger not enforced', 503);
+    requireThat(probe(() => this.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run(pt, 7, 'x', 'x', '{}')), 'INV-503-STORAGE', 'Audit sequence guard not enforced', 503);
   }
   close() { this.db.close(); }
   tx(fn) {
@@ -211,6 +227,10 @@ export class Store {
     // a regressed value into the chain (it would break verification
     // permanently — w7-clock F1). The rewound host reading is still on the
     // record inside the CLOCK_RECOVERED entry's metadata.
+    // priorTime is the monotone floor: chain time never steps back, so a
+    // legitimate clock rewind (recoverClock) stays verifiable. A forged
+    // head claiming a far-future timestamp gets no silent credit — the
+    // index's consume-time bound wedges on it instead (w13-supply W13-04).
     const priorTime = last ? JSON.parse(last.envelope).payload.time : 0;
     const entry = { tenant_id: tenant, sequence: (last?.seq ?? 0) + 1, previous: last?.hash ?? '0'.repeat(64), type, actor, reference, metadata, time: Math.max(now, priorTime) };
     // Hash what is actually attested: the signer may add a bound marker (the

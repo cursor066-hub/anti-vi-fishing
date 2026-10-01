@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 2409,
-      "bytes": 200142
+      "lines": 2574,
+      "bytes": 211878
     },
     "src/issuerd.mjs": {
       "lines": 411,
@@ -74,16 +74,16 @@
       "bytes": 10649
     },
     "src/server.mjs": {
-      "lines": 300,
-      "bytes": 30949
+      "lines": 301,
+      "bytes": 31078
     },
     "src/shamir.mjs": {
       "lines": 87,
       "bytes": 3671
     },
     "src/store.mjs": {
-      "lines": 294,
-      "bytes": 20461
+      "lines": 314,
+      "bytes": 22107
     },
     "src/target.mjs": {
       "lines": 260,
@@ -115,7 +115,7 @@
     },
     "scripts/generate-contracts.mjs": {
       "lines": 102,
-      "bytes": 17866
+      "bytes": 17992
     },
     "scripts/generate-vectors.mjs": {
       "lines": 143,
@@ -162,8 +162,8 @@
       "bytes": 813
     },
     "scripts/verify-release.mjs": {
-      "lines": 71,
-      "bytes": 4882
+      "lines": 75,
+      "bytes": 5209
     },
     "scripts/verify-vectors-webcrypto.mjs": {
       "lines": 127,
@@ -206,8 +206,8 @@
       "bytes": 8603
     },
     "tests/ledger2.test.mjs": {
-      "lines": 411,
-      "bytes": 29184
+      "lines": 415,
+      "bytes": 29478
     },
     "tests/ledger3.test.mjs": {
       "lines": 399,
@@ -226,8 +226,8 @@
       "bytes": 71437
     },
     "tests/release-attestation.test.mjs": {
-      "lines": 121,
-      "bytes": 7201
+      "lines": 133,
+      "bytes": 8184
     },
     "tests/runtime-audit.test.mjs": {
       "lines": 83,
@@ -250,8 +250,8 @@
       "bytes": 16104
     },
     "tests/w11-audits.test.mjs": {
-      "lines": 250,
-      "bytes": 15873
+      "lines": 259,
+      "bytes": 16502
     },
     "tests/w11-ledger.test.mjs": {
       "lines": 29,
@@ -262,12 +262,16 @@
       "bytes": 10570
     },
     "tests/w12-redteam.test.mjs": {
-      "lines": 243,
-      "bytes": 15989
+      "lines": 245,
+      "bytes": 16144
     },
     "tests/w13-provenance.test.mjs": {
       "lines": 140,
       "bytes": 9010
+    },
+    "tests/w14-lifecycle.test.mjs": {
+      "lines": 218,
+      "bytes": 13779
     },
     "tests/w5-mutations.test.mjs": {
       "lines": 192,
@@ -338,6 +342,6 @@
       "bytes": 6229
     }
   },
-  "total_files": 84,
-  "total_lines": 15153
+  "total_files": 85,
+  "total_lines": 15588
 }

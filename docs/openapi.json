@@ -1863,6 +1863,38 @@
         }
       }
     },
+    "/v1/audit/seal": {
+      "post": {
+        "operationId": "post_v1_audit_seal",
+        "summary": "Seal a poisoned audit tail: drops unverifiable rows under a signed AUDIT_SEALED event",
+        "description": "Roles: security. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/subjects": {
       "get": {
         "operationId": "get_v1_subjects",

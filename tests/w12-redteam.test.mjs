@@ -102,8 +102,10 @@ test('w12 R7: backdated received_at cannot skip the cooldown', t => {
   rec.capsule.received_at = h.now() - 3600000;
   rec.capsule_digest = digest(rec.capsule); // keep the store digest in sync — the tamper under test is the backdate itself
   h.f.store.put('acme', 'capsule', rec.capsule.capsule_id, rec, h.now());
-  const evald = h.f.evaluate(h.p(), r.capsule.capsule_id);
-  assert.equal(evald.decision, 'DEFER', 'cooldown must still apply — anchored on chain time');
+  // Any divergence from the chain-anchored proposal — even a soft-field
+  // backdate — is an integrity failure since the w14 anchor (previously
+  // the gate merely ignored the forged instant via proposedAt).
+  assert.throws(() => h.f.evaluate(h.p(), r.capsule.capsule_id), hasCode('INV-409-INTEGRITY'));
 });
 
 // R12: tenant configuration is deep-frozen at open — an in-process edit
