@@ -6,6 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { generateKeyPairSync } from 'node:crypto';
 import { mkdtempSync, writeFileSync, chmodSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -63,8 +64,9 @@ test('w23 F14: release-sign refuses a signing key with permissive mode', () => {
   const dir = mkdtempSync(join(tmpdir(), 'w23-sign-'));
   try {
     const key = join(dir, 'key.pem'), pub = join(dir, 'key.pub');
-    writeFileSync(key, '-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\n');
-    writeFileSync(pub, '-----BEGIN PUBLIC KEY-----\nx\n-----END PUBLIC KEY-----\n');
+    const pair = generateKeyPairSync('ed25519');
+    writeFileSync(key, pair.privateKey.export({ type: 'pkcs8', format: 'pem' }));
+    writeFileSync(pub, pair.publicKey.export({ type: 'spki', format: 'pem' }));
     chmodSync(key, 0o644);
     const out = run('scripts/release-sign.mjs', ['--key', key, '--public-key', pub]);
     assert.equal(out.status, 1);
