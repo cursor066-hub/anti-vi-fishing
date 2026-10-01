@@ -19,7 +19,18 @@ const write = (path, content) => {
 };
 
 // ---- 1. Full test suite → tests.tap / final-regression.tap + summaries ----
-const tap = run(process.execPath, ['--test', '--test-concurrency=1', '--test-reporter=tap', 'tests/**/*.test.mjs']);
+// Explicitly sort the test file list: --test's own glob expansion follows
+// readdir order, which differs across filesystems and made committed
+// tests.tap byte-unstable (w22 CI).
+const testFiles = [];
+const collectTests = (dir) => {
+  for (const e of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+    const p = join(dir, e.name);
+    if (e.isDirectory()) collectTests(p); else if (e.name.endsWith('.test.mjs')) testFiles.push(p);
+  }
+};
+collectTests('tests');
+const tap = run(process.execPath, ['--test', '--test-concurrency=1', '--test-reporter=tap', ...testFiles]);
 const tapText = (tap.stdout ?? '') + (tap.stderr ?? '');
 // Strip per-test durations so the committed TAP is byte-stable.
 const stableTap = tapText.replace(/ \([\d.]+ms\)/g, '').replace(/(duration_ms: )[\d.]+/g, '$10').replace(/(# duration_ms )[\d.]+/g, '$10');

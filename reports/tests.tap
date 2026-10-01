@@ -4118,13 +4118,13 @@ ok 683 - w9-deploy F7: bootstrap issuer specs carry bearer digests, not plaintex
   type: 'test'
   ...
 # issuerd: no bearer credentials configured — all endpoints refuse with uniform 401 until a token is provisioned or allow_insecure_loopback is set
-# issuerd: tokenless issuers unreachable in a tokened registry: bank
 # Subtest: w9-deploy F9: the coarse bucket is spent before request validation
 ok 684 - w9-deploy F9: the coarse bucket is spent before request validation
   ---
   duration_ms: 0
   type: 'test'
   ...
+# issuerd: tokenless issuers unreachable in a tokened registry: bank
 # Subtest: w9-deploy F10: constructor-name kinds miss own-property lookup; tokenless daemon stays closed
 ok 685 - w9-deploy F10: constructor-name kinds miss own-property lookup; tokenless daemon stays closed
   ---
