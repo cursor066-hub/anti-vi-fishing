@@ -49,6 +49,9 @@ export class Fabric {
   // not ride a first-read cache forever.
   #auditSigners = {};
   #pendingChainHeads = null;
+  #chainHeadRaw = undefined;
+  #chainHeadParsed = null;
+  #chainHeadVerdicts = new Map();
   constructor(config, directory, clock = Date.now, { vault = null } = {}) {
     requireThat(config.profile === 'engineering', 'INV-503-RELEASE', 'Production mode is blocked: external acceptance evidence is missing', 503);
     this.config = config; this.directory = directory; this.clock = clock;
@@ -367,20 +370,35 @@ export class Fabric {
     renameSync(`${path}.tmp`, path);
   }
   _readChainHeadFile() {
-    try { return JSON.parse(readFileSync(join(this.directory, 'chain-heads.json'), 'utf8')); } catch { return null; }
+    let raw = null;
+    try { raw = readFileSync(join(this.directory, 'chain-heads.json'), 'utf8'); } catch { /* absent or unreadable */ }
+    if (raw !== this.#chainHeadRaw) {
+      this.#chainHeadRaw = raw;
+      try { this.#chainHeadParsed = raw === null ? null : JSON.parse(raw); } catch { this.#chainHeadParsed = null; }
+      this.#chainHeadVerdicts.clear();
+    }
+    return this.#chainHeadParsed;
   }
   // The verified head for a tenant: the envelope re-verifies against the
   // tenant's audit keys on every call — the file is untrusted input, so a
   // post-boot rewrite (truncated head, forged signature, malformed claim)
   // is tamper evidence on the next fold, never a cached pass ('corrupt'),
   // and a deleted file simply loses the watermark it cannot re-forge.
+  // Every call still re-reads the file bytes; verdicts cache only against
+  // the exact raw content, which can never skip verification of new bytes.
   _chainHead(tenant) {
-    const env = this._readChainHeadFile()?.tenants?.[tenant];
-    if (!env) return undefined;
-    let pl = null;
-    try { pl = verifySigned(env, this.auditPublicKeys(tenant), 'audit'); } catch { /* falls to corrupt */ }
-    if (!pl || pl.tenant_id !== tenant || !Number.isSafeInteger(pl.seq) || typeof pl.hash !== 'string') return 'corrupt';
-    return { seq: pl.seq, hash: pl.hash };
+    const file = this._readChainHeadFile();
+    if (this.#chainHeadVerdicts.has(tenant)) return this.#chainHeadVerdicts.get(tenant);
+    const env = file?.tenants?.[tenant];
+    let verdict;
+    if (!env) verdict = undefined;
+    else {
+      let pl = null;
+      try { pl = verifySigned(env, this.auditPublicKeys(tenant), 'audit'); } catch { /* falls to corrupt */ }
+      verdict = (!pl || pl.tenant_id !== tenant || !Number.isSafeInteger(pl.seq) || typeof pl.hash !== 'string') ? 'corrupt' : { seq: pl.seq, hash: pl.hash };
+    }
+    this.#chainHeadVerdicts.set(tenant, verdict);
+    return verdict;
   }
   persistVault() {
     mkdirSync(this.directory, { recursive: true, mode: 0o700 });
