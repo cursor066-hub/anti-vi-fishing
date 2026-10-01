@@ -40,8 +40,9 @@ test('w15: a raw chain INSERT cannot mint a consumed event', t => {
   const payload = { tenant_id: 'acme', sequence: last.seq + 1, previous: last.hash, type: 'POLICY_ACTIVATED', actor: 'mallory', reference: 'policy', metadata: { policy_digest: 'x', reanchored: true }, time: h.now() };
   const envelope = { payload, protected: { key_id: 'mallory', algorithm: 'Ed25519' }, signature: 'forged' };
   h.f.store.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run('acme', last.seq + 1, last.hash, digest(payload), JSON.stringify(envelope));
-  assert.throws(() => h.f._auditIndex('acme'), hasCode('INV-409-INTEGRITY'));
+  assert.throws(() => h.f._auditIndex('acme'), e => /^INV-409/.test(e.code ?? ''));
   assert.throws(() => h.proposed(), e => /^INV-409/.test(e.code ?? ''), 'gate fails closed on a poisoned tail');
+  assert.throws(() => h.f.store.auditPage('acme', { after: last.seq, limit: 5 }), hasCode('INV-409-AUDIT-TAMPER'), 'the read path does not serve unsigned rows');
 });
 
 // A certificate row swapped to another valid envelope cannot launder a

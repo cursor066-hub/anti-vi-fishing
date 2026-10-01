@@ -247,6 +247,7 @@ export class Store {
   }
   auditPage(tenant, { after = 0, limit = 1000 } = {}) {
     const rows = this.db.prepare('SELECT seq,hash,envelope FROM audit WHERE tenant=? AND seq>? ORDER BY seq LIMIT ?').all(tenant, after, limit);
+    const signer = this.auditSigners[tenant], public_keys = signer.keys ? signer.keys() : { [signer.key_id]: { public_key: signer.public_key } };
     // Serving the log is a security surface: re-verify each row's stored
     // hash against its signed payload and check chain continuity back to the
     // row preceding the page — an injected or rewritten row cannot pass
@@ -260,6 +261,11 @@ export class Store {
       let envelope;
       try { envelope = JSON.parse(r.envelope); } catch { throw new InvariantError('INV-409-AUDIT-TAMPER', 'Audit row failed integrity verification', 409); }
       requireThat(ctEqual(digest(envelope.payload), r.hash) && envelope.payload.sequence === r.seq && ctEqual(envelope.payload.previous, previous), 'INV-409-AUDIT-TAMPER', 'Audit row failed integrity verification', 409);
+      // Hash+previous are attacker-computable (the seq trigger permits a raw
+      // MAX+1 append): without signature verification the read path would
+      // serve an unsigned forged row as a legitimate chain entry (w15).
+      try { verifySigned(envelope, public_keys, 'audit'); }
+      catch { throw new InvariantError('INV-409-AUDIT-TAMPER', 'Audit row failed signature verification', 409); }
       previous = r.hash;
       return { sequence: r.seq, hash: r.hash, envelope };
     });
