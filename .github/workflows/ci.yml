@@ -105,7 +105,7 @@ jobs:
           # `|| true`: when every porcelain line is filtered, the final grep
           # exits 1 and bash -e would kill the step even though stale is
           # correctly empty.
-          stale="$(git status --porcelain -- docs/ examples/ ai-eval/ vectors/ reports/ | grep -v 'reports/benchmark.json' | grep -v 'reports/source-check.json' | grep -v 'reports/artifact-audit.json' | grep -v 'vectors/envelope-es256-vectors.json' | grep -v 'reports/sample-audit.json' | grep -v 'reports/sample-checkpoint.json' | grep -v 'reports/sample-pinned-trust.json' || true)"
+          stale="$(git status --porcelain -- docs/ examples/ ai-eval/ vectors/ reports/ | grep -v 'reports/benchmark.json' | grep -v 'reports/source-check.json' | grep -v 'reports/artifact-audit.json' | grep -v 'reports/verification-webcrypto.json' | grep -v 'vectors/envelope-es256-vectors.json' | grep -v 'reports/sample-audit.json' | grep -v 'reports/sample-checkpoint.json' | grep -v 'reports/sample-pinned-trust.json' || true)"
           test -z "$stale" || { echo "stale generated artifacts:"; echo "$stale"; exit 1; }
           # reports/benchmark.json is intentionally absent: it embeds measured
           # timings, so byte-equality can never hold — freshness there is
@@ -117,6 +117,10 @@ jobs:
           # (w8-composite CI). vectors/envelope-es256-vectors.json is absent
           # because ECDSA signatures are nondeterministic — the vector is
           # proven fresh by the three independent verify steps, not by bytes.
+          # reports/verification-webcrypto.json snapshots the bun verifier's
+          # output, which depends on whether bun exists in the environment —
+          # proven fresh by the live `bun verify-export-webcrypto.mjs` step
+          # above, not by byte equality across machines (w20 CI).
       - name: Upload verification evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
