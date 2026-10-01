@@ -194,8 +194,8 @@
       "bytes": 10132
     },
     "tests/helpers.mjs": {
-      "lines": 149,
-      "bytes": 12193
+      "lines": 151,
+      "bytes": 12387
     },
     "tests/http-concurrency-ui.test.mjs": {
       "lines": 246,
@@ -451,5 +451,5 @@
     }
   },
   "total_files": 112,
-  "total_lines": 24989
+  "total_lines": 24991
 }
