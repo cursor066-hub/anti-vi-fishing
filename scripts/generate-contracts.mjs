@@ -24,7 +24,7 @@ const components = {
   AcquireEvidence: object({ issuer: type.id, kind: type.text, claims: { type: 'object' } }, ['issuer', 'kind', 'claims']),
   PerceptionSession: object({ attestation: { type: 'object' } }),
   PerceptionRelease: object({ session_id: type.id, fields: { type: 'object' }, purpose: type.text, capsule_id: type.id, evidence_ref: type.id }, ['session_id', 'fields', 'purpose']),
-  PerceptionFallback: object({ fields: { type: 'object' }, purpose: type.text, reason: type.text, session_id: type.id, capsule_id: type.id, evidence_ref: type.id }, ['fields', 'purpose']),
+  PerceptionFallback: object({ fields: { type: 'object' }, purpose: type.text, reason: type.text, capsule_id: type.id, evidence_ref: type.id }, ['fields', 'purpose']),
   Advisory: object({ operation: { enum: ['extract', 'explain', 'intent'] }, document: { type: 'string', maxLength: 1000000 }, decision: Str, kind_hint: Str, capsule_id: type.id }, ['operation']),
   CeremonyCreate: object({ ceremony_id: type.id, tenant_id: type.id, purpose: { type: 'string', minLength: 1, maxLength: 64 }, threshold: { type: 'integer', minimum: 2, maximum: 16 }, custodians: { type: 'array', items: type.id, minItems: 2, maxItems: 16, uniqueItems: true }, valid_until: { type: 'integer', minimum: 1 }, min_delay_ms: { type: 'integer', minimum: 0, maximum: 2592000000 } }, ['ceremony_id', 'tenant_id', 'purpose', 'threshold', 'custodians', 'valid_until']),
   // The acknowledgement body is the signed envelope itself.

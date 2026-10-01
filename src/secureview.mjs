@@ -117,12 +117,14 @@ export function openRelease(component, release, session, now = Date.now()) {
   shared.fill(0); // transient ECDH secret does not outlive key derivation
   const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(release.nonce, 'base64url'));
   decipher.setAAD(canonical({ mode: release.mode, assurance: release.assurance, production: release.production ?? false, ephemeral_public: release.ephemeral_public }));
-  decipher.setAuthTag(Buffer.from(release.tag, 'base64url'));
-  let plaintext;
-  try { plaintext = Buffer.concat([decipher.update(Buffer.from(release.ciphertext, 'base64url')), decipher.final()]).toString('utf8'); }
-  catch { requireThat(false, 'INV-401-TAMPER', 'Release ciphertext failed authentication', 401); }
+  let plaintext, inner;
+  try {
+    decipher.setAuthTag(Buffer.from(release.tag, 'base64url'));
+    plaintext = Buffer.concat([decipher.update(Buffer.from(release.ciphertext, 'base64url')), decipher.final()]).toString('utf8');
+    inner = parseStrict(plaintext);
+  } catch { requireThat(false, 'INV-401-TAMPER', 'Release ciphertext failed authentication', 401); }
   finally { key.fill(0); } // session AES key zeroed even on tag failure (w11-timing NEW-LOW-2)
-  const inner = parseStrict(plaintext);
+  requireThat(inner && typeof inner === 'object' && !Array.isArray(inner), 'INV-401-TAMPER', 'Release plaintext is not an object', 401);
   // The outer binding is unauthenticated metadata — the authenticated copy
   // inside the ciphertext must agree with it, or the release was tampered.
   const { data, ...innerBinding } = inner;

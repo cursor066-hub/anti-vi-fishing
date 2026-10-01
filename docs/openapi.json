@@ -3468,11 +3468,6 @@
             "minLength": 1,
             "maxLength": 512
           },
-          "session_id": {
-            "type": "string",
-            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
-            "maxLength": 128
-          },
           "capsule_id": {
             "type": "string",
             "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",

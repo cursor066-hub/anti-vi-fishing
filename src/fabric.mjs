@@ -364,11 +364,42 @@ export class Fabric {
     return new KeyVault(randomBytes(32).toString('base64url'));
   }
   _chainHeadNote(tenant, seq, hash) {
-    (this.#pendingChainHeads ??= new Map()).set(tenant, { seq, hash });
+    // A head minted inside the seal's transaction is the ONE sanctioned
+    // backward move: the monotone gate would otherwise drop the seal's
+    // re-anchor envelope and the file would wedge the cut it was made to
+    // repair (w27-chainheads F0).
+    (this.#pendingChainHeads ??= new Map()).set(tenant, { seq, hash, reanchor: this.#sealing?.has(tenant) === true });
     // Appends committed outside a fabric transaction (denial audits, drift
     // flags, seal sweeps) flush immediately — inside a tx the watermark must
     // not outlive a rollback, so it waits for the commit edge.
     if (!this.store.db.isTransaction) this._flushChainHeads();
+  }
+  // Single mkdir-dir lock covering BOTH chain-heads files. The owner token
+  // keeps a stale-expired holder that resumes from deleting the NEW
+  // holder's lock (w27-chainheads F4); the self-check keeps it from
+  // clobbering the file with a stale snapshot.
+  _headFileLock(fn) {
+    const lockPath = join(this.directory, 'chain-heads.json.lock');
+    const deadline = Date.now() + 4_000;
+    const token = `${process.pid}:${randomBytes(8).toString('hex')}`;
+    for (let attempt = 0;; attempt++) {
+      try { mkdirSync(lockPath); writeFileSync(join(lockPath, 'owner'), token); break; }
+      catch (err) {
+        if (err?.code !== 'EEXIST') throw err;
+        // An expired stale lock dir is cleared and retried; a live-held
+        // lock past the deadline reports the honest gate code — never a
+        // raw EEXIST off the commit edge (w27-fixverify W27-10).
+        try { if (Date.now() - statSync(lockPath).mtimeMs > 8_000) rmSync(lockPath, { recursive: true, force: true }); } catch { /* lost the race to clear it */ }
+        if (Date.now() > deadline) throw new InvariantError('INV-503-GATE', 'Chain-head file lock held by a live peer beyond the deadline', 503);
+        const spin = Date.now() + Math.min(2 * (attempt + 1), 20);
+        while (Date.now() < spin) { /* bounded backoff; the locked section is microseconds */ }
+      }
+    }
+    const lockAt = Date.now();
+    try { return fn(() => Date.now() - lockAt > 8_000); }
+    finally {
+      try { if (readFileSync(join(lockPath, 'owner'), 'utf8') === token) rmSync(lockPath, { recursive: true, force: true }); } catch { /* a peer cleared or took the lock */ }
+    }
   }
   _flushChainHeads() {
     if (!this.#pendingChainHeads?.size) return;
@@ -394,46 +425,50 @@ export class Fabric {
     for (const [tenant, h] of landed) signed.push([tenant, h, this.#auditSigners[tenant].sign({ tenant_id: tenant, seq: h.seq, hash: h.hash }, 'audit')]);
     const restore = () => { for (const [t, h] of landed) if (!this.#pendingChainHeads.has(t)) this.#pendingChainHeads.set(t, h); };
     const path = join(this.directory, 'chain-heads.json');
-    const lockPath = `${path}.lock`;
     // Two fabric instances over one directory race on the read-merge-write
     // window: each sees the same pre-image and the later writer drops the
     // earlier's tenant heads — a file that regresses under authentic
     // signatures reads as replay on the next fold (w25-concurrency). The
     // lock dir is atomic create-or-fail; a crashed holder's stale dir
-    // expires after 10s so the file can never wedge forever.
-    const deadline = Date.now() + 10_000;
-    for (;;) {
-      try { mkdirSync(lockPath); break; } catch (err) {
-        if (err?.code !== 'EEXIST') { restore(); throw err; }
-        try { if (Date.now() - statSync(lockPath).mtimeMs > 10_000) rmSync(lockPath, { recursive: true, force: true }); } catch { /* lost the race to clear it */ }
-        if (Date.now() > deadline) { restore(); throw err; }
-        const spin = Date.now() + 2; while (Date.now() < spin) { /* bounded spin: the locked section is microseconds */ }
-      }
-    }
+    // expires so the file can never wedge forever.
     try {
-      const file = this._readChainHeadFile() ?? { format: 'IF-CHAINHEAD-1', tenants: {} };
-      file.tenants ??= {};
-      for (const [tenant, h, env] of signed) {
-        // Monotone per tenant: a slower peer may already have landed a
-        // LATER head — overwriting it regresses the watermark and reads
-        // as replay (w25-concurrency). The compare uses the CLAIMED seq
-        // deliberately — no verification, no sqlite inside the lock; a
-        // forged envelope claiming a higher seq fails signature
-        // verification on the very next fold and wedges honestly anyway.
-        // A same-seq head with a DIFFERENT hash must be replaced — the
-        // seal is the one writer that legitimately signs a new tip at a
-        // reused seq, and the stale envelope would diverge forever.
-        const existing = file.tenants[tenant]?.payload;
-        if (Number.isSafeInteger(existing?.seq) && (existing.seq > h.seq || (existing.seq === h.seq && existing.hash === h.hash))) continue;
-        file.tenants[tenant] = env;
-      }
-      mkdirSync(this.directory, { recursive: true, mode: 0o700 });
-      writeFileSync(`${path}.tmp`, canonical(file) + '\n', { mode: 0o600 });
-      renameSync(`${path}.tmp`, path);
-      // Our own write changed the bytes after the cached read — drop the
-      // snapshot so the next _chainHead re-reads what we just landed.
-      this.#chainHeadRaw = undefined;
-    } finally { try { rmdirSync(lockPath); } catch { /* a peer cleared it first */ } }
+      this._headFileLock(staleHold => {
+        // Held the lock too long — it may already have been expired and
+        // retaken, so this snapshot could clobber a peer's fresh write.
+        // Abort and let the next flush land the pending heads (w27 F4).
+        if (staleHold()) { restore(); return; }
+        const file = this._readChainHeadFile() ?? { format: 'IF-CHAINHEAD-1', tenants: {} };
+        // A JSON-valid wrong-shape tenants field is planted state, not a
+        // read — normalize in the writer and refuse it in the reader
+        // (w27-chainheads F5).
+        if (!file.tenants || typeof file.tenants !== 'object' || Array.isArray(file.tenants)) file.tenants = {};
+        for (const [tenant, h, env] of signed) {
+          // Monotone per tenant — but on the VERIFIED payload only. An
+          // existing entry whose signature fails is planted state: it may
+          // claim a far-future seq and monotone-wedge every honest head
+          // forever, so it is overwritten, never compared (w27 F1). A
+          // same-seq head with a DIFFERENT hash must be replaced — the
+          // seal is the one writer that legitimately signs a new tip at a
+          // reused seq — and a pending head minted inside the seal's
+          // transaction may move backward (w27 F0).
+          const existing = file.tenants[tenant];
+          if (existing) {
+            let existingPl = null;
+            try { existingPl = verifySigned(existing, this.auditPublicKeys(tenant), 'audit'); } catch { /* forged — falls through to overwrite */ }
+            if (existingPl && existingPl.tenant_id === tenant && Number.isSafeInteger(existingPl.seq)
+              && (existingPl.seq > h.seq || (existingPl.seq === h.seq && existingPl.hash === h.hash))
+              && !h.reanchor) continue;
+          }
+          file.tenants[tenant] = env;
+        }
+        mkdirSync(this.directory, { recursive: true, mode: 0o700 });
+        writeFileSync(`${path}.tmp`, canonical(file) + '\n', { mode: 0o600 });
+        renameSync(`${path}.tmp`, path);
+        // Our own write changed the bytes after the cached read — drop the
+        // snapshot so the next _chainHead re-reads what we just landed.
+        this.#chainHeadRaw = undefined;
+      });
+    } catch (err) { restore(); throw err; }
   }
   _readChainHeadFile() {
     let raw = null;
@@ -469,10 +504,52 @@ export class Fabric {
     else {
       let pl = null;
       try { pl = verifySigned(env, this.auditPublicKeys(tenant), 'audit'); } catch { /* falls to corrupt */ }
-      verdict = (!pl || pl.tenant_id !== tenant || !Number.isSafeInteger(pl.seq) || typeof pl.hash !== 'string') ? 'corrupt' : { seq: pl.seq, hash: pl.hash };
+      // A non-object tenants map is planted state — the reader fails
+      // closed exactly like a forged envelope (w27-chainheads F5).
+      if (!file.tenants || typeof file.tenants !== 'object' || Array.isArray(file.tenants)) verdict = 'corrupt';
+      else verdict = (!pl || pl.tenant_id !== tenant || !Number.isSafeInteger(pl.seq) || typeof pl.hash !== 'string') ? 'corrupt' : { seq: pl.seq, hash: pl.hash };
     }
     this.#chainHeadVerdicts.set(tenant, verdict);
     return verdict;
+  }
+  // Durable "highest consumed head" per tenant (w27-chainheads F2,
+  // w27-fixverify W27-02): the in-memory seenHeadSeq dies with the
+  // process, so a directory-level rollback (audit rows + chain-heads.json
+  // restored together) verifies clean on a cold open. The watermark file
+  // raises the attack to a consistent rollback of THREE files — partial
+  // replays wedge. Bootstraps at the current head on first contact so
+  // pre-w27 deployments migrate silently; a consistent whole-directory
+  // restore is the documented residual (SECURITY.md).
+  _readHeadWatermark() {
+    let raw = null;
+    try { raw = readFileSync(join(this.directory, 'head-watermark.json'), 'utf8'); } catch { /* absent */ }
+    if (raw === null) return null;
+    try { const f = JSON.parse(raw); return f?.tenants && typeof f.tenants === 'object' && !Array.isArray(f.tenants) ? f.tenants : null; } catch { return null; }
+  }
+  _bumpHeadWatermark(tenant, seq) {
+    try {
+      this._headFileLock(staleHold => {
+        if (staleHold()) return;
+        const tenants = this._readHeadWatermark() ?? {};
+        if ((tenants[tenant] ?? 0) >= seq) return;
+        tenants[tenant] = seq;
+        const path = join(this.directory, 'head-watermark.json');
+        mkdirSync(this.directory, { recursive: true, mode: 0o700 });
+        writeFileSync(`${path}.tmp`, canonical({ format: 'IF-HEADMARK-1', tenants }) + '\n', { mode: 0o600 });
+        renameSync(`${path}.tmp`, path);
+      });
+    } catch { /* a held lock degrades the watermark to the in-memory guard, never a write wedge */ }
+  }
+  _headWatermark(tenant) {
+    const wm = this._readHeadWatermark();
+    if (wm !== null) return wm[tenant];
+    // Bootstrap: absent file adopts the currently committed head (or 0 for
+    // a fresh store) — covers first-contact upgrades; a later absence is
+    // suspicious but can only launder a consistent rollback (residual).
+    const head = this._chainHead(tenant);
+    const adopted = head && head !== 'corrupt' ? head.seq : 0;
+    this._bumpHeadWatermark(tenant, adopted);
+    return adopted;
   }
   persistVault() {
     mkdirSync(this.directory, { recursive: true, mode: 0o700 });
@@ -938,7 +1015,13 @@ export class Fabric {
       if (tip && !(head && head !== 'corrupt' && head.seq === tip.seq && ctEqual(head.hash, tip.hash))) {
         const now = this.clock();
         this.store.audit(t, 'AUDIT_HEAD_REANCHORED', p.subject_id, 'audit', { reanchored_tip_seq: tip.seq, reanchored_tip_hash: tip.hash }, now);
-        headReanchored = true;
+        // Report only what actually landed: the head write raced a peer's
+        // monotone compare before — claiming a re-anchor the file never
+        // took was the lie that let a wedged tenant report healed
+        // (w27-chainheads F0).
+        const newTip = this.store.db.prepare('SELECT seq,hash FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1').get(t);
+        const moved = this._chainHead(t);
+        headReanchored = moved && moved !== 'corrupt' && newTip && moved.seq === newTip.seq && ctEqual(moved.hash, newTip.hash);
       }
       // A wedge planted by an integrity cause clears only when the SAME
       // set of causes re-proves clean — a cert-only sweep clearing over a
@@ -1076,7 +1159,14 @@ export class Fabric {
         return { ...out, wedge_cleared: false, vault_persist_error: persistErr instanceof Error ? persistErr.message : String(persistErr) };
       }
       if (clearUnverifiable) this._clockRecoveryUnverifiable?.delete(t);
-      return { ...out, wedge_cleared: clearUnverifiable };
+      // The head write inside this seal's scope can regress only because
+      // the pending heads carried reanchor — verify it actually landed:
+      // 'sealed' with a stale watermark is a still-wedged tenant, not a
+      // success report (w27-chainheads F0).
+      const sealedTip = this.store.db.prepare('SELECT seq,hash FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1').get(t);
+      const sealedHead = this._chainHead(t);
+      const sealedMoved = sealedHead && sealedHead !== 'corrupt' && sealedTip && sealedHead.seq === sealedTip.seq && ctEqual(sealedHead.hash, sealedTip.hash);
+      return { ...out, wedge_cleared: clearUnverifiable && sealedMoved === true, head_reanchored: sealedMoved === true };
     } catch (sealErr) {
       // Any fault inside the repoint window — activation, the re-anchor
       // snapshot, the seal row itself — must undo the in-memory repoint:
@@ -1526,6 +1616,10 @@ export class Fabric {
       // closed until sealAuditChain repairs it — proceeding would risk
       // resurrecting authority the veto sweep could not see (w18-fixverify F12).
       requireThat(!this._clockUnverifiable(principal.tenant_id), 'INV-503-TIME', 'Tenant chain could not be verified during clock recovery — seal the audit chain first', 503);
+      // A previous commit's head flush may have lost the lock race — land
+      // it now, before this tx's own flush, so the watermark lag window
+      // stays bounded to a single commit (w27-chainheads F3).
+      if (this.#pendingChainHeads?.size) try { this._flushChainHeads(); } catch { /* retry lands on the next commit edge */ }
       // In-session heal for failed post-commit effects: replay the same
       // idempotent ledger heal open() runs before new work attests over a
       // dataplane an earlier verdict already diverged from (w22 F6).
@@ -1648,7 +1742,13 @@ export class Fabric {
         // which legitimately runs ahead mid-transaction on uncommitted
         // appends) (w25-fixverify W25-01, w25-issuerd F2).
         requireThat(!(committedHead.seq < (idx.seenHeadSeq ?? 0)), 'INV-409-INTEGRITY', 'Signed chain head regressed below the consumed watermark', 409);
+        // The durable watermark survives restarts: a replayed head file
+        // carrying a committed-but-lower seq screams on a cold open, not
+        // just in-process (w27-chainheads F2, w27-fixverify W27-02).
+        const wmSeq = this._headWatermark(t);
+        requireThat(!(wmSeq > committedHead.seq), 'INV-409-INTEGRITY', 'Signed chain head regressed below the durable watermark', 409);
         idx.seenHeadSeq = committedHead.seq;
+        this._bumpHeadWatermark(t, committedHead.seq);
         requireThat(!(committedHead.seq > maxSeq), 'INV-409-INTEGRITY', 'Audit chain truncated below the signed head watermark', 409);
       }
       if (committedHead && committedHead.seq === maxSeq && committedHead.seq > 0) {
@@ -1765,7 +1865,7 @@ export class Fabric {
         // bounded — a linear pass over the whole runtime history per
         // request was a quadratic wall-clock sink (w17-idx F8).
         case 'RUNTIME_ALLOWED': { const u = { capability: pl.reference, subject: pl.actor, resource: meta.resource ?? null, request_id: meta.request_id ?? null, cost: typeof meta.cost === 'number' ? meta.cost : 0, at: pl.time }; idx.runtimeUse.push(u); const cl = idx.runtimeUseByCap.get(u.capability) ?? []; cl.push(u); idx.runtimeUseByCap.set(u.capability, cl); const sl = idx.runtimeUseBySubject.get(u.subject) ?? []; sl.push(u); idx.runtimeUseBySubject.set(u.subject, sl); break; }
-        case 'PERCEPTION_SESSION': if (meta.nonce) idx.perceptionNonce.add(meta.nonce); if (meta.channel_digest) idx.perceptionSessions.set(pl.reference, { creator: meta.creator ?? null, expires_at: meta.expires_at ?? null, channel_digest: meta.channel_digest, component: meta.component ?? null, signing_key_id: meta.signing_key_id ?? null, assurance: meta.assurance ?? null, firmware: meta.firmware ?? null }); break;
+        case 'PERCEPTION_SESSION': if (meta.nonce) idx.perceptionNonce.add(meta.nonce); if (meta.channel_digest) idx.perceptionSessions.set(pl.reference, { creator: meta.creator ?? null, expires_at: meta.expires_at ?? null, channel_digest: meta.channel_digest, component: meta.component ?? null, signing_key_id: meta.signing_key_id ?? null, assurance: meta.assurance ?? null, firmware: meta.firmware ?? null, minted_at: pl.time }); break;
         case 'DATA_ACCESSED': idx.dataAccess.push({ subject: pl.reference, dataset: meta.dataset, row_ids: meta.row_ids ?? [], columns: meta.columns ?? [], at: meta.at ?? pl.time, certificate_id: meta.certificate_id ?? null }); break;
         // The reservation's anchored time bounds the crash-gap window an
         // honest EXECUTION_DISPATCHED can lose — an unanchored journal far
@@ -2715,6 +2815,12 @@ export class Fabric {
     const t = p.tenant_id;
     const children = capsule.requested_state.children;
     const executed = [], wedged = [], attemptedFailed = [];
+    // Sibling egress overlay: children inside one composite dispatch
+    // sequentially, so a later export child must see the earlier siblings'
+    // egress in its coverage check — otherwise one composite can bypass
+    // the reconstruction budget the per-child ledger fold never fed back
+    // in time (w27-datagate F1).
+    const siblingAccess = [];
     const bail = (reason) => {
       const compensations = [];
       // Compensation runs in reverse EXECUTION order; the executed array
@@ -2763,8 +2869,9 @@ export class Fabric {
           // same reservation-time rule as a standalone export (w10-datagate F3).
           if (child.capsule.action.type === 'data.export') {
             const req = child.capsule.requested_state;
-            const recon = reconstructionCheck(this.store.db, this.target.db, { tenant: t, subject: child.capsule.actor.subject_id, dataset: req.dataset, rows: req.row_ids, columns: req.columns, now: childNow, policy: this.policy(t).runtime.reconstruction, record: false, access: this._auditIndex(t).dataAccess });
+            const recon = reconstructionCheck(this.store.db, this.target.db, { tenant: t, subject: child.capsule.actor.subject_id, dataset: req.dataset, rows: req.row_ids, columns: req.columns, now: childNow, policy: this.policy(t).runtime.reconstruction, record: false, access: [...this._auditIndex(t).dataAccess, ...siblingAccess] });
             requireThat(recon.allowed, 'INV-429-BUDGET', 'Reconstruction limit reached', 429, { coverage_percent: recon.coverage_percent, dataset_coverage_percent: recon.dataset_coverage_percent });
+            siblingAccess.push({ subject: child.capsule.actor.subject_id, dataset: req.dataset, row_ids: req.row_ids, columns: req.columns, at: childNow, certificate_id: childCert.certificate_id });
           }
           childStored.consumed = true; childStored.status = 'EXECUTING'; childStored.transaction_id = childCert.certificate_id;
           child.status = 'EXECUTING';
@@ -2805,12 +2912,17 @@ export class Fabric {
         // The reservation committed but the dispatch did not conclude: the
         // child is honestly wedged (EXECUTING, reconcilable later) and the
         // parent outcome must name it rather than understate the loss (M2).
+        // A wedged export with a durable journal may already have egressed
+        // rows — attest the pending disclosure or it stays invisible
+        // (w27-datagate F2).
+        if (child.capsule.action.type === 'data.export' && childJournal) this._touchWedgedEgress(t, child, childCert, dispatchNow);
         wedged.push(childId);
         return bail(`CHILD_EXECUTION_FAILED:${dispatchError.code ?? 'UNKNOWN'}`);
       }
       // A child's reply earns VERIFIED only under the same response rules as
       // a standalone execution (runtime-audit F-2).
       if (!this._validateTargetResponse(child, childCert, raw, this.clock(), { postRead: true }).valid) {
+        if (child.capsule.action.type === 'data.export' && childJournal) this._touchWedgedEgress(t, child, childCert, dispatchNow);
         wedged.push(childId);
         return bail('CHILD_EXECUTION_FAILED:TARGET_RESPONSE_INVALID');
       }
@@ -3218,6 +3330,18 @@ export class Fabric {
     // can never launder a different row (w25-datagate W25-06).
     const egressRowIds = raw.output_row_ids ?? requested.row_ids;
     return { watermarks: watermark(raw.output ?? [], { tenant: t, dataset: requested.dataset, subject, requestId: cert.certificate_id, capabilityId: `cert:${cert.certificate_id}`, tenantWatermarkKey, rowIds: egressRowIds }).watermarks };
+  }
+  // A wedged export child disclosed rows through a durable journal whose
+  // child outcome was never recorded — without its own DATA_ACCESSED the
+  // disclosure is invisible to coverage accounting and the ledger
+  // (w27-datagate F2). The touch certifies the pending disclosure under
+  // the child certificate id so reconcile still recognises exactly-once.
+  _touchWedgedEgress(t, child, childCert, now) {
+    if (this._auditIndex(t).dataAccess.some(a => a.certificate_id === childCert.certificate_id)) return;
+    const req = child.capsule.requested_state;
+    if (!req?.row_ids?.length || !req?.columns?.length) return;
+    const subject = child.capsule.actor.subject_id;
+    this.store.audit(t, 'DATA_ACCESSED', subject, subject, { dataset: req.dataset, row_ids: req.row_ids, columns: req.columns, at: now, certificate_id: childCert.certificate_id, wedged: true }, now);
   }
   finish(p, cert, raw, status, reason, { postRead = false } = {}) {
     const post = [];
@@ -4353,9 +4477,14 @@ export class Fabric {
       // event — an authorized caller must not grow either without bound
       // (w26-perception F-9). The anchored index counts only sessions that
       // have not expired.
-      let live = 0;
-      for (const [, s] of this._auditIndex(t).perceptionSessions) if ((s.expires_at ?? 0) > now) live++;
+      let live = 0, minted = 0;
+      for (const [, s] of this._auditIndex(t).perceptionSessions) { if ((s.expires_at ?? 0) > now) live++; if ((s.minted_at ?? 0) > now - 3_600_000) minted++; }
       requireThat(live < 64, 'INV-429-QUOTA', 'Perception live-session cap reached (64)', 429);
+      // The durable-growth bound the cap exists for: expiring-session churn
+      // (1ms TTLs) still lands a row, a nonce and a signed chain event per
+      // mint — bound the mint RATE, not only the live window
+      // (w27-fixverify W27-03).
+      requireThat(minted < 256, 'INV-429-QUOTA', 'Perception mint-rate cap reached (256/hour)', 429);
       this.store.db.prepare('INSERT INTO nonces VALUES(?,?,?)').run(t, 'perception:' + attestation.payload.nonce, `perception:${session.session_id}`);
       const stored = { ...session, _server_private: session._server_private.export({ type: 'pkcs8', format: 'pem' }), creator: p.subject_id };
       this.store.insert(t, 'perception-session', session.session_id, stored, now);
@@ -4392,12 +4521,14 @@ export class Fabric {
       // never pass — the ledger attests what the session was minted as
       // (w18-issuerd F-1).
       const anchoredSession = this._auditIndex(t).perceptionSessions.get(sid);
+      const releaseComponent = anchoredSession ? this.perceptionComponents[t]?.[anchoredSession.component] : null;
       requireThat(anchoredSession && anchoredSession.creator === session.creator && anchoredSession.expires_at === session.expires_at && anchoredSession.channel_digest === digest({ component_ecdh: session.component_ecdh, server_ephemeral: session.server_ephemeral })
-        // assurance/firmware were dropped from the anchor pre-w26 — null
-        // tolerates pre-upgrade sessions; when anchored, a planted row
-        // cannot relabel either into the signed release trail (F-4).
-        && (anchoredSession.assurance == null || anchoredSession.assurance === session.assurance)
-        && (anchoredSession.firmware == null || anchoredSession.firmware === session.firmware_version), 'INV-409-INTEGRITY', 'Perception session diverges from its ledger-anchored binding', 409);
+        // Anchors written before the assurance/firmware fields existed
+        // carry null — they may ONLY claim the component's configured
+        // values. Tolerating a bare null let a planted row label ride the
+        // sealed release trail as 'hardware-enclave' (w27-fixverify W27-04).
+        && (anchoredSession.assurance == null ? session.assurance === releaseComponent?.assurance : anchoredSession.assurance === session.assurance)
+        && (anchoredSession.firmware == null ? session.firmware_version === releaseComponent?.firmware_version : anchoredSession.firmware === session.firmware_version), 'INV-409-INTEGRITY', 'Perception session diverges from its ledger-anchored binding', 409);
       // The anchored digest binds only the public halves of the ECDH pair —
       // the seal key comes from the stored private half. Re-prove the pair:
       // a swapped _server_private can never re-key the release to an
@@ -4413,7 +4544,6 @@ export class Fabric {
       // reaches them after the config moved on (w18-issuerd F-5,
       // w20-fixverify F-2). Sessions minted before the anchor carried the
       // key id fall back to the current config key.
-      const releaseComponent = this.perceptionComponents[t]?.[anchoredSession.component];
       const attestingKid = anchoredSession.signing_key_id ?? releaseComponent?.signing.key_id;
       requireThat(releaseComponent && attestingKid && !this.revoked(t, 'key', attestingKid), 'INV-403-SCOPE', 'Perception component signing credential is revoked or unknown', 403);
       // Release provenance must be real: a cited capsule or evidence record

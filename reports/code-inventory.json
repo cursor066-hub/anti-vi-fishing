@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 4558,
-      "bytes": 363360
+      "lines": 4688,
+      "bytes": 372395
     },
     "src/issuerd.mjs": {
       "lines": 715,
@@ -58,8 +58,8 @@
       "bytes": 6684
     },
     "src/policy.mjs": {
-      "lines": 453,
-      "bytes": 45862
+      "lines": 458,
+      "bytes": 46415
     },
     "src/runtime.mjs": {
       "lines": 230,
@@ -70,12 +70,12 @@
       "bytes": 10397
     },
     "src/secureview.mjs": {
-      "lines": 167,
-      "bytes": 13550
+      "lines": 169,
+      "bytes": 13696
     },
     "src/server.mjs": {
       "lines": 363,
-      "bytes": 37529
+      "bytes": 37592
     },
     "src/shamir.mjs": {
       "lines": 91,
@@ -115,7 +115,7 @@
     },
     "scripts/generate-contracts.mjs": {
       "lines": 102,
-      "bytes": 18121
+      "bytes": 18100
     },
     "scripts/generate-vectors.mjs": {
       "lines": 143,
@@ -377,6 +377,10 @@
       "lines": 127,
       "bytes": 7460
     },
+    "tests/w27.test.mjs": {
+      "lines": 145,
+      "bytes": 9076
+    },
     "tests/w5-mutations.test.mjs": {
       "lines": 194,
       "bytes": 13645
@@ -446,6 +450,6 @@
       "bytes": 6499
     }
   },
-  "total_files": 111,
-  "total_lines": 24690
+  "total_files": 112,
+  "total_lines": 24972
 }

@@ -378,6 +378,11 @@ export function evaluatePolicy({ capsule, policy, evidence = [], approvals = [],
     // never mint custodian/security/policy_admin privilege.
     if (!(req.roles ?? []).every(x => ['operator', 'workload'].includes(x))) return result('DENY', [reason('ROLE_ESCALATION', 'JIT grant roles may only confer operator or workload scope.')]);
     if (!Array.isArray(rowIds)) return result('DENY', [reason('INVALID_GRANT', 'row_ids must be an explicit list.')]);
+    // A row-scoped grant must name real identifier-shaped ids and live
+    // inside a declared DATASET resource — phantom rows in a service-scope
+    // grant mint authority that can never serve and later audits cannot
+    // attribute (w27-datagate F4).
+    if (rowIds.length && (!rowIds.every(x => typeof x === 'string' && /^[A-Za-z0-9][\w:.-]{0,127}$/.test(x)) || !resources.some(x => r.datasets.includes(x)))) return result('DENY', [reason('INVALID_GRANT', 'row_ids must name well-formed row identifiers inside a declared dataset resource.')]);
   }
   // POL-011: the cooldown anchors on the server-side receive timestamp, not
   // the caller's claim — created_at is inside a 300s backdate window and is
