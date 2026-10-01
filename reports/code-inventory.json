@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 4293,
-      "bytes": 343943
+      "lines": 4299,
+      "bytes": 344349
     },
     "src/issuerd.mjs": {
       "lines": 679,
@@ -439,5 +439,5 @@
     }
   },
   "total_files": 109,
-  "total_lines": 23970
+  "total_lines": 23976
 }
