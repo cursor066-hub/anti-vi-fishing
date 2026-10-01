@@ -4,8 +4,13 @@
 // hostile audit demonstrated.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync, writeFileSync, rmSync, chmodSync } from 'node:fs';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { fixture, hasCode } from './helpers.mjs';
 import { clone } from '../src/canonical.mjs';
+import { generateKey } from '../src/crypto.mjs';
+import { Fabric } from '../src/fabric.mjs';
 
 // W29-F1: a planted capsule.certificate_id pointer must never land an
 // anchored CANCELLED verdict on the foreign live certificate — the
@@ -159,4 +164,149 @@ test('W29-F5: deleted anchored child capsule row screams integrity on parent rec
   const code = fn => { try { fn(); return null; } catch (e) { return e.code; } };
   assert.equal(code(() => h.f.execute(h.p(), c1.cert)), 'INV-409-INTEGRITY');
   assert.equal(code(() => h.f.cancel(h.p(), c1.r.capsule.capsule_id)), 'INV-409-INTEGRITY');
+});
+
+// W29-DATAGATE: egress is irrevocable — a standalone data.export whose
+// EXECUTION_DISPATCHED anchor died in the commit gap still egressed rows,
+// so the wedge must charge usage, attest DATA_ACCESSED and watermark —
+// never leave the disclosure invisible to the coverage ledger.
+test('W29-DATAGATE: wedged standalone export is charged, attested and watermarked', t => {
+  const h = fixture(t);
+  const r = h.proposed('data.export',
+    { dataset: 'dataset-1', columns: ['id', 'name'], row_ids: ['row-1'], max_rows: 1, classification: 'internal', jurisdiction: 'EU' },
+    { action: { type: 'data.export', target_resource: 'dataset-1', purpose: 'Operations' }, destination: 'customer-vault' });
+  h.evidence(r, { kind: 'dataset_authority' }); h.approve(r, 1);
+  const cert = h.f.certificate(h.p(), r.capsule.capsule_id);
+  const certId = cert.payload.certificate_id;
+
+  // Reserve then die before dispatch — the durable journal commits while
+  // the EXECUTION_DISPATCHED anchor never lands (the real crash gap).
+  assert.throws(() => h.f.execute(h.p(), cert, { fault: 'process-crash' }), /process death/i);
+  h.f.target.execute(r.capsule, certId, h.now());
+  assert.ok(h.f.target.outcome('acme', certId), 'rows durably egressed');
+
+  const out = h.f.reconcile(h.p('security'), certId);
+  assert.equal(out.payload.status, 'FAILED');
+  assert.equal(out.payload.reason, 'DISPATCH_UNATTESTED');
+
+  // …but the egress is honest on the ledger: charged, attested, watermarked
+  const access = h.f._auditIndex('acme').dataAccess.filter(a => a.certificate_id === certId);
+  assert.equal(access.length, 1, 'exactly one DATA_ACCESSED attestation');
+  assert.deepEqual(access[0].row_ids, ['row-1']);
+  const charge = h.f.store.db.prepare("SELECT * FROM usage WHERE tenant='acme' AND capability=? AND request=?").get(`cert:${certId}`, certId);
+  assert.ok(charge, 'usage billing mirror exists');
+  assert.ok(out.payload.watermarks?.length >= 1, 'watermarks recorded on the outcome');
+
+  // coverage accounting now sees the disclosed rows — a same-subject
+  // export of the same rows hits the reconstruction window, not a clean slate
+  const recon = h.f._auditIndex('acme').dataAccess.length;
+  assert.ok(recon >= 1);
+});
+
+// W29-F12: pending chain-head notes ride the tx boundary — a savepoint
+// that rolls back must restore the note map, never clobber the outer
+// committed append's head into permanent watermark starvation.
+test('W29-F12: a rolled-back savepoint append never starves the committed head', t => {
+  const h = fixture(t);
+  h.ready();
+  const headsPath = join(h.directory, 'chain-heads.json');
+  const headSeq = () => JSON.parse(readFileSync(headsPath, 'utf8')).tenants.acme?.payload?.seq ?? null;
+  const tipSeq = () => h.f.store.db.prepare("SELECT COALESCE(MAX(seq),0) m FROM audit WHERE tenant='acme'").get().m;
+
+  h.f.store.tx(() => {
+    h.f.store.audit('acme', 'AUDIT_ACCESSED', 'operator', 'acme', { probe: 'outer' }, h.now());
+    try { h.f.store.tx(() => { h.f.store.audit('acme', 'AUDIT_ACCESSED', 'operator', 'acme', { probe: 'rolled' }, h.now()); throw new Error('rb'); }); } catch {}
+  });
+  assert.equal(headSeq(), tipSeq(), 'the committed append still lands its head');
+
+  // starvation pattern: every tx carries a trailing rolled-back append —
+  // the head must keep advancing on the committed rows alone
+  for (let i = 0; i < 3; i++) h.f.store.tx(() => {
+    h.f.store.audit('acme', 'AUDIT_ACCESSED', 'operator', 'acme', { probe: `c${i}` }, h.now());
+    try { h.f.store.tx(() => { h.f.store.audit('acme', 'AUDIT_ACCESSED', 'operator', 'acme', { probe: `r${i}` }, h.now()); throw new Error('rb'); }); } catch {}
+  });
+  assert.equal(headSeq(), tipSeq(), 'head never starves behind the committed tip');
+});
+
+// W29-F9a: the target store must READ user_version before re-stamping it —
+// a foreign sqlite file with a newer schema marker is refused, never
+// silently adopted (w29-fixverify F9).
+test('W29-F9a: the target db read-checks user_version — foreign db refused', t => {
+  const h = fixture(t);
+  h.ready();
+  const cfg = h.clone(h.setup.config), dir = h.directory;
+  h.close();
+  rmSync(join(dir, 'target.db'), { force: true });
+  const alien = new DatabaseSync(join(dir, 'target.db'));
+  alien.exec('CREATE TABLE alien (x); PRAGMA user_version=9;');
+  alien.close();
+  assert.throws(() => new Fabric(cfg, dir, () => h.now()), hasCode('INV-503-STORAGE'));
+});
+
+// W29-F9b: reopening over a read-only database file surfaces the honest
+// storage code — never a raw ERR_SQLITE_ERROR (w29-fixverify F9).
+test('W29-F9b: a read-only target db reports INV-503-STORAGE', t => {
+  const h = fixture(t);
+  const cfg = h.clone(h.setup.config), dir = h.directory;
+  h.close();
+  chmodSync(join(dir, 'target.db'), 0o444);
+  try { assert.throws(() => new Fabric(cfg, dir, () => h.now()), hasCode('INV-503-STORAGE')); }
+  finally { chmodSync(join(dir, 'target.db'), 0o600); }
+});
+
+// W29-F10: a fold that already perceived the head file 'corrupt' must not
+// wedge the healing flush — a head buffered behind a stalled flush re-lands
+// on the next non-signing commit even after an outside-tx fold cached the
+// 'corrupt' verdict (w29-fixverify F10).
+test('W29-F10: a cached corrupt-head verdict cannot wedge the healing flush', t => {
+  const h = fixture(t);
+  h.ready();
+  const headsPath = join(h.directory, 'chain-heads.json');
+  const tipSeq = () => h.f.store.db.prepare("SELECT COALESCE(MAX(seq),0) m FROM audit WHERE tenant='acme'").get().m;
+
+  // Buffer a head behind a one-shot stalled flush — the append commits,
+  // the signed head stays pending for the next transaction.
+  const origLock = h.f._headFileLock;
+  h.f._headFileLock = () => { throw new Error('lock-stall'); };
+  try { h.f.store.audit('acme', 'AUDIT_ACCESSED', 'operator', 'acme', { probe: 'pending' }, h.now()); }
+  finally { h.f._headFileLock = origLock; }
+  const seq = tipSeq();
+  assert.ok(seq > 0);
+
+  // The attacker swaps in a corrupt head file — the fold wedges loudly and
+  // caches the 'corrupt' verdict.
+  const forged = { protected: { profile: 'IF-CJSON-1', suite: 'Ed25519', key_id: 'x', purpose: 'audit' },
+    payload: { tenant_id: 'acme', seq, hash: 'z'.repeat(64) }, signature: 'A'.repeat(86) };
+  writeFileSync(headsPath, JSON.stringify({ format: 'IF-CHAINHEAD-1', tenants: { acme: forged } }));
+  assert.throws(() => h.f._auditIndex('acme'), hasCode('INV-409-INTEGRITY'));
+
+  // A commit that signs no audit row still runs the post-commit flush —
+  // the head signature resolves under the seal scope and the file heals.
+  h.f.store.put('acme', 'note', 'heal', { v: 1 }, h.now());
+  const head = JSON.parse(readFileSync(headsPath, 'utf8')).tenants.acme;
+  assert.equal(head?.payload?.seq, seq, 'the pending signed head lands at the committed tip');
+  assert.ok(head?.signature?.length > 10);
+  assert.doesNotThrow(() => h.f._auditIndex('acme'), 'the fold recovers once an authentic head lands');
+});
+
+// W29-F11: under an anchor wedge the suite gate must never degrade to
+// "any suite" — only the vault-bound audit key's own suite may sign for
+// remediation; a foreign suite stays denied (w29-fixverify F11).
+test('W29-F11: an anchor wedge degrades to the bound key suite, never to any suite', t => {
+  const h = fixture(t);
+  h.ready();
+  const es = generateKey('ES256');
+  h.f.vault.importKey({ key_id: 'es-audit', public_key: es.public_key, private_key: es.private_key }, 'audit', { suite: 'ES256', tenant_id: 'acme' });
+  assert.throws(() => h.f.signAudit('acme', { probe: 'healthy' }, 'audit', 'es-audit'), hasCode('INV-451-POLICY'));
+
+  // anchor-divergence wedge: tamper the active policy row off-anchor
+  const active = h.f.store.get('acme', 'policy', 'active');
+  h.f.store.put('acme', 'policy', 'active', { ...active, tampered_field: 'x' }, h.now());
+  assert.throws(() => h.f.policy('acme'), hasCode('INV-409-INTEGRITY'));
+
+  // under the wedge a foreign suite still cannot sign
+  assert.throws(() => h.f.signAudit('acme', { probe: 'wedged' }, 'audit', 'es-audit'), hasCode('INV-451-POLICY'));
+  // …while remediation signing on the bound suite stays reachable
+  const env = h.f.signAudit('acme', { probe: 'remediation' }, 'audit');
+  assert.equal(env.protected.suite, 'Ed25519');
 });

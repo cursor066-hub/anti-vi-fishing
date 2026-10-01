@@ -49,6 +49,9 @@ export class Fabric {
   // not ride a first-read cache forever.
   #auditSigners = {};
   #pendingChainHeads = null;
+  // Per-tx-depth snapshots of #pendingChainHeads — restored on savepoint
+  // rollback so a doomed append never clobbers the outer head (w29-fv F12).
+  #pendingHeadStack = null;
   // Flush hot-path caches (w28-http CI regression): the signer-death map
   // grows only on key-lifecycle audit rows, so it is maintained
   // incrementally from the append-only table instead of a full LIKE scan
@@ -128,6 +131,15 @@ export class Fabric {
     // in one when no fabric transaction is open, and the pending head must
     // not wait for a later edge (w28-store F2, w28-regression w25/w27).
     this.store.onTxCommit = () => { try { this._flushChainHeads(); } catch { /* re-buffered — the next edge retries */ } };
+    // Pending heads ride the same tx boundary as the anchor floor: a
+    // savepoint that rolls back must restore the note map — otherwise the
+    // doomed append's note clobbers the outer committed append's head and
+    // the phantom check silently starves the watermark (w29-fixverify F12).
+    this.store.onTxDepth = ev => {
+      if (ev === 'push') (this.#pendingHeadStack ??= []).push(new Map(this.#pendingChainHeads ?? []));
+      else if (ev === 'pop') this.#pendingHeadStack?.pop();
+      else if (ev === 'rollback') { const snap = this.#pendingHeadStack?.pop(); if (snap !== undefined) this.#pendingChainHeads = snap; }
+    };
     // Migration accounting is observable, not silent: every re-sealed,
     // collided, ambiguous or unreadable row lands on the tenant's ledger
     // at open (w19-aad W19-2).
@@ -497,7 +509,16 @@ export class Fabric {
           // so consulting it here would deadlock the recovery (w28-crypto
           // F3, w28-regression w25/w27).
           const deadAt = this._keyDeaths(tenant);
-          signed.push([tenant, h, this.#auditSigners[tenant].sign({ tenant_id: tenant, seq: h.seq, hash: h.hash }, 'audit'), this._verifyKeysCached(tenant, 'audit'), deadAt]);
+          // The head this flush heals may already be perceived 'corrupt'
+          // by an outside-tx fold — its cached verdict must not wedge the
+          // signature that repairs it: resolve the signing path under the
+          // seal scope, where the fold skips the corrupt-head require
+          // (w29-fixverify F10).
+          const alreadySealed = this.#sealing?.has(tenant) === true;
+          if (!alreadySealed) (this.#sealing ??= new Set()).add(tenant);
+          try {
+            signed.push([tenant, h, this.#auditSigners[tenant].sign({ tenant_id: tenant, seq: h.seq, hash: h.hash }, 'audit'), this._verifyKeysCached(tenant, 'audit'), deadAt]);
+          } finally { if (!alreadySealed) this.#sealing.delete(tenant); }
         }
         catch { if (!this.#pendingChainHeads.has(tenant)) this.#pendingChainHeads.set(tenant, h); }
       }
@@ -1160,9 +1181,14 @@ export class Fabric {
         const genesis = this.#tenants[t]?.genesis_policy;
         if (activeD && genesis && activeD === digest(genesis) && !nonStaged && !stagedAnchor) allowed = genesis.algorithms?.allowed_suites;
         // Fully divergent: no anchor-verified constitution is resolvable —
-        // the fabric is already fail-closed on every policy-gated path, and
         // remediation signing (reanchorPolicy) must stay reachable to
-        // repair it. The suite check has nothing authoritative to consult.
+        // repair it, but the gate must never degrade to "any suite": only
+        // the vault-bound audit key's own suite may sign while the
+        // constitution is unverifiable (w29-fixverify F11).
+        else {
+          const boundSuite = this.vault.keys.get(this.tenant(t).keys?.audit?.key_id)?.suite;
+          allowed = boundSuite ? [boundSuite] : [];
+        }
       }
     }
     this._suiteAllowCache.set(t, { fp, allowed });
@@ -3791,12 +3817,21 @@ export class Fabric {
       if (extras?.gate_denied) { status = 'FAILED'; reason = extras.gate_denied.code; }
       if (extras?.rotation_precondition_lapsed) { status = 'FAILED'; reason = 'ROTATION_PRECONDITION_LAPSED'; }
       if (extras?.activation_superseded) { status = 'FAILED'; reason = extras.activation_superseded.detail; }
+      // Egress is irrevocable: an export whose journal durably committed
+      // rows is charged and watermarked even when the verdict lands
+      // non-VERIFIED (dispatch-unattested wedge, invalid response) — the
+      // same doctrine finishComposite applies to wedged children; without
+      // it a standalone wedged export leaves rows disclosed but invisible
+      // to coverage accounting forever (w29-datagate F1).
+      let wedgedExtras = null;
+      if (r.capsule.action.type === 'data.export' && status !== 'VERIFIED' && !existing && journal && raw && digest(raw) === digest(journal))
+        wedgedExtras = this._recordExportEgress(p, t, r, cert, raw, now);
       // H1: revocation cannot abort a committed reservation — it stops NEW
       // reservations. A revocation that landed between reservation and this
       // finish is recorded and flagged rather than hidden, so the ledger
       // shows the race instead of pretending it never happened.
       const revokedMidFlight = this.revoked(t, 'certificate', cert.certificate_id) || this.revoked(t, 'key', stored.envelope.protected.key_id);
-      const payload = { certificate_id: cert.certificate_id, capsule_digest: cert.capsule_digest, target_transaction_id: cert.certificate_id, observed_state_digest: valid ? raw.observed_state_digest : null, status, reason, execution_time: valid ? raw.execution_time : now, reconciliation_evidence: valid ? digest(raw) : null, journal_digest: status === 'VERIFIED' ? digest(journal) : null, simulation: true, output: valid && !extras?.gate_denied ? raw.output : null, watermarks: extras?.watermarks ?? null, gate_denied: extras?.gate_denied?.detail ?? null, revoked_post_reservation: revokedMidFlight || null, composite_child_of: this._auditIndex(t).dispatchedMeta.get(cert.certificate_id) ?? this._auditIndex(t).reservedMeta.get(cert.certificate_id) ?? null, supersedes: existing ? digest(existing) : null };
+      const payload = { certificate_id: cert.certificate_id, capsule_digest: cert.capsule_digest, target_transaction_id: cert.certificate_id, observed_state_digest: valid ? raw.observed_state_digest : null, status, reason, execution_time: valid ? raw.execution_time : now, reconciliation_evidence: valid ? digest(raw) : null, journal_digest: status === 'VERIFIED' ? digest(journal) : null, simulation: true, output: valid && !extras?.gate_denied ? raw.output : null, watermarks: extras?.watermarks ?? wedgedExtras?.watermarks ?? null, gate_denied: extras?.gate_denied?.detail ?? wedgedExtras?.gate_denied?.detail ?? null, revoked_post_reservation: revokedMidFlight || null, composite_child_of: this._auditIndex(t).dispatchedMeta.get(cert.certificate_id) ?? this._auditIndex(t).reservedMeta.get(cert.certificate_id) ?? null, supersedes: existing ? digest(existing) : null };
       const envelope = this.signAudit(t, payload, 'outcome', extras?.outcome_key_id ?? null, { allowPending: extras?.outcome_allow_pending === true });
       this.store.put(t, 'outcome', cert.certificate_id, envelope, now); stored.status = status; r.status = status;
       this.store.put(t, 'certificate', cert.certificate_id, stored, now); this.store.put(t, 'capsule', cert.capsule_id, r, now);

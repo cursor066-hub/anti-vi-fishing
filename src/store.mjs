@@ -77,7 +77,9 @@ export class Store {
         PRAGMA user_version=1;
       `);
     } catch (e) {
+      if (e instanceof InvariantError) throw e;
       if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
+      if (/readonly|not authorized/i.test(e?.message ?? '')) throw new InvariantError('INV-503-STORAGE', 'Ledger database file is not writable', 503);
       throw e;
     }
     // Migration runs BEFORE the append-only guards exist: its donor-revert
@@ -87,7 +89,9 @@ export class Store {
     try {
       this._installIntegrityGuards();
     } catch (e) {
+      if (e instanceof InvariantError) throw e;
       if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
+      if (/readonly|not authorized/i.test(e?.message ?? '')) throw new InvariantError('INV-503-STORAGE', 'Ledger database file is not writable', 503);
       throw e;
     }
   }
@@ -378,8 +382,9 @@ export class Store {
     // never leave the detector anchored to a time that was never committed.
     this._anchorStack ??= [];
     this._anchorStack.push([this._chainFloor ?? 0, this._lastRecoveredAt ?? null]);
-    const anchorsPop = () => this._anchorStack.pop();
-    const anchorsRollback = () => { const [f, r] = this._anchorStack.pop() ?? [0, null]; this._chainFloor = f; this._lastRecoveredAt = r; };
+    this.onTxDepth?.('push');
+    const anchorsPop = () => { this._anchorStack.pop(); this.onTxDepth?.('pop'); };
+    const anchorsRollback = () => { const [f, r] = this._anchorStack.pop() ?? [0, null]; this._chainFloor = f; this._lastRecoveredAt = r; this.onTxDepth?.('rollback'); };
     // Nested calls run under a SAVEPOINT: a callee's ROLLBACK can then never
     // destroy the outer transaction's writes (concurrency-audit L2).
     if (this.db.isTransaction) {

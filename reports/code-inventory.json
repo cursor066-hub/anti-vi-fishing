@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 5092,
-      "bytes": 400825
+      "lines": 5127,
+      "bytes": 403174
     },
     "src/issuerd.mjs": {
       "lines": 726,
@@ -82,12 +82,12 @@
       "bytes": 3876
     },
     "src/store.mjs": {
-      "lines": 841,
-      "bytes": 60833
+      "lines": 846,
+      "bytes": 61321
     },
     "src/target.mjs": {
-      "lines": 409,
-      "bytes": 30138
+      "lines": 416,
+      "bytes": 30687
     },
     "web/app.js": {
       "lines": 251,
@@ -390,8 +390,8 @@
       "bytes": 25992
     },
     "tests/w29.test.mjs": {
-      "lines": 163,
-      "bytes": 8903
+      "lines": 313,
+      "bytes": 17395
     },
     "tests/w5-mutations.test.mjs": {
       "lines": 194,
@@ -463,5 +463,5 @@
     }
   },
   "total_files": 115,
-  "total_lines": 26142
+  "total_lines": 26339
 }

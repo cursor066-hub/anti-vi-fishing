@@ -36,7 +36,12 @@ export class SimulatedTarget {
       // user_version stamps the schema like the ledger store does: a
       // file-writer swapping in a foreign sqlite database is caught by the
       // version marker before any encrypted row is trusted (w28-store F10).
-      this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=30000; PRAGMA secure_delete=ON;
+      // The marker must be READ before it is re-stamped — stamping alone
+      // silently adopts any foreign file (w29-fixverify F9).
+      this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=30000; PRAGMA secure_delete=ON;');
+      const version = this.db.prepare('PRAGMA user_version').get().user_version;
+      requireThat(version <= 1, 'INV-503-STORAGE', 'Database schema is newer than this application', 503);
+      this.db.exec(`
         CREATE TABLE IF NOT EXISTS resources(tenant TEXT, id TEXT, version INTEGER, value TEXT, PRIMARY KEY(tenant,id));
         CREATE TABLE IF NOT EXISTS transactions(tenant TEXT,id TEXT,value TEXT,PRIMARY KEY(tenant,id));
         CREATE TABLE IF NOT EXISTS dataset_rows(tenant TEXT, dataset TEXT, row_id TEXT, data TEXT, PRIMARY KEY(tenant,dataset,row_id));
@@ -51,7 +56,9 @@ export class SimulatedTarget {
       // (w8-fixverify F3).
       this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
     } catch (e) {
+      if (e instanceof InvariantError) throw e;
       if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
+      if (/readonly|not authorized/i.test(e?.message ?? '')) throw new InvariantError('INV-503-STORAGE', 'Target database file is not writable', 503);
       throw e;
     }
     this._migrateAad();
