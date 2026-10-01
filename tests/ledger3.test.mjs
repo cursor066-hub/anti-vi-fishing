@@ -69,7 +69,11 @@ test('DAT-007: no reusable database credential exists anywhere in configuration 
   const corpus = JSON.stringify(h.setup.config) + JSON.stringify(h.setup.credentials.acme);
   // Issuer and session tokens are opaque random strings scoped to their
   // endpoint — there is no database layer with a credential at all.
-  assert.ok(!/database|jdbc|postgres|mysql|mongodb|db_user|db_pass/i.test(JSON.stringify(h.setup.config)));
+  // A database credential would appear as a credential-named KEY or a
+  // connection-string scheme — scanning raw JSON for the bare words also
+  // matches random base64url key material ('jdbc' inside a public key is a
+  // ~2e-6-per-key false positive; CI hit it once).
+  assert.ok(!/"(database|jdbc|postgres|mysql|mongodb|db_user|db_pass)[a-z_]*"\s*:|jdbc:|postgres:\/\/|mysql:\/\/|mongodb:\/\//i.test(JSON.stringify(h.setup.config)));
   for (const token of Object.values(h.setup.credentials.acme)) assert.match(token, /^[A-Za-z0-9_-]{43}$/);
 });
 
