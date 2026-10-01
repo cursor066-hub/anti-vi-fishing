@@ -309,7 +309,10 @@ export class Store {
       // the same INV-409-AUDIT-TAMPER as a hash break (w13-fixverify L10).
       let envelope;
       try { envelope = JSON.parse(r.envelope); } catch { throw new InvariantError('INV-409-AUDIT-TAMPER', 'Audit row failed integrity verification', 409); }
-      requireThat(ctEqual(digest(envelope.payload), r.hash) && envelope.payload.sequence === r.seq && ctEqual(envelope.payload.previous, previous), 'INV-409-AUDIT-TAMPER', 'Audit row failed integrity verification', 409);
+      // A payload-less envelope is tamper evidence too — guard before
+      // digest so the failure classifies as AUDIT-TAMPER, not a bare
+      // schema crash (w18-fixverify F16).
+      requireThat(envelope.payload !== undefined && ctEqual(digest(envelope.payload), r.hash) && envelope.payload.sequence === r.seq && ctEqual(envelope.payload.previous, previous), 'INV-409-AUDIT-TAMPER', 'Audit row failed integrity verification', 409);
       // Hash+previous are attacker-computable (the seq trigger permits a raw
       // MAX+1 append): without signature verification the read path would
       // serve an unsigned forged row as a legitimate chain entry (w15).
@@ -331,7 +334,7 @@ export class Store {
       let envelope;
       try { envelope = JSON.parse(r.envelope); }
       catch { throw new InvariantError('INV-409-AUDIT-TAMPER', 'Audit row failed integrity verification', 409); }
-      requireThat(ctEqual(digest(envelope.payload), r.hash) && envelope.payload.sequence === r.seq && ctEqual(envelope.payload.previous, previous), 'INV-409-AUDIT-TAMPER', 'Audit row failed integrity verification', 409);
+      requireThat(envelope.payload !== undefined && ctEqual(digest(envelope.payload), r.hash) && envelope.payload.sequence === r.seq && ctEqual(envelope.payload.previous, previous), 'INV-409-AUDIT-TAMPER', 'Audit row failed integrity verification', 409);
       try { verifySigned(envelope, public_keys, 'audit'); }
       catch { throw new InvariantError('INV-409-AUDIT-TAMPER', 'Audit row failed signature verification', 409); }
       previous = r.hash;

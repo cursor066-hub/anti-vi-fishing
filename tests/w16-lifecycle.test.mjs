@@ -23,8 +23,10 @@ test('w12-lifecycle F2: an unanchored staged row is retired, never promoted', t 
   forged.rules['finance.beneficiary.create'].approval_threshold = 0;
   forged.rules['finance.beneficiary.create'].evidence_kinds = [];
   h.f.store.put('acme', 'policy', 'staged', { policy: forged, activate_at: forged.not_before, staged_at: h.now() }, h.now());
-  // The getter refuses it pre-promotion…
-  assert.throws(() => h.f.policy('acme'), hasCode('INV-409-INTEGRITY'));
+  // The getter refuses to serve it — it degrades to the honest active
+  // constitution rather than wedging every read (w18-fixverify F9), and
+  // the sweep retires the forged row loudly on the next transaction…
+  assert.equal(h.f.policy('acme').policy_id.includes('forged'), false, 'unanchored staged row is never served');
   // …and the first transaction after the forge retires the row instead of
   // minting a signed POLICY_ACTIVATED over it (w12-lifecycle F2).
   h.f.cancel(h.p(), victim.capsule.capsule_id);

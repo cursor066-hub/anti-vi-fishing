@@ -310,7 +310,7 @@ export class Fabric {
       const ceremony = this.store.get(t, 'ceremony', cid);
       if (!ceremony || ceremony.rotation?.new_key_id !== kid || ceremony.rotation?.key_class !== klass) continue;
       let planDigest = null;
-      try { planDigest = digest({ ceremony_id: cid, tenant_id: ceremony.tenant_id, purpose: ceremony.purpose, threshold: ceremony.threshold, custodians: [...(ceremony.custodians ?? [])].sort(), valid_until: ceremony.valid_until, min_delay_ms: ceremony.min_delay_ms, rotation: ceremony.rotation ?? null }); } catch { /* forged rows fail closed */ }
+      try { planDigest = digest({ ceremony_id: cid, tenant_id: ceremony.tenant_id, purpose: ceremony.purpose, threshold: ceremony.threshold, custodians: [...(ceremony.custodians ?? [])].sort(), valid_until: ceremony.valid_until, min_delay_ms: ceremony.min_delay_ms, devices: ceremony.devices ?? null, rotation: ceremony.rotation ?? null }); } catch { /* forged rows fail closed */ }
       if (planDigest === null || !ctEqual(planDigest, plannedDigest)) continue;
       if ((idx.ceremonyAcks.get(cid)?.size ?? 0) >= ceremony.threshold) return true;
     }
@@ -325,7 +325,7 @@ export class Fabric {
     // terms instead (w17-redteam A2).
     const planned = this._auditIndex(t).ceremonyPlanned?.get(ceremony.ceremony_id);
     let planDigest = null;
-    try { planDigest = digest({ ceremony_id: ceremony.ceremony_id, tenant_id: ceremony.tenant_id, purpose: ceremony.purpose, threshold: ceremony.threshold, custodians: [...(ceremony.custodians ?? [])].sort(), valid_until: ceremony.valid_until, min_delay_ms: ceremony.min_delay_ms, rotation: ceremony.rotation ?? null }); }
+    try { planDigest = digest({ ceremony_id: ceremony.ceremony_id, tenant_id: ceremony.tenant_id, purpose: ceremony.purpose, threshold: ceremony.threshold, custodians: [...(ceremony.custodians ?? [])].sort(), valid_until: ceremony.valid_until, min_delay_ms: ceremony.min_delay_ms, devices: ceremony.devices ?? null, rotation: ceremony.rotation ?? null }); }
     catch { /* forged rows with non-canonical fields fail closed, never crash the gate */ }
     if (planned === undefined || planDigest === null || !ctEqual(planDigest, planned))
       return { count: ceremony.acknowledgements?.length ?? 0, live: 0, custodians: new Set() };
@@ -646,7 +646,8 @@ export class Fabric {
     const callerRefs = [`subject:${p.subject_id}`, `key:${iid}`, ...(ident?.device_id ? [`device:${ident.device_id}`] : [])];
     requireThat(!callerRefs.some(ref => revokedSeen.has(ref)), 'INV-403-QUARANTINE', 'A revoked identity cannot seal the audit chain', 403);
     let repointUndo = null;
-    return this.store.tx(() => {
+    try {
+      return this.store.tx(() => {
       const now = this.clock();
       // Suspend and restore the guards inside one transaction — if the
       // recreate fails the delete rolls back with it.
@@ -717,17 +718,27 @@ export class Fabric {
           this.store.put(t, 'config-snapshot', 'current', { digest: digest({ tenant: t, sections: postSections }), taken_at: now, sections: postSections }, now);
         }
       }
-      try { this.store.audit(t, 'AUDIT_SEALED', p.subject_id, 'audit', { sealed_at_seq: firstBad, removed_count: removed.length, removed_head: removed[0] ?? null, removed_tail: removed.at(-1) ?? null }, now); }
-      catch (sealErr) { repointUndo?.(); throw sealErr; }
+      this.store.audit(t, 'AUDIT_SEALED', p.subject_id, 'audit', { sealed_at_seq: firstBad, removed_count: removed.length, removed_head: removed[0] ?? null, removed_tail: removed.at(-1) ?? null }, now);
       this.#auditIdx?.delete(t);
+      this._clockRecoveryUnverifiable?.delete(t);
       return { sealed: true, sealed_at_seq: firstBad, removed_count: removed.length };
-    });
+      });
+    } catch (sealErr) {
+      // Any fault inside the repoint window — activation, the re-anchor
+      // snapshot, the seal row itself — must undo the in-memory repoint:
+      // memory may never claim a binding the ledger rejected. The cached
+      // index can hold phantom-consumed rows folded inside the aborted tx,
+      // so it is dropped unconditionally — the next read rebuilds from the
+      // committed head (w18-fixverify F10/F11).
+      repointUndo?.(); this.#auditIdx?.delete(t); throw sealErr;
+    }
   }
   recoverClock(p) {
     this.authorize(p, ['security', 'policy_admin']);
     return this.store.tx(() => {
       const now = this.clock();
       const prior = this.store.db.prepare('SELECT last FROM clock WHERE id=1').get()?.last ?? null;
+      const unverifiable = [];
       // A backward step (snapshot restore) is survivable, but never silently:
       // it must not re-open the validity window of any authority that the
       // ledger watched lapse. Any certificate or live-status capsule whose
@@ -735,37 +746,36 @@ export class Fabric {
       // (w9-network F4). Forward steps need no such check.
       if (prior !== null && now < prior) {
         for (const tenant of Object.keys(this.#tenants)) {
-          const idx = this._auditIndex(tenant);
-          // Enumeration must not cap at a fixed page — a flooded table
-          // would push a real certificate past the limit and let a rewind
-          // resurrect it (w17-redteam E2). Rows are tolerated per-record
-          // and only chain-anchored state may veto: a planted certificate
-          // envelope fails verification, and a planted or rewritten capsule
-          // never matches its anchored proposed digest (w17-fixverify L3).
-          for (let off = 0;; off += 5000) {
-            const ids = this.store.ids(tenant, 'certificate', 5000, off);
-            if (!ids.length) break;
-            for (const id of ids) {
-              let c; try { c = this.store.get(tenant, 'certificate', id); } catch { continue; }
-              if (!c || !(idx.issuedCerts ?? new Set()).has(id)) continue;
-              if (c.consumed || idx.reserved.has(id)) continue;
-              let envOk = false; try { envOk = !!verifySigned(c.envelope, this.executionPublic(tenant), 'action-certificate'); } catch { envOk = false; }
-              if (!envOk) continue;
-              const exp = c.envelope.payload.expires_at;
-              requireThat(exp <= now || exp > prior, 'INV-503-TIME', 'Clock recovery would resurrect an expired certificate', 503);
-            }
+          // A tenant whose chain cannot fold cannot prove it has no
+          // resurrection candidate — it is blocked alone, never allowed to
+          // veto recovery for every other tenant (w18-fixverify F12). It
+          // transacts again once sealAuditChain repairs the chain.
+          let idx;
+          try { idx = this._auditIndex(tenant); }
+          catch { unverifiable.push(tenant); (this._clockRecoveryUnverifiable ??= new Set()).add(tenant); continue; }
+          // Anchored enumeration only: deleting or flag-flipping a mutable
+          // row can never launder an expired authority past the veto — a
+          // missing or divergent anchored row IS the veto evidence
+          // (w18-fixverify F5). Consumption and terminal state likewise
+          // read from the fold, never from row flags.
+          for (const id of idx.issuedCerts ?? []) {
+            let c; try { c = this.store.get(tenant, 'certificate', id); } catch { c = null; }
+            requireThat(c, 'INV-503-TIME', 'Anchored certificate row missing during clock recovery', 503);
+            if (idx.outcomes.has(id) || idx.reserved.has(id)) continue;
+            let envOk = false; try { envOk = !!verifySigned(c.envelope, this.executionPublic(tenant), 'action-certificate'); } catch { envOk = false; }
+            requireThat(envOk, 'INV-503-TIME', 'Anchored certificate envelope does not verify — ledger tamper', 503);
+            const exp = c.envelope.payload.expires_at;
+            requireThat(exp <= now || exp > prior, 'INV-503-TIME', 'Clock recovery would resurrect an expired certificate', 503);
           }
-          for (let off = 0;; off += 5000) {
-            const ids = this.store.ids(tenant, 'capsule', 5000, off);
-            if (!ids.length) break;
-            for (const id of ids) {
-              let r; try { r = this.store.get(tenant, 'capsule', id); } catch { continue; }
-              if (!r) continue;
-              const anchoredCapsuleDigest = idx.proposedDigest?.get(id);
-              if (anchoredCapsuleDigest === undefined || digest(r.capsule) !== anchoredCapsuleDigest) continue;
-              if (['VERIFIED', 'UNCERTAIN', 'FAILED', 'COMPENSATED', 'CANCELLED', 'EXECUTING'].includes(r.status)) continue;
-              requireThat(r.capsule.expires_at <= now || r.capsule.expires_at > prior, 'INV-503-TIME', 'Clock recovery would resurrect an expired action', 503);
-            }
+          for (const [id, anchoredCapsuleDigest] of idx.proposedDigest ?? []) {
+            let r; try { r = this.store.get(tenant, 'capsule', id); } catch { r = null; }
+            requireThat(r && digest(r.capsule) === anchoredCapsuleDigest, 'INV-503-TIME', 'Anchored capsule row missing or divergent during clock recovery', 503);
+            // Only a certified capsule can dispatch — a proposed-only
+            // capsule cannot resurrect, and a terminally-anchored one is
+            // spent. Both facts live on the chain, not the mutable status.
+            const certId = idx.issuedCert.get(id);
+            if (!certId || idx.outcomes.has(certId) || idx.reserved.has(certId)) continue;
+            requireThat(r.capsule.expires_at <= now || r.capsule.expires_at > prior, 'INV-503-TIME', 'Clock recovery would resurrect an expired action', 503);
           }
         }
       }
@@ -774,8 +784,8 @@ export class Fabric {
       // host time. An external verifier sees the jump on the signed chain
       // — time discontinuity is evidence, not silent rewriting (w7-clock F1).
       this.store.clock(now, { recovery: true });
-      this.store.audit(p.tenant_id, 'CLOCK_RECOVERED', p.subject_id, 'local-gate', { prior_last: prior, recovered_at: now, regression_ms: prior !== null ? prior - now : 0 }, now);
-      return { recovered_at: now, prior_last: prior };
+      this.store.audit(p.tenant_id, 'CLOCK_RECOVERED', p.subject_id, 'local-gate', { prior_last: prior, recovered_at: now, regression_ms: prior !== null ? prior - now : 0, unverifiable_tenants: unverifiable }, now);
+      return { recovered_at: now, prior_last: prior, unverifiable_tenants: unverifiable };
     });
   }
   identity(p) {
@@ -816,8 +826,10 @@ export class Fabric {
     // the string cannot un-budget the ledger (w13-timing M-1).
     const key = `${t}${subject_id}${code}`, last = this.#denyAudit.get(key);
     if (last !== undefined && now - last < 60_000) return;
-    this.#denyAudit.set(key, now);
-    try { this.store.audit(t, 'AUTHORIZATION_DENIED', subject_id ?? 'anonymous', null, { code, message: String(message).slice(0, 200) }, now); } catch { /* ledger write failure does not change the verdict */ }
+    // The window is consumed only by a write that lands — a failed audit
+    // insert must not suppress the next identical denial's evidence
+    // (w18-fixverify F14).
+    try { this.store.audit(t, 'AUTHORIZATION_DENIED', subject_id ?? 'anonymous', null, { code, message: String(message).slice(0, 200) }, now); this.#denyAudit.set(key, now); } catch { /* ledger write failure does not change the verdict */ }
     // Quarantine denials land in the containment ledger too — a quarantined
     // device hammering proposals must be reconstructible, not invisible
     // (w11-lifecycle F5; NET-010 coverage of pre-transaction denials).
@@ -911,8 +923,12 @@ export class Fabric {
     // version at activate_at. Versions can never regress.
     const staged = this.store.get(t, 'policy', 'staged');
     if (!staged) return null;
-    const active = this.store.must(t, 'policy', 'active');
     if (staged.activate_at <= now) {
+      // The active fetch stays behind the due-gate and never asserts: a
+      // planted staged row must not demand that an 'active' row exist —
+      // a missing or divergent active is exactly the state reanchorPolicy
+      // repairs, and every transaction runs this sweep (w18-fixverify F6).
+      const active = this.store.get(t, 'policy', 'active');
       // The version ladder may only consume ANCHORED content: the mutable
       // 'active' row supplies the baseline version solely when it matches
       // its last non-staged ledger anchor — otherwise a planted row
@@ -922,7 +938,7 @@ export class Fabric {
       // A due-but-stale row (superseded version race, or expired before its
       // slot) must never wedge every transaction — retire it honestly and
       // move on (policy-audit F1/F3).
-      if (!activeAnchor || digest(active) !== activeAnchor.digest || staged.policy.version !== active.version + 1 || staged.policy.expires_at <= now) {
+      if (!activeAnchor || !active || digest(active) !== activeAnchor.digest || staged.policy.version !== active.version + 1 || staged.policy.expires_at <= now) {
         this.store.remove(t, 'policy', 'staged');
         this.store.audit(t, 'POLICY_SUPERSEDED', 'system', staged.policy.policy_id, { version: staged.policy.version, reason: !activeAnchor || digest(active) !== activeAnchor.digest ? 'divergent-active-row' : (staged.policy.expires_at <= now ? 'expired-before-activation' : 'version-superseded') }, now);
         return null;
@@ -932,7 +948,13 @@ export class Fabric {
       // active constitution by being promoted (w12-lifecycle F2). An
       // unanchored staged row is tamper evidence: retire it loudly instead
       // of letting a mutable row mint a signed POLICY_ACTIVATED.
-      const stagedAnchored = this._auditIndex(t).policyAnchors.some(a => a.staged && a.digest === digest(staged.policy));
+      // Only the LATEST staged anchor governs — any earlier staged draft
+      // is spent once a successor anchors — and the row must match both
+      // its content digest and its anchored activation slot: a swapped or
+      // back-dated row is tamper evidence, not a constitution candidate
+      // (w18-fixverify F8/F9).
+      const stagedAnchor = [...this._auditIndex(t).policyAnchors].reverse().find(a => a.staged);
+      const stagedAnchored = stagedAnchor && stagedAnchor.digest === digest(staged.policy) && stagedAnchor.activate_at === staged.activate_at;
       if (!stagedAnchored) {
         this.store.remove(t, 'policy', 'staged');
         this.store.audit(t, 'POLICY_SUPERSEDED', 'system', staged.policy.policy_id, { version: staged.policy.version, reason: 'unanchored-staged-row', policy_digest: digest(staged.policy) }, now);
@@ -955,6 +977,10 @@ export class Fabric {
       // in-memory set — a second Fabric instance on the same deployment
       // cannot transact through a drift it never noticed (concurrency-audit M4).
       requireThat(allowDuringDrift || (!this._configDrift.has(principal.tenant_id) && !this._auditIndex(principal.tenant_id).tenantDrifted), 'INV-403-QUARANTINE', 'Configuration drift withdrew gate privileges pending security re-attestation', 403);
+      // A tenant whose chain could not fold during a clock rewind stays
+      // closed until sealAuditChain repairs it — proceeding would risk
+      // resurrecting authority the veto sweep could not see (w18-fixverify F12).
+      requireThat(!this._clockRecoveryUnverifiable?.has(principal.tenant_id), 'INV-503-TIME', 'Tenant chain could not be verified during clock recovery — seal the audit chain first', 503);
       return this.store.tx(() => { const now = this.clock(); this.store.clock(now); this.activateDuePolicies(principal.tenant_id, now); return fn(now); });
     }
     catch (error) {
@@ -981,8 +1007,7 @@ export class Fabric {
         // (w17-idx F7).
         const rNow = this.clock(), rKey = `${principal?.tenant_id ?? 'unknown'} ${principal?.subject_id ?? 'anonymous'} ${error.code}`;
         if (rNow - (this.#rejectMemo.get(rKey) ?? -Infinity) >= 60_000) {
-          this.#rejectMemo.set(rKey, rNow);
-          try { this.store.tx(() => { const now = this.clock(); this.store.clock(now); this.store.audit(principal.tenant_id, 'SECURITY_OPERATION_REJECTED', principal.subject_id, 'local-gate', { code: error.code }, now); }); } catch { /* ledger unavailable — surface the real rejection */ }
+          try { this.store.tx(() => { const now = this.clock(); this.store.clock(now); this.store.audit(principal.tenant_id, 'SECURITY_OPERATION_REJECTED', principal.subject_id, 'local-gate', { code: error.code }, now); }); this.#rejectMemo.set(rKey, rNow); } catch { /* ledger unavailable — surface the real rejection */ }
         }
         // Quarantine denials land in the containment ledger too — NET-010
         // reconstruction must see denied executes/proposes, not only denied
@@ -1023,7 +1048,7 @@ export class Fabric {
   _auditIndex(t) {
     const maxSeq = this.store.db.prepare('SELECT COALESCE(MAX(seq),0) m FROM audit WHERE tenant=?').get(t).m;
     let idx = this.#auditIdx.get(t);
-    if (!idx) { idx = { maxSeq: 0, building: false, revoked: new Set(), attached: new Map(), proposedNonce: new Set(), proposedAt: new Map(), proposedDigest: new Map(), issued: new Set(), issuedCert: new Map(), issuedCerts: new Set(), grants: new Map(), grantMeta: new Map(), rotations: new Map(), rotationsByPrev: new Map(), rotationKeys: new Set(), policyAnchors: [], dataAccess: [], perceptionNonce: new Set(), reserved: new Set(), dispatched: new Map(), outcomes: new Map(), keyDeadAt: new Map(), parentChildren: new Map(), simulated: [], issuerDrift: new Set(), tenantDrifted: false, configSnapshot: null, decisions: new Map(), runtimeUse: [], runtimeUseByCap: new Map(), runtimeUseBySubject: new Map(), revocationDigests: new Map(), denials: [], denialsByReq: new Map(), ceremonyAcks: new Map(), ceremonyPlanned: new Map(), ceremonyCommitted: new Map(), ceremonyAborted: new Set(), coverageAnchors: new Map() }; this.#auditIdx.set(t, idx); }
+    if (!idx) { idx = { maxSeq: 0, building: false, revoked: new Set(), attached: new Map(), proposedNonce: new Set(), proposedAt: new Map(), proposedDigest: new Map(), issued: new Set(), issuedCert: new Map(), issuedCerts: new Set(), grants: new Map(), grantMeta: new Map(), rotations: new Map(), rotationsByPrev: new Map(), rotationKeys: new Set(), policyAnchors: [], dataAccess: [], perceptionNonce: new Set(), reserved: new Set(), dispatched: new Map(), outcomes: new Map(), keyDeadAt: new Map(), parentChildren: new Map(), simulated: [], issuerDrift: new Set(), tenantDrifted: false, configSnapshot: null, decisions: new Map(), runtimeUse: [], runtimeUseByCap: new Map(), runtimeUseBySubject: new Map(), revocationDigests: new Map(), denials: [], denialsByReq: new Map(), ceremonyAcks: new Map(), ceremonyPlanned: new Map(), ceremonyCommitted: new Map(), ceremonyAborted: new Set(), ceremonyCompleted: new Set(), ceremonyNotices: new Map(), ceremonyRotationConsumed: new Set(), coverageAnchors: new Map() }; this.#auditIdx.set(t, idx); }
     // Re-entrancy must fail closed: a nested caller handed the mid-fold
     // partial projection could observe anchors that the committed chain
     // never attested (w17-idx F9). Nothing inside the fold recurses
@@ -1104,6 +1129,10 @@ export class Fabric {
           if (typeof pl.reference === 'string') idx.rotationKeys.add(pl.reference);
           if (typeof meta.previous_key_id === 'string') idx.rotationKeys.add(meta.previous_key_id);
           if (typeof meta.key_class === 'string' && typeof meta.previous_key_id === 'string' && typeof pl.reference === 'string') idx.rotationsByPrev.set(`${meta.key_class}:${meta.previous_key_id}`, pl.reference);
+          // Anchored ceremony spend: a mutable rotation_consumed row flag
+          // can neither erase nor fake a spend the ledger recorded
+          // (w18-fixverify F13).
+          if (typeof meta.ceremony_id === 'string') idx.ceremonyRotationConsumed.add(meta.ceremony_id);
           break;
         case 'ROTATION_PREPARED': if (typeof pl.reference === 'string') idx.rotationKeys.add(pl.reference); break;
         case 'EVIDENCE_ATTACHED': { const l = idx.attached.get(pl.reference) ?? []; l.push(meta.evidence_id); idx.attached.set(pl.reference, l); break; }
@@ -1111,7 +1140,7 @@ export class Fabric {
         case 'CERTIFICATE_ISSUED': idx.issued.add(pl.reference); if (meta.certificate_id) { idx.issuedCert.set(pl.reference, meta.certificate_id); idx.issuedCerts.add(meta.certificate_id); } if (Array.isArray(meta.children)) idx.parentChildren.set(pl.reference, meta.children); break;
         case 'JIT_GRANT_ISSUED': idx.grants.set(meta.grant_id, meta.scope_digest ?? meta.grant_digest); if (meta.grant_id) idx.grantMeta.set(meta.grant_id, { expires_at: meta.expires_at, at: pl.time }); break;
         case 'POLICY_GENESIS': case 'POLICY_ACTIVATED': case 'EMERGENCY_POLICY_ACTIVATED': if (meta.policy_digest) idx.policyAnchors.push({ staged: false, digest: meta.policy_digest }); break;
-        case 'POLICY_STAGED': if (meta.policy_digest) idx.policyAnchors.push({ staged: true, digest: meta.policy_digest }); break;
+        case 'POLICY_STAGED': if (meta.policy_digest) idx.policyAnchors.push({ staged: true, digest: meta.policy_digest, activate_at: meta.activate_at ?? null }); break;
         case 'POLICY_SIMULATED': if (meta.candidate_digest) idx.simulated.push({ candidate_digest: meta.candidate_digest, baseline_digest: meta.baseline_digest ?? null, at: pl.time }); break;
         case 'CONNECTOR_DRIFT': idx.issuerDrift.add(pl.reference); break;
         case 'CONNECTOR_REVALIDATED': idx.issuerDrift.delete(pl.reference); break;
@@ -1137,6 +1166,15 @@ export class Fabric {
         // the quorum's authority (w17-fixverify H1).
         case 'CEREMONY_ACKNOWLEDGED': if (meta.custodian === pl.actor) { const s = idx.ceremonyAcks.get(pl.reference) ?? new Set(); s.add(pl.actor); idx.ceremonyAcks.set(pl.reference, s); } break;
         case 'CEREMONY_ABORTED': idx.ceremonyAborted ??= new Set(); idx.ceremonyAborted.add(pl.reference); break;
+        // Anchored lifecycle, not row status: flipping the mutable
+        // ceremony row can never resurrect an aborted ceremony, replay a
+        // completed reconstruction, or re-open a committed deal
+        // (w18-fixverify F2).
+        case 'CEREMONY_RECONSTRUCTED': idx.ceremonyCompleted ??= new Set(); idx.ceremonyCompleted.add(pl.reference); break;
+        // 'All custodians notified' attests through the chain — the
+        // mutable notices array can be padded or truncated at will
+        // (w18-fixverify F15).
+        case 'RECOVERY_NOTICE_ISSUED': if (meta.custodian) { const ns = idx.ceremonyNotices.get(pl.reference) ?? new Set(); ns.add(meta.custodian); idx.ceremonyNotices.set(pl.reference, ns); } break;
       }
         idx.maxSeq = Math.max(idx.maxSeq, e.sequence ?? 0);
       }
@@ -1230,9 +1268,14 @@ export class Fabric {
     // closed — reanchorPolicy is the break-glass that establishes the
     // first anchor under a signed remediation event (w16-fixverify F6).
     requireThat(anchor && digest(active) === anchor.digest, 'INV-409-INTEGRITY', 'Active policy diverges from its ledger-anchored activation', 409);
+    // The getter serves staged content only when the row IS the latest
+    // staged anchor verbatim — content digest AND activation slot. A
+    // swapped or back-dated row degrades to 'active' rather than throwing,
+    // so tamper cannot wedge every reader; the transaction-path sweep
+    // retires it loudly instead (w18-fixverify F8/F9).
     if (staged && staged.activate_at <= this.clock() && staged.policy.version === active.version + 1 && staged.policy.expires_at > this.clock()) {
-      requireThat([...anchors].reverse().find(a => a.staged && a.digest === digest(staged.policy)), 'INV-409-INTEGRITY', 'Staged policy has no ledger-anchored staging event', 409);
-      return staged.policy;
+      const stagedAnchor = [...anchors].reverse().find(a => a.staged);
+      if (stagedAnchor && stagedAnchor.digest === digest(staged.policy) && stagedAnchor.activate_at === staged.activate_at) return staged.policy;
     }
     return active;
   }
@@ -1878,7 +1921,14 @@ export class Fabric {
         requireThat(entry.purpose === 'any' || (this._keyPurposes[req.key_class] ?? []).every(x => offered.includes(x)), 'INV-403-SCOPE', 'Rotation key purpose does not cover the target class', 403);
         if (req.ceremony_id) {
           const ceremony = this.store.get(t, 'ceremony', req.ceremony_id);
-          requireThat(ceremony && ceremony.status !== 'completed' && ceremony.valid_until > now && ceremony.purpose === 'key.rotate' && !ceremony.rotation_consumed, 'INV-409-STATE', 'key.rotate requires a live, unconsumed key.rotate ceremony', 409);
+          // Anchored lifecycle + anchored spend: forged row flags can
+          // neither fake a spend nor block a live ceremony — the ledger's
+          // recorded lifecycle is the only consulted state
+          // (w18-fixverify F2/F13).
+          const cidx = this._auditIndex(t);
+          requireThat(ceremony && ceremony.valid_until > now && ceremony.purpose === 'key.rotate'
+            && !(cidx.ceremonyAborted?.has(req.ceremony_id) || cidx.ceremonyCompleted?.has(req.ceremony_id))
+            && !cidx.ceremonyRotationConsumed?.has(req.ceremony_id), 'INV-409-STATE', 'key.rotate requires a live, unconsumed key.rotate ceremony', 409);
           requireThat(ceremony.rotation?.key_class === req.key_class && ceremony.rotation?.new_key_id === req.new_key_id, 'INV-403-SCOPE', 'Ceremony is not bound to this rotation', 403);
           requireThat(this.custodianQuorum(t, ceremony).live >= ceremony.threshold, 'INV-409-STATE', 'Ceremony lacks a live custodian quorum across failure domains', 409);
           // The ceremony is spent atomically with the reservation — a second
@@ -2210,8 +2260,10 @@ export class Fabric {
         const ceremony = this.store.get(t, 'ceremony', req.ceremony_id);
         // The ceremony was consumed atomically at reservation — this may
         // only be consumed by THIS capsule and stay bound to this rotation.
+        const cidxR = this._auditIndex(t);
         preconditions = preconditions && ceremony && ceremony.purpose === 'key.rotate' && ceremony.rotation_consumed === r.capsule.capsule_id
-          && ceremony.rotation?.key_class === req.key_class && ceremony.rotation?.new_key_id === req.new_key_id;
+          && ceremony.rotation?.key_class === req.key_class && ceremony.rotation?.new_key_id === req.new_key_id
+          && !(cidxR.ceremonyAborted?.has(req.ceremony_id) || cidxR.ceremonyCompleted?.has(req.ceremony_id));
       }
       if (!preconditions) return { rotation_precondition_lapsed: true };
       const klass = req.key_class, previous = this.keys(t)[klass];
@@ -2976,6 +3028,11 @@ export class Fabric {
       this.assertSuiteAllowed(t, envelope.protected.suite);
       fields(payload, ['ceremony_id', 'artifact_digest', 'custodian', 'acknowledged_at']);
       const ceremony = this.store.must(t, 'ceremony', identifier(payload.ceremony_id));
+      // Anchored lifecycle wins over the mutable row: a status flip can
+      // never re-open consent on a ceremony the ledger already closed
+      // (w18-fixverify F2).
+      const cidx = this._auditIndex(t);
+      requireThat(!(cidx.ceremonyAborted?.has(ceremony.ceremony_id) || cidx.ceremonyCompleted?.has(ceremony.ceremony_id)), 'INV-409-STATE', 'Ceremony is ledger-anchored as closed', 409);
       requireThat(payload.custodian === p.subject_id && payload.artifact_digest === ceremony.artifact_digest, 'INV-403-SCOPE', 'Acknowledgement scope mismatch', 403);
       // The signing key must belong to the claimed custodian identity — the
       // same binding rule approvals enforce (HTTP-audit finding).
@@ -3001,6 +3058,11 @@ export class Fabric {
       // custodian — a non-member custodian must never burn the ceremony and
       // pocket every share (w11-approval F3).
       requireThat(this.identity(p).roles.includes('security') || ceremony.custodians.includes(p.subject_id), 'INV-403-ROLE', 'Only a security officer or a ceremony member may deal shares', 403);
+      // Anchored lifecycle + anchored commitment: a row flip can neither
+      // resurrect a closed ceremony nor re-open an already-committed deal
+      // to restart the delay clock (w18-fixverify F2).
+      const cidx = this._auditIndex(p.tenant_id);
+      requireThat(!(cidx.ceremonyAborted?.has(ceremony.ceremony_id) || cidx.ceremonyCompleted?.has(ceremony.ceremony_id) || cidx.ceremonyCommitted?.has(ceremony.ceremony_id)), 'INV-409-STATE', 'Ceremony is ledger-anchored as closed or committed', 409);
       commitShares(ceremony, shares, now);
       this.store.put(p.tenant_id, 'ceremony', ceremony.ceremony_id, ceremony, now);
       this.store.audit(p.tenant_id, 'CEREMONY_SHARES_COMMITTED', p.subject_id, ceremony.ceremony_id, { count: ceremony.share_commitments.length }, now);
@@ -3017,6 +3079,10 @@ export class Fabric {
       this.assertHealthy(p.tenant_id, p.subject_id, this.identity(p).device_id, now);
       const ceremony = this.store.must(p.tenant_id, 'ceremony', identifier(ceremony_id));
       requireThat(this.identity(p).roles.includes('security') || ceremony.custodians.includes(p.subject_id), 'INV-403-ROLE', 'Only a security officer or a ceremony member may abort the ceremony', 403);
+      // An anchored-closed ceremony can never be aborted a second time —
+      // a row-status flip does not re-open the kill switch (w18-fixverify F2).
+      const cidx = this._auditIndex(p.tenant_id);
+      requireThat(!(cidx.ceremonyAborted?.has(ceremony.ceremony_id) || cidx.ceremonyCompleted?.has(ceremony.ceremony_id)), 'INV-409-STATE', 'Ceremony is ledger-anchored as closed', 409);
       requireThat(!['completed', 'aborted'].includes(ceremony.status), 'INV-409-STATE', 'Ceremony is already closed', 409);
       const prior = ceremony.status;
       ceremony.status = 'aborted';
@@ -3034,6 +3100,10 @@ export class Fabric {
       // a different share subset — the status must land on the stored row,
       // not just on the working clone (w18-crypto F4).
       requireThat(!['completed', 'aborted'].includes(ceremony.status), 'INV-409-STATE', 'Ceremony is already closed', 409);
+      // The anchored lifecycle is the authority: a row-status flip can
+      // never resurrect what the ledger already closed (w18-fixverify F2).
+      const cidx = this._auditIndex(t);
+      requireThat(!(cidx.ceremonyAborted?.has(ceremony.ceremony_id) || cidx.ceremonyCompleted?.has(ceremony.ceremony_id)), 'INV-409-STATE', 'Ceremony is ledger-anchored as closed', 409);
       // The consent quorum and the share quorum are one set: every presented
       // share must belong to a custodian who acknowledged the committed
       // artifact, and the acknowledgements themselves must span distinct
@@ -3052,9 +3122,15 @@ export class Fabric {
       // mutable row field — a rewritten committed_at cannot pre-date the
       // share commitment the ledger actually attested (w17-redteam A2
       // residual). A ceremony with no anchored commit cannot reconstruct.
-      const anchoredCommitted = this._auditIndex(t).ceremonyCommitted?.get(ceremony.ceremony_id);
+      const anchoredCommitted = cidx.ceremonyCommitted?.get(ceremony.ceremony_id);
       requireThat(anchoredCommitted !== undefined, 'INV-409-INTEGRITY', 'Ceremony share commitment is not ledger-anchored', 409);
-      const { secret, artifact } = reconstructSecret({ ...ceremony, committed_at: anchoredCommitted }, shares, now);
+      // 'Every custodian was notified' attests through the chain, not the
+      // mutable notices array — a padded or truncated row can neither fake
+      // coverage nor wedge a legitimate reconstruction (w18-fixverify F15).
+      const notified = cidx.ceremonyNotices?.get(ceremony.ceremony_id) ?? new Set();
+      requireThat(ceremony.custodians.every(c => notified.has(c)), 'INV-409-STATE', 'Custodian notice coverage is not ledger-anchored', 409);
+      const settled = { ...ceremony, committed_at: anchoredCommitted, notices: ceremony.custodians.map(c => ({ custodian: c })) };
+      const { secret, artifact } = reconstructSecret(settled, shares, now);
       // The status flip inside reconstructSecret lands on the clone passed
       // to it — re-apply it to the stored row so the one-shot invariant
       // actually persists (w18-crypto F4).
@@ -3084,6 +3160,11 @@ export class Fabric {
       // (w11-approval F3).
       requireThat(this.identity(p).roles.includes('security') || ceremony.custodians.includes(p.subject_id), 'INV-403-ROLE', 'Only a security officer or a ceremony member may deal shares', 403);
       requireThat(ceremony.status === 'planned', 'INV-409-STATE', 'Shares were already committed for this ceremony', 409);
+      // Same anchored-closed/committed guard as commitCeremonyShares — a
+      // row flipped back to 'planned' cannot re-deal the secret
+      // (w18-fixverify F2).
+      const cidx = this._auditIndex(p.tenant_id);
+      requireThat(!(cidx.ceremonyAborted?.has(ceremony.ceremony_id) || cidx.ceremonyCompleted?.has(ceremony.ceremony_id) || cidx.ceremonyCommitted?.has(ceremony.ceremony_id)), 'INV-409-STATE', 'Ceremony is ledger-anchored as closed or committed', 409);
       requireThat(typeof secretB64 === 'string', 'INV-400-SCHEMA', 'Secret must be a base64url string');
       const secret = Buffer.from(secretB64, 'base64url');
       requireThat(secret.length >= 16 && secret.length <= 512, 'INV-400-SCHEMA', 'Secret size out of bounds');

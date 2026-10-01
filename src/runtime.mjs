@@ -170,10 +170,15 @@ export class RuntimeGate {
       // (w17-idx F7). The ledger still proves the denial happened, just
       // not at request frequency.
       this.f._containMemo ??= new Map();
-      const memoKey = `${t} ${principal.subject_id} ${e.code} ${input.capability?.payload?.capability_id ?? ''}`;
+      // The dedup key must not carry unverified request fields: the
+      // envelope failed verification, so its capability_id is an
+      // attacker-chosen salt that un-budgets the signed-ledger write
+      // (w18-fixverify F4). And the window is consumed only by a write
+      // that lands — a failed insert must not suppress the next denial's
+      // evidence (w18-fixverify F14).
+      const memoKey = `${t} ${principal.subject_id} ${e.code}`;
       const last = this.f._containMemo.get(memoKey);
       if (last !== undefined && now - last < 60_000) return;
-      this.f._containMemo.set(memoKey, now);
       this.f.store.tx(() => { this.f.store.put(t, 'containment', `deny:${randomUUID()}:${e.code}`, {
         contained_at: now, subject_id: principal.subject_id, device_id: input.device_id ?? null,
         capability_id: input.capability?.payload?.capability_id ?? null, resource: input.resource ?? null,
@@ -184,6 +189,7 @@ export class RuntimeGate {
       // cross-checks each mutable row against RUNTIME_DENIED events instead
       // of trusting store contents (w13-fixverify L7).
       this.f.store.audit(t, 'RUNTIME_DENIED', principal.subject_id, input.request_id ?? 'unknown', { code: e.code, capability_id: input.capability?.payload?.capability_id ?? null }, now); });
+      this.f._containMemo.set(memoKey, now);
     } catch { /* containment logging never masks the original denial */ }
   }
 }
