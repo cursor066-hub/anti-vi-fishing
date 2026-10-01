@@ -102,12 +102,16 @@ if (typeof document !== 'undefined') {
     const login = await api('/session', { method: 'POST', body: { token: $('token').value } }); $('token').value = ''; state.csrf = login.csrf_token; state.me = await api('/v1/me');
     $('identity').textContent = `${state.me.tenant_id} / ${state.me.subject_id}`; $('logout').hidden = false; $('login-panel').hidden = true; $('workspace').hidden = false;
     state.schemas = await api('/v1/schemas'); $('action-type').replaceChildren(new Option('Choose action type', '')); for (const s of state.schemas.filter(s => s.type.startsWith('finance.'))) $('action-type').append(new Option(s.type, s.type));
-    const canActions = state.me.roles.some(r => ['operator', 'approver', 'custodian', 'security', 'policy_admin'].includes(r));
-    const admin = state.me.roles.some(r => ['security', 'policy_admin', 'custodian'].includes(r));
     const has = (...r) => state.me.roles.some(x => r.includes(x));
+    // GET /v1/action-capsules permits the auditor read path too — the nav
+    // must show the list to exactly the roles the server serves it to.
+    const canActions = has('operator', 'approver', 'custodian', 'security', 'policy_admin', 'auditor');
+    const admin = has('security', 'policy_admin', 'custodian');
     // Affordances mirror the server's own authorization sets — a nav entry is
-    // hidden exactly when every API call under it would 403 (UX-004).
-    const access = { actions: canActions, propose: state.me.roles.includes('operator'), coverage: true, policy: has('policy_admin', 'security'), runtime: has('operator', 'workload'), audit: has('auditor', 'security'), keys: has('security', 'policy_admin'), ceremonies: admin, connectors: has('operator', 'security', 'policy_admin', 'auditor'), proofs: has('operator', 'security', 'auditor'), perception: has('operator', 'approver', 'custodian', 'security'), grants: has('operator', 'security', 'auditor') };
+    // hidden exactly when every API call under it would 403 (UX-004,
+    // w17-console F5: propose includes workload+policy_admin, coverage
+    // excludes workload, grants includes policy_admin).
+    const access = { actions: canActions, propose: has('operator', 'workload', 'policy_admin'), coverage: has('operator', 'approver', 'custodian', 'security', 'auditor', 'policy_admin'), policy: has('policy_admin', 'security'), runtime: has('operator', 'workload'), audit: has('auditor', 'security'), keys: has('security', 'policy_admin'), ceremonies: admin, connectors: has('operator', 'security', 'policy_admin', 'auditor'), proofs: has('operator', 'security', 'auditor'), perception: has('operator', 'approver', 'custodian', 'security'), grants: has('operator', 'security', 'auditor', 'policy_admin') };
     document.querySelectorAll('nav button').forEach(b => { b.hidden = !access[b.dataset.view]; });
     // Per-ACTION affordances inside a visible view must also mirror the
     // server's role set: a button that always 403s is a dishonest
@@ -117,7 +121,11 @@ if (typeof document !== 'undefined') {
     $('ack-form').hidden = !has('custodian');
     $('split-form').hidden = !has('security', 'custodian');
     $('reconstruct-form').hidden = !has('security', 'custodian');
-    if (canActions) { show('actions'); await loadList(); } else { show('audit'); }
+    if (canActions) { show('actions'); await loadList(); }
+    // A principal with no list access (e.g. workload) lands on the first
+    // view it can actually use — never on 'audit' it cannot read
+    // (w17-console F5).
+    else { const first = Object.entries(access).find(([, v]) => v)?.[0]; if (first) show(first); }
     notify('Connected to the isolated engineering workspace. Targets and evidence issuers are synthetic.');
   });
   handle('logout', 'click', async () => { await api('/session/logout', { method: 'POST', body: {} }); state.csrf = null; state.me = null; state.selected = null; state.runtime = null; state.currentState = null; location.reload(); });
@@ -136,7 +144,13 @@ if (typeof document !== 'undefined') {
     const schema = state.schemas.find(s => s.type === $('action-type').value), requested = {}; for (const input of $('requested-fields').querySelectorAll('input')) requested[input.name] = typedValue(input.value, input.dataset.rule);
     const policy = await api('/v1/policy'), now = Date.now(), ttl = typedValue($('ttl').value, 'positive');
     const input = { schema_id: schema.id, schema_digest: schema.digest, actor: { subject_id: state.me.subject_id, identity_class: 'workforce', device_id: state.me.device_id }, action: { type: schema.type, target_resource: $('resource').value, purpose: $('purpose').value }, current_state: state.currentState, requested_state: requested, destination: requested.bank_account, quantity: requested.amount_minor ?? 1, exclusions: [], evidence_refs: [], policy_version: policy.version, nonce: crypto.randomUUID(), created_at: now, expires_at: now + ttl * 60000, rollback_or_compensation: $('rollback').value, privacy_classification: 'confidential' };
-    const r = await api('/v1/action-capsules', { method: 'POST', body: input, headers: { 'Idempotency-Key': crypto.randomUUID() } }); notify('Immutable proposal created. No target execution has occurred.'); await detail(r.capsule.capsule_id);
+    // The API requires a signed capsule-intent envelope: the proposal is
+    // signed in-browser via WebCrypto Ed25519 against the loaded identity
+    // key file (w17-console F2 — the previous form POSTed the bare capsule
+    // and could never succeed).
+    if (!state.identityKey) throw new Error('Select your operator identity key file (identity-<tenant>-<subject>.json) — the proposal must be signed in this browser.');
+    const envelope = await signIntent(input, state.identityKey);
+    const r = await api('/v1/action-capsules', { method: 'POST', body: { input, signature: envelope }, headers: { 'Idempotency-Key': crypto.randomUUID() } }); notify('Immutable proposal created. No target execution has occurred.'); await detail(r.capsule.capsule_id);
   });
   handle('evaluate', 'click', async () => { await api(`/v1/action-capsules/${state.selected.capsule.capsule_id}/evaluate`, { method: 'POST', body: {} }); await detail(state.selected.capsule.capsule_id); });
   handle('mint', 'click', async () => { await api('/v1/certificates', { method: 'POST', body: { capsule_id: state.selected.capsule.capsule_id } }); await detail(state.selected.capsule.capsule_id); notify('Single-use certificate issued. It expires shortly and cannot authorise a different action.'); });

@@ -10,6 +10,9 @@ import { randomUUID } from 'node:crypto';
 import { fixture, hasCode, runtimeInput, runtimeRequest } from './helpers.mjs';
 import { digest } from '../src/canonical.mjs';
 import { Fabric } from '../src/fabric.mjs';
+import { signAcknowledgement } from '../src/ceremony.mjs';
+
+const CUSTODIANS = ['custodian-1', 'custodian-2', 'custodian-3'];
 
 const JIT_REQ = { subject_id: 'operator', resources: ['dataset-1'], actions: ['data.read'], destinations: ['customer-vault'], columns: ['id'], row_ids: ['row-1'], ttl_ms: 60000, reason: 'Incident', roles: [] };
 const JIT_OVR = { action: { type: 'identity.jit.grant', target_resource: 'jit-grants', purpose: 'JIT' } };
@@ -171,4 +174,131 @@ test('w17 F13: a forged key-rotation record cannot steer signing attribution', t
   const last = entries.at(-1);
   assert.equal(last.envelope.protected.key_id, configured, 'no anchor, no steering');
   assert.equal(last.envelope.payload.recovery_signing, undefined, 'no recovery attribution without an anchored rotation');
+});
+
+// ---------------------------------------------------------------------------
+// w17-fixverify wave-2: quorum anchoring, seal repair, drift baseline, and
+// corrupt-row tolerance.
+
+// H1: the mutable ceremony row's ack list is a cache — a store-planted ack
+// with a forged signature must not mint custodian quorum, and the
+// reservation-time key.rotate gate must refuse it.
+test('w17 H1: a store-planted forged acknowledgement cannot mint custodian quorum', t => {
+  const h = fixture(t);
+  const pending = h.f.prepareRotation(h.p('security'), 'audit');
+  const c = h.f.createCeremony(h.p('security'), { ceremony_id: 'cer-forged', purpose: 'key.rotate', threshold: 2, custodians: CUSTODIANS, valid_until: h.now() + 3600000, min_delay_ms: 120000, rotation: { key_class: 'audit', new_key_id: pending.key_id } });
+  h.f.acknowledgeCeremony(h.p('custodian-1'), signAcknowledgement(c, 'custodian-1', h.setup.custodianKeys.acme['custodian-1'], h.now()));
+  // The plant: a real-looking envelope bound to this ceremony but with a
+  // garbage signature — the old code counted it.
+  const forged = signAcknowledgement(c, 'custodian-2', h.setup.custodianKeys.acme['custodian-2'], h.now());
+  const row = h.f.store.must('acme', 'ceremony', 'cer-forged');
+  row.acknowledgements.push({ ...forged, signature: 'AAAA' });
+  h.f.store.put('acme', 'ceremony', 'cer-forged', row, h.now());
+  assert.equal(h.f.custodianQuorum('acme', h.f.store.must('acme', 'ceremony', 'cer-forged')).live, 1, 'forged signature never counts');
+  const r = h.proposed('key.rotate', { key_class: 'audit', new_key_id: pending.key_id, new_public_key: pending.public_key, ceremony_id: 'cer-forged', revoke_old: false }, { action: { type: 'key.rotate', target_resource: 'key-registry', purpose: 'Rotation' } });
+  h.evidence(r, { kind: 'governance_review' }); h.evidence(r, { kind: 'governance_review', issuer: 'audit-committee' }); h.approve(r, 3); h.advance(60001);
+  const cert = h.f.certificate(h.p(), r.capsule.capsule_id);
+  assert.throws(() => h.f.execute(h.p(), cert), hasCode('INV-409-STATE'), 'quorum gate refuses the planted quorum');
+});
+
+// H1b: even a VALIDLY-signed envelope cannot mint quorum when the chain never
+// recorded that custodian's acknowledgement — the ledger is the authority,
+// not the signature bytes alone.
+test('w17 H1b: a validly-signed ack planted without its chain event cannot mint quorum', t => {
+  const h = fixture(t);
+  const c = h.f.createCeremony(h.p('security'), { ceremony_id: 'cer-planted', purpose: 'key.rotate', threshold: 2, custodians: CUSTODIANS, valid_until: h.now() + 3600000, min_delay_ms: 120000 });
+  h.f.acknowledgeCeremony(h.p('custodian-1'), signAcknowledgement(c, 'custodian-1', h.setup.custodianKeys.acme['custodian-1'], h.now()));
+  const row = h.f.store.must('acme', 'ceremony', 'cer-planted');
+  row.acknowledgements.push(signAcknowledgement(c, 'custodian-2', h.setup.custodianKeys.acme['custodian-2'], h.now()));
+  h.f.store.put('acme', 'ceremony', 'cer-planted', row, h.now());
+  assert.equal(h.f.custodianQuorum('acme', h.f.store.must('acme', 'ceremony', 'cer-planted')).live, 1, 'no chain event, no consent');
+});
+
+// Seal-scan parity: a row that verifies but violates the fold's future-time
+// bound is signed poison the seal must cut — before the fix it reported
+// "already verifies" while the index stayed wedged.
+test('w17 M2: sealAuditChain cuts a signed future-time poison row', t => {
+  const h = fixture(t);
+  const keyA = h.f.keys('acme').audit.key_id;
+  const last = h.f.store.db.prepare('SELECT seq,hash FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1').get('acme');
+  const payload = { tenant_id: 'acme', sequence: last.seq + 1, previous: last.hash, type: 'AUDIT_ACCESSED', actor: 'mallory', reference: 'x', metadata: {}, time: h.now() + 3600000 };
+  const env = h.f.signAudit('acme', payload, 'audit', keyA);
+  h.f.store.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run('acme', last.seq + 1, last.hash, digest(env.payload), JSON.stringify(env));
+  assert.throws(() => h.f._auditIndex('acme'), e => /^INV-409/.test(e.code ?? ''), 'future-time row wedges the index');
+  const sealed = h.f.sealAuditChain(h.p('security'));
+  assert.equal(sealed.sealed, true, 'the seal sees the bound violation as poison');
+  assert.doesNotThrow(() => h.f._auditIndex('acme'));
+});
+
+// Revoke-without-rotation fallback: when the configured audit key is killed
+// by revocation with no KEY_ROTATED succession, the seal repoints onto the
+// live pending tenant-owned successor instead of bricking at INV-503.
+test('w17 M3: seal survives an audit key revoked without a rotation succession', t => {
+  const h = fixture(t);
+  const keyA = h.f.keys('acme').audit.key_id;
+  const pending = h.f.prepareRotation(h.p('security'), 'audit'); // revoke guard demands a pending successor
+  h.f.revoke(h.p('security'), { kind: 'key', id: keyA, reason: 'compromised' });
+  const last = h.f.store.db.prepare('SELECT seq,hash FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1').get('acme');
+  const payload = { tenant_id: 'acme', sequence: last.seq + 1, previous: last.hash, type: 'FORGED', actor: 'mallory', reference: 'x', metadata: {}, time: h.now() };
+  const env = { payload, protected: { key_id: 'mallory', algorithm: 'Ed25519' }, signature: 'forged' };
+  h.f.store.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run('acme', last.seq + 1, last.hash, digest(payload), JSON.stringify(env));
+  const sealed = h.f.sealAuditChain(h.p('security'));
+  assert.equal(sealed.sealed, true, 'seal succeeds via the pending fallback');
+  const sealRow = h.f.store.auditPage('acme', { after: last.seq, limit: 5 }).entries.at(-1);
+  assert.equal(sealRow.envelope.protected.key_id, pending.key_id, 'seal attests under the pending successor');
+  assert.equal(h.f.keys('acme').audit.key_id, pending.key_id);
+  assert.doesNotThrow(() => h.f._auditIndex('acme'));
+});
+
+// Drift baseline is the FILE view: a chain-attested repoint (rotation or
+// seal) must not drift-quarantine the tenant — not now, not on the next
+// boot, and configDriftStatus agrees the declared config is unchanged.
+test('w17 M1: a chain-attested repoint is not configuration drift', t => {
+  const h = fixture(t);
+  const keyA = h.f.keys('acme').audit.key_id;
+  const prepB = h.f.prepareRotation(h.p('security'), 'audit');
+  h.f.store.audit('acme', 'KEY_ROTATED', 'security', prepB.key_id, { key_class: 'audit', previous_key_id: keyA, ceremony_id: 'cer-b', revoke_old: false }, h.now());
+  const last = h.f.store.db.prepare('SELECT seq,hash FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1').get('acme');
+  const payload = { tenant_id: 'acme', sequence: last.seq + 1, previous: last.hash, type: 'FORGED', actor: 'mallory', reference: 'x', metadata: {}, time: h.now() };
+  const env = { payload, protected: { key_id: 'mallory', algorithm: 'Ed25519' }, signature: 'forged' };
+  h.f.store.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run('acme', last.seq + 1, last.hash, digest(payload), JSON.stringify(env));
+  assert.equal(h.f.sealAuditChain(h.p('security')).sealed, true);
+  assert.equal(h.f.keys('acme').audit.key_id, prepB.key_id, 'repoint landed in memory');
+  assert.equal(h.f._auditIndex('acme').tenantDrifted, false, 'repoint is ledger business, not drift');
+  assert.equal(h.f.configDriftStatus(h.p('security')).drifted, false);
+  h.reconfigure(() => {});
+  assert.equal(h.f._configDrift.has('acme'), false, 'no boot-time drift either');
+  assert.equal(h.f._auditIndex('acme').tenantDrifted, false);
+});
+
+// M4: the containment report's revocation anchor flag recomputes the keyed
+// MAC honestly — an injected or field-flipped revocation row degrades to
+// 'identity-only', a real one reports anchored.
+test('w17 M4: containmentReport anchors real revocations and degrades tampered rows', t => {
+  const h = fixture(t);
+  h.ready();
+  h.f.revoke(h.p('security'), { kind: 'subject', id: 'custodian-5', reason: 'offboarded' });
+  const report = h.f.containmentReport(h.p('security'));
+  const entry = report.sequence.find(q => q.kind === 'revocation' && q.revoked === 'subject:custodian-5');
+  assert.equal(entry.anchored, true, 'real revocation is chain-anchored');
+  // A tampered row — same id, flipped field — degrades honestly.
+  const row = h.f.store.must('acme', 'revocation', 'subject:custodian-5');
+  h.f.store.put('acme', 'revocation', 'subject:custodian-5', { ...row, reason: 'rewritten' }, h.now());
+  const report2 = h.f.containmentReport(h.p('security'));
+  assert.equal(report2.sequence.find(q => q.kind === 'revocation' && q.revoked === 'subject:custodian-5').anchored, 'identity-only', 'field-tampered row loses its anchor');
+});
+
+// M5: corrupt encrypted grant rows are residue, not a wedge — a single
+// undecryptable jit-grant row can only hide a grant, never forge one.
+test('w17 M5: a corrupt grant row cannot wedge authorize or cold-start', t => {
+  const h = fixture(t);
+  h.ready();
+  // Poison the dataplane grant table with undecryptable ciphertext.
+  h.f.target.db.prepare('INSERT INTO grants VALUES(?,?,?)').run('acme', 'corrupt-G', Buffer.from('garbage'));
+  assert.doesNotThrow(() => h.f.grantsFor('acme', 'operator', h.now()), 'authorize path tolerates the corrupt row');
+  assert.doesNotThrow(() => h.ready());
+  // Same tolerance on the ledger-side jit-grant store at cold-open.
+  h.f.store.put('acme', 'jit-grant', 'corrupt-S', { grant: { grant_id: 'corrupt-S' } }, h.now());
+  h.f.store.db.prepare("UPDATE records SET value=? WHERE tenant='acme' AND kind='jit-grant' AND id='corrupt-S'").run(Buffer.from('garbage'));
+  assert.doesNotThrow(() => h.reconfigure(() => {}), 'cold-start tolerates a corrupt jit-grant row');
 });

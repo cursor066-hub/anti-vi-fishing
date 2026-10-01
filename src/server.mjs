@@ -80,7 +80,11 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
     // A session minted from a token dies with it — token revocation checked
     // at mint time alone would leave a residual window (w7-clock F3).
     requireThat(!fabric.revoked(session.principal.tenant_id, 'token', session.token_hash), 'INV-401-AUTH', 'Authentication required', 401);
-    if (req.method !== 'GET') requireThat(typeof req.headers['x-csrf-token'] === 'string' && req.headers['x-csrf-token'].length === session.csrf.length && timingSafeEqual(Buffer.from(req.headers['x-csrf-token']), Buffer.from(session.csrf)) && req.headers.origin === origin, 'INV-403-CSRF', 'Request origin or CSRF token rejected', 403);
+    // Byte length, not char length: Node decodes headers latin1 but
+    // Buffer.from re-encodes UTF-8, so a non-ASCII header passes a
+    // char-length gate and throws inside timingSafeEqual — surfacing an
+    // INV-500 where the contract promises INV-403 (w17-console F1).
+    if (req.method !== 'GET') requireThat(typeof req.headers['x-csrf-token'] === 'string' && Buffer.byteLength(req.headers['x-csrf-token']) === session.csrf.length && timingSafeEqual(Buffer.from(req.headers['x-csrf-token']), Buffer.from(session.csrf)) && req.headers.origin === origin, 'INV-403-CSRF', 'Request origin or CSRF token rejected', 403);
     fabric.authorize(session.principal, ['operator', 'approver', 'custodian', 'security', 'auditor', 'policy_admin', 'workload']); return session.principal;
   }
   // Canonical integer grammar for query params — the same strictness the
@@ -127,6 +131,7 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
     res.setHeader('X-Request-Id', requestId); res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('X-Frame-Options', 'DENY'); res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
     res.setHeader('Content-Security-Policy', "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
+    res.setHeader('Cross-Origin-Resource-Policy', 'same-origin'); res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
     res.setHeader('Cache-Control', 'no-store');
     // Serialize before any byte is flushed: a canonical() failure must surface
     // as a clean error response, never a destroyed socket after a 200 header.
@@ -183,13 +188,19 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       if (path === '/session/logout' && req.method === 'POST') {
         // Logout retires every sibling session minted from the same
         // credential — one stolen token's sessions must not linger under a
-        // device the user never sees (w7-console F4).
+        // device the user never sees (w7-console F4). The kill is bound to
+        // the credential the CALLER authenticated with: a Bearer token for
+        // principal A presenting a sid minted under B's token may not force
+        // B's family out — only sessions whose token_hash equals the
+        // caller's own credential hash are terminated (w17-console F3).
+        // With no matching session the response reports it rather than
+        // claiming a logout that terminated nothing (w17-console F4).
         const sid = /(?:^|;\s*)if_session=([A-Za-z0-9_-]{43})(?:;|$)/.exec(req.headers.cookie ?? '')?.[1];
-        if (sid) {
-          const doomed = sessions.get(hashBytes(sid))?.token_hash;
-          for (const [key, session] of sessions) if (session.token_hash === doomed) sessions.delete(key);
-        }
-        res.setHeader('Set-Cookie', 'if_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'); return send(200, { logged_out: true });
+        const callerTokenHash = req.headers.authorization ? hashBytes(req.headers.authorization.slice(7)) : (sid ? sessions.get(hashBytes(sid))?.token_hash : null);
+        const doomed = sid ? sessions.get(hashBytes(sid))?.token_hash : null;
+        let terminated = 0;
+        if (doomed && doomed === callerTokenHash) for (const [key, session] of sessions) if (session.token_hash === doomed) { sessions.delete(key); terminated++; }
+        res.setHeader('Set-Cookie', 'if_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'); return send(200, { logged_out: terminated > 0, sessions_terminated: terminated });
       }
       if (path === '/v1/me' && req.method === 'GET') return send(200, { ...p, roles: fabric.identity(p).roles, device_id: fabric.identity(p).device_id, profile: 'engineering', secure_perception: 'dev-attested-software', perception_components: Object.keys(fabric.perceptionComponents[p.tenant_id] ?? {}) });
       if (path === '/v1/schemas' && req.method === 'GET') return send(200, Object.values(SCHEMAS).map(s => ({ ...s, digest: digest(s) })));

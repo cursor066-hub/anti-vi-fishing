@@ -62,8 +62,11 @@ export function coverageAt(events, now) {
   for (const [id, s] of Object.entries(paths)) out[id] = { ...s, path_id: id, status: effectiveStatus(s, now), stored_status: s.status };
   return out;
 }
-export function coverageManifest(tenant, paths, now, sign) {
-  const effective = paths.map(p => ({ ...p, effective_status: effectiveStatus(p, now), next_action: p.status === 'ENFORCED' ? 'Revalidate before evidence expires; verify all bypass paths.' : p.status === 'UNCOVERED' ? 'Close this path or bring it under enforced coverage; it is declared unprotected.' : 'Attach independently executed technical bypass evidence.' }));
+export function coverageManifest(tenant, paths, now, sign, { unanchored = [] } = {}) {
+  const effective = paths.map(p => ({ ...p, anchored: true, effective_status: effectiveStatus(p, now), next_action: p.status === 'ENFORCED' ? 'Revalidate before evidence expires; verify all bypass paths.' : p.status === 'UNCOVERED' ? 'Close this path or bring it under enforced coverage; it is declared unprotected.' : 'Attach independently executed technical bypass evidence.' }));
+  // Rows without a ledger-anchored COVERAGE_DECLARED event are excluded —
+  // the manifest names them honestly instead of attesting their state
+  // (w17-redteam A3).
   // This distribution provides a simulator, not target-wide total mediation.
-  return sign({ tenant_id: tenant, issued_at: now, profile: 'software-engineering', guarantee: false, assurance: 'NO_PRODUCTION_ENFORCEMENT_GUARANTEE', reason: 'Real target coverage and independent bypass assessment have not been supplied.', paths: effective, scope_digest: digest(effective) }, 'coverage');
+  return sign({ tenant_id: tenant, issued_at: now, profile: 'software-engineering', guarantee: false, assurance: 'NO_PRODUCTION_ENFORCEMENT_GUARANTEE', reason: 'Real target coverage and independent bypass assessment have not been supplied.', paths: effective, unanchored_rows: unanchored, scope_digest: digest(effective) }, 'coverage');
 }

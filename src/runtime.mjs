@@ -108,19 +108,25 @@ export class RuntimeGate {
       // fan-out set (w13-fixverify M1). The usage INSERT below stays as an
       // observability mirror only.
       const idx = this.f._auditIndex(t);
-      const exists = idx.runtimeUse.some(u => u.capability === cap.capability_id && u.request_id === input.request_id);
+      // The fold keeps per-capability and per-subject indexes — scanning
+      // the whole runtime history per request was a quadratic sink
+      // (w17-idx F8). Fall back to the flat list only on a stale index
+      // built before the maps existed.
+      const byCap = idx.runtimeUseByCap?.get(cap.capability_id) ?? idx.runtimeUse.filter(u => u.capability === cap.capability_id);
+      const bySubject = idx.runtimeUseBySubject?.get(cap.subject_id) ?? idx.runtimeUse.filter(u => u.subject === cap.subject_id);
+      const exists = byCap.some(u => u.request_id === input.request_id);
       requireThat(!exists, 'INV-409-REPLAY', 'Runtime request already consumed', 409);
       const r = cap.runtime_policy, cost = cap.action === 'data.read' ? input.row_ids.length * input.columns.length * r.sensitivity_weights[cap.classification] : 1;
-      const used = idx.runtimeUse.filter(u => u.capability === cap.capability_id).reduce((n, u) => n + (u.cost ?? 0), 0);
+      const used = byCap.reduce((n, u) => n + (u.cost ?? 0), 0);
       requireThat(used + cost <= (constrained ? Math.floor(cap.max_cost / 2) : cap.max_cost), 'INV-429-BUDGET', 'Capability volume exhausted', 429);
       // No caller-provided byte counts: charge observed requested information units.
       for (const window of r.windows) {
-        const total = idx.runtimeUse.filter(u => u.subject === cap.subject_id && u.resource === cap.resource && u.at > now - window.duration_ms).reduce((n, u) => n + (u.cost ?? 0), 0);
+        const total = bySubject.filter(u => u.resource === cap.resource && u.at > now - window.duration_ms).reduce((n, u) => n + (u.cost ?? 0), 0);
         requireThat(total + cost <= window.limit, 'INV-429-BUDGET', 'Rolling information budget exhausted', 429);
       }
-      const rate = idx.runtimeUse.filter(u => u.subject === cap.subject_id && u.at > now - 1000).length;
+      const rate = bySubject.filter(u => u.at > now - 1000).length;
       requireThat(rate < r.rate_per_second, 'INV-429-RATE', 'Subject request rate exceeded', 429);
-      const resources = [...new Set(idx.runtimeUse.filter(u => u.subject === cap.subject_id && u.at > now - 1000).map(u => u.resource))];
+      const resources = [...new Set(bySubject.filter(u => u.at > now - 1000).map(u => u.resource))];
       requireThat(resources.includes(cap.resource) || resources.length < r.max_fanout, 'INV-429-FANOUT', 'Service fan-out exceeded', 429);
       let rows = null, recon = null, watermarks = null;
       if (cap.action === 'data.read') {
@@ -158,6 +164,16 @@ export class RuntimeGate {
   recordContainment(principal, input, e) {
     try {
       const t = principal.tenant_id, now = this.f.clock();
+      // A denied consume must not mint unbounded ledger rows — identical
+      // (subject, code, capability) denials re-record at most once per
+      // 60s, the same bound _rejectionAudit applies to gate denials
+      // (w17-idx F7). The ledger still proves the denial happened, just
+      // not at request frequency.
+      this.f._containMemo ??= new Map();
+      const memoKey = `${t} ${principal.subject_id} ${e.code} ${input.capability?.payload?.capability_id ?? ''}`;
+      const last = this.f._containMemo.get(memoKey);
+      if (last !== undefined && now - last < 60_000) return;
+      this.f._containMemo.set(memoKey, now);
       this.f.store.tx(() => { this.f.store.put(t, 'containment', `deny:${randomUUID()}:${e.code}`, {
         contained_at: now, subject_id: principal.subject_id, device_id: input.device_id ?? null,
         capability_id: input.capability?.payload?.capability_id ?? null, resource: input.resource ?? null,

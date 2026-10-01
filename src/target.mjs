@@ -125,14 +125,23 @@ export class SimulatedTarget {
     this._deleted = true; // grant upsert supersedes ciphertext (w8-fixverify F3)
     this.db.prepare('INSERT INTO grants VALUES(?,?,?) ON CONFLICT(tenant,grant_id) DO UPDATE SET value=excluded.value').run(tenant, grant_id, encrypt(value, this.key(tenant), AAD('target', 'grant', tenant, grant_id)));
   }
+  // One undecryptable grant row must not wedge every authorize() call — a
+  // corrupt row can only ever HIDE a grant (anchoring is the authority), so
+  // it is skipped and counted, never fatal (w17-fixverify).
   grants(tenant, subject_id, now) {
-    return this.db.prepare('SELECT grant_id, value FROM grants WHERE tenant=?').all(tenant)
-      .map(r => this._dec(r.value, tenant, AAD('target', 'grant', tenant, r.grant_id), `${tenant}/grant/${r.grant_id}`))
-      .filter(g => g.subject_id === subject_id && g.expires_at > now && !g.revoked);
+    const out = [];
+    for (const r of this.db.prepare('SELECT grant_id, value FROM grants WHERE tenant=?').all(tenant)) {
+      let g; try { g = this._dec(r.value, tenant, AAD('target', 'grant', tenant, r.grant_id), `${tenant}/grant/${r.grant_id}`); } catch { this._corruptGrantRows = (this._corruptGrantRows ?? 0) + 1; continue; }
+      if (g.subject_id === subject_id && g.expires_at > now && !g.revoked) out.push(g);
+    }
+    return out;
   }
   allGrants(tenant) {
-    return this.db.prepare('SELECT grant_id, value FROM grants WHERE tenant=?').all(tenant)
-      .map(r => this._dec(r.value, tenant, AAD('target', 'grant', tenant, r.grant_id), `${tenant}/grant/${r.grant_id}`));
+    const out = [];
+    for (const r of this.db.prepare('SELECT grant_id, value FROM grants WHERE tenant=?').all(tenant)) {
+      try { out.push(this._dec(r.value, tenant, AAD('target', 'grant', tenant, r.grant_id), `${tenant}/grant/${r.grant_id}`)); } catch { this._corruptGrantRows = (this._corruptGrantRows ?? 0) + 1; }
+    }
+    return out;
   }
   revokeGrant(tenant, grant_id) {
     const row = this.db.prepare('SELECT value FROM grants WHERE tenant=? AND grant_id=?').get(tenant, grant_id);

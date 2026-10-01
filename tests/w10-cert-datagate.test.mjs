@@ -98,15 +98,26 @@ test('w10-dg F7: export watermarks bind tenant, capability and request', t => {
   assert.equal(out.payload.watermarks[0].tag, expected);
 });
 
-// w10-dg F8: two denied consumes with the same caller request id each land
-// their own containment record — dedup must not swallow incidents.
-test('w10-dg F8: identical denied consumes each land a containment record', t => {
+// w10-dg F8: denied consumes are ledger-bounded — identical (subject,
+// code, capability) denials re-record at most once per 60s so a crafted
+// flood cannot mint unbounded chain rows; a distinct incident (different
+// request id AND different denial class) still lands its own record
+// (w17-idx F7).
+test('w10-dg F8: identical denied consumes share one containment record; distinct ones land separately', t => {
   const h = fixture(t);
   const cap = h.f.runtime.issue(h.p(), runtimeInput());
   const request = runtimeRequest(cap, { columns: ['passport'], request_id: 'req-dup' });
-  for (let i = 0; i < 2; i++) assert.throws(() => h.f.runtime.consume(h.p(), request), hasCode('INV-403-SCOPE'));
-  const rows = h.f.store.list('acme', 'containment', 100).filter(c => c.request_id === 'req-dup');
-  assert.equal(rows.length, 2);
+  for (let i = 0; i < 3; i++) assert.throws(() => h.f.runtime.consume(h.p(), request), hasCode('INV-403-SCOPE'));
+  const rows = h.f.store.list('acme', 'containment', 100).filter(c => c.capability_id === cap.payload.capability_id);
+  assert.equal(rows.length, 1, 'identical denials record once — the ledger still proves the denial');
+  // A genuinely different denial (replay of an already-consumed request)
+  // records its own containment row.
+  const cap2 = h.f.runtime.issue(h.p(), runtimeInput());
+  const req2 = runtimeRequest(cap2);
+  h.f.runtime.consume(h.p(), req2);
+  assert.throws(() => h.f.runtime.consume(h.p(), req2), hasCode('INV-409-REPLAY'));
+  const all = h.f.store.list('acme', 'containment', 100);
+  assert.equal(all.length, 2, 'each distinct denial class lands once');
 });
 
 // w10-dg F9: the declared aggregate transform must actually be admissible.

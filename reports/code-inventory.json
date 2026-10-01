@@ -26,8 +26,8 @@
       "bytes": 9012
     },
     "src/coverage.mjs": {
-      "lines": 70,
-      "bytes": 4909
+      "lines": 73,
+      "bytes": 5151
     },
     "src/crypto.mjs": {
       "lines": 88,
@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 2977,
-      "bytes": 241856
+      "lines": 3201,
+      "bytes": 258996
     },
     "src/issuerd.mjs": {
       "lines": 428,
@@ -62,8 +62,8 @@
       "bytes": 38457
     },
     "src/runtime.mjs": {
-      "lines": 174,
-      "bytes": 16286
+      "lines": 190,
+      "bytes": 17227
     },
     "src/schema.mjs": {
       "lines": 90,
@@ -74,8 +74,8 @@
       "bytes": 10649
     },
     "src/server.mjs": {
-      "lines": 302,
-      "bytes": 31220
+      "lines": 313,
+      "bytes": 32377
     },
     "src/shamir.mjs": {
       "lines": 91,
@@ -86,12 +86,12 @@
       "bytes": 23951
     },
     "src/target.mjs": {
-      "lines": 265,
-      "bytes": 19896
+      "lines": 274,
+      "bytes": 20388
     },
     "web/app.js": {
-      "lines": 216,
-      "bytes": 31300
+      "lines": 230,
+      "bytes": 32380
     },
     "scripts/ai-eval.mjs": {
       "lines": 38,
@@ -238,8 +238,8 @@
       "bytes": 23705
     },
     "tests/w10-cert-datagate.test.mjs": {
-      "lines": 206,
-      "bytes": 13461
+      "lines": 217,
+      "bytes": 14197
     },
     "tests/w10-fixverify.test.mjs": {
       "lines": 238,
@@ -270,20 +270,24 @@
       "bytes": 9022
     },
     "tests/w14-lifecycle.test.mjs": {
-      "lines": 218,
-      "bytes": 13787
+      "lines": 221,
+      "bytes": 13783
     },
     "tests/w15-anchored.test.mjs": {
-      "lines": 215,
-      "bytes": 14632
+      "lines": 217,
+      "bytes": 14737
     },
     "tests/w16-lifecycle.test.mjs": {
       "lines": 248,
       "bytes": 15995
     },
     "tests/w17-fixverify.test.mjs": {
-      "lines": 175,
-      "bytes": 13388
+      "lines": 305,
+      "bytes": 23185
+    },
+    "tests/w17-redteam.test.mjs": {
+      "lines": 263,
+      "bytes": 17947
     },
     "tests/w5-mutations.test.mjs": {
       "lines": 192,
@@ -354,6 +358,6 @@
       "bytes": 6229
     }
   },
-  "total_files": 88,
-  "total_lines": 16903
+  "total_files": 89,
+  "total_lines": 17589
 }

@@ -188,9 +188,11 @@ test('w15: revocations() reports anchored state and flags a tampered record', t 
 });
 
 // The policy anchor cannot be laundered: reanchorPolicy refuses while the
-// anchor already matches, and a forged active policy row stays INTEGRITY
-// until security chooses to re-anchor the observed state (w13-store H3).
-test('w15: reanchorPolicy refuses a healthy anchor and re-anchors a real divergence', t => {
+// anchor already matches, and a forged active policy row can only be
+// RESTORED from the anchored copy — signing a fresh anchor over the
+// observed (attacker-chosen) state would launder it (w13-store H3,
+// w17-redteam A1).
+test('w15: reanchorPolicy refuses a healthy anchor and restores a real divergence', t => {
   const h = fixture(t);
   assert.throws(() => h.f.reanchorPolicy(h.p('security')), hasCode('INV-409-STATE'));
   const active = h.f.store.must('acme', 'policy', 'active');
@@ -198,7 +200,7 @@ test('w15: reanchorPolicy refuses a healthy anchor and re-anchors a real diverge
   assert.throws(() => h.f.policy('acme'), hasCode('INV-409-INTEGRITY'));
   const re = h.f.reanchorPolicy(h.p('security'));
   assert.equal(re.reanchored, true);
-  assert.equal(h.f.policy('acme').version, 'forged-v9', 'security chose to re-anchor the observed state');
+  assert.equal(h.f.policy('acme').version, active.version, 'the anchored constitution is restored — forged content never signed');
 });
 
 // auditProof verifies the leaf's live signature — proofs name the leaf

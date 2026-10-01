@@ -96,8 +96,11 @@ test('w14 F5: a quarantined propose lands in the containment ledger', t => {
 test('w14 W13-01: a revoked audit key cannot sign post-revocation rows', t => {
   const h = fixture(t);
   const auditKey = h.setup.config.tenants.acme.keys.audit;
-  // The revoke guard needs a pending successor — mint one like rotation does.
-  h.f.vault.generate(['audit', 'outcome', 'revocation', 'coverage', 'checkpoint', 'backup-manifest'], { tenant_id: 'acme', pending: true });
+  // The revoke guard needs a pending successor — minted the sanctioned
+  // way: chain-anchored by ROTATION_PREPARED so the vault entry is
+  // provably this tenant's (w17 D1 — a bare vault.generate is
+  // indistinguishable from a relabeled foreign key).
+  h.f.prepareRotation(h.p('security'), 'audit');
   h.f.revoke(h.p('security'), { kind: 'key', id: auditKey.key_id, reason: 'leaked' });
   h.f._auditIndex('acme'); // consume the revocation
   // Forge a self-consistent append signed by the DEAD key.
@@ -113,7 +116,7 @@ test('w14 W13-01: a revoked audit key cannot sign post-revocation rows', t => {
 test('w14 W13-01b: recovery-signed rows pass the signing window', t => {
   const h = fixture(t);
   const auditKey = h.setup.config.tenants.acme.keys.audit;
-  h.f.vault.generate(['audit', 'outcome', 'revocation', 'coverage', 'checkpoint', 'backup-manifest'], { tenant_id: 'acme', pending: true });
+  h.f.prepareRotation(h.p('security'), 'audit');
   h.f.revoke(h.p('security'), { kind: 'key', id: auditKey.key_id, reason: 'leaked' });
   // Recovery signing under the pending successor — post-revocation rows
   // must still verify and be consumed.
