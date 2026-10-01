@@ -530,6 +530,7 @@
       "drop",
       "constant",
       "aggregate"
-    ]
+    ],
+    "transform_min_bucket": 10
   }
 }

@@ -245,6 +245,11 @@ test('NFR-MNT-001: every public route is versioned and the contract is documente
   assert.equal(spec.openapi.split('.')[0], '3');
   const assets = new Set(['/', '/app.js', '/style.css']); // console statics are content, not API routes
   for (const path of Object.keys(spec.paths)) assert.ok(assets.has(path) || /^\/(v1|gate\/v1|session|healthz|readyz)/.test(path), path);
+  // The compatibility leg is documented, not implied: API.md must state the
+  // breaking-change/version-prefix contract explicitly (w25-ledger L3).
+  const api = readFileSync('docs/API.md', 'utf8');
+  assert.match(api, /[Bb]ackward compatibility/);
+  assert.match(api, /new version prefix/);
 });
 
 test('NFR-MNT-003: a CycloneDX SBOM enumerates components and dependencies', () => {
@@ -272,7 +277,13 @@ test('NFR-TST-001: every requirement row carries a verification method, and ever
   const methodIdx = rows[0].indexOf('verification_method'), idIdx = rows[0].indexOf('id'), statusIdx = rows[0].indexOf('status'), limIdx = rows[0].indexOf('limitations');
   assert.ok(methodIdx > 0 && idIdx >= 0 && statusIdx > 0 && limIdx > 0);
   assert.equal(rows.length - 1, 211);
-  const testCorpus = readdirSync('tests').filter(f => f.endsWith('.test.mjs')).map(f => readFileSync(`tests/${f}`, 'utf8')).join('\n');
+  // Mirror of the traceability gate's evidence rule: the id must appear
+  // inside a real test() block that also runs an assertion call — comments
+  // are stripped, so a comment mention cannot mint evidence (w25-ledger L1).
+  const stripComments = s => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(?<![:/\w])\/\/[^\n]*/g, '');
+  const ASSERT_CALL = /\b(?:assert(?:\.\w+)?|requireThat|hasCode|throws|rejects|doesNotThrow|strictEqual|deepStrictEqual|expect)\s*\(/;
+  const evidenceBlocks = readdirSync('tests').filter(f => f.endsWith('.test.mjs'))
+    .flatMap(f => readFileSync(`tests/${f}`, 'utf8').split(/^test\(/m).slice(1).map(stripComments));
   for (const cells of rows.slice(1)) {
     const id = cells[idIdx];
     assert.ok(cells.length > methodIdx, `short row: ${id}`);
@@ -280,7 +291,7 @@ test('NFR-TST-001: every requirement row carries a verification method, and ever
     if (cells[statusIdx] === 'VERIFIED_IN_ENGINEERING_PROFILE') {
       // VERIFIED means a test tagged with this id exists — the row must not
       // be honourable on prose alone.
-      assert.ok(testCorpus.includes(id), `${id} is VERIFIED but no test file mentions it`);
+      assert.ok(evidenceBlocks.some(b => b.includes(id) && ASSERT_CALL.test(b)), `${id} is VERIFIED but no tagged test() block with an assertion mentions it`);
     } else {
       // Every non-verified row must carry an honest limitation gap.
       assert.ok(cells[limIdx].trim().length > 0, `${id} non-verified row lacks a limitations statement`);

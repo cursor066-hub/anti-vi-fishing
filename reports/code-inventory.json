@@ -210,8 +210,8 @@
       "bytes": 29523
     },
     "tests/ledger3.test.mjs": {
-      "lines": 405,
-      "bytes": 27387
+      "lines": 416,
+      "bytes": 28265
     },
     "tests/lifecycle.test.mjs": {
       "lines": 135,
@@ -222,8 +222,8 @@
       "bytes": 534
     },
     "tests/regression.test.mjs": {
-      "lines": 1033,
-      "bytes": 72071
+      "lines": 1056,
+      "bytes": 73611
     },
     "tests/release-attestation.test.mjs": {
       "lines": 133,
@@ -439,5 +439,5 @@
     }
   },
   "total_files": 109,
-  "total_lines": 23976
+  "total_lines": 24010
 }

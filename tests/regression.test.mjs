@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { driftCheck } from '../src/connectors.mjs';
-import { workspaceFallback } from '../src/secureview.mjs';
+import { workspaceFallback, createComponent, openSession, releaseFields, openRelease } from '../src/secureview.mjs';
 import { generateKey, signed, verifySigned } from '../src/crypto.mjs';
 import { Store } from '../src/store.mjs';
 import { KeyVault } from '../src/keystore.mjs';
@@ -400,6 +400,29 @@ test('audit: key.rotate requires an acknowledged ceremony', t => {
 test('audit PER-006: releaseFields honour a policy allowlist (INV-451 on unlisted fields)', t => {
   const policy = { secure_perception: { fallback: 'controlled-workspace', release_fields: ['bank_account'] } };
   assert.throws(() => workspaceFallback({ fields: { bank_account: 'TESTBANK1', ssn: '001' }, purpose: 'review', reason: 'x' }, policy, 1), hasCode('INV-451-POLICY'));
+});
+
+test('audit PER-006: purpose, field and time constraints bind every release', () => {
+  const now = 1700000000000;
+  const component = createComponent('ev-viewer', '1.2.3');
+  const policy = { secure_perception: { allowed_firmware: ['1.2.3'], session_ttl_ms: 300000, release_fields: ['bank_account'] } };
+  const session = openSession(component, component.attest('a'.repeat(64), now + 120000), policy, now);
+  const rel = { fields: { bank_account: 'TESTBANK1' }, purpose: 'review-ticket-7' };
+  const out = releaseFields(session, rel, policy, now);
+  // Purpose leg: the authenticated binding names the declared purpose.
+  assert.equal(out.binding.purpose, 'review-ticket-7');
+  // Field leg: the allowlist runs inside releaseFields too, and the binding
+  // records exactly the released field names.
+  assert.deepEqual(out.binding.fields, ['bank_account']);
+  assert.throws(() => releaseFields(session, { fields: { ssn: '001' }, purpose: 'p' }, policy, now), hasCode('INV-451-POLICY'));
+  // Time leg: the binding carries the session expiry and a release past it
+  // is refused.
+  assert.equal(out.binding.expires_at, session.expires_at);
+  assert.throws(() => releaseFields(session, rel, policy, session.expires_at + 1), hasCode('INV-409-STATE'));
+  // The purpose-bound plaintext is readable only by the attested component.
+  const inner = openRelease(component, out);
+  assert.equal(inner.purpose, 'review-ticket-7');
+  assert.equal(inner.data.bank_account, 'TESTBANK1');
 });
 
 test('audit: configDriftStatus reports per-section digests and no drift on fresh snapshot', t => {
