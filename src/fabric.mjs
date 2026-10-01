@@ -1438,9 +1438,15 @@ export class Fabric {
   // hash-chained ledger entry. The index is incremental over audit sequence:
   // rows deleted mid-table cannot un-anchor what the chain already attested.
   _auditIndex(t) {
-    const maxSeq = this.store.db.prepare('SELECT COALESCE(MAX(seq),0) m FROM audit WHERE tenant=?').get(t).m;
     let idx = this.#auditIdx.get(t);
     if (!idx) { idx = { maxSeq: 0, building: false, revoked: new Set(), attached: new Map(), proposedNonce: new Set(), proposedAt: new Map(), proposedDigest: new Map(), issued: new Set(), issuedCert: new Map(), issuedCerts: new Set(), grants: new Map(), grantMeta: new Map(), rotations: new Map(), rotationsByPrev: new Map(), rotationKeys: new Set(), policyAnchors: [], dataAccess: [], perceptionNonce: new Set(), reserved: new Set(), reservedAt: new Map(), reservedMeta: new Map(), dispatched: new Map(), dispatchedMeta: new Map(), outcomes: new Map(), outcomeDigests: new Map(), cancelled: new Set(), dryRunAt: new Map(), keyDeadAt: new Map(), parentChildren: new Map(), simulated: [], issuerDrift: new Set(), tenantDrifted: false, configSnapshot: null, decisions: new Map(), runtimeUse: [], runtimeUseByCap: new Map(), runtimeUseBySubject: new Map(), revocationDigests: new Map(), denials: [], denialsByReq: new Map(), ceremonyAcks: new Map(), ceremonyPlanned: new Map(), ceremonyCommitted: new Map(), ceremonyAborted: new Set(), ceremonyCompleted: new Set(), ceremonyNotices: new Map(), ceremonyRotationConsumed: new Map(), coverageAnchors: new Map(), coverageDeclared: new Map(), coverageTransitions: [], coverageValidations: [], perceptionSessions: new Map(), capabilities: new Set() }; this.#auditIdx.set(t, idx); }
+    // One prepared statement per index for the head probe — evaluation
+    // touches the index dozens of times and a fresh prepare per call was
+    // most of that cost. Semantics unchanged: the query still re-reads
+    // MAX(seq) and the consumed-tip hash on every call.
+    idx.headQ ??= this.store.db.prepare("SELECT m.maxSeq, h.headHash FROM (SELECT COALESCE(MAX(seq),0) maxSeq FROM audit WHERE tenant=?) m LEFT JOIN (SELECT hash headHash FROM audit WHERE tenant=? AND seq=?) h");
+    const probe = idx.headQ.get(t, t, idx.maxSeq);
+    const maxSeq = probe.maxSeq;
     // Re-entrancy must fail closed: a nested caller handed the mid-fold
     // partial projection could observe anchors that the committed chain
     // never attested (w17-idx F9). Nothing inside the fold recurses
@@ -1456,7 +1462,8 @@ export class Fabric {
     if (committedHead) {
       requireThat(!(committedHead.seq > maxSeq), 'INV-409-INTEGRITY', 'Audit chain truncated below the signed head watermark', 409);
       if (committedHead.seq === maxSeq && committedHead.seq > 0) {
-        const tipRow = this.store.db.prepare('SELECT hash FROM audit WHERE tenant=? AND seq=?').get(t, committedHead.seq);
+        idx.tipQ ??= this.store.db.prepare('SELECT hash FROM audit WHERE tenant=? AND seq=?');
+        const tipRow = idx.tipQ.get(t, committedHead.seq);
         requireThat(tipRow && ctEqual(tipRow.hash, committedHead.hash), 'INV-409-INTEGRITY', 'Audit head row diverges from the signed watermark', 409);
       }
     }
@@ -1464,8 +1471,7 @@ export class Fabric {
     // must still carry the hash the index last consumed — otherwise a
     // tail rewrite slipped under the MAX(seq) watermark (w12-provenance F10).
     if (idx.maxSeq > 0 && idx.headHash !== undefined) {
-      const head = this.store.db.prepare('SELECT hash FROM audit WHERE tenant=? AND seq=?').get(t, idx.maxSeq);
-      requireThat(head && ctEqual(head.hash, idx.headHash), 'INV-409-AUDIT-TAMPER', 'Audit head diverged from the consumed index', 409);
+      requireThat(probe.headHash != null && ctEqual(probe.headHash, idx.headHash), 'INV-409-AUDIT-TAMPER', 'Audit head diverged from the consumed index', 409);
     }
     if (idx.maxSeq === maxSeq) return idx;
     // Signature-trust boundary: the seq trigger lets an in-process writer
