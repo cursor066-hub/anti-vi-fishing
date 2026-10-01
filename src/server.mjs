@@ -252,12 +252,13 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       let m;
       if ((m = /^\/v1\/action-capsules\/([A-Za-z0-9-]+)$/.exec(path)) && req.method === 'GET') return send(200, fabric.getCapsule(p, m[1]));
       if ((m = /^\/v1\/action-capsules\/([A-Za-z0-9-]+)\/approval-challenge$/.exec(path)) && req.method === 'GET') return send(200, fabric.approvalChallenge(p, m[1]));
-      if ((m = /^\/v1\/action-capsules\/([A-Za-z0-9-]+)\/(evidence|evaluate|cancel)$/.exec(path)) && req.method === 'POST') {
-        // Authorize BEFORE field-shape validation: a 400-vs-403 delta leaks
-        // the route's field whitelist to unauthorized callers (w22-http F2).
-        fabric.authorize(p, m[2] === 'evaluate' ? ['operator', 'policy_admin', 'approver', 'custodian'] : ['operator', 'security', 'policy_admin']);
+      // Authorize BEFORE field-shape validation: a 400-vs-403 delta leaks
+      // the route's field whitelist to unauthorized callers (w22-http F2).
+      if ((m = /^\/v1\/action-capsules\/([A-Za-z0-9-]+)\/evaluate$/.exec(path)) && req.method === 'POST') { fabric.authorize(p, ['operator', 'policy_admin', 'approver', 'custodian']); const input = await body(req); fields(input, []); return send(200, fabric.evaluate(p, m[1])); }
+      if ((m = /^\/v1\/action-capsules\/([A-Za-z0-9-]+)\/(evidence|cancel)$/.exec(path)) && req.method === 'POST') {
+        fabric.authorize(p, ['operator', 'security', 'policy_admin']);
         const input = await body(req); if (m[2] === 'evidence') return send(201, fabric.attachEvidence(p, m[1], input)); fields(input, []);
-        return send(200, m[2] === 'evaluate' ? fabric.evaluate(p, m[1]) : fabric.cancel(p, m[1]));
+        return send(200, fabric.cancel(p, m[1]));
       }
       if (path === '/v1/approvals' && req.method === 'POST') return send(201, fabric.approve(p, await body(req)));
       if (path === '/v1/approvals/batch' && req.method === 'POST') return send(201, fabric.batchApprove(p, await body(req)));
