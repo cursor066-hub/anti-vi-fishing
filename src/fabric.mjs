@@ -49,6 +49,20 @@ export class Fabric {
   // not ride a first-read cache forever.
   #auditSigners = {};
   #pendingChainHeads = null;
+  // Flush hot-path caches (w28-http CI regression): the signer-death map
+  // grows only on key-lifecycle audit rows, so it is maintained
+  // incrementally from the append-only table instead of a full LIKE scan
+  // per flush; the verify-key set is content-addressed by a signature of
+  // every input it consults; a stored head envelope's verification is
+  // memoized on its serialized bytes plus the verifier fingerprint.
+  _keyDeathCache = new Map();
+  _verifyKeyCache = new Map();
+  _headEnvVerifyCache = new Map();
+  _suiteAllowCache = new Map();
+  _signSelCache = new Map();
+  // Non-null only inside a synchronous transaction() window: file-side
+  // index probes memoize per transaction (see _auditIndex).
+  _probeMemo = null;
   // Tenants whose chain is being sealed RIGHT NOW: the seal is the only
   // path allowed to move the signed watermark backward, so _auditIndex's
   // head checks stand down inside its transaction — the fold's per-row
@@ -482,8 +496,8 @@ export class Fabric {
           // wedges on the corrupt/missing head this flush exists to heal,
           // so consulting it here would deadlock the recovery (w28-crypto
           // F3, w28-regression w25/w27).
-          const deadAt = this.store._auditKeyDeaths(tenant);
-          signed.push([tenant, h, this.#auditSigners[tenant].sign({ tenant_id: tenant, seq: h.seq, hash: h.hash }, 'audit'), this.auditPublicKeys(tenant), deadAt]);
+          const deadAt = this._keyDeaths(tenant);
+          signed.push([tenant, h, this.#auditSigners[tenant].sign({ tenant_id: tenant, seq: h.seq, hash: h.hash }, 'audit'), this._verifyKeysCached(tenant, 'audit'), deadAt]);
         }
         catch { if (!this.#pendingChainHeads.has(tenant)) this.#pendingChainHeads.set(tenant, h); }
       }
@@ -521,8 +535,19 @@ export class Fabric {
           // transaction may move backward (w27 F0).
           const existing = file.tenants[tenant];
           if (existing) {
-            let existingPl = null;
-            try { existingPl = verifySigned(existing, pubs, 'audit'); } catch { /* forged — falls through to overwrite */ }
+            // Verify an unchanged stored envelope once: the serialized
+            // bytes plus the verifier-key fingerprint pin the result, so a
+            // flush that re-reads its own last write pays no ECDSA cost.
+            // A tampered envelope changes the serialization (re-verify),
+            // a key rotation changes the fingerprint (re-verify).
+            const serialized = JSON.stringify(existing);
+            const fp = Object.keys(pubs).sort().map(k => `${k}:${pubs[k].public_key}`).join('|');
+            const vc = this._headEnvVerifyCache.get(tenant);
+            let existingPl = vc?.serialized === serialized && vc?.fp === fp ? vc.pl : null;
+            if (!(vc?.serialized === serialized && vc?.fp === fp)) {
+              try { existingPl = verifySigned(existing, pubs, 'audit'); } catch { /* forged — falls through to overwrite */ }
+              this._headEnvVerifyCache.set(tenant, { serialized, fp, pl: existingPl });
+            }
             // A verifiable-but-dead-signed head is replay, not authority:
             // an envelope attesting a seq past its signer's ledger death
             // loses the compare and is overwritten (w28-crypto F3).
@@ -932,8 +957,35 @@ export class Fabric {
     }
     return out;
   }
-  executionPublic(t) { return this._verifyKeys(t, 'execution'); }
-  auditPublicKeys(t) { return this._verifyKeys(t, 'audit'); }
+  executionPublic(t) { return this._verifyKeysCached(t, 'execution'); }
+  auditPublicKeys(t) { return this._verifyKeysCached(t, 'audit'); }
+  _keyDeaths(tenant) {
+    const cached = this._keyDeathCache.get(tenant) ?? { throughSeq: 0, dead: new Map() };
+    for (const row of this.store.db.prepare("SELECT seq,envelope FROM audit WHERE tenant=? AND seq>? AND (envelope LIKE '%\"type\":\"AUTHORITY_REVOKED\"%' OR envelope LIKE '%\"type\":\"KEY_ROTATED\"%')").all(tenant, cached.throughSeq)) {
+      let env; try { env = JSON.parse(row.envelope); } catch { continue; }
+      const pl = env?.payload, meta = pl?.metadata;
+      if (pl?.type === 'AUTHORITY_REVOKED' && meta?.kind === 'key' && typeof meta.id === 'string') cached.dead.set(meta.id, row.seq);
+      if (pl?.type === 'KEY_ROTATED' && meta?.key_class === 'audit' && typeof meta?.previous_key_id === 'string') cached.dead.set(meta.previous_key_id, row.seq);
+    }
+    // The watermark tracks the committed tail, not the last matching row —
+    // plain appends must not be rescanned on every flush.
+    const tip = this.store.db.prepare('SELECT seq FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1').get(tenant);
+    if (tip) cached.throughSeq = tip.seq;
+    this._keyDeathCache.set(tenant, cached);
+    return cached.dead;
+  }
+  _verifyKeysCached(t, klass) {
+    const parts = [klass, JSON.stringify(this.keys(t)[klass] ?? null), JSON.stringify(this.keys(t).retired ?? null)];
+    for (const [kid, e] of this.vault.keys) parts.push(kid, String(e.public_key), String(!!e.pending), String(!!e.revoked), String(e.generated_inside === false), JSON.stringify(e.purpose));
+    const dr = this.#declaredRetired[t]; if (dr) for (const [k, v] of dr) parts.push(k, String(v));
+    const sig = parts.join('\x00');
+    const key = `${t}:${klass}`;
+    const c = this._verifyKeyCache.get(key);
+    if (c?.sig === sig) return c.out;
+    const out = this._verifyKeys(t, klass);
+    this._verifyKeyCache.set(key, { sig, out });
+    return out;
+  }
   // Resolves the key allowed to mint class envelopes right now: the bound
   // key when live, else the pending, tenant-owned successor minted before
   // the revoke — the designed escape that keeps a compromise-response from
@@ -941,6 +993,30 @@ export class Fabric {
   // `recovery_signing` marker naming the superseded key, so the ledger tells
   // the truth about which authority signed.
   _signingKeyId(t, klass) {
+    // Every input the resolution consults lives in append-only fold sets
+    // or the vault's own flag checks: a revocation, rotation, ceremony
+    // stage, or grant lands as a NEW fold entry, so the sizes of those
+    // sets change exactly when the answer can change (w28-http CI
+    // regression: the lookup ran per signature). Vault-flag divergence
+    // without a lifecycle event re-verifies at envelope() — a stale sel
+    // can refuse a signature, never forge one.
+    const idx0 = this._auditIndex(t);
+    // Designation reads the ceremony row's plan bytes too — include them,
+    // but only while plans exist (the common eval path has none).
+    let cer = '';
+    if (idx0.ceremonyPlanned?.size) {
+      this._cerRowQ ??= this.store.db.prepare('SELECT value FROM records WHERE tenant=? AND kind=? AND id=?');
+      for (const cid of idx0.ceremonyPlanned.keys()) cer += `${cid}=${this._cerRowQ.get(t, 'ceremony', cid)?.value ?? '-'};`;
+    }
+    const selFp = `${this.keys(t)[klass]?.key_id}|${idx0.revoked.size}|${idx0.rotationsByPrev?.size ?? 0}|${idx0.rotationKeys?.size ?? 0}|${idx0.ceremonyPlanned?.size ?? 0}|${idx0.ceremonyCommitted?.size ?? 0}|${idx0.ceremonyCompleted?.size ?? 0}|${idx0.ceremonyAborted?.size ?? 0}|${idx0.ceremonyRotationConsumed?.size ?? 0}|${idx0.ceremonyAcks?.size ?? 0}|${idx0.grants?.size ?? 0}|${cer}`;
+    const selKey = `${t}:${klass}`;
+    const selHit = this._signSelCache.get(selKey);
+    if (selHit?.fp === selFp) return selHit.sel;
+    const sel = this._signingKeyIdResolve(t, klass);
+    this._signSelCache.set(selKey, { fp: selFp, sel });
+    return sel;
+  }
+  _signingKeyIdResolve(t, klass) {
     const configured = this.keys(t)[klass]?.key_id;
     // A committed-but-not-yet-activated rotation also supersedes the
     // configured key: activation is post-commit by design (ledger-first),
@@ -1025,6 +1101,37 @@ export class Fabric {
     return this.vault.envelope(sel.key_id, purpose, this._recoveryBody(sel, payload), { allowPending: allowPending || sel.recovery, tenant_id: t });
   }
   assertSuiteAllowed(t, suite) {
+    let allowed = this._allowedSuites(t);
+    if (allowed !== null) requireThat((allowed ?? ['Ed25519']).includes(suite), 'INV-451-POLICY', 'Signature suite retired by constitution', 451);
+  }
+  // The allowed-suite answer changes only with the served constitution or
+  // the anchor set that vouches for it — both are digest-bound, so the
+  // resolution memoizes on exactly that content (w28-http CI regression:
+  // the check runs per signature, and per-evaluation sign volume made the
+  // full policy() walk the hot path). A policy row swap changes a digest;
+  // a new anchor changes the tail signature; staged timing flags flip the
+  // booleans — every input is captured.
+  _allowedSuites(t) {
+    const anchors = (() => { try { return this._auditIndex(t).policyAnchors; } catch { return null; } })();
+    const nonStaged = anchors ? [...anchors].reverse().find(a => !a.staged) : null;
+    const stagedAnchor = anchors ? [...anchors].reverse().find(a => a.staged) : null;
+    const now = this.clock();
+    // The fingerprint must capture every input the resolution consults:
+    // the raw stored value of both policy rows (a ciphertext swap changes
+    // the bytes even when the decrypted content would compare equal, and
+    // the miss path re-reads them through the integrity-checked get()) and
+    // the anchor digests that vouch for them. Raw bytes stand in for
+    // digest(row-content): equal content re-encrypted yields a cheap
+    // conservative miss, different content always differs (w28-http CI
+    // regression — two digests of the full policy documents per
+    // signature was the hot path).
+    this._policyRowQ ??= this.store.db.prepare('SELECT value FROM records WHERE tenant=? AND kind=? AND id=?');
+    const av = this._policyRowQ.get(t, 'policy', 'active')?.value ?? null;
+    const sv = this._policyRowQ.get(t, 'policy', 'staged')?.value ?? null;
+    const stagedMeta = sv ? this.store.readValue(t, 'policy', 'staged', sv) : null;
+    const fp = `${av}|${sv}|${nonStaged?.digest ?? '-'}|${stagedAnchor?.digest ?? '-'}|${stagedAnchor?.activate_at ?? '-'}|${anchors === null}|${stagedMeta ? (stagedMeta.activate_at <= now) + (stagedMeta.policy.expires_at > now ? '2' : '1') : '0'}`;
+    const hit = this._suiteAllowCache.get(t);
+    if (hit?.fp === fp) return hit.allowed;
     let allowed = null;
     try { allowed = this.policy(t).algorithms?.allowed_suites; }
     catch (e) {
@@ -1058,7 +1165,8 @@ export class Fabric {
         // repair it. The suite check has nothing authoritative to consult.
       }
     }
-    if (allowed !== null) requireThat((allowed ?? ['Ed25519']).includes(suite), 'INV-451-POLICY', 'Signature suite retired by constitution', 451);
+    this._suiteAllowCache.set(t, { fp, allowed });
+    return allowed;
   }
   // Current drift status with a field-level preview of what changed — a
   // security actor must be able to see the diff before re-attesting.
@@ -1793,6 +1901,18 @@ export class Fabric {
     return null;
   }
   transaction(principal, fn, { allowDuringDrift = false, recoveryPath = false } = {}) {
+    // The index probes (signed-head verify, durable watermark compare,
+    // revocation floor, tip divergence) are cross-process freshness gates.
+    // Within one synchronous transaction nothing this process does can
+    // move them and a peer's file rewrite lands in the next fold's probes
+    // at worst one transaction late — the same lag that already exists
+    // between a peer write and our next read. Memoize them per
+    // transaction instead of paying two file reads plus three queries on
+    // each of the ~90 index touches an evaluation makes (w28-http CI
+    // regression). Standalone callers keep per-call freshness: the map is
+    // only live for the transaction's synchronous window.
+    const prevProbeMemo = this._probeMemo;
+    this._probeMemo = new Map();
     try {
       this.authorize(principal, ['operator', 'approver', 'custodian', 'security', 'auditor', 'policy_admin', 'workload'], { auditDeny: false });
       // RUN-010: a drifting gate configuration withdraws privileges until a
@@ -1866,6 +1986,7 @@ export class Fabric {
       // of leaking driver internals (e.g. node:sqlite ERR_INVALID_STATE).
       throw new InvariantError('INV-503-GATE', 'Internal gate failure', 503);
     }
+    finally { this._probeMemo = prevProbeMemo; }
   }
   // RUN-010: the snapshot watches every security-bearing config section —
   // identities, issuers, policy, the bearer-token map, key bindings and
@@ -1926,6 +2047,12 @@ export class Fabric {
     // fold's per-row verification still runs (w25-clock F-2/F-3).
     if (!sealing) {
       requireThat(idx.maxSeq <= maxSeq, 'INV-409-AUDIT-TAMPER', 'Audit truncated below the consumed index', 409);
+      // File-side probes (signed head verify + compare, durable watermark,
+      // tip hash) run once per synchronous transaction window — the map
+      // transaction() installs. Outside it they run on every call, so
+      // standalone reads keep per-call file freshness (w28-fixverify F4,
+      // w28-http CI regression).
+      if (this._probeMemo?.get(t) !== true) {
       const committedHead = this._chainHead(t);
       requireThat(committedHead !== 'corrupt', 'INV-409-INTEGRITY', 'Chain head watermark failed ledger signature verification', 409);
       if (committedHead) {
@@ -1948,6 +2075,8 @@ export class Fabric {
         idx.tipQ ??= this.store.db.prepare('SELECT hash FROM audit WHERE tenant=? AND seq=?');
         const tipRow = idx.tipQ.get(t, committedHead.seq);
         requireThat(tipRow && ctEqual(tipRow.hash, committedHead.hash), 'INV-409-INTEGRITY', 'Audit head row diverges from the signed watermark', 409);
+      }
+      this._probeMemo?.set(t, true);
       }
     }
     // Same-seq head replacement cannot resync silently: the stored head row
