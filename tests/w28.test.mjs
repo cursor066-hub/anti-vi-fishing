@@ -30,9 +30,11 @@
 // target-F10b/F10d: schema version pragma and BEGIN-outside-tx guard.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
+import http from 'node:http';
 import { fixture, hasCode, installPolicy } from './helpers.mjs';
 import { proposal } from '../src/schema.mjs';
 import { clone, digest, canonical } from '../src/canonical.mjs';
@@ -42,6 +44,19 @@ import { Fabric } from '../src/fabric.mjs';
 import { verifyAudit } from '../src/store.mjs';
 import { KeyVault, verifyAttestation } from '../src/keystore.mjs';
 import { generateKey, signed, decrypt } from '../src/crypto.mjs';
+import { createServer } from '../src/server.mjs';
+import { createIssuerServer, loadIssuers, writeIssuer } from '../src/issuerd.mjs';
+import { ISSUER_RULES, issuerRecords } from '../src/bootstrap.mjs';
+
+function rawRequest(port, { path, method = 'GET', headers = {}, payload } = {}) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, path, method, headers }, res => {
+      const chunks = []; res.on('data', c => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') }));
+    });
+    req.on('error', reject); req.end(payload);
+  });
+}
 
 const HEADS = h => join(h.directory, 'chain-heads.json');
 const WMARK = h => join(h.directory, 'head-watermark.json');
@@ -282,4 +297,84 @@ test('w28-store F10b/F10d: target schema is versioned and BEGIN is guarded', t =
   try {
     assert.throws(() => h.f.target.execute(record.capsule, 'req-w28-1', h.now()), hasCode('INV-503-LEDGER'), 'dispatch inside an outer tx is refused, not silently nested');
   } finally { h.f.target.db.exec('ROLLBACK'); }
+});
+
+// --- w28-http: the fifth HTTP/API surface pass (no CRITICAL/HIGH — one
+// functional defect plus hardening asymmetries) ---
+
+test('w28-http F-01: GET /v1/certificates serves live rows instead of a permanent 400', async t => {
+  const h = fixture(t);
+  h.ready();
+  const app = createServer(h.f, { port: 0, origin: 'http://127.0.0.1:17780' });
+  await app.listen(); t.after(() => app.close());
+  const port = app.server.address().port;
+  const res = await rawRequest(port, { path: '/v1/certificates', headers: { Host: '127.0.0.1:17780', Authorization: `Bearer ${h.setup.credentials.acme.operator}` } });
+  assert.equal(res.status, 200, `certificates list must serve, got ${res.status}: ${res.body}`);
+  const items = JSON.parse(res.body).items;
+  const storedId = h.f.store.db.prepare("SELECT id FROM records WHERE tenant='acme' AND kind='certificate' ORDER BY created DESC LIMIT 1").get().id;
+  assert.equal(items[0].certificate_id, storedId);
+});
+
+test('w28-http F-02: issuerd rejects a duplicated tenant parameter like the gate does', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'if-issuer-w28-')); t.after(() => rmSync(dir, { recursive: true }));
+  writeIssuer(dir, { issuer: 'bank', tenant: 'acme', version: '1.0.0', channel: 'authoritative', key: generateKey(), kinds: ISSUER_RULES.bank, records: issuerRecords().bank, read_token: 'tok-read-1' });
+  const srv = createIssuerServer(loadIssuers(dir), { port: 0, host: '127.0.0.1' });
+  await srv.listen(); t.after(() => srv.close());
+  const port = srv.server.address().port;
+  const host = `127.0.0.1:${port}`;
+  const single = await rawRequest(port, { path: '/v1/issuers/bank/manifest?tenant=acme', headers: { Host: host, Authorization: 'Bearer tok-read-1' } });
+  assert.equal(single.status, 200, 'declared single tenant param serves');
+  const dup = await rawRequest(port, { path: '/v1/issuers/bank/manifest?tenant=acme&tenant=globex', headers: { Host: host, Authorization: 'Bearer tok-read-1' } });
+  assert.equal(dup.status, 400, `duplicate tenant must be 400, got ${dup.status}`);
+});
+
+test('w28-http F-05: a flooding neighbour cannot starve a distinct token through the shared login bucket', async t => {
+  const h = fixture(t);
+  const origin = 'http://127.0.0.1:17781';
+  const app = createServer(h.f, { port: 0, origin });
+  await app.listen(); t.after(() => app.close());
+  const port = app.server.address().port;
+  const login = token => rawRequest(port, { path: '/session', method: 'POST', headers: { Host: '127.0.0.1:17781', Origin: origin, 'Content-Type': 'application/json' }, payload: JSON.stringify({ token }) }).then(r => r.status);
+  // 100 bad-token guesses under the coarse IP ceiling — each burns its own
+  // 5/min token bucket too (so a single bad token 429s after 5 tries).
+  assert.equal(await login('x'.repeat(43)), 401);
+  for (let i = 0; i < 4; i++) assert.equal(await login('x'.repeat(43)), 401);
+  assert.equal(await login('x'.repeat(43)), 429, 'per-token bucket exhausts at 5');
+  for (let i = 0; i < 94; i++) await login(`y${String(i).padStart(42, '0')}`);
+  // A DIFFERENT credential still gets its own bucket — the shared-IP
+  // starvation is gone.
+  assert.equal(await login(h.setup.credentials.acme.operator), 200, 'distinct token is not starved by the flood');
+  // The coarse ceiling still binds total spend from one address.
+  for (let i = 0; i < 105; i++) await login(`z${String(i).padStart(42, '0')}`);
+  assert.equal(await login(h.setup.credentials.acme.operator), 429, 'coarse IP ceiling still applies at 200/min');
+});
+
+test('w28-http F-06: a stale-binding approval cannot veto the signer re-approving changed material', t => {
+  const h = fixture(t);
+  const r = h.proposed();
+  h.evidence(r, { kind: 'ownership' });
+  h.approve(r, ['custodian-1']);
+  // New evidence moves the graph digest — the stored approval is now bound
+  // to stale material and stops counting toward the quorum.
+  h.evidence(r, { issuer: 'registry', kind: 'ownership' });
+  // The signer must be able to affirm the NEW material — before the fix the
+  // still-live old approval replay-blocked them for the rest of its TTL.
+  assert.doesNotThrow(() => h.approve(r, ['custodian-1']), 'signer re-approves the changed graph');
+  // The same binding is still replay-guarded.
+  const challenge = h.f.approvalChallenge(h.p('custodian-1'), r.capsule.capsule_id);
+  const env = signed(challenge, h.setup.identityKeys.acme['custodian-1'], 'action-approval');
+  assert.throws(() => h.f.approve(h.p('custodian-1'), env), hasCode('INV-409-REPLAY'), 'identical-binding second approval still replay-blocked');
+});
+
+test('w28-http F-07: grant enumeration is scoped — operators see only themselves', async t => {
+  const h = fixture(t);
+  const app = createServer(h.f, { port: 0, origin: 'http://127.0.0.1:17782' });
+  await app.listen(); t.after(() => app.close());
+  const port = app.server.address().port;
+  const get = (token, q) => rawRequest(port, { path: `/v1/grants${q}`, headers: { Host: '127.0.0.1:17782', Authorization: `Bearer ${token}` } }).then(r => r.status);
+  const cred = h.setup.credentials.acme;
+  assert.equal(await get(cred.operator, '?subject=custodian-1'), 403, 'operator cannot enumerate another subject');
+  assert.equal(await get(cred.operator, '?subject=operator'), 200, 'operator sees own grants');
+  assert.equal(await get(cred.operator, ''), 200, 'unfiltered list still serves');
+  assert.equal(await get(cred.auditor, '?subject=custodian-1'), 200, 'auditor may enumerate any subject');
 });

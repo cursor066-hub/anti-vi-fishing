@@ -42,12 +42,12 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 4910,
-      "bytes": 387438
+      "lines": 4912,
+      "bytes": 387716
     },
     "src/issuerd.mjs": {
-      "lines": 715,
-      "bytes": 51653
+      "lines": 726,
+      "bytes": 52284
     },
     "src/keystore.mjs": {
       "lines": 227,
@@ -74,8 +74,8 @@
       "bytes": 13696
     },
     "src/server.mjs": {
-      "lines": 373,
-      "bytes": 38337
+      "lines": 382,
+      "bytes": 39268
     },
     "src/shamir.mjs": {
       "lines": 91,
@@ -331,7 +331,7 @@
     },
     "tests/w22-http.test.mjs": {
       "lines": 175,
-      "bytes": 12863
+      "bytes": 12876
     },
     "tests/w22-lifecycle.test.mjs": {
       "lines": 159,
@@ -386,8 +386,8 @@
       "bytes": 9076
     },
     "tests/w28.test.mjs": {
-      "lines": 286,
-      "bytes": 19725
+      "lines": 381,
+      "bytes": 25992
     },
     "tests/w5-mutations.test.mjs": {
       "lines": 194,
@@ -443,7 +443,7 @@
     },
     "tests/w9-deploy.test.mjs": {
       "lines": 151,
-      "bytes": 10666
+      "bytes": 10683
     },
     "tests/w9-fixverify.test.mjs": {
       "lines": 74,
@@ -459,5 +459,5 @@
     }
   },
   "total_files": 114,
-  "total_lines": 25681
+  "total_lines": 25798
 }

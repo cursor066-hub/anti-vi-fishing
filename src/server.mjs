@@ -207,9 +207,18 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       const assets = { '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/style.css': ['style.css', 'text/css; charset=utf-8'] };
       if (req.method === 'GET' && assets[path]) { const [file, type] = assets[path]; return send(200, readFileSync(join(web, file)), type); }
       if (path === '/session' && req.method === 'POST') {
-        rateLimit(`login:${clientIp}`, 20);
+        // Two buckets: a coarse per-IP ceiling AND a per-token FAILURE
+        // counter. Keying login only on the address starves every console
+        // user behind one proxy IP when a single client floods (w28-http
+        // F-05); keying failures per token caps brute-force on any single
+        // credential at 5/min without denying legitimate repeat logins —
+        // successful authentication costs nothing on that bucket.
+        rateLimit(`login:${clientIp}`, 200);
         requireThat(req.headers.origin === origin, 'INV-403-ORIGIN', 'Session creation requires same origin', 403);
-        const input = await body(req); fields(input, ['token']); const result = authenticateToken(input.token);
+        const input = await body(req); fields(input, ['token']); requireThat(typeof input.token === 'string', 'INV-400-SCHEMA', 'token must be a string', 400);
+        let result;
+        try { result = authenticateToken(input.token); }
+        catch (err) { rateLimit(`login-token:${digest(input.token)}`, 5); throw err; }
         // A login is a tenant-scoped request too — attribute it once the
         // token resolves so the slice isn't skewed toward post-auth traffic
         // only. Failures stay unattributed: a bad token resolves no tenant
@@ -300,9 +309,9 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       // code so dashboards can facet by cause without parsing message text.
       if (path === '/v1/metrics' && req.method === 'GET') { fabric.authorize(p, ['security']); const tm = metrics.tenants[p.tenant_id] ?? { requests: 0, errors: 0, unauthorised: 0, rejections: {} }; return send(200, { ...tm, scope: 'tenant', analytics_enabled: false }); }
       if (path === '/v1/revocations' && req.method === 'GET') return send(200, fabric.revocations(p));
-      if (path === '/v1/grants' && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'auditor']); return send(200, fabric.listGrants(p, url.searchParams.get('subject'))); }
+      if (path === '/v1/grants' && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'auditor']); const subject = url.searchParams.get('subject'); requireThat(subject === null || subject === p.subject_id || ['security', 'auditor'].some(r => fabric.identity(p).roles?.includes(r)), 'INV-403-SCOPE', 'Grant enumeration for another subject requires security or auditor', 403); return send(200, fabric.listGrants(p, subject)); }
       if (path === '/v1/subjects' && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'auditor', 'policy_admin']); return send(200, { items: Object.values(fabric.identities(p.tenant_id)).map(i => ({ subject_id: i.subject_id, roles: i.roles, device_id: i.device_id, identity_class: i.identity_class, health_expires_at: i.health_expires_at })) }); }
-      if (path === '/v1/certificates' && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'auditor', 'policy_admin']); const limit = qint(url.searchParams.get('limit'), 'limit', 50, 1, 200), offset = qint(url.searchParams.get('offset'), 'offset', 0, 0, 1000000); return send(200, { items: fabric.store.list(p.tenant_id, 'certificate', limit, offset).map(c => ({ certificate_id: c.certificate_id, status: c.status, issued_at: c.issued_at ?? null, consumed: c.consumed === true })), limit, offset }); }
+      if (path === '/v1/certificates' && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'auditor', 'policy_admin']); const limit = qint(url.searchParams.get('limit'), 'limit', 50, 1, 200), offset = qint(url.searchParams.get('offset'), 'offset', 0, 0, 1000000); return send(200, { items: fabric.store.list(p.tenant_id, 'certificate', limit, offset).map(c => ({ certificate_id: c.envelope?.payload?.certificate_id ?? null, status: c.status, issued_at: c.issued_at ?? null, consumed: c.consumed === true })), limit, offset }); }
       if (path === '/v1/policy/history' && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'auditor', 'policy_admin']); return send(200, { items: fabric.store.list(p.tenant_id, 'policy-history', 100, 0), staged: fabric.store.get(p.tenant_id, 'policy', 'staged') ?? null }); }
       if ((m = /^\/v1\/action-capsules\/([A-Za-z0-9-]+)\/acquire-evidence$/.exec(path)) && req.method === 'POST') { fabric.authorize(p, ['operator', 'security', 'policy_admin']); const input = await body(req); fields(input, ['issuer', 'kind', 'claims']); return send(201, await fabric.acquireEvidence(p, m[1], input)); }
       if (path === '/v1/connectors/status' && req.method === 'GET') return send(200, fabric.connectorStatus(p));

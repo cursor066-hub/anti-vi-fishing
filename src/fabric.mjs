@@ -4304,11 +4304,13 @@ export class Fabric {
     requireThat(identity.subject_id !== record.capsule.actor.subject_id, 'INV-403-SEPARATION', 'An initiator cannot approve their own action', 403);
     requireThat(payload.capsule_digest === record.capsule_digest && payload.evidence_graph_digest === this.graph(t, record).digest && payload.policy_digest === digest(this.policy(t)), 'INV-409-STATE', 'Approval no longer matches action, evidence or policy', 409);
     integer(payload.approved_at, 'approval time', now - 300000, now + 5000); integer(payload.expires_at, 'approval expiry', now + 1, Math.min(record.capsule.expires_at, payload.approved_at + 300000));
-    // Only a LIVE approval binds the signer: a lapsed envelope stops counting
-    // in evaluation, and it must not also burn the signer's future votes —
-    // otherwise ESCROW past the 5-minute approval TTL permanently wedges the
-    // quorum (w11-lifecycle F3).
-    requireThat(!record.approvals.some(a => a.payload.signer_id === payload.signer_id && a.payload.expires_at > now), 'INV-409-REPLAY', 'Signer already approved this action', 409);
+    // Only a LIVE approval on the SAME binding blocks the signer: a lapsed
+    // envelope stops counting in evaluation, and one bound to a stale
+    // action/evidence/policy digest stops counting identically — it must not
+    // also burn the signer's re-approval of the changed material for the
+    // remainder of its TTL (w11-lifecycle F3, w28-http F-06).
+    requireThat(!record.approvals.some(a => a.payload.signer_id === payload.signer_id && a.payload.expires_at > now
+      && a.payload.capsule_digest === payload.capsule_digest && a.payload.evidence_graph_digest === payload.evidence_graph_digest && a.payload.policy_digest === payload.policy_digest), 'INV-409-REPLAY', 'Signer already approved this action', 409);
     record.approvals.push(clone(envelope)); this.store.put(t, 'capsule', capsuleId, record, now);
     this.store.audit(t, 'EXACT_ACTION_APPROVED', p.subject_id, capsuleId, { approval_digest: digest(envelope), signer_id: payload.signer_id, expires_at: payload.expires_at }, now);
     return { capsule_id: capsuleId, signer_id: payload.signer_id, approvals: record.approvals.length };

@@ -142,9 +142,9 @@ test('w9-deploy F3: --trust-proxy keys rate buckets on X-Forwarded-For only with
       res => { res.resume(); res.on('end', () => resolve(res.statusCode)); });
     req.on('error', reject); req.end('{}');
   });
-  // Login bucket is 20/min per identity — a secreted XFF exhausts only its
-  // own bucket, not the shared loopback one (w10-fixverify F-2).
-  for (let i = 0; i < 20; i++) assert.notEqual(await hit('10.9.9.9'), 429, `request ${i}`);
+  // Login bucket is 200/min per identity — a secreted XFF exhausts only its
+  // own bucket, not the shared loopback one (w10-fixverify F-2, w28-http F-05).
+  for (let i = 0; i < 200; i++) assert.notEqual(await hit('10.9.9.9'), 429, `request ${i}`);
   assert.equal(await hit('10.9.9.9'), 429);
   assert.notEqual(await hit('10.9.9.8'), 429);
 });

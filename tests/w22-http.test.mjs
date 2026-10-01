@@ -37,7 +37,7 @@ test('w22-http F1: rate buckets key on the RIGHTMOST XFF hop, not client-control
   const hit = xff => rawRequest(port, { path: '/session', method: 'POST', headers: { Host: '127.0.0.1:17779', Origin: origin, 'X-Fabric-Proxy': 'test-proxy-secret-1234', 'X-Forwarded-For': xff, 'Content-Type': 'application/json', 'Content-Length': 2 }, payload: '{}' }).then(r => r.status);
   // Rotating the client-controlled leftmost hop must NOT rotate the bucket:
   // the proxy-vouched rightmost '10.9.9.9' exhausts its own login bucket.
-  for (let i = 0; i < 20; i++) assert.notEqual(await hit(`10.1.1.${i}, 10.9.9.9`), 429, `request ${i}`);
+  for (let i = 0; i < 200; i++) assert.notEqual(await hit(`10.1.1.${(i % 250) + 1}, 10.9.9.9`), 429, `request ${i}`);
   assert.equal(await hit('172.16.0.1, 10.9.9.9'), 429, 'rightmost hop shares the exhausted bucket');
   assert.notEqual(await hit('10.9.9.8'), 429, 'a different rightmost hop is a different identity');
 });

@@ -458,7 +458,14 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
       // The wire contract is closed: 'tenant' on the manifest route is
       // the only declared parameter — anything else fails rather than
       // being silently ignored (w18-http F-4).
-      for (const k of url.searchParams.keys()) requireThat(k === 'tenant' && req.method === 'GET' && /^\/v1\/issuers\/[A-Za-z0-9_-]+\/(manifest|health)$/.test(url.pathname), 'INV-400-SCHEMA', 'Unknown query parameter', 400);
+      // Same closed-params grammar as the gate: only the declared 'tenant'
+      // parameter, and a parameter may never repeat (w28-http F-02).
+      const seen = new Set();
+      for (const k of url.searchParams.keys()) {
+        requireThat(k === 'tenant' && req.method === 'GET' && /^\/v1\/issuers\/[A-Za-z0-9_-]+\/(manifest|health)$/.test(url.pathname), 'INV-400-SCHEMA', 'Unknown query parameter', 400);
+        requireThat(!seen.has(k), 'INV-400-SCHEMA', `Duplicate query parameter ${k}`, 400);
+        seen.add(k);
+      }
       // Same Host pinning as the main server: requests naming another
       // authority are answered by nothing here (w9-deploy F5). Compare
       // against the socket's own local address/port so a wildcard-bound
@@ -681,6 +688,10 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
   // Socket hardening mirrors the main server: header trickle, idle
   // keep-alives and unbounded request streams are all bounded (w9-deploy F5).
   server.requestTimeout = 15000; server.headersTimeout = 8000; server.keepAliveTimeout = 5000; server.maxRequestsPerSocket = 100;
+  // Same connection ceiling as the gate — a flood of half-open sockets
+  // must not exhaust the issuer daemon's file descriptors (w28-http F-03).
+  let openConnections = 0;
+  server.on('connection', socket => { if (++openConnections > 2048) { socket.destroy(); return; } socket.on('close', () => openConnections--); });
   return { server, issuers, listen: () => new Promise(r => server.listen(port, host, r)), close: () => new Promise((r, j) => { server.closeAllConnections(); server.close(e => e ? j(e) : r()); }) };
 }
 

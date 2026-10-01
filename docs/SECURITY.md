@@ -108,6 +108,7 @@ Residual honest limits:
 - **An oversized `chain-heads.json` is corruption, not a document.** Files over 256 KiB are never parsed into memory — the reader wedges (`'corrupt'`) and the writer drops their contents rather than merging planted state (w28-crypto F10).
 - **`idempotency` receipts no longer keep capsule plaintext.** `propose` receipts store `{capsule_id, capsule_digest, status}` and resolve the live record on replay — after retention shredding, a replay answers `INV-404` rather than re-serving plaintext the shredder was supposed to destroy. Receipts written under the old scheme still return what they stored (w28-crypto F1).
 - **`verifyAudit`/`auditExport`/`auditPage` now enforce the signer-death window.** Rows sequenced after their signing key's ledger revocation/rotation are rejected as replay — the standalone verifiers match the fold's check (w28-crypto F2/F3); chain-head envelopes lose the monotone compare on the same window at flush time.
+- **Bearer-authenticated logout with a foreign `if_session` cookie is an honest no-op.** The session kill is bound to the credential the caller authenticated with — a Bearer token for principal A cannot force out sessions minted under B's token, and reporting a logout that terminated nothing would be a lie, so the response reports zero terminated sessions rather than pretending (w28-http F-04).
 
 ### Data gate design limits (w6-tenancy audit)
 
