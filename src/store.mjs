@@ -255,7 +255,10 @@ export class Store {
     requireThat(after === 0 || anchor, 'INV-409-AUDIT-TAMPER', 'Audit cursor does not resolve to a stored row', 409);
     let previous = anchor?.hash ?? '0'.repeat(64);
     const entries = rows.map(r => {
-      const envelope = JSON.parse(r.envelope);
+      // A malformed envelope is tamper evidence, not a crash: it lands as
+      // the same INV-409-AUDIT-TAMPER as a hash break (w13-fixverify L10).
+      let envelope;
+      try { envelope = JSON.parse(r.envelope); } catch { throw new InvariantError('INV-409-AUDIT-TAMPER', 'Audit row failed integrity verification', 409); }
       requireThat(ctEqual(digest(envelope.payload), r.hash) && envelope.payload.sequence === r.seq && ctEqual(envelope.payload.previous, previous), 'INV-409-AUDIT-TAMPER', 'Audit row failed integrity verification', 409);
       previous = r.hash;
       return { sequence: r.seq, hash: r.hash, envelope };
@@ -263,7 +266,10 @@ export class Store {
     return { entries, next_cursor: rows.length === limit ? rows.at(-1).seq : null };
   }
   auditExport(tenant, now = null) {
-    const rows = this.db.prepare('SELECT hash,envelope FROM audit WHERE tenant=? ORDER BY seq').all(tenant).map(r => ({ hash: r.hash, envelope: JSON.parse(r.envelope) }));
+    const rows = this.db.prepare('SELECT hash,envelope FROM audit WHERE tenant=? ORDER BY seq').all(tenant).map(r => {
+      try { return { hash: r.hash, envelope: JSON.parse(r.envelope) }; }
+      catch { throw new InvariantError('INV-409-AUDIT-TAMPER', 'Audit row failed integrity verification', 409); }
+    });
     const signer = this.auditSigners[tenant], public_keys = signer.keys ? signer.keys() : { [signer.key_id]: { public_key: signer.public_key } };
     const checkpoint = signer.sign({ tenant_id: tenant, size: rows.length, head: rows.at(-1)?.hash ?? '0'.repeat(64), tree_head: merkleRoot(rows.map(r => r.hash)) }, 'checkpoint');
     // Witness checkpoints (store-audit HIGH-2): the previous export's signed

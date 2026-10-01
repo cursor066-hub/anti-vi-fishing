@@ -968,22 +968,28 @@ test('CONC-D R2-43: reconcile-superseded outcomes name their predecessor digest'
   assert.ok(audited.at(-1).envelope.payload.metadata.supersedes, 'audit chain carries the supersession pointer');
 });
 
-test('CONC-E R2-44: config drift quarantine is durable across Fabric instances', t => {
+test('CONC-E R2-44: config drift quarantine is anchored — a forged flag delete cannot clear it', t => {
   const h = fixture(t, ['acme']);
-  // A second Fabric instance on the same deployment directory whose config
-  // disagrees with the stored snapshot detects drift — and crucially the
-  // consequence (privilege withdrawal) is visible to the FIRST instance,
-  // which never performed the detection (concurrency-audit M4).
+  // Drift consequence rides the LAST SIGNED snapshot, not the mutable
+  // 'config-flag'/'config-snapshot' rows (w13-fixverify M4): a store-level
+  // writer who deletes the flag or re-baselines the record can no longer
+  // un-drift the gate — only a signed CONFIG_REASSERTED moves the anchor.
   const tampered = JSON.parse(JSON.stringify(h.setup.config));
   delete tampered.tenants.acme.issuers[Object.keys(tampered.tenants.acme.issuers)[0]];
-  const f2 = new Fabric(tampered, h.directory, () => h.now() + 1);
+  const f2 = new Fabric(tampered, h.directory, () => h.now());
   try {
     assert.equal(Boolean(f2.store.get('acme', 'config-flag', 'drift')), true, 'drift flag persisted to the ledger');
-    // Instance A (h.f) has an EMPTY in-memory drift set — only the durable
-    // flag can block it.
-    assert.throws(() => h.proposed(), e => e.code === 'INV-403-QUARANTINE');
+    // Forge a clean slate at the store layer: delete the flag AND the
+    // snapshot record — the anchored compare must still hold the gate.
+    f2.store.remove('acme', 'config-flag', 'drift');
+    f2.store.remove('acme', 'config-snapshot', 'current');
+    assert.throws(() => f2.evaluate({ tenant_id: 'acme', subject_id: 'operator' }, 'any'), e => e.code === 'INV-403-QUARANTINE');
+    // Instance A runs the ORIGINAL config, which honestly matches the
+    // anchor — per-instance divergence, not a shared poisoned flag.
+    h.f.store.remove('acme', 'config-flag', 'drift');
+    assert.doesNotThrow(() => h.proposed());
     f2.reassertConfig({ tenant_id: 'acme', subject_id: 'security' });
-    assert.equal(f2.store.get('acme', 'config-flag', 'drift') ?? null, null, 'reassert clears the durable flag');
+    assert.equal(f2._auditIndex('acme').tenantDrifted, false, 'reassert moves the anchor and clears the gate');
   } finally { f2.close(); }
 });
 

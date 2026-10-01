@@ -15,7 +15,7 @@ test('w13 F9: a pre-consumption revoke-event delete wedges on the floor row', t 
   h.f.revoke(h.p('security'), { kind: 'device', id: 'operator-device', reason: 'hostile device' });
   // Consume nothing: evict the cached index so the deletion happens before
   // the event is ever projected — the exact race the auditor named.
-  h.f._auditIdx?.clear();
+  h.f.invalidateAuditIndex();
   const row = h.f.store.db.prepare("SELECT seq FROM audit WHERE tenant='acme' ORDER BY seq DESC LIMIT 1").get();
   // The append-only triggers would stop a bare delete — the insider drops
   // them first, exactly what the store audit documented (open-time guard
@@ -78,11 +78,11 @@ test('w13 F16b: a deleted reservation event strands the consumed flag', t => {
   const id = certificate.payload.certificate_id;
   // Begin a real execution, kill it before dispatch (journal absent).
   assert.equal(h.f.execute(h.p(), certificate, { fault: 'before-dispatch' }).payload.status, 'UNCERTAIN');
-  h.f._auditIdx?.clear();
+  h.f.invalidateAuditIndex();
   for (const tr of h.f.store.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all()) h.f.store.db.exec(`DROP TRIGGER ${tr.name}`);
   const res = h.f.store.db.prepare("SELECT seq FROM audit WHERE tenant='acme' AND envelope LIKE '%EXECUTION_RESERVED%' ORDER BY seq DESC LIMIT 1").get();
   h.f.store.db.prepare('DELETE FROM audit WHERE tenant=? AND seq=?').run('acme', res.seq);
-  h.f._auditIdx?.clear();
+  h.f.invalidateAuditIndex();
   // A mid-chain delete trips the tamper guard; a reservation that never
   // anchored fails the state check — both refusals are the wedge working.
   assert.throws(() => h.f.reconcile(h.p(), id), e => /^INV-409-(STATE|INTEGRITY|AUDIT-TAMPER)$/.test(e.code));

@@ -25,7 +25,7 @@ test('w14 F2: transplanted evidence cannot answer for a sibling capsule', t => {
   const aRow = h.f.store.must('acme', 'evidence', aId);
   // Rewrite B's attached row in place to carry A's signed envelope.
   h.f.store.put('acme', 'evidence', bId, aRow, h.now());
-  h.f._auditIdx?.clear();
+  h.f.invalidateAuditIndex();
   assert.throws(() => h.f.evaluate(h.p(), b.capsule.capsule_id), hasCode('INV-409-INTEGRITY'));
 });
 
@@ -212,6 +212,6 @@ test('w14 M-3: an in-place capsule rewrite fails the proposal anchor', t => {
   stored.capsule.requested_state = { ...stored.capsule.requested_state, extra_graft: true };
   stored.capsule_digest = digest(stored.capsule); // consistent re-digest — still dies on the anchor
   h.f.store.put('acme', 'capsule', r.capsule.capsule_id, stored, h.now());
-  h.f._auditIdx?.clear();
+  h.f.invalidateAuditIndex();
   assert.throws(() => h.f.evaluate(h.p(), r.capsule.capsule_id), hasCode('INV-409-INTEGRITY'));
 });

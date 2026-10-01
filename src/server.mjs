@@ -37,7 +37,7 @@ export const ROUTE_METHODS = new Map(Object.entries({
   '/v1/ceremonies/{id}/split': 'POST', '/v1/ceremonies/{id}/reconstruct': 'POST',
   '/v1/ceremonies/{id}/abort': 'POST',
   '/v1/keys': 'GET', '/v1/keys/rotate-prepare': 'POST', '/v1/keys/{id}/attest': 'GET',
-  '/v1/config-drift': 'GET', '/v1/config-drift/reassert': 'POST', '/v1/clock/recover': 'POST', '/v1/audit/seal': 'POST',
+  '/v1/config-drift': 'GET', '/v1/config-drift/reassert': 'POST', '/v1/policy/reanchor': 'POST', '/v1/clock/recover': 'POST', '/v1/audit/seal': 'POST',
   '/v1/secure-perception/sessions': 'POST', '/v1/secure-perception/release': 'POST',
   '/v1/secure-perception/fallback': 'POST', '/v1/advisory': 'POST',
 }).map(([k, v]) => [k, v.split(',')]));
@@ -260,6 +260,7 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       if (path === '/v1/keys' && req.method === 'GET') { fabric.authorize(p, ['security', 'policy_admin']); return send(200, { keys: fabric.vault.list().filter(k => fabric.ownsVaultKey(p.tenant_id, k.key_id)).map(({ wrapped, ...k }) => k), firmware: fabric.vault.firmware }); }
       if (path === '/v1/keys/rotate-prepare' && req.method === 'POST') { const input = await body(req); fields(input, ['key_class'], ['suite']); return send(201, fabric.prepareRotation(p, input.key_class, input.suite)); }
       if (path === '/v1/config-drift/reassert' && req.method === 'POST') return send(200, fabric.reassertConfig(p));
+      if (path === '/v1/policy/reanchor' && req.method === 'POST') return send(200, fabric.reanchorPolicy(p));
       if (path === '/v1/clock/recover' && req.method === 'POST') return send(200, fabric.recoverClock(p));
       if (path === '/v1/audit/seal' && req.method === 'POST') return send(200, fabric.sealAuditChain(p));
       if (path === '/v1/config-drift' && req.method === 'GET') return send(200, fabric.configDriftStatus(p));

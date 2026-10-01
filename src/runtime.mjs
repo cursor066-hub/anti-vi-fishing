@@ -102,19 +102,25 @@ export class RuntimeGate {
       for (const key of ['device_id', 'resource', 'destination', 'action', 'purpose']) requireThat(input[key] === cap[key], 'INV-403-SCOPE', 'Capability binding mismatch', 403);
       requireThat(input.columns.every(c => cap.columns.includes(c)) && input.row_ids.every(id => cap.row_ids.includes(id)), 'INV-403-SCOPE', 'Data scope denied', 403);
       requireThat(input.action !== 'data.read' || (input.columns.length > 0 && input.row_ids.length > 0), 'INV-400-SCHEMA', 'Data request requires explicit selection');
-      const exists = this.f.store.db.prepare('SELECT 1 FROM usage WHERE tenant=? AND capability=? AND request=?').get(t, cap.capability_id, input.request_id);
+      // Replay/budget/rate/fanout authority is the signed chain, not the
+      // mutable usage table — an insider who can DELETE or INSERT usage rows
+      // can otherwise replay a request, refill a budget, or clear the
+      // fan-out set (w13-fixverify M1). The usage INSERT below stays as an
+      // observability mirror only.
+      const idx = this.f._auditIndex(t);
+      const exists = idx.runtimeUse.some(u => u.capability === cap.capability_id && u.request_id === input.request_id);
       requireThat(!exists, 'INV-409-REPLAY', 'Runtime request already consumed', 409);
       const r = cap.runtime_policy, cost = cap.action === 'data.read' ? input.row_ids.length * input.columns.length * r.sensitivity_weights[cap.classification] : 1;
-      const used = this.f.store.db.prepare('SELECT coalesce(sum(cost),0) AS n FROM usage WHERE tenant=? AND capability=?').get(t, cap.capability_id).n;
+      const used = idx.runtimeUse.filter(u => u.capability === cap.capability_id).reduce((n, u) => n + (u.cost ?? 0), 0);
       requireThat(used + cost <= (constrained ? Math.floor(cap.max_cost / 2) : cap.max_cost), 'INV-429-BUDGET', 'Capability volume exhausted', 429);
       // No caller-provided byte counts: charge observed requested information units.
       for (const window of r.windows) {
-        const total = this.f.store.db.prepare('SELECT coalesce(sum(cost),0) AS n FROM usage WHERE tenant=? AND subject=? AND resource=? AND at>?').get(t, cap.subject_id, cap.resource, now - window.duration_ms).n;
+        const total = idx.runtimeUse.filter(u => u.subject === cap.subject_id && u.resource === cap.resource && u.at > now - window.duration_ms).reduce((n, u) => n + (u.cost ?? 0), 0);
         requireThat(total + cost <= window.limit, 'INV-429-BUDGET', 'Rolling information budget exhausted', 429);
       }
-      const rate = this.f.store.db.prepare('SELECT count(*) AS n FROM usage WHERE tenant=? AND subject=? AND at>?').get(t, cap.subject_id, now - 1000).n;
+      const rate = idx.runtimeUse.filter(u => u.subject === cap.subject_id && u.at > now - 1000).length;
       requireThat(rate < r.rate_per_second, 'INV-429-RATE', 'Subject request rate exceeded', 429);
-      const resources = this.f.store.db.prepare('SELECT DISTINCT resource FROM usage WHERE tenant=? AND subject=? AND at>?').all(t, cap.subject_id, now - 1000).map(x => x.resource);
+      const resources = [...new Set(idx.runtimeUse.filter(u => u.subject === cap.subject_id && u.at > now - 1000).map(u => u.resource))];
       requireThat(resources.includes(cap.resource) || resources.length < r.max_fanout, 'INV-429-FANOUT', 'Service fan-out exceeded', 429);
       let rows = null, recon = null, watermarks = null;
       if (cap.action === 'data.read') {
@@ -152,12 +158,16 @@ export class RuntimeGate {
   recordContainment(principal, input, e) {
     try {
       const t = principal.tenant_id, now = this.f.clock();
-      this.f.store.tx(() => this.f.store.put(t, 'containment', `deny:${randomUUID()}:${e.code}`, {
+      this.f.store.tx(() => { this.f.store.put(t, 'containment', `deny:${randomUUID()}:${e.code}`, {
         contained_at: now, subject_id: principal.subject_id, device_id: input.device_id ?? null,
         capability_id: input.capability?.payload?.capability_id ?? null, resource: input.resource ?? null,
         destination: input.destination ?? null, action: input.action ?? null, code: e.code,
         request_id: input.request_id, dropped_requests: 1,
-      }, now));
+      }, now);
+      // The denial anchors on the signed chain too — the containment report
+      // cross-checks each mutable row against RUNTIME_DENIED events instead
+      // of trusting store contents (w13-fixverify L7).
+      this.f.store.audit(t, 'RUNTIME_DENIED', principal.subject_id, input.request_id ?? 'unknown', { code: e.code, capability_id: input.capability?.payload?.capability_id ?? null }, now); });
     } catch { /* containment logging never masks the original denial */ }
   }
 }

@@ -198,8 +198,10 @@ test('NFR-AVL-002: connector unavailability does not remove already-issued local
   // registered issuer is flagged drifted (as checkIssuerDrift does when the
   // endpoint is unreachable or the manifest is invalid), so no new evidence
   // can be acquired or attached.
+  // Quarantine is anchored by the signed event, not the mutable row
+  // (w13-fixverify M3) — emit CONNECTOR_DRIFT like the drift check does.
   for (const key_id of Object.keys(h.f.tenant('acme').issuers))
-    h.f.store.put('acme', 'issuer-drift', key_id, { drifted_at: h.now(), changes: [{ field: 'endpoint', detail: 'unreachable' }] }, h.now());
+    h.f.store.audit('acme', 'CONNECTOR_DRIFT', 'test', key_id, { drifted: 'endpoint' }, h.now());
   const r = h.proposed();
   assert.throws(() => h.evidence(r), hasCode('INV-403-QUARANTINE'));
   // ...while the already-issued local control still enforces offline.

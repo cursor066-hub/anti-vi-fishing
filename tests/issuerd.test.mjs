@@ -46,13 +46,20 @@ test('EVD-001: evidence bound to a different bank account is rejected at attach'
 });
 
 // MED-2: a drifted connector stops being trusted until a clean re-check.
+// Drift quarantine is chain-anchored (w13-fixverify M3): only signed
+// CONNECTOR_DRIFT/CONNECTOR_REVALIDATED events move the gate — the mutable
+// 'issuer-drift' row is observability, not authority.
 test('CON-006: issuer-drift flag suspends evidence until cleared', t => {
   const h = fixture(t);
   const r = h.proposed();
   const bankId = Object.keys(h.f.tenant('acme').issuers).find(k => h.f.tenant('acme').issuers[k].name === 'bank');
+  // A mutable row alone mints no quarantine.
   h.f.store.put('acme', 'issuer-drift', bankId, { drifted_at: h.now(), changes: [{ field: 'actions' }] }, h.now());
+  h.evidence(r, { issuer: 'bank' });
+  h.f.store.audit('acme', 'CONNECTOR_DRIFT', 'test', bankId, { drifted: 'manifest' }, h.now());
   assert.throws(() => h.evidence(r, { issuer: 'bank' }), hasCode('INV-403-QUARANTINE'));
   h.f.store.remove('acme', 'issuer-drift', bankId);
+  h.f.store.audit('acme', 'CONNECTOR_REVALIDATED', 'test', bankId, { configuration_digest: 'x' }, h.now());
   h.evidence(r, { issuer: 'bank' });
 });
 

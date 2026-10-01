@@ -1625,6 +1625,48 @@
         }
       }
     },
+    "/v1/policy/reanchor": {
+      "post": {
+        "operationId": "post_v1_policy_reanchor",
+        "summary": "Re-anchor a diverged active policy under a signed remediation event",
+        "description": "Roles: security. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Empty"
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/audit-exports": {
       "post": {
         "operationId": "post_v1_audit_exports",

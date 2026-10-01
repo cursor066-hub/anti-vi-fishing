@@ -71,7 +71,11 @@ test('w7-seam F3: drifted issuer evidence stops counting at evaluation', t => {
   h.evidence(r, { issuer: 'registry' });
   h.approve(r, 2);
   assert.equal(h.f.evaluate(h.p(), r.capsule.capsule_id).decision, 'ALLOW');
+  // Drift is chain-anchored, not a mutable record (w13-fixverify M3): the
+  // CONNECTOR_DRIFT event is what suspends the issuer — a bare
+  // 'issuer-drift' store row can no longer gate or ungate anything.
   h.f.store.insert('acme', 'issuer-drift', h.setup.issuerKeys.acme['registry'].key_id, { drifted_at: h.now(), changes: [{ field: 'manifest', detail: 'invalid' }] }, h.now());
+  h.f.store.audit('acme', 'CONNECTOR_DRIFT', 'test', h.setup.issuerKeys.acme['registry'].key_id, { drifted: 'manifest' }, h.now());
   const decision = h.f.evaluate(h.p(), r.capsule.capsule_id);
   assert.notEqual(decision.decision, 'ALLOW');
 });

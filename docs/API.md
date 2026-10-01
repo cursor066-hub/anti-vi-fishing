@@ -59,7 +59,7 @@ There are no external URL fetch, plaintext-key extraction, raw SQL, universal ad
 | Ceremonies | `GET|POST /v1/ceremonies` · `POST /v1/ceremonies/{id}/{acknowledge,split,reconstruct,abort}` | security, custodian, policy_admin | Committed Shamir shares; quorum enforced. Abort retires a live ceremony. |
 | Keys | `GET /v1/keys` · `POST /v1/keys/rotate-prepare` · `GET /v1/keys/{id}/attest` | security, policy_admin / auditor | Metadata only; pending keys sign nothing until `key.rotate` verifies. |
 | Grants | `GET /v1/grants?subject=` | operator, security, auditor | Active JIT grants; expired/revoked excluded. |
-| Policy | `GET /v1/policy/history` | operator, security, auditor, policy_admin | Version history + staged pending policy. |
+| Policy | `GET /v1/policy/history` · `POST /v1/policy/reanchor` | operator, security, auditor, policy_admin / security | Version history + staged pending policy; reanchor is break-glass remediation that re-anchors a diverged active policy under a signed `POLICY_ACTIVATED` event — refused while the anchor is healthy. |
 | Subjects | `GET /v1/subjects` | operator, security, auditor, policy_admin | Tenant subject inventory. |
 | Perception | `POST /v1/secure-perception/{sessions,release,fallback}` | operator, approver, custodian, security | Dev-attested software sessions; never a trusted display. |
 | Advisory | `POST /v1/advisory` | operator, approver, custodian, security, policy_admin | Deterministic extraction/explanation; zero authority. |
