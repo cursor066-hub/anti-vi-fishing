@@ -391,7 +391,11 @@ export function evaluatePolicy({ capsule, policy, evidence = [], approvals = [],
     // inside a declared DATASET resource — phantom rows in a service-scope
     // grant mint authority that can never serve and later audits cannot
     // attribute (w27-datagate F4).
-    if (rowIds.length && (!rowIds.every(x => typeof x === 'string' && /^[A-Za-z0-9][\w:.-]{0,127}$/.test(x)) || !resources.some(x => r.datasets.includes(x)))) return result('DENY', [reason('INVALID_GRANT', 'row_ids must name well-formed row identifiers inside a declared dataset resource.')]);
+    // Row scope only binds dataset reads — a grant mixing dataset and
+    // service resources may not carry row_ids at all, or the row set
+    // launders itself across siblings it never constrained
+    // (w28-fixverify F11).
+    if (rowIds.length && (!rowIds.every(x => typeof x === 'string' && /^[A-Za-z0-9][\w:.-]{0,127}$/.test(x)) || !resources.every(x => r.datasets.includes(x)))) return result('DENY', [reason('INVALID_GRANT', 'row_ids must name well-formed row identifiers inside a declared dataset resource.')]);
     // The beneficiary must be a live registered identity — pre-positioned
     // scope for a ghost subject survives as latent authority the moment the
     // name is enrolled (w27-policy F4). Revocation is re-checked at the

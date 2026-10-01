@@ -33,6 +33,9 @@ export class SimulatedTarget {
     // a busy-timeout race as INV-503-LEDGER, never a raw sqlite error
     // (w20-fixverify F-12).
     try {
+      // user_version stamps the schema like the ledger store does: a
+      // file-writer swapping in a foreign sqlite database is caught by the
+      // version marker before any encrypted row is trusted (w28-store F10).
       this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=30000; PRAGMA secure_delete=ON;
         CREATE TABLE IF NOT EXISTS resources(tenant TEXT, id TEXT, version INTEGER, value TEXT, PRIMARY KEY(tenant,id));
         CREATE TABLE IF NOT EXISTS transactions(tenant TEXT,id TEXT,value TEXT,PRIMARY KEY(tenant,id));
@@ -41,7 +44,8 @@ export class SimulatedTarget {
         CREATE INDEX IF NOT EXISTS data_access_ix ON data_access(tenant,subject,dataset,at);
         CREATE TABLE IF NOT EXISTS secrets_registry(tenant TEXT, secret_id TEXT, version INTEGER, value TEXT, PRIMARY KEY(tenant,secret_id));
         CREATE TABLE IF NOT EXISTS grants(tenant TEXT, grant_id TEXT, value TEXT, PRIMARY KEY(tenant,grant_id));
-        CREATE INDEX IF NOT EXISTS grants_subject ON grants(tenant);`);
+        CREATE INDEX IF NOT EXISTS grants_subject ON grants(tenant);
+        PRAGMA user_version=1;`);
       // Crash residue: a post-delete checkpoint that never ran leaves superseded
       // ciphertext in the WAL — truncate at open like the ledger store does
       // (w8-fixverify F3).
@@ -292,6 +296,9 @@ export class SimulatedTarget {
     // see) — the outcome must record FAILED, never UNCERTAIN.
     if (fault === 'state-conflict') throw new InvariantError('INV-409-STATE', 'Simulated deterministic target refusal', 409);
     let outcome;
+    // A caller already inside a transaction cannot nest a bare BEGIN — the
+    // inner COMMIT would commit the caller's writes early (w28-store F10).
+    requireThat(!this.db.isTransaction, 'INV-503-LEDGER', 'Target execute cannot nest inside a live transaction', 503);
     try {
       // BEGIN inside the try: contention on the BEGIN itself must surface
       // as INV-503-LEDGER, not a raw sqlite error (w21-store F-3).
@@ -352,8 +359,10 @@ export class SimulatedTarget {
       if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
       // Two processes racing the same transactionId hit the PK constraint
       // inside the write — the loser must get the stored outcome, not an
-      // error (store-audit LOW: idempotent replay under contention).
-      if (/PRIMARYKEY|UNIQUE/.test(String(e.code ?? e.message))) {
+      // error (store-audit LOW: idempotent replay under contention). The
+      // constraint code lives on e.errcode — e.code is always the generic
+      // ERR_SQLITE_ERROR (w28-store F6).
+      if (e?.errcode === 1555 || e?.errcode === 2067 || /PRIMARYKEY|UNIQUE/.test(String(e?.message ?? ''))) {
         const prior = this.outcome(tenant, transactionId);
         if (prior) return prior;
       }

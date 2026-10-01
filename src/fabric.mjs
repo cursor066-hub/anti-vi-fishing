@@ -10,7 +10,7 @@ import { httpJson, postOnce, readWithRetry, driftCheck, verifyManifest } from '.
 import { createCeremony, acknowledge, commitShares, splitSecret, reconstructSecret, ceremonyReport } from './ceremony.mjs';
 import { decodeShare, encodeShare } from './shamir.mjs';
 import { SUITES } from './crypto.mjs';
-import { openSession, releaseFields, workspaceFallback } from './secureview.mjs';
+import { openSession, releaseFields, workspaceFallback, ASSURANCE } from './secureview.mjs';
 import { extract, explain, classifyIntent } from './advisory.mjs';
 import { fields, text, identifier, integer, uniqueStrings, validateProposal } from './schema.mjs';
 import { evaluatePolicy, validatePolicy, policyDiff } from './policy.mjs';
@@ -61,6 +61,10 @@ export class Fabric {
   // authoritative (every locked bump re-reads it), but equal/regressed
   // bumps must not pay a lock + parse on every _auditIndex fold.
   #headWm = new Map();
+  // Raw-bytes → parsed memo for the durable watermark file (w28-fixverify
+  // F4: the file is re-read every call, the parse is what caches).
+  #headWmRaw = undefined;
+  #headWmParsed = null;
   constructor(config, directory, clock = Date.now, { vault = null } = {}) {
     requireThat(config.profile === 'engineering', 'INV-503-RELEASE', 'Production mode is blocked: external acceptance evidence is missing', 503);
     this.config = config; this.directory = directory; this.clock = clock;
@@ -83,8 +87,15 @@ export class Fabric {
         // a key-id conflict (w13 fixverify).
         if (key.private_key && !this.vault.keys.has(key.key_id)) this.vault.importKey({ key_id: key.key_id, public_key: key.public_key, private_key: key.private_key }, purposes[klass], { exportable: false, tenant_id: tenant });
         requireThat(this.vault.keys.has(key.key_id), 'INV-503-CONFIG', `Tenant ${klass} key is not in the keystore`, 503);
+        // Embedded-custody divergence: a vault-resident entry under the
+        // configured id whose public half differs from the config binding
+        // means the wrapped material no longer attests the declared key —
+        // report config corruption, never silently keep both halves
+        // (w28-crypto F9).
+        const resident = this.vault.keys.get(key.key_id);
+        requireThat(resident.public_key === key.public_key, 'INV-503-CONFIG', `Tenant ${klass} key material diverges from vault residency`, 503);
       }
-      auditSigners[tenant] = { key_id: t.keys.audit.key_id, public_key: t.keys.audit.public_key, keys: () => this.auditPublicKeys(tenant), sign: (payload, purpose = 'audit') => { const sel = this._signingKeyId(tenant, 'audit'); return this.vault.envelope(sel.key_id, purpose, this._recoveryBody(sel, payload), { allowPending: sel.recovery, tenant_id: tenant }); } };
+      auditSigners[tenant] = { key_id: t.keys.audit.key_id, public_key: t.keys.audit.public_key, keys: () => this.auditPublicKeys(tenant), sign: (payload, purpose = 'audit') => { const sel = this._signingKeyId(tenant, 'audit'); const e = this.vault.keys.get(sel.key_id); this.assertSuiteAllowed(tenant, e?.suite ?? 'Ed25519'); return this.vault.envelope(sel.key_id, purpose, this._recoveryBody(sel, payload), { allowPending: sel.recovery, tenant_id: tenant }); } };
     }
     // Both migrators consult one dedup index so a ciphertext grafted
     // between the two DBs is caught by whichever side sees it second
@@ -99,6 +110,10 @@ export class Fabric {
     // back — the fold refuses to run below it.
     this.#auditSigners = auditSigners;
     this.store.onAuditAppend = (tenant, seq, hash) => this._chainHeadNote(tenant, seq, hash);
+    // A bare store.tx commit is a real commit edge too — audit() self-wraps
+    // in one when no fabric transaction is open, and the pending head must
+    // not wait for a later edge (w28-store F2, w28-regression w25/w27).
+    this.store.onTxCommit = () => { try { this._flushChainHeads(); } catch { /* re-buffered — the next edge retries */ } };
     // Migration accounting is observable, not silent: every re-sealed,
     // collided, ambiguous or unreadable row lands on the tenant's ledger
     // at open (w19-aad W19-2).
@@ -317,13 +332,20 @@ export class Fabric {
       // skips its replay instead of wedging cold-start — anchoring remains
       // the authority, a corrupt row can only lose a grant, never mint one
       // (w17-fixverify).
-      for (const id of this.store.ids(tenant, 'jit-grant', 1000)) {
-        let jg; try { jg = this.store.must(tenant, 'jit-grant', id); } catch { continue; }
-        // Forged grant rows replay into the dataplane — only rows the chain
-        // anchors (new scope_digest, or the legacy grant_digest scheme with
-        // every row field proven against the issuing request) may replay
-        // (w13-fixverify L10, w16-fixverify F4/F7).
-        if (jg.grant?.grant_id && !grants.some(g => g.grant_id === jg.grant.grant_id) && idx && this._grantAnchored(tenant, idx, jg.grant.grant_id, jg.grant)) this.target.grant(tenant, jg.grant.grant_id, jg.grant);
+      // Paginate the whole table — a fixed cap would let planted garbage
+      // rows starve legitimate grant replay out of the heal pass
+      // (w28-store F10).
+      for (let off = 0;; off += 1000) {
+        const page = this.store.ids(tenant, 'jit-grant', 1000, off);
+        if (!page.length) break;
+        for (const id of page) {
+          let jg; try { jg = this.store.must(tenant, 'jit-grant', id); } catch { continue; }
+          // Forged grant rows replay into the dataplane — only rows the chain
+          // anchors (new scope_digest, or the legacy grant_digest scheme with
+          // every row field proven against the issuing request) may replay
+          // (w13-fixverify L10, w16-fixverify F4/F7).
+          if (jg.grant?.grant_id && !grants.some(g => g.grant_id === jg.grant.grant_id) && idx && this._grantAnchored(tenant, idx, jg.grant.grant_id, jg.grant)) this.target.grant(tenant, jg.grant.grant_id, jg.grant);
+        }
       }
       // Revoke direction too: a grant revoked in the ledger whose dataplane
       // write never landed (crash between commit and apply) is still dead
@@ -364,7 +386,15 @@ export class Fabric {
     // under a fresh master strands every stored DEK and wedges the NEXT
     // persist on MAC mismatch, far from the cause (w9-schema F-4).
     if (!existsSync(storePath) && existsSync(masterPath)) throw new InvariantError('INV-503-CONFIG', 'Master key exists but keystore is missing — refusing to silently re-key and strand existing wrapped records', 503);
-    if (existsSync(storePath)) return KeyVault.load(storePath, JSON.parse(readFileSync(masterPath, 'utf8')).master_key);
+    if (existsSync(storePath)) {
+      // The commit marker is file-writer shaped too — a corrupt or
+      // shapeless master.key classifies as config corruption, never a raw
+      // SyntaxError/TypeError off the boot path (w28-crypto F4).
+      let master = null;
+      try { master = JSON.parse(readFileSync(masterPath, 'utf8'))?.master_key; } catch (e) { throw new InvariantError('INV-503-CONFIG', 'master.key is unparseable — vault commit marker corrupt', 503, { cause: e }); }
+      requireThat(typeof master === 'string' && master.length > 0, 'INV-503-CONFIG', 'master.key carries no string master_key', 503);
+      return KeyVault.load(storePath, master);
+    }
     return new KeyVault(randomBytes(32).toString('base64url'));
   }
   _chainHeadNote(tenant, seq, hash) {
@@ -376,7 +406,10 @@ export class Fabric {
     // Appends committed outside a fabric transaction (denial audits, drift
     // flags, seal sweeps) flush immediately — inside a tx the watermark must
     // not outlive a rollback, so it waits for the commit edge.
-    if (!this.store.db.isTransaction) this._flushChainHeads();
+    // A committed bare append's flush can lose the lock race — the pending
+    // heads are re-buffered by restore() and retried on the next edge; the
+    // committed write is never reported back as an error (w28-store F5).
+    if (!this.store.db.isTransaction) { try { this._flushChainHeads(); } catch { /* re-buffered; the next append or commit edge retries */ } }
   }
   // Single mkdir-dir lock covering BOTH chain-heads files. The owner token
   // keeps a stale-expired holder that resumes from deleting the NEW
@@ -418,16 +451,43 @@ export class Fabric {
     const landed = new Map();
     for (const [tenant, h] of pending) {
       const row = this.store.db.prepare('SELECT hash FROM audit WHERE tenant=? AND seq=?').get(tenant, h.seq);
-      if (row && row.hash === h.hash) landed.set(tenant, h);
+      if (!row || row.hash !== h.hash) continue;
+      // A reanchor head is sanctioned only while it is still the tenant's
+      // committed TIP — a delayed seal head must never overwrite a peer's
+      // legitimately higher watermark that landed in between
+      // (w28-fixverify F3). Degraded to monotone, a stale reanchor can
+      // only lose — drop it like a rolled-back phantom.
+      if (h.reanchor) {
+        const tip = this.store.db.prepare('SELECT seq,hash FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1').get(tenant);
+        if (!(tip && tip.seq === h.seq && tip.hash === h.hash)) continue;
+      }
+      landed.set(tenant, h);
     }
     if (!landed.size) return;
     // Signing consults the audit index (rotation steering) — sqlite again —
     // so envelopes are produced BEFORE the lock as well; a peer that lands
     // a later head first simply wins the monotone compare below and our
-    // pre-signed envelope is discarded harmlessly.
-    const signed = [];
-    for (const [tenant, h] of landed) signed.push([tenant, h, this.#auditSigners[tenant].sign({ tenant_id: tenant, seq: h.seq, hash: h.hash }, 'audit')]);
+    // pre-signed envelope is discarded harmlessly. One tenant's signing
+    // fault drops only its own pending head — never the whole batch
+    // (w28-store F4). The verifier key sets are resolved pre-lock too: the
+    // vault scan (decrypt+derivePublic per key) must not run inside the
+    // shared critical section (w28-fixverify F8).
     const restore = () => { for (const [t, h] of landed) if (!this.#pendingChainHeads.has(t)) this.#pendingChainHeads.set(t, h); };
+    const signed = [];
+    try {
+      for (const [tenant, h] of landed) {
+        try {
+          // The signer-death window is resolved pre-lock too — and from
+          // the raw row scan, never the index fold: the fold legitimately
+          // wedges on the corrupt/missing head this flush exists to heal,
+          // so consulting it here would deadlock the recovery (w28-crypto
+          // F3, w28-regression w25/w27).
+          const deadAt = this.store._auditKeyDeaths(tenant);
+          signed.push([tenant, h, this.#auditSigners[tenant].sign({ tenant_id: tenant, seq: h.seq, hash: h.hash }, 'audit'), this.auditPublicKeys(tenant), deadAt]);
+        }
+        catch { if (!this.#pendingChainHeads.has(tenant)) this.#pendingChainHeads.set(tenant, h); }
+      }
+    } catch (err) { restore(); throw err; }
     const path = join(this.directory, 'chain-heads.json');
     // Two fabric instances over one directory race on the read-merge-write
     // window: each sees the same pre-image and the later writer drops the
@@ -441,12 +501,16 @@ export class Fabric {
         // retaken, so this snapshot could clobber a peer's fresh write.
         // Abort and let the next flush land the pending heads (w27 F4).
         if (staleHold()) { restore(); return; }
-        const file = this._readChainHeadFile() ?? { format: 'IF-CHAINHEAD-1', tenants: {} };
+        const headFile = this._readChainHeadFile();
+        // Planted bloat or a corrupt read starts the merge from an empty
+        // honest file — planted envelopes are dropped, never carried
+        // (w28-crypto F10).
+        const file = typeof headFile === 'object' && headFile !== null ? headFile : { format: 'IF-CHAINHEAD-1', tenants: {} };
         // A JSON-valid wrong-shape tenants field is planted state, not a
         // read — normalize in the writer and refuse it in the reader
         // (w27-chainheads F5).
         if (!file.tenants || typeof file.tenants !== 'object' || Array.isArray(file.tenants)) file.tenants = {};
-        for (const [tenant, h, env] of signed) {
+        for (const [tenant, h, env, pubs, deadAt] of signed) {
           // Monotone per tenant — but on the VERIFIED payload only. An
           // existing entry whose signature fails is planted state: it may
           // claim a far-future seq and monotone-wedge every honest head
@@ -458,13 +522,24 @@ export class Fabric {
           const existing = file.tenants[tenant];
           if (existing) {
             let existingPl = null;
-            try { existingPl = verifySigned(existing, this.auditPublicKeys(tenant), 'audit'); } catch { /* forged — falls through to overwrite */ }
-            if (existingPl && existingPl.tenant_id === tenant && Number.isSafeInteger(existingPl.seq)
+            try { existingPl = verifySigned(existing, pubs, 'audit'); } catch { /* forged — falls through to overwrite */ }
+            // A verifiable-but-dead-signed head is replay, not authority:
+            // an envelope attesting a seq past its signer's ledger death
+            // loses the compare and is overwritten (w28-crypto F3).
+            const deadSeq = deadAt.get(existing?.protected?.key_id);
+            const deadSigned = deadSeq !== undefined && existingPl?.seq > deadSeq;
+            if (existingPl && !deadSigned && existingPl.tenant_id === tenant && Number.isSafeInteger(existingPl.seq)
               && (existingPl.seq > h.seq || (existingPl.seq === h.seq && existingPl.hash === h.hash))
               && !h.reanchor) continue;
           }
           file.tenants[tenant] = env;
         }
+        // Re-verify the hold immediately before committing the file: a
+        // holder that stalled past the stale window may already have been
+        // cleared and replaced — writing now would clobber the peer's
+        // fresh merge with our stale pre-image (w28-store F3,
+        // w28-fixverify F2).
+        if (staleHold()) { restore(); return; }
         mkdirSync(this.directory, { recursive: true, mode: 0o700 });
         writeFileSync(`${path}.tmp`, canonical(file) + '\n', { mode: 0o600 });
         renameSync(`${path}.tmp`, path);
@@ -476,7 +551,15 @@ export class Fabric {
   }
   _readChainHeadFile() {
     let raw = null;
-    try { raw = readFileSync(join(this.directory, 'chain-heads.json'), 'utf8'); } catch { /* absent or unreadable */ }
+    try {
+      const p = join(this.directory, 'chain-heads.json');
+      // Planted bloat is untrusted input: an oversized heads file is
+      // tamper evidence, never a document to parse into memory
+      // (w28-crypto F10). The reader treats it as corruption; the writer
+      // drops its contents rather than merging planted state.
+      if (statSync(p).size > 262_144) { this.#chainHeadRaw = 'oversized'; this.#chainHeadParsed = 'oversized'; this.#chainHeadVerdicts.clear(); return 'oversized'; }
+      raw = readFileSync(p, 'utf8');
+    } catch { /* absent or unreadable */ }
     if (raw !== this.#chainHeadRaw) {
       this.#chainHeadRaw = raw;
       try { this.#chainHeadParsed = raw === null ? null : JSON.parse(raw); } catch { this.#chainHeadParsed = null; }
@@ -494,8 +577,12 @@ export class Fabric {
   _chainHead(tenant) {
     const file = this._readChainHeadFile();
     if (this.#chainHeadVerdicts.has(tenant)) return this.#chainHeadVerdicts.get(tenant);
-    const env = file?.tenants?.[tenant];
+    // Planted bloat reads as the same tamper evidence a malformed file
+    // does — never as an absent watermark (w28-crypto F10).
+    const env = file === 'oversized' ? undefined : file?.tenants?.[tenant];
     let verdict;
+    if (file === 'oversized') verdict = 'corrupt';
+    else
     // A committed ledger row implies a head was signed for it — the flush
     // runs on the commit edge of every append. Committed rows without a
     // head file therefore mean the file was deleted (or this store predates
@@ -525,47 +612,69 @@ export class Fabric {
   // pre-w27 deployments migrate silently; a consistent whole-directory
   // restore is the documented residual (SECURITY.md).
   _readHeadWatermark() {
+    // Re-read every call — the durable floor is cross-process state, so a
+    // peer's advance must be visible on the next check, not just at cache
+    // install (w28-fixverify F4). Parsed values memoize on the raw bytes.
     let raw = null;
     try { raw = readFileSync(join(this.directory, 'head-watermark.json'), 'utf8'); } catch { /* absent */ }
-    if (raw === null) return null;
-    try { const f = JSON.parse(raw); return f?.tenants && typeof f.tenants === 'object' && !Array.isArray(f.tenants) ? f.tenants : null; } catch { return null; }
+    if (raw === this.#headWmRaw) return this.#headWmParsed;
+    this.#headWmRaw = raw;
+    try { const f = raw === null ? null : JSON.parse(raw); this.#headWmParsed = f?.tenants && typeof f.tenants === 'object' && !Array.isArray(f.tenants) ? f.tenants : null; } catch { this.#headWmParsed = null; }
+    return this.#headWmParsed;
   }
-  _bumpHeadWatermark(tenant, seq, force = false) {
+  // Returns true when the durable file now carries seq for the tenant.
+  _bumpHeadWatermark(tenant, seq, { force = false, reanchor = false } = {}) {
+    // A downward move is sanctioned only inside the seal scope — anywhere
+    // else a lower seq degrades to the ordinary monotone path
+    // (w28-fixverify F1: the seal is the one legal head regression, and the
+    // durable floor must move with it or every fold wedges afterward).
+    const mayReanchor = reanchor && this.#sealing?.has(tenant) === true;
     // Fast path: a bump that does not advance past the last-known durable
     // value is a no-op — _auditIndex calls this on every fold, so the lock
-    // and file parse only happen when the committed head actually moved.
-    if (!force) {
+    // only happens when the committed head actually moved.
+    if (!force && !mayReanchor) {
       const known = this._headWatermark(tenant);
-      if (known !== undefined && seq <= known) return;
+      if (known !== undefined && seq <= known) return true;
     }
+    let wrote = false;
     try {
       this._headFileLock(staleHold => {
         if (staleHold()) return;
         const tenants = this._readHeadWatermark() ?? {};
-        if ((tenants[tenant] ?? 0) >= seq) { this.#headWm.set(tenant, tenants[tenant]); return; }
+        if (!mayReanchor && !force && (tenants[tenant] ?? 0) >= seq) { this.#headWm.set(tenant, tenants[tenant]); wrote = true; return; }
         tenants[tenant] = seq;
         const path = join(this.directory, 'head-watermark.json');
+        // Re-verify the hold before committing — a stale hold may have
+        // been cleared and retaken; our pre-image must never clobber the
+        // peer's fresh floor (w28-store F3 / w28-fixverify F2).
+        if (staleHold()) return;
         mkdirSync(this.directory, { recursive: true, mode: 0o700 });
         writeFileSync(`${path}.tmp`, canonical({ format: 'IF-HEADMARK-1', tenants }) + '\n', { mode: 0o600 });
         renameSync(`${path}.tmp`, path);
         this.#headWm.set(tenant, seq);
+        wrote = true;
       });
     } catch { /* a held lock degrades the watermark to the in-memory guard, never a write wedge */ }
+    return wrote;
   }
   _headWatermark(tenant) {
-    if (this.#headWm.has(tenant)) return this.#headWm.get(tenant);
+    // The durable file is authoritative when present — always consulted,
+    // so a peer's advance is never hidden by this process's cache
+    // (w28-fixverify F4). The in-memory floor fills only the file-absent
+    // bootstrap window.
     const wm = this._readHeadWatermark();
     if (wm !== null) { this.#headWm.set(tenant, wm[tenant]); return wm[tenant]; }
+    if (this.#headWm.has(tenant)) return this.#headWm.get(tenant);
     // Bootstrap: absent file adopts the currently committed head (or 0 for
     // a fresh store) — covers first-contact upgrades; a later absence is
     // suspicious but can only launder a consistent rollback (residual).
     const head = this._chainHead(tenant);
     const adopted = head && head !== 'corrupt' ? head.seq : 0;
-    // Cache before bumping so the bump's own fast-path read does not
-    // re-enter the bootstrap path; force the write — the durable floor
-    // must exist from the first contact, not only after the head moves.
-    this.#headWm.set(tenant, adopted);
-    this._bumpHeadWatermark(tenant, adopted, true);
+    // The durable floor must exist from the first contact — force the
+    // write even for seq 0. Only a confirmed write is cached: a claimed
+    // floor the file never got would be a phantom a peer's cold open
+    // cannot share (w28-fixverify F7).
+    if (this._bumpHeadWatermark(tenant, adopted, { force: true })) this.#headWm.set(tenant, adopted);
     return adopted;
   }
   persistVault() {
@@ -916,7 +1025,40 @@ export class Fabric {
     return this.vault.envelope(sel.key_id, purpose, this._recoveryBody(sel, payload), { allowPending: allowPending || sel.recovery, tenant_id: t });
   }
   assertSuiteAllowed(t, suite) {
-    requireThat((this.policy(t).algorithms?.allowed_suites ?? ['Ed25519']).includes(suite), 'INV-451-POLICY', 'Signature suite retired by constitution', 451);
+    let allowed = null;
+    try { allowed = this.policy(t).algorithms?.allowed_suites; }
+    catch (e) {
+      if (e?.code !== 'INV-409-INTEGRITY') throw e;
+      // policy() fails closed on two honest windows: genesis bootstrap
+      // (the signing calls that write the constitution's own anchors) and
+      // the activation transaction (the 'active' row already carries the
+      // staged successor while its POLICY_ACTIVATED anchor is still
+      // uncommitted). Enforce against anchor-VERIFIED content in both —
+      // the row that matches a real anchor, or verbatim genesis with no
+      // anchors at all (w28-crypto F8).
+      // The index itself may be the reason policy() failed — a corrupt or
+      // missing chain-head wedges the fold while the flush that heals it
+      // needs this very signature. Unresolvable anchors degrade to 'no
+      // authoritative constitution consultable', which is already
+      // fail-closed on every policy-gated path (w28-regression w25/w27).
+      let anchors = [];
+      try { anchors = [...this._auditIndex(t).policyAnchors].reverse(); } catch { /* wedged fold — anchor data unreachable */ }
+      const nonStaged = anchors.find(a => !a.staged), stagedAnchor = anchors.find(a => a.staged);
+      const active = this.store.get(t, 'policy', 'active'), staged = this.store.get(t, 'policy', 'staged');
+      const activeD = active && digest(active), stagedD = staged && digest(staged.policy);
+      if (activeD && nonStaged && activeD === nonStaged.digest) allowed = active.algorithms?.allowed_suites;
+      else if (activeD && stagedAnchor && activeD === stagedAnchor.digest) allowed = active.algorithms?.allowed_suites;
+      else if (stagedD && stagedAnchor && stagedD === stagedAnchor.digest) allowed = staged.policy.algorithms?.allowed_suites;
+      else {
+        const genesis = this.#tenants[t]?.genesis_policy;
+        if (activeD && genesis && activeD === digest(genesis) && !nonStaged && !stagedAnchor) allowed = genesis.algorithms?.allowed_suites;
+        // Fully divergent: no anchor-verified constitution is resolvable —
+        // the fabric is already fail-closed on every policy-gated path, and
+        // remediation signing (reanchorPolicy) must stay reachable to
+        // repair it. The suite check has nothing authoritative to consult.
+      }
+    }
+    if (allowed !== null) requireThat((allowed ?? ['Ed25519']).includes(suite), 'INV-451-POLICY', 'Signature suite retired by constitution', 451);
   }
   // Current drift status with a field-level preview of what changed — a
   // security actor must be able to see the diff before re-attesting.
@@ -1066,7 +1208,11 @@ export class Fabric {
       const now = this.clock();
       // Suspend and restore the guards inside one transaction — if the
       // recreate fails the delete rolls back with it.
-      for (const tr of this.store.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all()) this.store.db.exec(`DROP TRIGGER ${tr.name}`);
+      // SQLite trigger names are attacker-shaped strings — interpolate
+      // unquoted and a file-writer's planted trigger name is a raw SQL
+      // payload inside this privileged transaction (w28-store F1).
+      for (const tr of this.store.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all())
+        this.store.db.exec(`DROP TRIGGER "${String(tr.name).replace(/"/g, '""')}"`);
       // Attest what the DELETE actually removes, computed INSIDE the
       // transaction — rows appended between the pre-scan and the cut are
       // destroyed too and must be named in the signed record
@@ -1153,11 +1299,14 @@ export class Fabric {
       clearUnverifiable = true;
       return { sealed: true, sealed_at_seq: firstBad, removed_count: removed.length };
       });
-      // The seal committed through store.tx, which never passes the
-      // transaction() flush edge — land the head watermark on the new tip
-      // now, or the stale file reads as a truncation. A flush fault here
-      // wedges the next fold fail-closed, which is honest (w25-clock F-4).
-      this._flushChainHeads();
+      // The seal committed through store.tx — the repoint's ledger binding
+      // is durable, so post-commit faults can no longer claim the ledger
+      // rejected it: the in-memory repoint and vault activation stay.
+      repointUndo = null;
+      // A post-commit flush fault is retried on the next transaction edge —
+      // the pending heads were re-buffered by restore(); the committed seal
+      // is never reported back as denied (w28-store F5, w28-fixverify F5).
+      try { this._flushChainHeads(); } catch { /* pending heads re-buffered — retry lands on the next edge */ }
       // Post-commit durability: the repoint's ledger binding committed,
       // so the vault activation must persist now — a restart that sees the
       // config repoint but a still-pending vault key bricks every
@@ -1181,8 +1330,15 @@ export class Fabric {
       // 'sealed' with a stale watermark is a still-wedged tenant, not a
       // success report (w27-chainheads F0).
       const sealedTip = this.store.db.prepare('SELECT seq,hash FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1').get(t);
+      // The durable watermark must move backward WITH the seal — the one
+      // sanctioned re-anchor; otherwise every subsequent fold wedges on
+      // durable-wm > committed-head forever (w28-fixverify F1). Honored
+      // only while #sealing holds this tenant.
+      if (sealedTip) this._bumpHeadWatermark(t, sealedTip.seq, { reanchor: true });
       const sealedHead = this._chainHead(t);
-      const sealedMoved = sealedHead && sealedHead !== 'corrupt' && sealedTip && sealedHead.seq === sealedTip.seq && ctEqual(sealedHead.hash, sealedTip.hash);
+      const sealedWm = this._headWatermark(t);
+      const sealedMoved = sealedHead && sealedHead !== 'corrupt' && sealedTip && sealedHead.seq === sealedTip.seq && ctEqual(sealedHead.hash, sealedTip.hash)
+        && (sealedWm === undefined || sealedWm <= sealedTip.seq);
       return { ...out, wedge_cleared: clearUnverifiable && sealedMoved === true, head_reanchored: sealedMoved === true };
     } catch (sealErr) {
       // Any fault inside the repoint window — activation, the re-anchor
@@ -1664,7 +1820,11 @@ export class Fabric {
       // Post-commit edge: the signed chain-head watermark moves only after
       // its anchors are durable — a rolled-back tx can never leave a
       // watermark pointing at rows that do not exist (w24-fixverify W24-01).
-      this._flushChainHeads();
+      // A post-commit flush fault must not turn a committed transaction
+      // into an error + falsified rejection rows — pending heads are
+      // re-buffered by restore() and retried on the next edge
+      // (w28-store F5).
+      try { this._flushChainHeads(); } catch { /* deferred to the next append/commit edge */ }
       return txResult;
     }
     catch (error) {
@@ -1899,7 +2059,7 @@ export class Fabric {
         // request was a quadratic wall-clock sink (w17-idx F8).
         case 'RUNTIME_ALLOWED': { const u = { capability: pl.reference, subject: pl.actor, resource: meta.resource ?? null, request_id: meta.request_id ?? null, cost: typeof meta.cost === 'number' ? meta.cost : 0, at: pl.time }; idx.runtimeUse.push(u); const cl = idx.runtimeUseByCap.get(u.capability) ?? []; cl.push(u); idx.runtimeUseByCap.set(u.capability, cl); const sl = idx.runtimeUseBySubject.get(u.subject) ?? []; sl.push(u); idx.runtimeUseBySubject.set(u.subject, sl); break; }
         case 'PERCEPTION_SESSION': if (meta.nonce) idx.perceptionNonce.add(meta.nonce); if (meta.channel_digest) idx.perceptionSessions.set(pl.reference, { creator: meta.creator ?? null, expires_at: meta.expires_at ?? null, channel_digest: meta.channel_digest, component: meta.component ?? null, signing_key_id: meta.signing_key_id ?? null, assurance: meta.assurance ?? null, firmware: meta.firmware ?? null, minted_at: pl.time }); break;
-        case 'DATA_ACCESSED': idx.dataAccess.push({ subject: pl.reference, dataset: meta.dataset, row_ids: meta.row_ids ?? [], columns: meta.columns ?? [], at: meta.at ?? pl.time, certificate_id: meta.certificate_id ?? null }); break;
+        case 'DATA_ACCESSED': idx.dataAccess.push({ subject: pl.reference, dataset: meta.dataset, row_ids: meta.row_ids ?? [], columns: meta.columns ?? [], at: meta.at ?? pl.time, certificate_id: meta.certificate_id ?? null, wedged: meta.wedged === true, gate_denied: meta.gate_denied === true }); break;
         // The reservation's anchored time bounds the crash-gap window an
         // honest EXECUTION_DISPATCHED can lose — an unanchored journal far
         // outside it is tamper evidence, never a settleable FAILED
@@ -2219,6 +2379,20 @@ export class Fabric {
       this.store.insert(p.tenant_id, 'capsule', capsule.capsule_id, record, now);
       this.store.audit(p.tenant_id, 'CAPSULE_PROPOSED', p.subject_id, capsule.capsule_id, { capsule_digest: record.capsule_digest, action_type: capsule.action.type, nonce: input.nonce, expires_at: capsule.expires_at }, now);
       return record;
+    }, {
+      // The receipt must not preserve plaintext the retention shredder
+      // later destroys — store a redacted reference and resolve the LIVE
+      // record on replay (w28-crypto F1).
+      project: r => ({ capsule_id: r.capsule.capsule_id, capsule_digest: r.capsule_digest, status: r.status }),
+      resolve: stored => {
+        // Receipts written before this scheme still hold the full record —
+        // honour them as stored.
+        if (stored?.capsule !== undefined) return stored;
+        let live = null;
+        try { live = this.store.get(p.tenant_id, 'capsule', stored?.capsule_id); } catch { /* shredded or unreadable */ }
+        requireThat(live, 'INV-404-NOT-FOUND', 'Capsule shredded — the idempotency receipt retains no plaintext', 404);
+        return live;
+      }
     }));
   }
   ensureMutable(record) { requireThat(!['DENY', 'CANCELLED', 'CERTIFIED', 'EXECUTING', 'VERIFIED', 'UNCERTAIN', 'FAILED', 'COMPENSATED'].includes(record.status), 'INV-409-STATE', 'Action is immutable in its current state', 409); }
@@ -2948,14 +3122,16 @@ export class Fabric {
         // A wedged export with a durable journal may already have egressed
         // rows — attest the pending disclosure or it stays invisible
         // (w27-datagate F2).
-        if (child.capsule.action.type === 'data.export' && childJournal) this._touchWedgedEgress(t, child, childCert, dispatchNow);
+        // The touch is observability — a fold or lock fault inside it must
+        // never swallow the wedged-outcome record (w28-fixverify F6).
+        if (child.capsule.action.type === 'data.export' && childJournal) { try { this._touchWedgedEgress(t, child, childCert, dispatchNow, childJournal); } catch { /* bail proceeds regardless */ } }
         wedged.push(childId);
         return bail(`CHILD_EXECUTION_FAILED:${dispatchError.code ?? 'UNKNOWN'}`);
       }
       // A child's reply earns VERIFIED only under the same response rules as
       // a standalone execution (runtime-audit F-2).
       if (!this._validateTargetResponse(child, childCert, raw, this.clock(), { postRead: true }).valid) {
-        if (child.capsule.action.type === 'data.export' && childJournal) this._touchWedgedEgress(t, child, childCert, dispatchNow);
+        if (child.capsule.action.type === 'data.export' && childJournal) { try { this._touchWedgedEgress(t, child, childCert, dispatchNow, childJournal); } catch { /* bail proceeds regardless */ } }
         wedged.push(childId);
         return bail('CHILD_EXECUTION_FAILED:TARGET_RESPONSE_INVALID');
       }
@@ -3335,7 +3511,10 @@ export class Fabric {
     // longer suppress billing, coverage or the DATA_ACCESSED attestation —
     // only a real signed disclosure event for THIS certificate counts
     // (w12-provenance F17). The usage row stays as the billing mirror.
-    const alreadyCharged = this._auditIndex(t).dataAccess.some(a => a.certificate_id === cert.certificate_id);
+    // exactly-once per certificate — a wedged disclosure touch does NOT
+    // settle the billing obligation: when reconcile later settles the
+    // child VERIFIED, the real charge still lands (w28-fixverify F6).
+    const alreadyCharged = this._auditIndex(t).dataAccess.some(a => a.certificate_id === cert.certificate_id && a.wedged !== true && a.gate_denied !== true);
     const recon = reconstructionCheck(this.store.db, this.target.db, { tenant: t, subject, dataset: requested.dataset, rows: requested.row_ids, columns: requested.columns, now, policy: this.policy(t).runtime.reconstruction, record: !alreadyCharged, access: this._auditIndex(t).dataAccess });
     const weight = this.policy(t).runtime.sensitivity_weights[dataset.classification] ?? 1;
     const cost = requested.row_ids.length * requested.columns.length * weight;
@@ -3373,12 +3552,15 @@ export class Fabric {
   // disclosure is invisible to coverage accounting and the ledger
   // (w27-datagate F2). The touch certifies the pending disclosure under
   // the child certificate id so reconcile still recognises exactly-once.
-  _touchWedgedEgress(t, child, childCert, now) {
+  _touchWedgedEgress(t, child, childCert, now, journal = null) {
     if (this._auditIndex(t).dataAccess.some(a => a.certificate_id === childCert.certificate_id)) return;
     const req = child.capsule.requested_state;
     if (!req?.row_ids?.length || !req?.columns?.length) return;
     const subject = child.capsule.actor.subject_id;
-    this.store.audit(t, 'DATA_ACCESSED', subject, subject, { dataset: req.dataset, row_ids: req.row_ids, columns: req.columns, at: now, certificate_id: childCert.certificate_id, wedged: true }, now);
+    // Attest the rows the durable journal actually discharged — the
+    // declared request may overstate the real egress (w28-fixverify F10).
+    const rowIds = journal?.output_row_ids ?? req.row_ids;
+    this.store.audit(t, 'DATA_ACCESSED', subject, subject, { dataset: req.dataset, row_ids: rowIds, columns: req.columns, at: now, certificate_id: childCert.certificate_id, wedged: true }, now);
   }
   finish(p, cert, raw, status, reason, { postRead = false } = {}) {
     const post = [];
@@ -4564,8 +4746,11 @@ export class Fabric {
         // carry null — they may ONLY claim the component's configured
         // values. Tolerating a bare null let a planted row label ride the
         // sealed release trail as 'hardware-enclave' (w27-fixverify W27-04).
-        && (anchoredSession.assurance == null ? session.assurance === releaseComponent?.assurance : anchoredSession.assurance === session.assurance)
-        && (anchoredSession.firmware == null ? session.firmware_version === releaseComponent?.firmware_version : anchoredSession.firmware === session.firmware_version), 'INV-409-INTEGRITY', 'Perception session diverges from its ledger-anchored binding', 409);
+        && (anchoredSession.assurance == null ? session.assurance === (releaseComponent?.assurance ?? ASSURANCE.dev) : anchoredSession.assurance === session.assurance)
+        // A component that declares no firmware pins the minted constant,
+        // not a config-shaped hole a planted row can claim through
+        // (w28-fixverify F9).
+        && (anchoredSession.firmware == null ? session.firmware_version === (releaseComponent?.firmware_version ?? session.firmware_version) : anchoredSession.firmware === session.firmware_version), 'INV-409-INTEGRITY', 'Perception session diverges from its ledger-anchored binding', 409);
       // The anchored digest binds only the public halves of the ECDH pair —
       // the seal key comes from the stored private half. Re-prove the pair:
       // a swapped _server_private can never re-key the release to an

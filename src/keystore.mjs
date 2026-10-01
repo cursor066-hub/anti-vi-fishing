@@ -70,6 +70,16 @@ export class KeyVault {
     fields(key, ['key_id', 'public_key', 'private_key']);
     requireThat(typeof key.private_key === 'string' && key.private_key.includes('PRIVATE KEY') && key.private_key.length <= 8192, 'INV-400-SCHEMA', 'Invalid private key');
     requireThat(Object.hasOwn(SUITES, suite), 'INV-400-SCHEMA', 'Unapproved algorithm suite');
+    // The declared suite must match the private key's real type — a P-256
+    // key imported under the Ed25519 suite (or vice versa) leaves the vault
+    // claiming an agility profile it cannot honour, and a DER/PEM fault
+    // classifies as schema, not a raw crypto exception (w28-crypto F5).
+    try {
+      const pk = createPrivateKey(key.private_key);
+      const actual = pk.asymmetricKeyType === 'ed25519' ? 'Ed25519'
+        : pk.asymmetricKeyType === 'ec' && pk.asymmetricKeyDetails?.namedCurve === 'prime256v1' ? 'ES256' : null;
+      requireThat(actual === suite, 'INV-400-SCHEMA', 'Private key type does not match the declared suite', 400);
+    } catch (e) { if (e instanceof InvariantError) throw e; throw new InvariantError('INV-400-SCHEMA', 'Invalid private key', 400, { cause: e }); }
     // The advertised public key must be the public half of the private key —
     // otherwise the vault would attest a foreign identity while signing with
     // whatever private material was handed in (crypto-audit M-2).
@@ -200,7 +210,11 @@ export class KeyVault {
 export function verifyAttestation(envelope, attestorKeys, { now = Date.now(), nonce = undefined, tenant_id = undefined, vault = undefined } = {}) {
   const payload = verifySigned(envelope, attestorKeys, 'key-attestation');
   requireThat(Number.isSafeInteger(payload.issued_at) && Number.isSafeInteger(payload.expires_at)
-    && payload.issued_at <= payload.expires_at && payload.expires_at > now,
+    && payload.issued_at <= payload.expires_at && payload.expires_at > now
+    // A backdated-or-futured issued_at outside a small clock skew means a
+    // minted-for-another-epoch artifact — never a live claim
+    // (w28-crypto F6).
+    && payload.issued_at <= now + 60_000,
     'INV-401-ATTESTATION', 'Attestation carries no live validity window', 401);
   if (nonce !== undefined) requireThat(payload.nonce === nonce, 'INV-401-ATTESTATION', 'Attestation nonce does not match the verifier challenge', 401);
   if (tenant_id !== undefined) requireThat(payload.tenant_id === tenant_id, 'INV-401-ATTESTATION', 'Attestation belongs to another tenant', 401);

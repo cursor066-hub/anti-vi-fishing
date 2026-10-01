@@ -42,24 +42,24 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 4725,
-      "bytes": 374937
+      "lines": 4910,
+      "bytes": 387438
     },
     "src/issuerd.mjs": {
       "lines": 715,
       "bytes": 51653
     },
     "src/keystore.mjs": {
-      "lines": 213,
-      "bytes": 16831
+      "lines": 227,
+      "bytes": 17841
     },
     "src/merkle.mjs": {
       "lines": 121,
       "bytes": 6684
     },
     "src/policy.mjs": {
-      "lines": 472,
-      "bytes": 47601
+      "lines": 476,
+      "bytes": 47833
     },
     "src/runtime.mjs": {
       "lines": 235,
@@ -74,20 +74,20 @@
       "bytes": 13696
     },
     "src/server.mjs": {
-      "lines": 363,
-      "bytes": 37592
+      "lines": 373,
+      "bytes": 38337
     },
     "src/shamir.mjs": {
       "lines": 91,
       "bytes": 3876
     },
     "src/store.mjs": {
-      "lines": 770,
-      "bytes": 55854
+      "lines": 841,
+      "bytes": 60833
     },
     "src/target.mjs": {
-      "lines": 400,
-      "bytes": 29444
+      "lines": 409,
+      "bytes": 30138
     },
     "web/app.js": {
       "lines": 251,
@@ -385,6 +385,10 @@
       "lines": 145,
       "bytes": 9076
     },
+    "tests/w28.test.mjs": {
+      "lines": 286,
+      "bytes": 19725
+    },
     "tests/w5-mutations.test.mjs": {
       "lines": 194,
       "bytes": 13645
@@ -454,6 +458,6 @@
       "bytes": 6499
     }
   },
-  "total_files": 113,
-  "total_lines": 25102
+  "total_files": 114,
+  "total_lines": 25681
 }

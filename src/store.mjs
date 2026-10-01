@@ -91,6 +91,20 @@ export class Store {
       throw e;
     }
   }
+  // Signer-death window shared by the export/page verifiers: a key revoked
+  // or rotated out of service ON THE CHAIN must not be attesting rows
+  // sequenced after its death — the fabric fold enforces this for the live
+  // index; standalone verification lacked it (w28-crypto F2).
+  _auditKeyDeaths(tenant) {
+    const dead = new Map();
+    for (const row of this.db.prepare("SELECT seq,envelope FROM audit WHERE tenant=? AND (envelope LIKE '%\"type\":\"AUTHORITY_REVOKED\"%' OR envelope LIKE '%\"type\":\"KEY_ROTATED\"%')").all(tenant)) {
+      let env; try { env = JSON.parse(row.envelope); } catch { continue; }
+      const pl = env?.payload, meta = pl?.metadata;
+      if (pl?.type === 'AUTHORITY_REVOKED' && meta?.kind === 'key' && typeof meta.id === 'string') dead.set(meta.id, row.seq);
+      if (pl?.type === 'KEY_ROTATED' && meta?.key_class === 'audit' && typeof meta?.previous_key_id === 'string') dead.set(meta.previous_key_id, row.seq);
+    }
+    return dead;
+  }
   // Tamper-evidence for the tables a file-level writer would rewrite:
   // append-only audit (existing bar) plus the replay/clock/billing-control
   // tables whose value IS their integrity (w21-store F-6). Trigger text is
@@ -144,6 +158,16 @@ export class Store {
     const triggers = new Map(this.db.prepare("SELECT name, sql FROM sqlite_master WHERE type='trigger'").all().map(x => [x.name, x.sql ?? '']));
     for (const [name, sql] of guards)
       if (norm(triggers.get(name)) !== norm(sql)) throw new InvariantError('INV-503-STORAGE', `integrity trigger missing or tampered: ${name}`, 503);
+    // Enumeration, not just existence: a file-writer can plant EXTRA
+    // triggers whose names or bodies smuggle SQL into our own privileged
+    // paths (DROP TRIGGER batch, the seal's delete pass, or any ordinary
+    // write that fires the payload). Anything not in the known guard set
+    // is removed at open — quoted, never interpolated (w28-store F1).
+    const knownTriggers = new Set(guards.map(([name]) => name));
+    for (const stray of this.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger'").all().map(r => r.name).filter(n => !knownTriggers.has(n))) {
+      this.db.exec(`DROP TRIGGER "${String(stray).replace(/"/g, '""')}"`);
+      (this._strayTriggers ??= []).push(stray);
+    }
     // Functional probes: each forbidden write must abort with THAT
     // trigger's own RAISE message — an unrelated failure (a primary-key
     // collision on a pre-seeded probe row, a broken trigger raising a
@@ -214,7 +238,7 @@ export class Store {
       } catch { /* forged or unverifiable tail row — keep walking back */ }
     }
     requireThat(floorSeeded || this.db.prepare('SELECT COUNT(*) n FROM audit').get().n === 0, 'INV-409-AUDIT-TAMPER', 'Audit tail carries no verifiable entry — ledger tamper', 409);
-    for (const row of this.db.prepare("SELECT tenant,envelope FROM audit WHERE envelope LIKE '%\"type\":\"CLOCK_RECOVERED\"%' ORDER BY rowid DESC LIMIT 8").all()) {
+    for (const row of this.db.prepare("SELECT tenant,envelope FROM audit WHERE envelope LIKE '%\"type\":\"CLOCK_RECOVERED\"%' ORDER BY rowid DESC LIMIT 512").all()) {
       try {
         const env = JSON.parse(row.envelope);
         if (env?.payload?.type !== 'CLOCK_RECOVERED') continue;
@@ -383,6 +407,11 @@ export class Store {
       if (result && typeof result.then === 'function') throw new Error('Transactions must be synchronous');
       this.db.exec('COMMIT');
       anchorsPop();
+      // Post-commit edge for observers (chain-head flush): a bare audit()
+      // append through this self-wrapped tx must land its signed watermark
+      // here, not wait for a later fabric transaction (w28-store F2,
+      // w28-regression w25/w27).
+      try { this.onTxCommit?.(); } catch { /* observers re-buffer and retry on the next edge */ }
       // Post-commit WAL truncation so shredded DEK material never lingers in
       // the log — runs outside the transaction, where SQLite allows it.
       this.checkpoint();
@@ -438,8 +467,14 @@ export class Store {
     if (this.db.prepare('SELECT 1 FROM records WHERE tenant=? AND kind=? AND id=?').get(tenant, kind, id)
       || this.db.prepare('SELECT 1 FROM deks WHERE tenant=? AND kind=? AND id=?').get(tenant, kind, id)) this._shredded = true;
     const dek = randomBytes(32);
-    this.db.prepare('INSERT INTO records VALUES(?,?,?,?,?) ON CONFLICT(tenant,kind,id) DO UPDATE SET value=excluded.value').run(tenant, kind, id, encrypt(value, dek, recAad(tenant, kind, id)), at);
-    this.db.prepare('INSERT INTO deks VALUES(?,?,?,?) ON CONFLICT(tenant,kind,id) DO UPDATE SET wrapped=excluded.wrapped').run(tenant, kind, id, encrypt(dek.toString('base64url'), this.key(tenant), dekAad(tenant, kind, id)));
+    // The record+DEK pair must land atomically — a bare-autocommit crash
+    // between them leaves a ciphertext with no key that then reads as
+    // INV-409 'tamper' instead of a crash artifact (w28-store F8).
+    const pair = () => {
+      this.db.prepare('INSERT INTO records VALUES(?,?,?,?,?) ON CONFLICT(tenant,kind,id) DO UPDATE SET value=excluded.value').run(tenant, kind, id, encrypt(value, dek, recAad(tenant, kind, id)), at);
+      this.db.prepare('INSERT INTO deks VALUES(?,?,?,?) ON CONFLICT(tenant,kind,id) DO UPDATE SET wrapped=excluded.wrapped').run(tenant, kind, id, encrypt(dek.toString('base64url'), this.key(tenant), dekAad(tenant, kind, id)));
+    };
+    if (this.db.isTransaction) pair(); else this.tx(pair);
     if (!this.db.isTransaction) this.checkpoint();
   }
   insert(tenant, kind, id, value, at) {
@@ -514,7 +549,7 @@ export class Store {
         if (typeof env?.payload?.time === 'number' && Number.isFinite(env.payload.time) && env.payload.time > (this._chainFloor ?? 0)) this._chainFloor = env.payload.time;
       } catch { /* unverifiable head — floor holds its last attested value */ }
     }
-    for (const row of this.db.prepare("SELECT tenant,envelope FROM audit WHERE envelope LIKE '%\"type\":\"CLOCK_RECOVERED\"%' ORDER BY rowid DESC LIMIT 8").all()) {
+    for (const row of this.db.prepare("SELECT tenant,envelope FROM audit WHERE envelope LIKE '%\"type\":\"CLOCK_RECOVERED\"%' ORDER BY rowid DESC LIMIT 512").all()) {
       try {
         const env = JSON.parse(row.envelope);
         if (env?.payload?.type !== 'CLOCK_RECOVERED') continue;
@@ -564,6 +599,12 @@ export class Store {
     return this.db.prepare('SELECT COALESCE(MAX(seq),0) s FROM audit WHERE tenant=?').get(tenant).s;
   }
   audit(tenant, type, actor, reference, metadata, now) {
+    // Entry + clock-ratchet must commit together: outside a transaction a
+    // crash (or SQLITE_BUSY) between them leaves clock.last below the
+    // chain floor and the NEXT OPEN bricks on INV-409-AUDIT-TAMPER with no
+    // in-band recovery (w28-store F2). Inside a tx the caller's boundary
+    // already covers the pair.
+    if (!this.db.isTransaction) return this.tx(() => this.audit(tenant, type, actor, reference, metadata, now));
     const last = this.db.prepare('SELECT seq,hash,envelope FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1').get(tenant);
     // The chain's `time` is a monotone logical clock: verifyAudit requires
     // non-decreasing entry times, so an accepted host rewind must not write
@@ -672,6 +713,10 @@ export class Store {
     // row preceding the page — an injected or rewritten row cannot pass
     // (store-audit MED-5).
     const anchor = after ? this.db.prepare('SELECT hash FROM audit WHERE tenant=? AND seq=?').get(tenant, after) : null;
+    // Death map spans the WHOLE chain, not just the page — a page reader
+    // must catch a row signed after its key's earlier revocation
+    // (w28-crypto F2).
+    const deadAt = this._auditKeyDeaths(tenant);
     requireThat(after === 0 || anchor, 'INV-409-AUDIT-TAMPER', 'Audit cursor does not resolve to a stored row', 409);
     let previous = anchor?.hash ?? '0'.repeat(64);
     const entries = rows.map(r => {
@@ -692,6 +737,9 @@ export class Store {
       // signed foreign-tenant envelope keyed under this tenant is still
       // tamper evidence (w21-store F-8).
       requireThat(envelope.payload.tenant_id === tenant, 'INV-409-AUDIT-TAMPER', 'Audit row attests a different tenant', 409);
+      // Signer-death window on the page surface too (w28-crypto F2).
+      const deadSeq = deadAt.get(envelope.protected?.key_id);
+      requireThat(!(deadSeq !== undefined && r.seq > deadSeq), 'INV-409-AUDIT-TAMPER', 'Audit row signed by a key past its ledger death', 409);
       previous = r.hash;
       return { sequence: r.seq, hash: r.hash, envelope };
     });
@@ -704,6 +752,7 @@ export class Store {
     // attests (w16-fixverify F11). The signed head would otherwise vouch
     // for attacker JSON.
     let previous = '0'.repeat(64);
+    const deadAt = this._auditKeyDeaths(tenant);
     const rows = this.db.prepare('SELECT seq,hash,envelope FROM audit WHERE tenant=? ORDER BY seq').all(tenant).map(r => {
       let envelope;
       try { envelope = JSON.parse(r.envelope); }
@@ -715,6 +764,11 @@ export class Store {
       // signed foreign-tenant envelope keyed under this tenant is still
       // tamper evidence (w21-store F-8).
       requireThat(envelope.payload.tenant_id === tenant, 'INV-409-AUDIT-TAMPER', 'Audit row attests a different tenant', 409);
+      // Rows sequenced after their signer's ledger death cannot be
+      // legitimate — a revoked/rotated-out key attesting later history is
+      // replay, not authority (w28-crypto F2).
+      const deadSeq = deadAt.get(envelope.protected?.key_id);
+      requireThat(!(deadSeq !== undefined && r.seq > deadSeq), 'INV-409-AUDIT-TAMPER', 'Audit row signed by a key past its ledger death', 409);
       previous = r.hash;
       return { hash: r.hash, envelope };
     });
@@ -730,7 +784,7 @@ export class Store {
     if (now !== null) this.put(tenant, 'audit-checkpoint', `cp-${checkpoint.payload.size}`, checkpoint, now);
     return { format: 'IF-AUDIT-1', public_keys, prior_checkpoint, checkpoint, entries: rows };
   }
-  idempotent(tenant, scope, key, requestHash, fn) {
+  idempotent(tenant, scope, key, requestHash, fn, { project = null, resolve = null } = {}) {
     // SELECT-then-INSERT is atomic only inside a transaction — refuse to run
     // outside one rather than silently depending on the caller (L4).
     requireThat(this.db.isTransaction, 'INV-500-STORE', 'idempotent() must run inside store.tx()', 500);
@@ -740,11 +794,16 @@ export class Store {
       requireThat(ctEqual(row.hash, requestHash), 'INV-409-IDEMPOTENCY', 'Idempotency key reused for a different request', 409);
       // A corrupt or transplanted receipt surfaces in the ledger taxonomy,
       // not as a raw cipher/TypeError (w22-fixverify F9).
-      try { return decrypt(row.result, this.key(tenant), idemAad(tenant, scope, key)); }
+      let stored;
+      try { stored = decrypt(row.result, this.key(tenant), idemAad(tenant, scope, key)); }
       catch (e) { throw new InvariantError('INV-409-INTEGRITY', 'Stored idempotency receipt failed integrity', 409, { cause: e }); }
+      return resolve ? resolve(stored) : stored;
     }
     const result = fn();
-    this.db.prepare('INSERT INTO idempotency VALUES(?,?,?,?,?)').run(tenant, scope, key, requestHash, encrypt(result, this.key(tenant), idemAad(tenant, scope, key)));
+    // The receipt may carry a redacted projection — callers that want the
+    // stored value minimal (shredder-safe) pass project/resolve; without
+    // them the full result is receipt+response as before (w28-crypto F1).
+    this.db.prepare('INSERT INTO idempotency VALUES(?,?,?,?,?)').run(tenant, scope, key, requestHash, encrypt(project ? project(result) : result, this.key(tenant), idemAad(tenant, scope, key)));
     return result;
   }
 }
@@ -755,11 +814,23 @@ export function verifyAudit(bundle, pinnedKeys, priorCheckpoint = null) {
   // supplies none — verify it under the same keys before trusting it.
   const prior = priorCheckpoint ?? (bundle.prior_checkpoint ? verifySigned(bundle.prior_checkpoint, pinnedKeys, 'checkpoint') : null);
   let previous = '0'.repeat(64), sequence = 0, time = 0;
+  // The signer-death window the fabric fold enforces must hold for the
+  // standalone verifier too: revocation/rotation events inside the bundle
+  // bound which key may attest which sequence (w28-crypto F2).
+  const deadAt = new Map(), signedSeqs = [];
   for (const item of bundle.entries) {
     const entry = verifySigned(item.envelope, pinnedKeys, 'audit');
     requireThat(entry.tenant_id === checkpoint.tenant_id && entry.sequence === ++sequence && ctEqual(entry.previous, previous) && entry.time >= time && ctEqual(digest(entry), item.hash), 'INV-409-AUDIT', 'Audit continuity failure', 409);
+    const meta = entry.metadata;
+    if (entry.type === 'AUTHORITY_REVOKED' && meta?.kind === 'key' && typeof meta.id === 'string') deadAt.set(meta.id, entry.sequence);
+    if (entry.type === 'KEY_ROTATED' && meta?.key_class === 'audit' && typeof meta?.previous_key_id === 'string') deadAt.set(meta.previous_key_id, entry.sequence);
+    signedSeqs.push([entry.sequence, item.envelope?.protected?.key_id]);
     previous = item.hash; time = entry.time;
     if (prior && sequence === prior.size) requireThat(ctEqual(previous, prior.head), 'INV-409-FORK', 'Witness checkpoint disagrees', 409);
+  }
+  for (const [seq, kid] of signedSeqs) {
+    const dead = deadAt.get(kid);
+    requireThat(!(dead !== undefined && seq > dead), 'INV-409-AUDIT', 'Audit entry signed by a key past its ledger death', 409);
   }
   requireThat(checkpoint.size === sequence && ctEqual(checkpoint.head, previous) && (!prior || (checkpoint.tenant_id === prior.tenant_id && sequence >= prior.size)), 'INV-409-AUDIT', 'Missing or inconsistent checkpoint', 409);
   // The signed tree_head anchors the entry set under the Merkle root —

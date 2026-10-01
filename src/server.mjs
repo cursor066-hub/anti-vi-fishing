@@ -113,10 +113,17 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
     ['/v1/action-capsules', ['limit', 'offset']], ['/v1/certificates', ['limit', 'offset']],
     ['/v1/grants', ['subject']], ['/v1/coverage/history', ['at']],
     ['/v1/audit/consistency', ['first']], ['/v1/audit/entries', ['cursor', 'limit', 'view']],
+    ['/v1/keys/{id}/attest', ['nonce']],
   ]);
+  const QUERY_TEMPLATES = [...QUERY_ALLOW.entries()].filter(([t]) => t.includes('{'));
     const object = v => { requireThat(v && typeof v === 'object' && !Array.isArray(v), 'INV-400-SCHEMA', 'Request body must be an object', 400); return v; };
   const queryCheck = (url, path) => {
-    const allowed = QUERY_ALLOW.get(path) ?? [];
+    // {param} templates match one concrete segment — the same binding the
+    // ROUTE_METHODS map applies to methods (w28-crypto F7).
+    const allowed = QUERY_ALLOW.get(path) ?? QUERY_TEMPLATES.find(([t]) => {
+      const tp = t.split('/'), pp = path.split('/');
+      return tp.length === pp.length && tp.every((seg, i) => seg.startsWith('{') || seg === pp[i]);
+    })?.[1] ?? [];
     const seen = new Set();
     for (const k of url.searchParams.keys()) {
       requireThat(allowed.includes(k), 'INV-400-SCHEMA', `Unknown query parameter ${k}`, 400);
@@ -320,7 +327,10 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       if (path === '/v1/clock/recover' && req.method === 'POST') { await noBody(req); return send(200, fabric.recoverClock(p)); }
       if (path === '/v1/audit/seal' && req.method === 'POST') { await noBody(req); return send(200, fabric.sealAuditChain(p)); }
       if (path === '/v1/config-drift' && req.method === 'GET') return send(200, fabric.configDriftStatus(p));
-      if ((m = /^\/v1\/keys\/([A-Za-z0-9_.:-]+)\/attest$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['security', 'auditor']); const e = fabric.vault.keys.get(m[1]); requireThat(e && fabric.ownsVaultKey(p.tenant_id, m[1]), 'INV-404-NOT-FOUND', 'Key not found', 404); return send(200, fabric.vault.attest(m[1], { now: fabric.clock() })); }
+      // A caller-supplied nonce binds the artifact to the verifier's
+      // challenge — without it the endpoint mints freely-replayable
+      // attestations (w28-crypto F7).
+      if ((m = /^\/v1\/keys\/([A-Za-z0-9_.:-]+)\/attest$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['security', 'auditor']); const e = fabric.vault.keys.get(m[1]); requireThat(e && fabric.ownsVaultKey(p.tenant_id, m[1]), 'INV-404-NOT-FOUND', 'Key not found', 404); const nonce = url.searchParams.get('nonce'); if (nonce !== null) text(nonce, 'nonce', 128); return send(200, fabric.vault.attest(m[1], { now: fabric.clock(), nonce })); }
       if (path === '/v1/secure-perception/sessions' && req.method === 'POST') { fabric.authorize(p, ['operator', 'approver', 'custodian', 'security']); const input = await body(req); fields(input, ['attestation']); return send(201, fabric.perceptionSession(p, input.attestation)); }
       if (path === '/v1/secure-perception/release' && req.method === 'POST') { fabric.authorize(p, ['operator', 'approver', 'custodian', 'security']); const input = await body(req); fields(input, ['session_id', 'fields', 'purpose'], ['capsule_id', 'evidence_ref']); const { session_id, ...release } = input; return send(200, fabric.perceptionRelease(p, session_id, release)); }
       if (path === '/v1/secure-perception/fallback' && req.method === 'POST') { fabric.authorize(p, ['operator', 'approver', 'custodian', 'security']); const input = await body(req); fields(input, ['fields', 'purpose'], ['reason', 'capsule_id', 'evidence_ref']); return send(200, fabric.perceptionFallback(p, input)); }
