@@ -98,7 +98,7 @@ jobs:
           # Nothing under the generated trees may differ — the gate is
           # directory-scoped (not an enumerative file list) so a NEW report
           # someone forgets to name cannot slip through (w13-supply W12-05).
-          stale="$(git status --porcelain -- docs/ examples/ ai-eval/ vectors/ reports/ | grep -v 'reports/benchmark.json' | grep -v 'reports/source-check.json' | grep -v 'reports/artifact-audit.json')"
+          stale="$(git status --porcelain -- docs/ examples/ ai-eval/ vectors/ reports/ | grep -v 'reports/benchmark.json' | grep -v 'reports/source-check.json' | grep -v 'reports/artifact-audit.json' | grep -v 'vectors/envelope-es256-vectors.json')"
           test -z "$stale" || { echo "stale generated artifacts:"; echo "$stale"; exit 1; }
           # reports/benchmark.json is intentionally absent: it embeds measured
           # timings, so byte-equality can never hold — freshness there is
@@ -107,7 +107,9 @@ jobs:
           # they snapshot check.mjs's live exit code, which depends on
           # working-tree churn this pipeline itself creates — proven by the
           # live `node scripts/check.mjs` step, not by byte equality
-          # (w8-composite CI).
+          # (w8-composite CI). vectors/envelope-es256-vectors.json is absent
+          # because ECDSA signatures are nondeterministic — the vector is
+          # proven fresh by the three independent verify steps, not by bytes.
       - name: Upload verification evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
