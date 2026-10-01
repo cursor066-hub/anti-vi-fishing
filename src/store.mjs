@@ -275,11 +275,22 @@ export class Store {
     return { entries, next_cursor: rows.length === limit ? rows.at(-1).seq : null };
   }
   auditExport(tenant, now = null) {
-    const rows = this.db.prepare('SELECT hash,envelope FROM audit WHERE tenant=? ORDER BY seq').all(tenant).map(r => {
-      try { return { hash: r.hash, envelope: JSON.parse(r.envelope) }; }
-      catch { throw new InvariantError('INV-409-AUDIT-TAMPER', 'Audit row failed integrity verification', 409); }
-    });
     const signer = this.auditSigners[tenant], public_keys = signer.keys ? signer.keys() : { [signer.key_id]: { public_key: signer.public_key } };
+    // Export runs the same per-row pass as auditPage — a tampered-but-
+    // parseable row must not fold silently into the checkpoint the signer
+    // attests (w16-fixverify F11). The signed head would otherwise vouch
+    // for attacker JSON.
+    let previous = '0'.repeat(64);
+    const rows = this.db.prepare('SELECT seq,hash,envelope FROM audit WHERE tenant=? ORDER BY seq').all(tenant).map(r => {
+      let envelope;
+      try { envelope = JSON.parse(r.envelope); }
+      catch { throw new InvariantError('INV-409-AUDIT-TAMPER', 'Audit row failed integrity verification', 409); }
+      requireThat(ctEqual(digest(envelope.payload), r.hash) && envelope.payload.sequence === r.seq && ctEqual(envelope.payload.previous, previous), 'INV-409-AUDIT-TAMPER', 'Audit row failed integrity verification', 409);
+      try { verifySigned(envelope, public_keys, 'audit'); }
+      catch { throw new InvariantError('INV-409-AUDIT-TAMPER', 'Audit row failed signature verification', 409); }
+      previous = r.hash;
+      return { hash: r.hash, envelope };
+    });
     const checkpoint = signer.sign({ tenant_id: tenant, size: rows.length, head: rows.at(-1)?.hash ?? '0'.repeat(64), tree_head: merkleRoot(rows.map(r => r.hash)) }, 'checkpoint');
     // Witness checkpoints (store-audit HIGH-2): the previous export's signed
     // checkpoint travels in the bundle, so amputating or rewriting a suffix of

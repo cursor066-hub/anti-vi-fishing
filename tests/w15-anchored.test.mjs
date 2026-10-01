@@ -62,7 +62,10 @@ test('w15: a swapped certificate envelope cannot launder a forged finish', t => 
 test('w15: a planted outcome row fails integrity on the finish path', t => {
   const h = fixture(t);
   const r = h.ready();
-  h.f.store.put('acme', 'outcome', r.certificate.payload.certificate_id, { envelope: { payload: { outcome_id: 'planted' }, signature: 'forged' }, at: h.now() }, h.now());
+  // A real outcome row IS the signed envelope {payload, protected,
+  // signature} — a mis-shaped forgery would die at the wrong branch and
+  // never exercise verifySigned (w16-fixverify F8).
+  h.f.store.put('acme', 'outcome', r.certificate.payload.certificate_id, { payload: { outcome_id: 'planted', status: 'VERIFIED', certificate_id: r.certificate.payload.certificate_id }, protected: { key_id: 'mallory', algorithm: 'Ed25519' }, signature: 'forged' }, h.now());
   assert.throws(() => h.f.execute(h.p(), r.certificate), hasCode('INV-409-INTEGRITY'));
 });
 
@@ -88,15 +91,21 @@ test('w15: forged and deleted usage rows cannot move the replay/budget ledger', 
 // The decision anchor binds each capsule to its signed POLICY_EVALUATED
 // digest — a store-level rewrite of the decision row diverges from what
 // the ledger attests (w13-store M1).
-test('w15: a rewritten decision row diverges from its anchored digest', t => {
+test('w15: a rewritten decision diverges from its anchored digest on a certified capsule', t => {
   const h = fixture(t);
   const r = h.ready();
-  const anchored = h.f._auditIndex('acme').decisions.get(r.record.capsule.capsule_id);
-  const row = h.f.store.get('acme', 'decision', r.record.capsule.capsule_id);
-  if (!row || !anchored) return; // actions without a stored decision row are honest too
-  assert.equal(digest(row.decision), anchored);
-  h.f.store.put('acme', 'decision', r.record.capsule.capsule_id, { ...row, decision: { ...row.decision, decision: 'DENY' } }, h.now());
-  assert.notEqual(digest(h.f.store.get('acme', 'decision', r.record.capsule.capsule_id).decision), anchored);
+  const cid = r.record.capsule.capsule_id;
+  // The certify path anchors the stored decision on the chain — the
+  // certify-only flow (no evaluate() call) must also carry an anchor or
+  // honest capsules wedge forever (w16-fixverify F5/F8).
+  const stored = h.f.store.must('acme', 'capsule', cid);
+  const anchored = h.f._auditIndex('acme').decisions.get(cid);
+  assert.equal(anchored, digest(stored.decision), 'certificate() anchors the decision it stores');
+  // explain narrates the anchored decision — rewriting the stored decision
+  // object diverges and is refused.
+  h.f.store.put('acme', 'capsule', cid, { ...stored, decision: { ...stored.decision, decision: 'DENY' } }, h.now());
+  assert.notEqual(digest(h.f.store.must('acme', 'capsule', cid).decision), anchored);
+  assert.throws(() => h.f.advise(h.p(), { operation: 'explain', capsule_id: cid }), hasCode('INV-409-INTEGRITY'));
 });
 
 // Grants are merged only under their anchored scope digest — a widened
@@ -115,6 +124,16 @@ test('w15: a scope-widened grants row is dropped, not merged', t => {
   assert.equal(live.resources.includes('vault-secrets'), false, 'forged scope never merges');
   assert.equal(live.actions.includes('data.export'), false);
   assert.equal(live.roles.includes('security'), false);
+  // The legacy grant_digest fallback cannot launder a row either: cite the
+  // real issuing capsule but declare a different scope — every row field
+  // must equal the anchored request (w16-fixverify F4).
+  const reqState = r.capsule.requested_state;
+  const evNow = h.now();
+  h.f.store.audit('acme', 'JIT_GRANT_ISSUED', 'operator', reqState.subject_id, { grant_id: 'legacy-G1', grant_digest: digest(reqState) }, evNow);
+  h.f.target.grant('acme', 'legacy-G1', { grant_id: 'legacy-G1', subject_id: reqState.subject_id, resources: ['vault-secrets'], actions: reqState.actions, destinations: ['attacker-vault'], columns: reqState.columns, row_ids: reqState.row_ids, roles: ['security'], expires_at: evNow + reqState.ttl_ms, issued_at: evNow, issued_by: `action:${r.capsule.capsule_id}` });
+  const after = h.f.grantsFor('acme', 'operator', h.now());
+  assert.equal(after.resources.includes('vault-secrets'), false, 'legacy fallback demands field equality');
+  assert.equal(after.roles.includes('security'), false);
 });
 
 // Issuer drift quarantine holds until a SIGNED revalidation — deleting the
@@ -146,6 +165,13 @@ test('w15: containmentReport marks forged denial rows unanchored', t => {
   assert.ok(report.unanchored_rows >= 1);
   const real = report.sequence.find(x => x.code === 'INV-403-SCOPE');
   assert.equal(real.anchored, true, 'real denial is chain-anchored');
+  // Replaying a real (request_id, code) pair with different actor/capability
+  // is still unanchored — the pair alone is not the anchor (w16-fixverify F9).
+  h.f.store.put('acme', 'containment', `deny:${randomUUID()}`, { contained_at: h.now(), subject_id: 'mallory', device_id: null, capability_id: 'cap-other', resource: 'x', destination: null, action: null, code: real.code, request_id: real.request_id, dropped_requests: 1 }, h.now());
+  const report2 = h.f.containmentReport(h.p('security'));
+  const replayed = report2.sequence.filter(x => x.request_id === real.request_id && x.subject_id === 'mallory');
+  assert.equal(replayed.length, 1);
+  assert.equal(replayed[0].anchored, false, 'pair-replayed row is unanchored');
 });
 
 // Real revocations anchor their record digest — a payload edit flips the

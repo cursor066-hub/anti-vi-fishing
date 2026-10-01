@@ -284,7 +284,7 @@ test('AUD-006: evidence cannot claim retention past the per-kind policy ceiling'
 test('AUD-010: named projections filter the verified page without breaking integrity', t => {
   const h = fixture(t); h.ready();
   const finance = h.f.auditPageScoped(h.p('auditor'), { limit: 500, view: 'finance' });
-  assert.ok(finance.entries.length > 0 && finance.entries.every(e => ['CAPSULE_PROPOSED', 'EVIDENCE_ATTACHED', 'EXACT_ACTION_APPROVED', 'CERTIFICATE_ISSUED', 'EXECUTION_RESERVED', 'EXECUTION_OUTCOME'].includes(e.envelope.payload.type)));
+  assert.ok(finance.entries.length > 0 && finance.entries.every(e => ['CAPSULE_PROPOSED', 'EVIDENCE_ATTACHED', 'EXACT_ACTION_APPROVED', 'CERTIFICATE_ISSUED', 'EXECUTION_RESERVED', 'EXECUTION_OUTCOME', 'POLICY_EVALUATED'].includes(e.envelope.payload.type)));
   const privacy = h.f.auditPageScoped(h.p('auditor'), { limit: 500, view: 'privacy' });
   assert.ok(privacy.entries.every(e => !['CAPSULE_PROPOSED'].includes(e.envelope.payload.type)));
   assert.throws(() => h.f.auditPageScoped(h.p('auditor'), { view: 'nonsense' }), hasCode('INV-400-SCHEMA'));
