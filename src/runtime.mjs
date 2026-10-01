@@ -19,7 +19,8 @@ export class RuntimeGate {
     return this.f.transaction(principal, now => {
       const t = principal.tenant_id, policy = this.f.policy(t), r = policy.runtime, identity = this.f.identity(principal);
       this.f.assertHealthy(t, principal.subject_id, input.device_id, now);
-      // Effective grants = static grants ∪ active JIT action-grants (IDN).
+      // Effective grants = static grant tuple + honoured JIT grant tuples
+      // (IDN; w27-policy F1 — the union below is observability only).
       const grants = this.f.grantsFor(t, principal.subject_id, now);
       // NET-001/002: workstation-class peers are never reachable through a
       // service capability; east-west is default-deny by constitution. This
@@ -28,9 +29,11 @@ export class RuntimeGate {
       if (input.action === 'service.connect') {
         requireThat(!(r.network?.deny_workstation_peers && /^ws-|^workstation-|^endpoint-/.test(input.resource)), 'INV-451-POLICY', 'Workstation peers are not a service destination', 451);
       }
-      requireThat(identity.device_id === input.device_id && grants.resources.includes(input.resource) && grants.actions.includes(input.action), 'INV-403-SCOPE', 'Capability scope denied', 403);
-      requireThat(r.destinations.includes(input.destination) && grants.destinations.includes(input.destination) && r.purposes.includes(input.purpose) && r.classifications.includes(input.classification) && r.jurisdictions.includes(input.jurisdiction), 'INV-403-SCOPE', 'Capability context denied', 403);
-      requireThat(input.columns.every(c => grants.columns.includes(c) && !r.forbidden_columns.includes(c) && r.allowed_columns.includes(c)) && input.row_ids.every(id => grants.row_ids.includes(id)), 'INV-403-SCOPE', 'Dataset selection denied', 403);
+      // The whole capability tuple must fit inside ONE grant — the approver
+      // authorized a scope tuple, not its cross-product (w27-policy F1).
+      requireThat(identity.device_id === input.device_id && this.f._grantCovers(grants.tuples, input), 'INV-403-SCOPE', 'Capability scope denied', 403);
+      requireThat(r.destinations.includes(input.destination) && r.purposes.includes(input.purpose) && r.classifications.includes(input.classification) && r.jurisdictions.includes(input.jurisdiction), 'INV-403-SCOPE', 'Capability context denied', 403);
+      requireThat(input.columns.every(c => !r.forbidden_columns.includes(c) && r.allowed_columns.includes(c)), 'INV-403-SCOPE', 'Dataset selection denied', 403);
       if (input.action === 'data.read') {
         requireThat(input.columns.length && input.row_ids.length, 'INV-400-SCHEMA', 'Data capabilities require explicit rows and columns');
         // Catalog ceilings (policy-audit F7): only policy-declared datasets.
@@ -87,7 +90,9 @@ export class RuntimeGate {
       // revoked since issuance cannot ride a signed envelope past policy
       // (runtime-audit F-4).
       const live = this.f.grantsFor(t, cap.subject_id, now);
-      requireThat(live.resources.includes(cap.resource) && live.actions.includes(cap.action) && live.destinations.includes(cap.destination) && cap.columns.every(c => live.columns.includes(c)) && cap.row_ids.every(id => live.row_ids.includes(id)), 'INV-403-SCOPE', 'Underlying grant is revoked, expired, or narrowed', 403);
+      // Same per-grant tuple semantics at consume (w27-policy F1) — the
+      // signed capability must still fit inside ONE live grant tuple.
+      requireThat(this.f._grantCovers(live.tuples, cap), 'INV-403-SCOPE', 'Underlying grant is revoked, expired, or narrowed', 403);
       // RUN-005 / fail-mode matrix: a capability minted under a superseded
       // policy is honoured only for classes configured cached-allow, and only
       // inside max_stale_ms; everything else fails closed.

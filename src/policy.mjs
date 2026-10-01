@@ -81,7 +81,12 @@ export function validatePolicy(p) {
       for (const [kind, map] of Object.entries(r.evidence_bindings)) {
         text(kind, 'evidence binding kind', 128);
         requireThat(typeof map === 'object' && map !== null && !Array.isArray(map) && Object.keys(map).length >= 1 && Object.keys(map).length <= 16, 'INV-400-SCHEMA', 'evidence binding map must list 1-16 claim fields');
-        for (const [cf, path] of Object.entries(map)) { text(cf, 'claim field', 128); requireThat(/^(actor\.(subject_id|device_id|identity_class)|action\.(type|target_resource|purpose|destination)|requested_state\.[A-Za-z0-9_-]{1,64}|subject_id|tenant_id|capsule_id)$/.test(path), 'INV-400-SCHEMA', `Invalid evidence binding path ${path}`); }
+        // Every admitted path must resolve on a real capsule: bare
+        // `subject_id` lives under `actor.`, and `destination` is a
+        // top-level capsule field — paths that never resolve produce
+        // validated-but-unsatisfiable bindings that wedge the action
+        // type forever (w27-policy F3).
+        for (const [cf, path] of Object.entries(map)) { text(cf, 'claim field', 128); requireThat(/^(actor\.(subject_id|device_id|identity_class)|action\.(type|target_resource|purpose)|requested_state\.[A-Za-z0-9_-]{1,64}|tenant_id|capsule_id|destination|quantity)$/.test(path), 'INV-400-SCHEMA', `Invalid evidence binding path ${path}`); }
       }
     }
     // IDN-003/IDN-010 optional admission conditions: restrict which identity
@@ -374,6 +379,10 @@ export function evaluatePolicy({ capsule, policy, evidence = [], approvals = [],
     const r = policy.runtime, req = p.requested_state;
     const resources = req.resources ?? [], columns = req.columns ?? [], destinations = req.destinations ?? [], rowIds = req.row_ids ?? [];
     if (!resources.every(x => r.datasets.includes(x) || r.services.includes(x)) || !columns.every(x => r.allowed_columns.includes(x) && !r.forbidden_columns.includes(x)) || !destinations.every(x => r.destinations.includes(x))) return result('DENY', [reason('SCOPE_CATALOG', 'JIT grant exceeds the declared data/service catalog.')]);
+    // Actions are the one scope field with a closed vocabulary — the same
+    // list runtime.issue enforces; arbitrary strings must never be anchored
+    // as authorized scope (w27-policy F2).
+    if (!(req.actions ?? []).every(x => ['data.read', 'service.connect'].includes(x))) return result('DENY', [reason('SCOPE_CATALOG', 'JIT grant names an action outside the runtime vocabulary.')]);
     // CON-008: grant-carried roles are support scope only — a JIT grant may
     // never mint custodian/security/policy_admin privilege.
     if (!(req.roles ?? []).every(x => ['operator', 'workload'].includes(x))) return result('DENY', [reason('ROLE_ESCALATION', 'JIT grant roles may only confer operator or workload scope.')]);
@@ -383,6 +392,11 @@ export function evaluatePolicy({ capsule, policy, evidence = [], approvals = [],
     // grant mint authority that can never serve and later audits cannot
     // attribute (w27-datagate F4).
     if (rowIds.length && (!rowIds.every(x => typeof x === 'string' && /^[A-Za-z0-9][\w:.-]{0,127}$/.test(x)) || !resources.some(x => r.datasets.includes(x)))) return result('DENY', [reason('INVALID_GRANT', 'row_ids must name well-formed row identifiers inside a declared dataset resource.')]);
+    // The beneficiary must be a live registered identity — pre-positioned
+    // scope for a ghost subject survives as latent authority the moment the
+    // name is enrolled (w27-policy F4). Revocation is re-checked at the
+    // minting point (fabric._applyVerifiedEffects).
+    if (!Object.values(identities ?? {}).some(i => i.subject_id === req.subject_id)) return result('DENY', [reason('UNKNOWN_SUBJECT', 'JIT grant beneficiary is not a registered identity.')]);
   }
   // POL-011: the cooldown anchors on the server-side receive timestamp, not
   // the caller's claim — created_at is inside a 300s backdate window and is

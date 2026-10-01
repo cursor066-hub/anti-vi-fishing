@@ -81,6 +81,10 @@ export function validateProposal(input) {
   text(input.rollback_or_compensation, 'rollback or compensation'); oneOf(input.privacy_classification, ['internal', 'confidential', 'restricted'], 'privacy classification');
   if (input.action.type === 'finance.payment.first') requireThat(input.quantity === input.requested_state.amount_minor && input.destination === input.requested_state.bank_account, 'INV-400-SCHEMA', 'Payment amount/destination mismatch');
   if (input.action.type === 'data.export') requireThat(input.quantity === input.requested_state.row_ids.length && !input.requested_state.columns.some(c => input.exclusions.includes(c)), 'INV-400-SCHEMA', 'Export quantity or exclusions mismatch');
+  // The declared quantity is the grant's scope size — a caller-declared
+  // number must not diverge from what max_quantity actually bounds
+  // (w27-policy F5).
+  if (input.action.type === 'identity.jit.grant') requireThat(input.quantity === (input.requested_state.row_ids.length || 1), 'INV-400-SCHEMA', 'JIT grant quantity must equal the granted row count (or 1 for row-less scope)');
   canonical(input); return input;
 }
 export function proposal(type, actor, state, requested, now, overrides = {}) {

@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 4705,
-      "bytes": 373452
+      "lines": 4725,
+      "bytes": 374937
     },
     "src/issuerd.mjs": {
       "lines": 715,
@@ -58,16 +58,16 @@
       "bytes": 6684
     },
     "src/policy.mjs": {
-      "lines": 458,
-      "bytes": 46415
+      "lines": 472,
+      "bytes": 47601
     },
     "src/runtime.mjs": {
-      "lines": 230,
-      "bytes": 20766
+      "lines": 235,
+      "bytes": 20765
     },
     "src/schema.mjs": {
-      "lines": 90,
-      "bytes": 10397
+      "lines": 94,
+      "bytes": 10788
     },
     "src/secureview.mjs": {
       "lines": 169,
@@ -377,6 +377,10 @@
       "lines": 127,
       "bytes": 7460
     },
+    "tests/w27-policy.test.mjs": {
+      "lines": 68,
+      "bytes": 6024
+    },
     "tests/w27.test.mjs": {
       "lines": 145,
       "bytes": 9076
@@ -450,6 +454,6 @@
       "bytes": 6499
     }
   },
-  "total_files": 112,
-  "total_lines": 24991
+  "total_files": 113,
+  "total_lines": 25102
 }

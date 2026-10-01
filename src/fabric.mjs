@@ -1553,6 +1553,11 @@ export class Fabric {
     // operational role ONLY for the grant window; no standing access remains
     // after expiry or revocation.
     const merged = { roles: [...(identity?.roles ?? [])], resources: [...base.resources], actions: [...base.actions], destinations: [...base.destinations], columns: [...base.columns], row_ids: [...base.row_ids] };
+    // Per-grant authority tuples (w27-policy F1): each honoured grant is an
+    // indivisible scope — enforcement tests a selection against ONE tuple,
+    // never the flat union, so fields approved for a service cannot launder
+    // rows of an unrelated dataset (and vice versa).
+    const tuples = [{ resources: base.resources ?? [], actions: base.actions ?? [], destinations: base.destinations ?? [], columns: base.columns ?? [], row_ids: base.row_ids ?? [] }];
     const idx = this._auditIndex(tenant);
     for (const g of this.target.grants(tenant, subject_id, now)) {
       // A grants-table row is derived state, never authority: it is honored
@@ -1566,8 +1571,19 @@ export class Fabric {
       if (idx.revoked.has(`grant:${g.grant_id}`)) continue;
       if (!this._grantAnchored(tenant, idx, g.grant_id, g)) continue;
       for (const k of Object.keys(merged)) for (const v of g[k] ?? []) if (!merged[k].includes(v)) merged[k].push(v);
+      tuples.push({ resources: g.resources ?? [], actions: g.actions ?? [], destinations: g.destinations ?? [], columns: g.columns ?? [], row_ids: g.row_ids ?? [] });
     }
+    merged.tuples = tuples;
     return merged;
+  }
+  // A capability's whole selection must fit inside ONE honoured grant tuple
+  // — the flat per-field union is observability only (w27-policy F1).
+  _grantCovers(tuples, sel) {
+    return tuples.some(g => g.resources.includes(sel.resource)
+      && g.actions.includes(sel.action)
+      && g.destinations.includes(sel.destination)
+      && (sel.columns ?? []).every(c => g.columns.includes(c))
+      && (sel.row_ids ?? []).every(id => g.row_ids.includes(id)));
   }
   activateDuePolicies(t, now) {
     // Staged deployment (POL-008/013): a verified policy.change with a staged
@@ -3290,6 +3306,10 @@ export class Fabric {
     }
     if (type === 'identity.jit.grant') {
       const req = r.capsule.requested_state;
+      // The beneficiary's revocation status is ledger-authoritative at the
+      // minting point — a subject quarantined between evaluation and
+      // certificate must not still collect granted scope (w27-policy F4).
+      requireThat(!this.revoked(t, 'subject', req.subject_id), 'INV-403-SCOPE', 'JIT grant beneficiary is subject-revoked', 403);
       const grant = { grant_id: `jit-${cert.certificate_id}`, subject_id: req.subject_id, resources: req.resources, actions: req.actions, destinations: req.destinations, columns: req.columns, row_ids: req.row_ids, roles: req.roles ?? [], expires_at: now + req.ttl_ms, issued_at: now, issued_by: `action:${r.capsule.capsule_id}`, reason: req.reason, revoked: false };
       this.store.put(t, 'jit-grant', grant.grant_id, { grant }, now);
       this.store.audit(t, 'JIT_GRANT_ISSUED', p.subject_id, req.subject_id, { grant_id: grant.grant_id, grant_digest: digest(req), scope_digest: digest({ subject_id: grant.subject_id, resources: grant.resources ?? [], actions: grant.actions ?? [], destinations: grant.destinations ?? [], columns: grant.columns ?? [], row_ids: grant.row_ids ?? [], roles: grant.roles ?? [], expires_at: grant.expires_at }), expires_at: grant.expires_at }, now);
