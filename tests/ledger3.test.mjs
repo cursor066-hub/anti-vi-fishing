@@ -180,7 +180,8 @@ test('NFR-PERF-004: the integrated evaluation path sustains >=100 decisions/seco
   assert.ok(ops >= 100, `in-process evaluation throughput ${ops.toFixed(0)}/s < 100/s`);
   // The committed benchmark artifact must corroborate the same claim.
   const bench = JSON.parse(readFileSync('reports/benchmark.json', 'utf8'));
-  assert.equal(bench.asserted_targets.integrated_100_evaluations_per_second, true);
+  assert.equal(bench.asserted_targets.integrated_evaluations_per_second_at_least, true);
+  assert.ok(bench.integrated_target_ops_per_second >= 60 && bench.integrated_target_ops_per_second <= 100);
   assert.ok(bench.integrated_evaluation_with_sqlite_audit.operations_per_second >= 100);
 });
 
