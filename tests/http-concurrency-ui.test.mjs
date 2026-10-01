@@ -79,7 +79,7 @@ test('PER-007 PER-009: Secure Perception is dev-attested: forged attestations fa
   const release = await h.request('/v1/secure-perception/release', { method: 'POST', body: { session_id: session.data.session_id, fields: { secret_field: 'sensitive-value-123' }, purpose: 'review' } });
   assert.equal(release.status, 200); assert.equal(release.data.mode, 'secure-perception');
   assert.ok(!release.data.ciphertext.includes('sensitive-value-123'), 'ciphertext must not contain plaintext');
-  const opened = openRelease({ ...component, _ecdh_private: component.ecdh_private }, release.data);
+  const opened = openRelease({ ...component, _ecdh_private: component.ecdh_private }, release.data, session.data, h.now());
   assert.equal(opened.data.secret_field, 'sensitive-value-123');
   installPolicy(h, p => { p.secure_perception.fallback = 'denied'; });
   const denied = await h.request('/v1/secure-perception/fallback', { method: 'POST', body: { fields: { x: 'y' }, purpose: 'review' } });

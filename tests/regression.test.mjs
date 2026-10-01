@@ -420,7 +420,7 @@ test('audit PER-006: purpose, field and time constraints bind every release', ()
   assert.equal(out.binding.expires_at, session.expires_at);
   assert.throws(() => releaseFields(session, rel, policy, session.expires_at + 1), hasCode('INV-409-STATE'));
   // The purpose-bound plaintext is readable only by the attested component.
-  const inner = openRelease(component, out);
+  const inner = openRelease(component, out, session, now);
   assert.equal(inner.purpose, 'review-ticket-7');
   assert.equal(inner.data.bank_account, 'TESTBANK1');
 });

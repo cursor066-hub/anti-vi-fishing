@@ -50,6 +50,19 @@ attested hardware path:
 Product copy and the console must never present the module as a trusted
 display or as prevention of all visual exfiltration.
 
+Release envelopes are bound to their minting session: `openRelease`
+verifies `ephemeral_public === session.server_ephemeral` and
+`binding.session_id === session.session_id` before attempting decryption,
+and every envelope label (`mode`, `assurance`, `production`,
+`ephemeral_public`) rides the AES-GCM AAD. A forged release built only
+from the component's *public* ECDH key cannot open (w26 F-1/F-2).
+Freshness is enforced by the authenticated `expires_at` inside the
+ciphertext — a one-shot pin: a release opens only while fresh **and**
+only for the session it was minted in; it is not a replayable credential.
+`session_ttl_ms` is therefore the release's maximum useful life — a
+policy that wants shorter release freshness must shorten the session TTL
+(w26 F-5/F-10).
+
 ### Store plaintext surfaces (design decision)
 
 The audit chain, `data_access` trail, `usage` keys, `nonces` and `idempotency` request hashes are stored **plaintext by design** inside `fabric.db`: audit envelopes must remain verifiable and servable to auditors who hold only public keys, and `verifyAudit`/export integrity checks are deliberately key-free. Confidentiality of the database file itself comes from the `0600` file permissions and the deployment's filesystem/backup controls — the tenant encryption keys (`config.json`) live in the same trust boundary, so encrypting audit metadata under them would not raise the bar against an attacker who can already read the directory. Integrity, however, is fully cryptographic: hash chaining, signed envelopes and per-row re-verification on read (`auditPage` recomputes digests and chain links before serving).

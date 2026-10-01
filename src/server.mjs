@@ -243,7 +243,7 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
         if (doomed && doomed === callerTokenHash) for (const [key, session] of sessions) if (session.token_hash === doomed) { sessions.delete(key); terminated++; }
         res.setHeader('Set-Cookie', 'if_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'); await noBody(req); return send(200, { logged_out: terminated > 0, sessions_terminated: terminated });
       }
-      if (path === '/v1/me' && req.method === 'GET') return send(200, { ...p, roles: fabric.identity(p).roles, device_id: fabric.identity(p).device_id, profile: 'engineering', secure_perception: 'dev-attested-software', perception_components: Object.keys(fabric.perceptionComponents[p.tenant_id] ?? {}) });
+      if (path === '/v1/me' && req.method === 'GET') return send(200, { ...p, roles: fabric.identity(p).roles, device_id: fabric.identity(p).device_id, profile: 'engineering', secure_perception: 'dev-attested-software', perception_components: (fabric.identity(p).roles ?? []).some(r => ['operator', 'approver', 'custodian', 'security'].includes(r)) ? Object.keys(fabric.perceptionComponents[p.tenant_id] ?? {}) : [] });
       if (path === '/v1/schemas' && req.method === 'GET') return send(200, Object.values(SCHEMAS).map(s => ({ ...s, digest: digest(s) })));
       if (path === '/v1/policy' && req.method === 'GET') { fabric.authorize(p, ['operator', 'approver', 'custodian', 'policy_admin', 'security', 'auditor']); return send(200, fabric.policy(p.tenant_id)); }
       if (path === '/v1/action-capsules' && req.method === 'GET') {

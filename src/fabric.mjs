@@ -1765,7 +1765,7 @@ export class Fabric {
         // bounded — a linear pass over the whole runtime history per
         // request was a quadratic wall-clock sink (w17-idx F8).
         case 'RUNTIME_ALLOWED': { const u = { capability: pl.reference, subject: pl.actor, resource: meta.resource ?? null, request_id: meta.request_id ?? null, cost: typeof meta.cost === 'number' ? meta.cost : 0, at: pl.time }; idx.runtimeUse.push(u); const cl = idx.runtimeUseByCap.get(u.capability) ?? []; cl.push(u); idx.runtimeUseByCap.set(u.capability, cl); const sl = idx.runtimeUseBySubject.get(u.subject) ?? []; sl.push(u); idx.runtimeUseBySubject.set(u.subject, sl); break; }
-        case 'PERCEPTION_SESSION': if (meta.nonce) idx.perceptionNonce.add(meta.nonce); if (meta.channel_digest) idx.perceptionSessions.set(pl.reference, { creator: meta.creator ?? null, expires_at: meta.expires_at ?? null, channel_digest: meta.channel_digest, component: meta.component ?? null, signing_key_id: meta.signing_key_id ?? null }); break;
+        case 'PERCEPTION_SESSION': if (meta.nonce) idx.perceptionNonce.add(meta.nonce); if (meta.channel_digest) idx.perceptionSessions.set(pl.reference, { creator: meta.creator ?? null, expires_at: meta.expires_at ?? null, channel_digest: meta.channel_digest, component: meta.component ?? null, signing_key_id: meta.signing_key_id ?? null, assurance: meta.assurance ?? null, firmware: meta.firmware ?? null }); break;
         case 'DATA_ACCESSED': idx.dataAccess.push({ subject: pl.reference, dataset: meta.dataset, row_ids: meta.row_ids ?? [], columns: meta.columns ?? [], at: meta.at ?? pl.time, certificate_id: meta.certificate_id ?? null }); break;
         // The reservation's anchored time bounds the crash-gap window an
         // honest EXECUTION_DISPATCHED can lose — an unanchored journal far
@@ -4340,13 +4340,22 @@ export class Fabric {
       // revocation of component key_ids is honoured here, not only in the
       // class-key machinery (w6-perception P-2).
       requireThat(!this.revoked(t, 'key', component.signing.key_id), 'INV-401-ATTESTATION', 'Component signing key revoked', 401);
-      const session = openSession(component, attestation, this.policy(t), now);
+      // Health before crypto work: a quarantined caller pays no attestation
+      // cost (w26-perception F-10).
       this.assertHealthy(t, p.subject_id, this.identity(p).device_id, now);
+      const session = openSession(component, attestation, this.policy(t), now);
       // Replay guard: an attestation nonce may mint exactly one session.
       // Bare-key lookup covers pre-namespacing rows as well (w9-fixverify
       // NB-5): a legacy nonce row must still block the replay.
       const seen = this.store.db.prepare('SELECT capsule FROM nonces WHERE tenant=? AND nonce IN (?, ?)').get(t, 'perception:' + attestation.payload.nonce, attestation.payload.nonce);
       requireThat(!seen && !this._auditIndex(t).perceptionNonce.has(attestation.payload.nonce), 'INV-409-REPLAY', 'Attestation nonce already consumed', 409);
+      // Live-session cap: each mint writes a durable row AND a signed chain
+      // event — an authorized caller must not grow either without bound
+      // (w26-perception F-9). The anchored index counts only sessions that
+      // have not expired.
+      let live = 0;
+      for (const [, s] of this._auditIndex(t).perceptionSessions) if ((s.expires_at ?? 0) > now) live++;
+      requireThat(live < 64, 'INV-429-QUOTA', 'Perception live-session cap reached (64)', 429);
       this.store.db.prepare('INSERT INTO nonces VALUES(?,?,?)').run(t, 'perception:' + attestation.payload.nonce, `perception:${session.session_id}`);
       const stored = { ...session, _server_private: session._server_private.export({ type: 'pkcs8', format: 'pem' }), creator: p.subject_id };
       this.store.insert(t, 'perception-session', session.session_id, stored, now);
@@ -4360,8 +4369,20 @@ export class Fabric {
   }
   perceptionRelease(p, session_id, release) {
     this.authorize(p, ['operator', 'approver', 'custodian', 'security']);
+    const t = p.tenant_id, sid = identifier(session_id);
+    // An expired session shreds its private half on first observation,
+    // not only when the operator sweep runs — the residency window is
+    // 'until someone looks', never 'until cron' (w26-perception F-10).
+    // The tombstone must commit: writing it inside the refusal's
+    // transaction would roll the shred back with the refuse.
+    let probe = null;
+    try { probe = this.store.must(t, 'perception-session', sid); } catch { /* the tx below reports the honest error */ }
+    if (probe && (!(probe.expires_at > this.clock()) || probe._server_private == null)) {
+      if (probe._server_private != null) { probe._server_private = null; this.store.put(t, 'perception-session', sid, probe, this.clock()); }
+      requireThat(false, 'INV-409-STATE', 'Perception session expired or retired', 409);
+    }
     return this.transaction(p, now => {
-      const t = p.tenant_id, sid = identifier(session_id), session = this.store.must(t, 'perception-session', sid);
+      const session = this.store.must(t, 'perception-session', sid);
       this.assertHealthy(t, p.subject_id, this.identity(p).device_id, now);
       // A session is bound to its creator — another identity cannot release
       // into someone else's sealed channel (runtime-audit F-12).
@@ -4371,12 +4392,20 @@ export class Fabric {
       // never pass — the ledger attests what the session was minted as
       // (w18-issuerd F-1).
       const anchoredSession = this._auditIndex(t).perceptionSessions.get(sid);
-      requireThat(anchoredSession && anchoredSession.creator === session.creator && anchoredSession.expires_at === session.expires_at && anchoredSession.channel_digest === digest({ component_ecdh: session.component_ecdh, server_ephemeral: session.server_ephemeral }), 'INV-409-INTEGRITY', 'Perception session diverges from its ledger-anchored binding', 409);
+      requireThat(anchoredSession && anchoredSession.creator === session.creator && anchoredSession.expires_at === session.expires_at && anchoredSession.channel_digest === digest({ component_ecdh: session.component_ecdh, server_ephemeral: session.server_ephemeral })
+        // assurance/firmware were dropped from the anchor pre-w26 — null
+        // tolerates pre-upgrade sessions; when anchored, a planted row
+        // cannot relabel either into the signed release trail (F-4).
+        && (anchoredSession.assurance == null || anchoredSession.assurance === session.assurance)
+        && (anchoredSession.firmware == null || anchoredSession.firmware === session.firmware_version), 'INV-409-INTEGRITY', 'Perception session diverges from its ledger-anchored binding', 409);
       // The anchored digest binds only the public halves of the ECDH pair —
       // the seal key comes from the stored private half. Re-prove the pair:
       // a swapped _server_private can never re-key the release to an
       // attacker, and an honest session's private always re-derives the
       // anchored ephemeral (w20-fixverify F-1).
+      // The pre-tx probe shreds expired rows — a tombstone between probe
+      // and tx still refuses honestly rather than tripping on a null key.
+      requireThat(session._server_private != null && session.expires_at > now, 'INV-409-STATE', 'Perception session expired or retired', 409);
       requireThat(createPublicKey(createPrivateKey(session._server_private)).export({ type: 'spki', format: 'pem' }) === session.server_ephemeral, 'INV-409-INTEGRITY', 'Perception session private half diverges from the anchored ephemeral', 409);
       // Component credential revocation reaches live sessions and binds the
       // ATTESTING key the session anchored — a rotated component cannot
@@ -4393,7 +4422,16 @@ export class Fabric {
       requireThat(release && typeof release === 'object' && !Array.isArray(release) && release.fields && typeof release.fields === 'object' && !Array.isArray(release.fields), 'INV-400-SCHEMA', 'Invalid release', 400);
       text(release.purpose, 'purpose', 512);
       this._releaseCitation(t, release, p, now);
-      const result = releaseFields(session, release, this.policy(t), now);
+      // Policy revocation reaches LIVE sessions: mint-time gates re-run on
+      // every release so a tightened constitution cannot be outlived for
+      // the session TTL (w26-perception F-3). Firmware/assurance read from
+      // the anchored event, not the mutable row (F-4).
+      const effective = { ...session, assurance: anchoredSession.assurance ?? session.assurance, firmware_version: anchoredSession.firmware ?? session.firmware_version };
+      const sp = this.policy(t).secure_perception ?? {};
+      requireThat(sp.enabled !== false, 'INV-451-POLICY', 'Secure Perception was disabled for live sessions', 451);
+      requireThat(sp.required_assurance !== 'hardware-enclave', 'INV-451-INTEGRITY', 'Hardware-enclave assurance cannot be served by the software profile', 451);
+      requireThat((sp.allowed_firmware ?? []).includes(effective.firmware_version), 'INV-401-ATTESTATION', 'Session firmware no longer trusted by policy', 401);
+      const result = releaseFields(effective, release, this.policy(t), now);
       // The value digest rides the ledger: sealed content can never
       // misstate evaluated state without the audit trail carrying what was
       // actually committed (w18-issuerd F-4).
@@ -4467,11 +4505,16 @@ export class Fabric {
     requireThat(release && typeof release === 'object' && !Array.isArray(release), 'INV-400-SCHEMA', 'Invalid release', 400);
     requireThat(release.fields && typeof release.fields === 'object' && !Array.isArray(release.fields), 'INV-400-SCHEMA', 'fields must be an object', 400);
     text(release.purpose, 'purpose');
+    // The justification for a PLAINTEXT release is the accountability
+    // field — it must be a bounded string and it must ride the signed
+    // trail, or a 200KB/object reason could bypass both the label and the
+    // ledger (w26-perception F-7).
+    if (release.reason !== undefined) text(release.reason, 'reason', 256);
     return this.transaction(p, now => {
       this.assertHealthy(p.tenant_id, p.subject_id, this.identity(p).device_id, now);
       this._releaseCitation(p.tenant_id, release, p, now);
       const result = workspaceFallback(release, this.policy(p.tenant_id), now);
-      this.store.audit(p.tenant_id, 'PERCEPTION_FALLBACK', p.subject_id, 'workspace', { fields: result.binding.fields, fields_digest: digest(release.fields), assurance: result.assurance, capsule_id: release.capsule_id ?? null, evidence_ref: release.evidence_ref ?? null }, now);
+      this.store.audit(p.tenant_id, 'PERCEPTION_FALLBACK', p.subject_id, 'workspace', { fields: result.binding.fields, fields_digest: digest(release.fields), assurance: result.assurance, capsule_id: release.capsule_id ?? null, evidence_ref: release.evidence_ref ?? null, reason: release.reason ?? null }, now);
       return result;
     });
   }

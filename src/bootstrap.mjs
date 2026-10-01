@@ -157,7 +157,7 @@ export function createConfiguration(tenantNames = ['acme'], now = Date.now(), { 
     // goes to the component secret bundle (dev console), never into config.
     const component = createDevComponent(`secure-view-${tenant}`);
     componentSecrets[tenant][component.name] = component;
-    const components = { [component.name]: { signing_key_id: component.signing.key_id, signing: { key_id: component.signing.key_id, public_key: component.signing.public_key }, ecdh_public: component.ecdh_public, firmware_version: component.firmware_version, assurance: 'dev-attested-software', production: false } };
+    const components = { [component.name]: { signing_key_id: component.signing.key_id, signing: { key_id: component.signing.key_id, public_key: component.signing.public_key, suite: component.signing.suite }, ecdh_public: component.ecdh_public, firmware_version: component.firmware_version, assurance: 'dev-attested-software', production: false } };
     // Purpose-bound at creation — no 'any' wildcard signing authority.
     const execution = vault ? vault.generate(['action-certificate', 'capability'], { tenant_id: tenant }) : generateKey();
     const audit = vault ? vault.generate(['audit', 'outcome', 'revocation', 'coverage', 'checkpoint', 'backup-manifest'], { tenant_id: tenant }) : generateKey();

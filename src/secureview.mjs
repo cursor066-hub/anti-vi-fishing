@@ -28,7 +28,7 @@ export function createComponent(name, firmwareVersion) {
 
 export function openSession(component, attestation, policy, now) {
   fields(attestation, ['protected', 'payload', 'signature']);
-  verifySigned(attestation, { [component.signing.key_id]: { public_key: component.signing.public_key } }, 'component-attestation');
+  verifySigned(attestation, { [component.signing.key_id]: { public_key: component.signing.public_key, suite: component.signing.suite } }, 'component-attestation');
   const sp = policy.secure_perception ?? {};
   requireThat(sp.enabled !== false, 'INV-451-POLICY', 'Secure Perception is disabled by policy', 451);
   // The assurance bar is enforced at the session point, not only at policy
@@ -41,6 +41,11 @@ export function openSession(component, attestation, policy, now) {
   // than silently downgraded (w6-perception P-6).
   requireThat(attestation.payload.assurance === undefined || attestation.payload.assurance === ASSURANCE.dev, 'INV-401-ATTESTATION', 'Attestation claims an assurance level this profile cannot honor', 401);
   requireThat(attestation.payload.production !== true, 'INV-401-ATTESTATION', 'Attestation claims production status this profile cannot honor', 401);
+  // Decorative-looking claims are still typed — an attestation that asserts
+  // capabilities/residency the gate never checked cannot ride the signed
+  // trail as if it were verified (w26-perception F-10).
+  requireThat(attestation.payload.capabilities === undefined || (Array.isArray(attestation.payload.capabilities) && attestation.payload.capabilities.every(c => typeof c === 'string')), 'INV-400-SCHEMA', 'Bad capabilities claim');
+  requireThat(attestation.payload.generated_inside === undefined || typeof attestation.payload.generated_inside === 'boolean', 'INV-400-SCHEMA', 'Bad generated_inside claim');
   // Attestations must be fresh and nonce-bound: expiry is mandatory, the
   // nonce must be a 64-hex value, and when policy pins a nonce it must match
   // exactly. Fabric additionally rejects nonce reuse across sessions
@@ -81,6 +86,9 @@ export function releaseFields(session, release, policy, now) {
   const plaintext = canonical({ ...binding, data: release.fields });
   const key = deriveKey(session); const nonce = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', key, nonce);
+  // The outer labels authenticate too: mode/assurance/production ride in
+  // the open yet cannot flip without breaking the tag (w26-perception F-2).
+  cipher.setAAD(canonical({ mode: 'secure-perception', assurance: session.assurance, production: false, ephemeral_public: session.server_ephemeral }));
   const ciphertext = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
   const tag = cipher.getAuthTag();
   key.fill(0); // the session AES key does not outlive its cipher use (w11-timing NEW-LOW-2)
@@ -91,17 +99,28 @@ export function releaseFields(session, release, policy, now) {
   };
 }
 
-export function openRelease(component, release) {
+export function openRelease(component, release, session, now = Date.now()) {
   // Component-side open: used by the dev console component and tests. Proves
-  // the ciphertext is only readable with the attested component's private key.
+  // the ciphertext is only readable with the attested component's private key
+  // AND minted for this exact session: the component's ECDH public key is
+  // public, so without pinning the server ephemeral an attacker can DH with
+  // it and forge a release that opens cleanly (w26-perception F-1).
+  requireThat(release && typeof release === 'object' && !Array.isArray(release), 'INV-400-SCHEMA', 'Invalid release', 400);
+  for (const k of ['mode', 'assurance', 'ephemeral_public', 'nonce', 'ciphertext', 'tag']) requireThat(typeof release[k] === 'string', 'INV-400-SCHEMA', `Malformed release field ${k}`);
+  requireThat(release.production === undefined || typeof release.production === 'boolean', 'INV-400-SCHEMA', 'Malformed release production flag');
+  const binding = release.binding;
+  requireThat(binding && typeof binding === 'object' && !Array.isArray(binding), 'INV-400-SCHEMA', 'Malformed release binding');
+  requireThat(session && release.ephemeral_public === (session.server_ephemeral ?? session.ephemeral_public) && binding.session_id === session.session_id, 'INV-401-TAMPER', 'Release does not belong to this session', 401);
   const priv = typeof component._ecdh_private === 'string' ? createPrivateKey(component._ecdh_private) : component._ecdh_private;
   const shared = diffieHellman({ privateKey: priv, publicKey: createPublicKey(release.ephemeral_public) });
-  const key = Buffer.from(hkdfSync('sha256', shared, Buffer.from('if-secure-perception-1'), Buffer.from(release.binding.session_id), 32));
+  const key = Buffer.from(hkdfSync('sha256', shared, Buffer.from('if-secure-perception-1'), Buffer.from(session.session_id), 32));
   shared.fill(0); // transient ECDH secret does not outlive key derivation
   const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(release.nonce, 'base64url'));
+  decipher.setAAD(canonical({ mode: release.mode, assurance: release.assurance, production: release.production ?? false, ephemeral_public: release.ephemeral_public }));
   decipher.setAuthTag(Buffer.from(release.tag, 'base64url'));
   let plaintext;
   try { plaintext = Buffer.concat([decipher.update(Buffer.from(release.ciphertext, 'base64url')), decipher.final()]).toString('utf8'); }
+  catch { requireThat(false, 'INV-401-TAMPER', 'Release ciphertext failed authentication', 401); }
   finally { key.fill(0); } // session AES key zeroed even on tag failure (w11-timing NEW-LOW-2)
   const inner = parseStrict(plaintext);
   // The outer binding is unauthenticated metadata — the authenticated copy
@@ -109,7 +128,11 @@ export function openRelease(component, release) {
   const { data, ...innerBinding } = inner;
   // Constant-time compare on fixed-length digests — raw string length
   // must not leak which byte position first diverged (w21-crypto F-12).
-  requireThat(ctEqual(digest(innerBinding), digest(release.binding)), 'INV-401-TAMPER', 'Release binding does not match the authenticated plaintext', 401);
+  requireThat(ctEqual(digest(innerBinding), digest(binding)), 'INV-401-TAMPER', 'Release binding does not match the authenticated plaintext', 401);
+  // Freshness and self-consistency: a stale envelope must not open, and the
+  // declared field list must equal the released data's keys (w26 F-10).
+  requireThat(Number.isSafeInteger(inner.expires_at) && inner.expires_at > now, 'INV-409-STATE', 'Release is stale', 409);
+  requireThat(Array.isArray(inner.fields) && [...inner.fields].sort().join(',') === Object.keys(data ?? {}).sort().join(','), 'INV-401-TAMPER', 'Release field list diverges from the data', 401);
   return inner;
 }
 
