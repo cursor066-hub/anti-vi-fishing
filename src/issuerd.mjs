@@ -305,16 +305,33 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
     }
     if (fd !== null) {
       let lines;
-      try { requireThat(fstatSync(fd).isFile(), 'INV-503-CONFIG', 'Issuance log path must be a regular file', 503); lines = readFileSync(fd, 'utf8').trim().split('\n').filter(Boolean); }
+      try {
+        const fst = fstatSync(fd);
+        requireThat(fst.isFile(), 'INV-503-CONFIG', 'Issuance log path must be a regular file', 503);
+        // Same custody bar as the key and specs — a group-readable log
+        // leaks issuance metadata (w22-fixverify F10).
+        requireThat((fst.mode & 0o077) === 0, 'INV-503-CONFIG', 'Issuance log must not be readable by group or other users', 503);
+        // Strict line discipline: an interior blank line is tamper
+        // evidence, not formatting (w22-fixverify F13).
+        const raw = readFileSync(fd, 'utf8');
+        lines = raw.trim() === '' ? [] : raw.trim().split('\n');
+      }
       finally { closeSync(fd); }
       // Boot verifies the WHOLE chain, not just the tail: every line must
       // parse, sequence must be contiguous, the hash link must hold, and
       // the keyed HMAC must verify. An unparseable or edited line —
       // including a mid-write-truncated tail — refuses boot rather than
       // silently orphaning the prior segment under a fresh genesis
-      // (w20-fixverify F-7/F-8). Residual: a file truncated to a VALID
-      // prefix cannot be detected — the chain has no external anchor for
-      // its head; operators must ship the log off-box to bound that.
+      // (w20-fixverify F-7/F-8). Residuals: a file truncated to a VALID
+      // prefix cannot be detected, and neither can a wholesale replace —
+      // the chain key lives beside the log, so a directory-owning writer
+      // who swaps both files forges the whole history under a
+      // self-consistent key (w22-fixverify F3). Deriving the key from
+      // issuer spec material was rejected: routine issuer add/remove or
+      // rotation would invalidate the chain permanently (w21-issuerd F1).
+      // The honest bound is operational: the log has no external anchor —
+      // ship it off-box (SIEM/filebeat) so an external copy attests the
+      // head, and treat the dir's custody bits as the control.
       let previous = '0'.repeat(64), last = null;
       for (const [i, line] of lines.entries()) {
         let rec = null;
@@ -334,7 +351,11 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
   const LOG_MAX_BYTES = log_max_bytes;
   function issuanceLog(entry) {
     if (!logPath) return;
-    const record = { ...entry, sequence: sequence.n + 1, previous: sequence.previous, time: clock() };
+    // Server fields own the record — a caller-supplied 'digest' must not
+    // ride into the MAC input or the written line refuses boot forever
+    // (w22-fixverify F11).
+    const { digest: _ignored, ...rest } = entry;
+    const record = { ...rest, sequence: sequence.n + 1, previous: sequence.previous, time: clock() };
     // The chain itself is keyed — an unkeyed sha256 tail can be recomputed
     // after selective deletion; HMAC under the dedicated key makes a
     // rewritten history diverge at the next append (w18-issuerd F-9).
@@ -348,6 +369,7 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
     try {
       const st = fstatSync(afd);
       requireThat(st.isFile(), 'INV-503-CONFIG', 'Issuance log path must be a regular file', 503);
+      requireThat((st.mode & 0o077) === 0, 'INV-503-CONFIG', 'Issuance log must not be readable by group or other users', 503);
       requireThat(st.size < LOG_MAX_BYTES, 'INV-503-CONFIG', 'Issuance log exceeds the 64 MiB custody cap — archive and rotate it', 503);
       writeSync(afd, canonical({ ...record, digest: next }) + '\n');
     } finally { closeSync(afd); }
@@ -494,6 +516,9 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
           if (holder && (i.tenant ?? null) !== (holder.tenant ?? null) && i.tenant) continue;
           out[k] = { issuer: i.issuer, tenant: i.tenant ?? null, channel: i.channel, version: i.version, kinds: Object.keys(i.kinds), key_id: i.key.key_id, public_key: i.key.public_key };
         }
+        // Successful directory reads are support access too — the chain
+        // records them, not only refusals and issuance (w22-ledger AUD-007).
+        issuanceLog({ issuer: holder?.issuer ?? null, tenant: holder?.tenant ?? null, route: 'issuers-list', accessed: true });
         return send(200, out);
       }
       // Tenant-aware resolution: '<tenant>:<issuer>' wins; a bare name
@@ -516,6 +541,7 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
           issuanceLog({ issuer: m[1], tenant: requestedTenant ?? null, refused: true, unauthenticated: !authed, route: 'manifest', code: 'INV-404-NOT-FOUND' });
           throw new InvariantError('INV-404-NOT-FOUND', 'Issuer not found', 404);
         }
+        issuanceLog({ issuer: issuer.issuer, tenant: issuer.tenant ?? null, route: 'manifest', accessed: true });
         return send(200, signed({
           connector_id: `issuer:${issuer.issuer}`, version: issuer.version, domain: issuer.channel,
           actions: Object.keys(issuer.kinds), permissions: ISSUER_MANIFEST_PERMISSIONS,
@@ -598,6 +624,7 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
           issuanceLog({ issuer: m[1], refused: true, unauthenticated: !authed, route: 'health', code: 'INV-404-NOT-FOUND' });
           throw new InvariantError('INV-404-NOT-FOUND', 'Issuer not found', 404);
         }
+        issuanceLog({ issuer: issuer.issuer, tenant: issuer.tenant ?? null, route: 'health', accessed: true });
         const lat = issuer.metrics.latencies, sorted = [...lat].sort((a, b) => a - b);
         // Latencies are floats — emit an integer so the response can never
         // fail canonicalisation (w9-deploy F1).

@@ -133,6 +133,24 @@
       "expected": 0,
       "actual": 0,
       "pass": true
+    },
+    {
+      "name": "Rollback of fabric.db restores byte-identical deployment",
+      "expected": true,
+      "actual": true,
+      "pass": true
+    },
+    {
+      "name": "Rollback of target.db restores byte-identical deployment",
+      "expected": true,
+      "actual": true,
+      "pass": true
+    },
+    {
+      "name": "Rolled-back store opens and audit chain re-verifies",
+      "expected": true,
+      "actual": true,
+      "pass": true
     }
   ],
   "allowed_low_and_slow_queries": 50,

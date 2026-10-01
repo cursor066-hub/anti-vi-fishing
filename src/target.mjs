@@ -124,24 +124,33 @@ export class SimulatedTarget {
     if (this.db.isTransaction) {
       const sp = `sp_${++this._sp}`;
       this.db.exec(`SAVEPOINT ${sp}`);
-      try { const r = fn(); this.db.exec(`RELEASE ${sp}`); return r; }
+      try { const r = fn(); requireThat(typeof r?.then !== 'function', 'INV-409-STATE', 'Transactions must be synchronous — an async body commits before it runs', 409); this.db.exec(`RELEASE ${sp}`); return r; }
       catch (e) { this.db.exec(`ROLLBACK TO ${sp}; RELEASE ${sp}`); throw e; }
     }
     try {
       this.db.exec('BEGIN IMMEDIATE');
-      const r = fn(); this.db.exec('COMMIT');
+      const r = fn();
+      requireThat(typeof r?.then !== 'function', 'INV-409-STATE', 'Transactions must be synchronous — an async body commits before it runs', 409);
+      this.db.exec('COMMIT');
       // Deleted ciphertext must not linger in the WAL — any armed delete
       // truncates the log right at the commit boundary (DEK-audit F4). A
       // contended checkpoint throws SQLITE_LOCKED after the COMMIT: the write
       // is durable, so the flag stays armed for the next tx instead of
       // failing committed work (w8-fixverify F2).
-      if (this._deleted) try { this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); this._deleted = false; } catch { /* retry next tx */ }
+      if (this._deleted) try { this._checkpointDeleted(); } catch { /* retry next tx */ }
       return r;
     } catch (e) {
       try { if (this.db.isTransaction) this.db.exec('ROLLBACK'); } catch { /* rollback failure must not mask the real error */ }
       if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
       throw e;
     }
+  }
+  // TRUNCATE returns {busy,log,checkpointed}: a reader holding a WAL mark
+  // makes the call a silent no-op — only disarm the delete flag when the
+  // log actually folded, so a later armed write retries (w22-fixverify F4).
+  _checkpointDeleted() {
+    const r = this.db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+    if (r && !r.busy && (r.checkpointed ?? 0) >= (r.log ?? 0)) this._deleted = false;
   }
   key(tenant) { requireThat(Object.hasOwn(this.keys, tenant), 'INV-404-NOT-FOUND', 'Resource not found', 404); return Buffer.from(this.keys[tenant], 'base64url'); }
   exists(tenant, id) {
@@ -215,7 +224,7 @@ export class SimulatedTarget {
     // Bare callers arm the flag but never reach tx()'s post-commit
     // checkpoint — truncate on the autocommit path too, like the store
     // does (w21-store F-5).
-    if (!this.db.isTransaction) try { this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); this._deleted = false; } catch { /* retry on next armed write */ }
+    if (!this.db.isTransaction) try { this._checkpointDeleted(); } catch { /* retry on next armed write */ }
   }
   // One undecryptable grant row must not wedge every authorize() call — a
   // corrupt row can only ever HIDE a grant (anchoring is the authority), so
@@ -331,7 +340,7 @@ export class SimulatedTarget {
       this.db.exec('COMMIT');
       // Same commit-boundary truncation as tx() — durable on success, armed
       // for a later retry when the log is contended (w8-fixverify F2/F3).
-      if (this._deleted) try { this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); this._deleted = false; } catch { /* retry later */ }
+      if (this._deleted) try { this._checkpointDeleted(); } catch { /* retry later */ }
     } catch (e) {
       try { if (this.db.isTransaction) this.db.exec('ROLLBACK'); } catch { /* a failing ROLLBACK must not mask the real error (w21-store F-3) */ }
       if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
@@ -353,7 +362,7 @@ export class SimulatedTarget {
   // registered, verifiable compensations exist: registry-state restoration for
   // non-monetary mutations. Monetary effects cannot be un-sent — the record
   // says so instead of pretending.
-  compensate(capsule, priorState, now) {
+  compensate(capsule, priorState, now, certId = null) {
     const tenant = capsule.tenant_id, id = capsule.action.target_resource, type = capsule.action.type;
     const compensatable = ['finance.vendor.create', 'finance.beneficiary.create', 'finance.bank.change', 'identity.mfa.reset', 'identity.authenticator.enroll', 'identity.account.recover', 'cloud.firewall.change', 'code.release', 'key.rotate', 'backup.delete'];
     if (!compensatable.includes(type)) {
@@ -370,6 +379,11 @@ export class SimulatedTarget {
       if (state.version !== expected) return { compensated: false, reason: 'STALE_COMPENSATION', note: `Registry moved past the compensated write (version ${state.version}, expected ${expected}); a separately authorised remedy action is required.` };
       this._deleted = true; // restoration supersedes ciphertext (w8-fixverify F3)
       this.db.prepare('UPDATE resources SET version=?, value=? WHERE tenant=? AND id=?').run(state.version + 1, encrypt({ ...priorState, compensated_at: now, compensation_of: digest(capsule) }, this.key(tenant), AAD('target', 'resource', tenant, id)), tenant, id);
+      // The unwind is journaled like a dispatch: a crash between this commit
+      // and the parent's outcome write stays reconstructible — the chain
+      // anchors EXECUTION_COMPENSATED only against this durable row
+      // (w22 F4).
+      if (certId) this.db.prepare('INSERT INTO transactions VALUES(?,?,?)').run(tenant, `comp:${certId}`, encrypt({ target_transaction_id: `comp:${certId}`, capsule_digest: digest(capsule), compensated_at: now, restored_version: state.version + 1, status: 'COMPENSATED', simulation: true }, this.key(tenant), AAD('target', 'transaction', tenant, `comp:${certId}`)));
       return { compensated: true, restored_version: state.version + 1 };
     });
   }

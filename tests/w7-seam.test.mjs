@@ -172,8 +172,12 @@ test('w7-seam F9: wedged composite reconciles composite-aware', t => {
   const outcome = h.f.reconcile(h.p('security'), cert.payload.certificate_id);
   assert.equal(outcome.payload.status, 'UNCERTAIN');
   assert.equal(outcome.payload.composite, true);
-  assert.deepEqual([...outcome.payload.wedged_children].sort(), [c1.record.capsule.capsule_id, c2.record.capsule.capsule_id].sort());
-  // Wedged children keep live authority — they can still execute standalone.
+  // Children whose reservation never even committed are honestly
+  // NOT_ATTEMPTED, not wedged — they left no durable trace (w22 F9).
+  assert.equal(outcome.payload.child_outcomes[c1.record.capsule.capsule_id], 'NOT_ATTEMPTED');
+  assert.equal(outcome.payload.child_outcomes[c2.record.capsule.capsule_id], 'NOT_ATTEMPTED');
+  // Never-reserved children keep live authority — they can still execute
+  // standalone once the parent carries an anchored outcome.
   const child1 = h.f.execute(h.p(), c1.certificate);
   assert.equal(child1.payload.status, 'VERIFIED');
 });

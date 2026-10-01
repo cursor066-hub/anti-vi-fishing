@@ -55,6 +55,9 @@ export class RuntimeGate {
     });
   }
   consume(principal, input) {
+    // Authorize before field-shape validation — a 400-vs-403 delta leaks
+    // the field whitelist to unauthorized callers (w22-http F2).
+    this.f.authorize(principal, ['operator', 'workload']);
     fields(input, ['capability', 'device_id', 'resource', 'destination', 'action', 'purpose', 'columns', 'row_ids', 'request_id', 'protocol', 'port']);
     identifier(input.request_id); identifier(input.device_id); identifier(input.resource); text(input.destination, 'destination');
     uniqueStrings(input.columns, 'columns', 64); uniqueStrings(input.row_ids, 'row ids', 256);
@@ -159,7 +162,12 @@ export class RuntimeGate {
         requireThat(watermarkKey, 'INV-503-CONFIG', `Tenant ${t} has no watermark data key`, 503);
         watermarks = watermark(rows, { tenant: t, dataset: cap.resource, subject: cap.subject_id, capabilityId: cap.capability_id, requestId: input.request_id, tenantWatermarkKey: watermarkKey }).watermarks;
       }
-      this.f.store.db.prepare('INSERT INTO usage VALUES(?,?,?,?,?,?,?)').run(t, cap.subject_id, cap.resource, now, cost, cap.capability_id, input.request_id);
+      // A squatted usage row is replay evidence, not a 500: the conflict
+      // resolves only when the planted row is byte-identical to the honest
+      // charge — any other shape screams INV-409-REPLAY (w22 F8).
+      this.f.store.db.prepare('INSERT INTO usage VALUES(?,?,?,?,?,?,?) ON CONFLICT(tenant,capability,request) DO NOTHING').run(t, cap.subject_id, cap.resource, now, cost, cap.capability_id, input.request_id);
+      const plantedUsage = this.f.store.db.prepare('SELECT subject,resource,at,cost FROM usage WHERE tenant=? AND capability=? AND request=?').get(t, cap.capability_id, input.request_id);
+      requireThat(plantedUsage && plantedUsage.subject === cap.subject_id && plantedUsage.resource === cap.resource && plantedUsage.at === now && plantedUsage.cost === cost, 'INV-409-REPLAY', 'Usage row already exists with conflicting billing fields', 409);
       // The disclosure is attested on the signed chain — the data_access
       // table is only a mirror of this event (w11-redteam R9).
       // The disclosure event binds the authorising capability and request

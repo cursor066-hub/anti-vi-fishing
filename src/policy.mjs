@@ -58,9 +58,10 @@ export function defaultPolicy(tenant) {
     // POL-013/POL-014: staged rollout and emergency change contracts.
     staged_policy: { min_delay_ms: 60000, emergency_extra_custodians: 1, emergency_max_ttl_ms: 86400000 },
     secure_perception: { enabled: true, allowed_firmware: ['if-secureview-dev-1'], session_ttl_ms: 300000, release_fields: '*', fallback: 'controlled-workspace', required_assurance: 'dev-attested-software' },
-    // AUD-006: retention ceilings per evidence class. An envelope may not
-    // claim a retention window past its class ceiling.
-    retention: { default_ms: 31536000000, per_kind: {} },
+    // AUD-006: retention ceilings per evidence kind AND per action class.
+    // An envelope may not claim a retention window past either ceiling —
+    // the stricter of the two applies (w22-ledger).
+    retention: { default_ms: 31536000000, per_kind: {}, per_action: {} },
     algorithms: { allowed_suites: ['Ed25519'], deprecation: [] },
     runtime: { max_cost: 10000, rate_per_second: 20, max_fanout: 4, windows: [{ duration_ms: 60000, limit: 100 }, { duration_ms: 3600000, limit: 1000 }, { duration_ms: 86400000, limit: 5000 }, { duration_ms: 2592000000, limit: 10000 }], destinations: ['customer-vault', 'erp-service'], services: ['erp-service'], forbidden_columns: ['passport', 'payment_token', 'password'], jurisdictions: ['EU'], purposes: ['operations'], classifications: ['internal'], remediation_services: ['device-wipe', 'mdm-notify'], sensitivity_weights: { internal: 1, confidential: 5, restricted: 10 }, reconstruction: { window_ms: 86400000, max_distinct_rows: 5000, max_distinct_columns: 100, max_coverage_percent: 90 }, network: { deny_workstation_peers: true, allowed_protocols: ['https'], allowed_ports: [443] }, datasets: ['dataset-1'], allowed_columns: ['id', 'name', 'region', 'passport'], allowed_transforms: ['mask', 'tokenise', 'drop', 'constant', 'aggregate'] } };
 }
@@ -134,9 +135,12 @@ export function validatePolicy(p) {
   oneOf(p.secure_perception.required_assurance, ['dev-attested-software', 'workspace-unattested', 'hardware-enclave'], 'required assurance');
   if (p.secure_perception.required_assurance === 'hardware-enclave') requireThat(!p.secure_perception.enabled, 'INV-451-POLICY', 'Hardware-enclave assurance cannot be enabled in the software profile; disable or lower the requirement explicitly', 451);
   if (p.retention !== undefined) {
-    fields(p.retention, ['default_ms', 'per_kind']);
+    fields(p.retention, ['default_ms', 'per_kind'], ['per_action']);
     integer(p.retention.default_ms, 'default retention', 60000, 3153600000000);
     for (const [k, v] of Object.entries(p.retention.per_kind ?? {})) { text(k, 'retention kind', 128); integer(v, `retention ${k}`, 0, 3153600000000); }
+    // Action-class ceilings key on declared action types — a typo'd class
+    // silently fails to bind (w22-ledger AUD-006).
+    for (const [k, v] of Object.entries(p.retention.per_action ?? {})) { requireThat(Object.hasOwn(p.rules, k), 'INV-400-SCHEMA', `Unknown action class in retention ceiling: ${k}`); integer(v, `retention action ${k}`, 0, 3153600000000); }
   }
   integer(p.secure_perception.session_ttl_ms, 'perception ttl', 1000, 3600000);
   requireThat(p.secure_perception.release_fields === '*' || Array.isArray(p.secure_perception.release_fields), 'INV-400-SCHEMA', 'release_fields must be an explicit allowlist or "*"');

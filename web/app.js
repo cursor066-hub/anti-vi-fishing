@@ -82,7 +82,17 @@ if (typeof document !== 'undefined') {
     const r = await api(`/v1/action-capsules/${id}`); state.selected = r; const c = r.capsule;
     $('detail-title').textContent = c.action.type; $('detail-id').textContent = c.capsule_id; $('detail-status').textContent = r.status; $('detail-status').dataset.state = r.status;
     $('material-details').replaceChildren();
-    for (const [key, value] of Object.entries({ Resource: c.action.target_resource, Destination: c.destination, Quantity: formatQuantity(c), Purpose: c.action.purpose, Owner: c.actor.subject_id, Expires: new Date(c.expires_at).toLocaleString(), Exclusions: c.exclusions.join(', ') || 'None', Coverage: 'Simulation only; production enforcement not established' })) $('material-details').append(node('dt', key), node('dd', value));
+    // UX-009: the coverage row shows this action's own declared path state
+    // (enforced/monitored/uncovered), not a static disclaimer — the manifest
+    // is vault-signed, so what the console shows is what the gate attested.
+    let coverageText;
+    try {
+      const manifest = (await api('/v1/coverage')).payload;
+      const path = (manifest.paths ?? []).find(x => x.action_type === c.action.type && x.target === c.action.target_resource);
+      coverageText = path ? `${path.effective_status ?? path.status}${(path.effective_status ?? path.status) !== path.status ? ` (declared ${path.status})` : ''} — ${path.next_action ?? ''}` : 'No declared coverage path for this action';
+      if (manifest.guarantee === false) coverageText += ` · manifest: ${manifest.assurance ?? 'no guarantee'}`;
+    } catch { coverageText = 'Coverage manifest unavailable'; }
+    for (const [key, value] of Object.entries({ Resource: c.action.target_resource, Destination: c.destination, Quantity: formatQuantity(c), Purpose: c.action.purpose, Owner: c.actor.subject_id, Expires: new Date(c.expires_at).toLocaleString(), Exclusions: c.exclusions.join(', ') || 'None', Coverage: coverageText })) $('material-details').append(node('dt', key), node('dd', value));
     $('old-values').textContent = JSON.stringify(c.current_state.material_fields, null, 2); $('new-values').textContent = JSON.stringify(c.requested_state, null, 2); $('next-action').textContent = nextAction(r.status);
     $('decision-reasons').replaceChildren(); for (const reason of r.decision?.reasons ?? []) $('decision-reasons').append(node('p', `${reason.code}: ${reason.message}`, 'help'));
     $('binding-digests').textContent = `Capsule SHA-256: ${r.capsule_digest}\nEvidence: ${r.evidence.length} · Signed approvals: ${r.approvals.length}`;
@@ -165,7 +175,18 @@ if (typeof document !== 'undefined') {
   handle('evidence-form', 'submit', async () => { await api(`/v1/action-capsules/${state.selected.capsule.capsule_id}/evidence`, { method: 'POST', body: JSON.parse($('evidence-json').value) }); $('evidence-json').value = ''; await detail(state.selected.capsule.capsule_id); notify('Signed evidence attached. Earlier approvals were invalidated.'); });
   handle('challenge', 'click', async () => { const challenge = await api(`/v1/action-capsules/${state.selected.capsule.capsule_id}/approval-challenge`); download(challenge, `approval-challenge-${challenge.capsule_id}.json`); notify('Challenge downloaded. Sign it outside the browser with your independently controlled software key.'); });
   handle('approval-form', 'submit', async () => { const envelope = JSON.parse($('approval-json').value); if (envelope.payload?.capsule_id !== state.selected.capsule.capsule_id) throw new Error('Approval does not match the currently reviewed action.'); await api('/v1/approvals', { method: 'POST', body: envelope }); $('approval-json').value = ''; await detail(state.selected.capsule.capsule_id); notify('Exact-action signature accepted. Policy must still be evaluated.'); });
-  async function loadCoverage() { $('coverage-json').textContent = JSON.stringify((await api('/v1/coverage')).payload, null, 2); $('connector-json').textContent = JSON.stringify(await api('/v1/connectors'), null, 2); }
+  async function loadCoverage() {
+    const manifest = (await api('/v1/coverage')).payload;
+    // UX-009: per-path enforced-vs-monitored state rendered as rows next to
+    // the manifest, not only a raw JSON dump.
+    $('coverage-rows').replaceChildren();
+    for (const p of manifest.paths ?? []) {
+      const tr = node('tr'), status = node('td'), badge = node('span', p.effective_status ?? p.status, 'badge'); badge.dataset.state = p.effective_status ?? p.status; status.append(badge);
+      tr.append(node('td', p.path_id), node('td', p.action_type), node('td', p.target), status, node('td', p.anchored ? 'anchored' : 'unanchored'), node('td', p.next_action ?? ''));
+      $('coverage-rows').append(tr);
+    }
+    $('coverage-json').textContent = JSON.stringify(manifest, null, 2); $('connector-json').textContent = JSON.stringify(await api('/v1/connectors'), null, 2);
+  }
   handle('refresh-coverage', 'click', loadCoverage); handle('load-policy', 'click', async () => { $('policy-json').value = JSON.stringify(await api('/v1/policy'), null, 2); });
   handle('policy-form', 'submit', async () => { $('policy-result').textContent = JSON.stringify(await api('/v1/policies/simulate', { method: 'POST', body: JSON.parse($('policy-json').value) }), null, 2); notify('Simulation complete. No policy was activated.'); });
   handle('runtime-form', 'submit', async () => {

@@ -330,13 +330,13 @@ test('L3: secure-perception release binds capsule_id and evidence_ref into the s
   const h = fixture(t);
   const component = h.setup.componentSecrets.acme['secure-view-acme'];
   const session = h.f.perceptionSession(h.p(), component.attest('b'.repeat(64), h.now() + 300000));
-  const r = h.proposed();
-  const evidence = h.evidence(r);
-  // Citations point at decided authority — evaluate first (w8-fixverify F4).
-  h.f.evaluate(h.p(), r.capsule.capsule_id);
-  const released = h.f.perceptionRelease(h.p(), session.session_id, { fields: { vendor: 'v1' }, purpose: 'verify', capsule_id: r.capsule.capsule_id, evidence_ref: evidence.payload.evidence_id });
+  // Citations point at ALLOW-decided authority — the full pipeline first
+  // (w8-fixverify F4, w22-fixverify F2).
+  const r = h.ready().record;
+  const evidence_id = h.f.store.must('acme', 'capsule', r.capsule.capsule_id).evidence[0];
+  const released = h.f.perceptionRelease(h.p(), session.session_id, { fields: { vendor: 'v1' }, purpose: 'verify', capsule_id: r.capsule.capsule_id, evidence_ref: evidence_id });
   assert.equal(released.binding.capsule_id, r.capsule.capsule_id);
-  assert.equal(released.binding.evidence_ref, evidence.payload.evidence_id);
+  assert.equal(released.binding.evidence_ref, evidence_id);
   // Forged provenance is refused (runtime-audit F-6).
   assert.throws(() => h.f.perceptionRelease(h.p(), session.session_id, { fields: { vendor: 'v1' }, purpose: 'verify', capsule_id: 'cap-ghost' }), (e) => e.code === 'INV-404-NOT-FOUND');
 });

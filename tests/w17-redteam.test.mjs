@@ -212,6 +212,13 @@ test('w17-idx F4: clock regression wedges the fold, then seal + recoverClock rep
   const seal = h.f.sealAuditChain(h.p('security'));
   assert.equal(seal.sealed, true, 'seal cuts the inflated rows it can now see');
   assert.equal(h.f.revoked('acme', 'subject', 'x'), false, 'index healthy after the cut');
+  // The fixture's bearer tokens legitimately resurrect in the rewound span —
+  // the veto is honest (w22-http F6); the operator path is revoke-then-recover.
+  assert.throws(() => h.f.recoverClock(h.p('security')), hasCode('INV-503-TIME'), 'an unrevoked resurrectable token must veto recovery');
+  // The veto scans EVERY tenant — the remediation must too.
+  for (const tenant of ['acme', 'globex'])
+    for (const [hash, entry] of Object.entries(h.f.tenant(tenant).auth ?? {}))
+      if (entry.expires_at > h.now() && entry.expires_at <= h.now() + 172800000) h.f.revoke(h.p('security', tenant), { kind: 'token', id: hash, reason: 'Clock rewind would resurrect it' });
   const recovery = h.f.recoverClock(h.p('security'));
   assert.ok(recovery.recovered_at, 'recovery is recorded, not silent');
 });

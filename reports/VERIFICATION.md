@@ -2,9 +2,9 @@
 
 ## Executed evidence
 
-**710 automated test cases passed, 0 failed** (node --test over tests/). TAP output in reports/tests.tap.
+**729 automated test cases passed, 0 failed** (node --test over tests/). TAP output in reports/tests.tap.
 
-**22 simulation scenarios** run by scripts/simulate.mjs (reports/simulation-results.json).
+**25 simulation scenarios** run by scripts/simulate.mjs (reports/simulation-results.json).
 
 ## Requirement ledger (generated, not hand-maintained)
 

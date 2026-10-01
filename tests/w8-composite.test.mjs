@@ -67,7 +67,12 @@ test('w8 F1/F3/F7/F16: uncompensated bail records FAILED parent + per-child outc
   assert.ok(out.payload.wedged_children.includes(c2.record.capsule.capsule_id));
   // F7: the terminal record names every child's fate.
   assert.equal(out.payload.child_outcomes[c1.record.capsule.capsule_id], 'FAILED');
-  assert.equal(out.payload.child_outcomes[c2.record.capsule.capsule_id], 'WEDGED');
+  // A reserved-but-never-dispatched child is released back to free
+  // authority inside the terminal write — never burned forever (w22 F2).
+  assert.equal(out.payload.child_outcomes[c2.record.capsule.capsule_id], 'RELEASED');
+  const releasedChild = h.f.store.must('acme', 'certificate', c2.certificate.payload.certificate_id);
+  assert.equal(releasedChild.consumed, false);
+  assert.equal(releasedChild.status, 'CERTIFIED');
   // F3/F4: reconcile(child) returns the recorded verdict — no resurrection,
   // no JIT grant minted, no effect replay.
   const childOutcome = h.f.reconcile(h.p(), c1.certificate.payload.certificate_id);

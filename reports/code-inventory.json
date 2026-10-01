@@ -22,8 +22,8 @@
       "bytes": 7186
     },
     "src/connectors.mjs": {
-      "lines": 184,
-      "bytes": 12892
+      "lines": 188,
+      "bytes": 13131
     },
     "src/coverage.mjs": {
       "lines": 73,
@@ -42,12 +42,12 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 3728,
-      "bytes": 299549
+      "lines": 3944,
+      "bytes": 316608
     },
     "src/issuerd.mjs": {
-      "lines": 652,
-      "bytes": 46709
+      "lines": 679,
+      "bytes": 48536
     },
     "src/keystore.mjs": {
       "lines": 184,
@@ -58,12 +58,12 @@
       "bytes": 6684
     },
     "src/policy.mjs": {
-      "lines": 377,
-      "bytes": 39140
+      "lines": 381,
+      "bytes": 39613
     },
     "src/runtime.mjs": {
-      "lines": 212,
-      "bytes": 18725
+      "lines": 220,
+      "bytes": 19641
     },
     "src/schema.mjs": {
       "lines": 90,
@@ -74,24 +74,24 @@
       "bytes": 10789
     },
     "src/server.mjs": {
-      "lines": 326,
-      "bytes": 33487
+      "lines": 359,
+      "bytes": 37011
     },
     "src/shamir.mjs": {
       "lines": 91,
       "bytes": 3876
     },
     "src/store.mjs": {
-      "lines": 568,
-      "bytes": 40843
+      "lines": 653,
+      "bytes": 47386
     },
     "src/target.mjs": {
-      "lines": 380,
-      "bytes": 27752
+      "lines": 394,
+      "bytes": 28954
     },
     "web/app.js": {
-      "lines": 230,
-      "bytes": 32364
+      "lines": 251,
+      "bytes": 33849
     },
     "scripts/ai-eval.mjs": {
       "lines": 38,
@@ -142,8 +142,8 @@
       "bytes": 9312
     },
     "scripts/simulate.mjs": {
-      "lines": 82,
-      "bytes": 7563
+      "lines": 119,
+      "bytes": 10014
     },
     "scripts/start-local.sh": {
       "lines": 10,
@@ -223,7 +223,7 @@
     },
     "tests/regression.test.mjs": {
       "lines": 1033,
-      "bytes": 72051
+      "bytes": 72071
     },
     "tests/release-attestation.test.mjs": {
       "lines": 133,
@@ -286,8 +286,8 @@
       "bytes": 23200
     },
     "tests/w17-redteam.test.mjs": {
-      "lines": 263,
-      "bytes": 17947
+      "lines": 270,
+      "bytes": 18621
     },
     "tests/w18-crypto.test.mjs": {
       "lines": 96,
@@ -329,6 +329,14 @@
       "lines": 238,
       "bytes": 15646
     },
+    "tests/w22-http.test.mjs": {
+      "lines": 175,
+      "bytes": 12863
+    },
+    "tests/w22-lifecycle.test.mjs": {
+      "lines": 156,
+      "bytes": 10319
+    },
     "tests/w5-mutations.test.mjs": {
       "lines": 194,
       "bytes": 13645
@@ -350,24 +358,24 @@
       "bytes": 9246
     },
     "tests/w7-dek.test.mjs": {
-      "lines": 117,
-      "bytes": 7347
+      "lines": 118,
+      "bytes": 7601
     },
     "tests/w7-fix.test.mjs": {
       "lines": 225,
       "bytes": 15005
     },
     "tests/w7-seam.test.mjs": {
-      "lines": 180,
-      "bytes": 13533
+      "lines": 184,
+      "bytes": 13784
     },
     "tests/w8-canonical.test.mjs": {
       "lines": 161,
       "bytes": 12451
     },
     "tests/w8-composite.test.mjs": {
-      "lines": 193,
-      "bytes": 14810
+      "lines": 198,
+      "bytes": 15156
     },
     "tests/w8-fixverify.test.mjs": {
       "lines": 86,
@@ -398,6 +406,6 @@
       "bytes": 6499
     }
   },
-  "total_files": 99,
-  "total_lines": 20933
+  "total_files": 101,
+  "total_lines": 21730
 }

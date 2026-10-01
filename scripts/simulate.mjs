@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 import { fixture, runtimeInput, runtimeRequest } from '../tests/helpers.mjs';
-import { writeFileSync, mkdirSync, rmSync, mkdtempSync } from 'node:fs';
+import { writeFileSync, readFileSync, copyFileSync, existsSync, mkdirSync, rmSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { bootstrap } from '../src/bootstrap.mjs';
 import { digest, clone } from '../src/canonical.mjs';
 import { verifyAudit } from '../src/store.mjs';
+import { verifySigned } from '../src/crypto.mjs';
+import { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 const h = fixture(null, ['acme']), scenarios = [];
 function scenario(name, expected, fn) {
@@ -72,6 +75,40 @@ try {
     scenario('Engine-native online backup completes', 0, () => drill.status);
     const check = spawnSync(process.execPath, ['scripts/restore-check.mjs', '--dir', join(drillDir, 'backup'), '--trusted-keys', join(drillDir, 'deploy', 'config.json')], { encoding: 'utf8' });
     scenario('Offline restore verification of drill backup', 0, () => check.status);
+    // NFR-OPS-005 rollback drill: a bad release clobbers the live store (a
+    // corrupt write over real bytes is what a broken deploy actually does);
+    // the rollback path restores the VERIFIED backup files, then proves the
+    // restored deployment is both byte-identical to the backup and
+    // functionally healthy — the db opens and every tenant's audit chain
+    // re-verifies against the deployment's configured audit keys (w22-ledger).
+    const drillDeploy = join(drillDir, 'deploy'), drillBackup = join(drillDir, 'backup');
+    const drillConfig = JSON.parse(readFileSync(join(drillDeploy, 'config.json'), 'utf8'));
+    const trustedAudit = {};
+    for (const t of Object.values(drillConfig.tenants ?? {})) trustedAudit[t.keys.audit.key_id] = { public_key: t.keys.audit.public_key };
+    const sha = f => createHash('sha256').update(readFileSync(f)).digest('hex');
+    for (const name of ['fabric.db', 'target.db']) {
+      const backupFile = join(drillBackup, name), liveFile = join(drillDeploy, name);
+      if (!existsSync(backupFile) || !existsSync(liveFile)) continue;
+      writeFileSync(liveFile, Buffer.concat([Buffer.from('BAD-RELEASE\0'), readFileSync(backupFile).subarray(64)]));
+      for (const suffix of ['-wal', '-shm']) rmSync(liveFile + suffix, { force: true });
+      copyFileSync(backupFile, liveFile);
+      scenario(`Rollback of ${name} restores byte-identical deployment`, true, () => sha(liveFile) === sha(backupFile));
+    }
+    scenario('Rolled-back store opens and audit chain re-verifies', true, () => {
+      const db = new DatabaseSync(join(drillDeploy, 'fabric.db'), { readOnly: true });
+      try {
+        const rows = db.prepare('SELECT tenant,seq,previous,hash,envelope FROM audit ORDER BY tenant,seq').all();
+        const seen = {};
+        for (const row of rows) {
+          const prior = seen[row.tenant] ?? { seq: 0, hash: '0'.repeat(64) };
+          if (row.seq !== prior.seq + 1 || row.previous !== prior.hash) return false;
+          const entry = verifySigned(JSON.parse(row.envelope), trustedAudit, 'audit');
+          if (digest(entry) !== row.hash) return false;
+          seen[row.tenant] = { seq: row.seq, hash: row.hash };
+        }
+        return rows.length > 0;
+      } finally { db.close(); }
+    });
   } finally { rmSync(drillDir, { recursive: true, force: true }); }
   // Results are written AFTER every scenario — the report must cover the
   // drill scenarios too, not a prefix of the run.

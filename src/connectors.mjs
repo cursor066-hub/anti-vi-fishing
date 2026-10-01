@@ -135,7 +135,11 @@ export async function postOnce(url, body, options = {}) {
 // caller maps the affected coverage paths to UNKNOWN (COV-004, CON-006).
 export function driftCheck(registered, observed, now) {
   const changes = [];
-  const cmp = (field, was, is) => { const a = JSON.stringify(was ?? null), b = JSON.stringify(is ?? null); if (a !== b) changes.push({ field, was: was ?? null, now: is ?? null }); };
+  // Semantic compare, not text compare: a re-minted manifest with
+  // reordered object keys is byte-different but semantically identical —
+  // canonical() normalises key order so cosmetic drift cannot trip a
+  // quarantine (w22-fixverify F6).
+  const cmp = (field, was, is) => { const a = canonical(was ?? null), b = canonical(is ?? null); if (a !== b) changes.push({ field, was: was ?? null, now: is ?? null }); };
   const sorted = a => [...(a ?? [])].sort();
   cmp('connector_id', registered.connector_id, observed.connector_id);
   cmp('version', registered.version, observed.version);

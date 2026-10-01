@@ -180,6 +180,33 @@ export class Store {
     // truncate so boot-time verification leaves no residual pages behind
     // (w19-aad W19-3 measures post-migration WAL size).
     try { this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); } catch { /* contention: next armed write retries */ }
+    // Clock-floor anchoring (w22-fixverify F1): `clock.last` is a mutable
+    // row — a file-writer UPDATE rewinds the regression detector silently.
+    // The signed chain already attests a monotone time floor (every entry's
+    // payload.time), so the live `last` must sit at or above the newest
+    // attested time — UNLESS the chain itself carries a CLOCK_RECOVERED
+    // entry attesting the rewound value (recoverClock's honest backward
+    // step). Seed both anchors here; audit() keeps them current.
+    const newestRow = this.db.prepare('SELECT envelope FROM audit ORDER BY rowid DESC LIMIT 1').get();
+    this._chainFloor = 0; this._lastRecoveredAt = null;
+    try { this._chainFloor = JSON.parse(newestRow?.envelope ?? 'null')?.payload?.time ?? 0; } catch { /* unparseable head is read-path tamper evidence */ }
+    for (const row of this.db.prepare("SELECT tenant,envelope FROM audit WHERE envelope LIKE '%\"type\":\"CLOCK_RECOVERED\"%' ORDER BY rowid DESC LIMIT 8").all()) {
+      try {
+        const env = JSON.parse(row.envelope);
+        if (env?.payload?.type !== 'CLOCK_RECOVERED') continue;
+        const signer = this._signer(row.tenant), pub = signer.keys ? signer.keys() : { [signer.key_id]: { public_key: signer.public_key } };
+        verifySigned(env, pub, 'audit');
+        this._lastRecoveredAt = env.payload.metadata?.recovered_at ?? null;
+        break; // newest VERIFIED recovery wins — unsigned planted rows are skipped
+      } catch { /* tampered candidate — skip to an older verified one */ }
+    }
+    // A rewound floor with no attested recovery is tamper, detected at open
+    // before any transaction can ride it (in-process detection lives in
+    // clock() below). An ABSENT clock row is legitimate — the row is only
+    // materialised by the first transaction, and the delete trigger makes
+    // a file-writer's removal impossible anyway.
+    const seedRow = this.db.prepare('SELECT last FROM clock WHERE id=1').get();
+    requireThat(!seedRow || seedRow.last >= this._chainFloor || (this._lastRecoveredAt !== null && seedRow.last >= this._lastRecoveredAt), 'INV-409-AUDIT-TAMPER', 'Clock floor rewound below attested chain time', 409);
   }
   // One-shot migration: re-seal every ciphertext still bound under the
   // legacy slash-form AAD space, then never consult that space again. The
@@ -291,6 +318,13 @@ export class Store {
   }
   close() { this.db.close(); }
   tx(fn) {
+    // In-memory chain anchors (_chainFloor/_lastRecoveredAt) ride the same
+    // rollback boundary as the rows they summarise — an aborted write must
+    // never leave the detector anchored to a time that was never committed.
+    this._anchorStack ??= [];
+    this._anchorStack.push([this._chainFloor ?? 0, this._lastRecoveredAt ?? null]);
+    const anchorsPop = () => this._anchorStack.pop();
+    const anchorsRollback = () => { const [f, r] = this._anchorStack.pop() ?? [0, null]; this._chainFloor = f; this._lastRecoveredAt = r; };
     // Nested calls run under a SAVEPOINT: a callee's ROLLBACK can then never
     // destroy the outer transaction's writes (concurrency-audit L2).
     if (this.db.isTransaction) {
@@ -300,20 +334,23 @@ export class Store {
         const result = fn();
         if (result && typeof result.then === 'function') throw new Error('Transactions must be synchronous');
         this.db.exec(`RELEASE ${sp}`);
+        anchorsPop();
         return result;
-      } catch (e) { this.db.exec(`ROLLBACK TO ${sp}; RELEASE ${sp}`); throw e; }
+      } catch (e) { this.db.exec(`ROLLBACK TO ${sp}; RELEASE ${sp}`); anchorsRollback(); throw e; }
     }
     try {
       this.db.exec('BEGIN IMMEDIATE');
       const result = fn();
       if (result && typeof result.then === 'function') throw new Error('Transactions must be synchronous');
       this.db.exec('COMMIT');
+      anchorsPop();
       // Post-commit WAL truncation so shredded DEK material never lingers in
       // the log — runs outside the transaction, where SQLite allows it.
       this.checkpoint();
       return result;
     } catch (e) {
       if (this.db.isTransaction) this.db.exec('ROLLBACK');
+      anchorsRollback();
       // A lost busy-timeout race must surface as a fabric error, not a raw
       // SQLITE_BUSY leaking internals (concurrency-audit H2).
       if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
@@ -417,10 +454,22 @@ export class Store {
       if (!r.busy && r.checkpointed >= r.log) this._shredded = false;
     } catch { /* contention: flag stays armed */ }
   }
-  clock(now, { recovery = false } = {}) {
+  clock(now, { recovery = false, recoveryPath = false } = {}) {
     requireThat(Number.isSafeInteger(now) && now > 0, 'INV-503-TIME', 'Clock unavailable', 503);
     const row = this.db.prepare('SELECT last FROM clock WHERE id=1').get();
+    // recoveryPath: remediation ops (the veto's prescribed revokes) must
+    // run during a halted clock — they may not advance the row forward nor
+    // rewind it: the detector stays at its honest high-water mark while the
+    // op's audit entry lands at chain-floor time (w22-fixverify F1).
+    if (recoveryPath && row && now < row.last) {
+      requireThat(row.last >= (this._chainFloor ?? 0) || (this._lastRecoveredAt !== null && row.last >= this._lastRecoveredAt), 'INV-409-AUDIT-TAMPER', 'Clock floor rewound below attested chain time', 409);
+      return now;
+    }
     requireThat(recovery || !row || now >= row.last, 'INV-503-TIME', 'Clock regression; security operations halted', 503);
+    // Anchored floor: `last` sitting below the chain's attested time is
+    // legal only inside the span an on-chain CLOCK_RECOVERED attested —
+    // anything deeper is a file-writer's silent rewind (w22-fixverify F1).
+    requireThat(!row || row.last >= (this._chainFloor ?? 0) || (this._lastRecoveredAt !== null && row.last >= this._lastRecoveredAt), 'INV-409-AUDIT-TAMPER', 'Clock floor rewound below attested chain time', 409);
     // Recovery writes the operator-asserted host time: `last` is the
     // regression detector, not the time source — expiry is evaluated
     // against host time either way, and an over-high `last` would wedge
@@ -453,11 +502,44 @@ export class Store {
       priorTime = head.payload.time;
     }
     const entry = { tenant_id: tenant, sequence: (last?.seq ?? 0) + 1, previous: last?.hash ?? '0'.repeat(64), type, actor, reference, metadata, time: Math.max(now, priorTime) };
+    // Chain anchors kept current in-process: the newest signed time IS the
+    // floor the clock row is compared against, and the newest recovery
+    // explains any backward clock discontinuity (w22-fixverify F1). The
+    // floor compare below must use the pre-entry value — `last` trails the
+    // committed chain, it is not required to pre-empt the in-flight entry.
+    const floorBefore = this._chainFloor ?? 0;
+    if (entry.time > floorBefore) this._chainFloor = entry.time;
+    if (type === 'CLOCK_RECOVERED') this._lastRecoveredAt = entry.metadata?.recovered_at ?? this._lastRecoveredAt;
+    // Every committed write ratchets the detector to its own host time —
+    // bypass paths (denial audit, drift flags, snapshots) commit entries
+    // outside transaction()'s clock() call, and `last` trailing the chain
+    // with no attested recovery is what makes a file-writer's rewind
+    // detectable instead of invisible (w22-fixverify F1). MAX keeps the
+    // honest high-water during a halted or recovered span; the legality
+    // assert runs on the pre-write row so the ratchet itself can never
+    // launder a rewind.
+    const crow = this.db.prepare('SELECT last FROM clock WHERE id=1').get();
+    requireThat(!crow || crow.last >= floorBefore || (this._lastRecoveredAt !== null && crow.last >= this._lastRecoveredAt), 'INV-409-AUDIT-TAMPER', 'Clock floor rewound below attested chain time', 409);
+    this.db.prepare('INSERT INTO clock VALUES(1,?) ON CONFLICT(id) DO UPDATE SET last=MAX(clock.last, excluded.last)').run(now);
     // Hash what is actually attested: the signer may add a bound marker (the
     // recovery_signing annotation when a pending successor signs after a
     // key-revoke — w11-lifecycle F2), so the row digest binds the envelope's
     // payload, not the pre-signature entry.
-    const envelope = this._signer(tenant).sign(entry);
+    const signer = this._signer(tenant);
+    // The head we extend must verify: a file-writer planting a parseable
+    // but unverifiable row must not get every subsequent entry silently
+    // chained atop a permanent wedge (w22-fixverify F8). Memoised by head
+    // hash — the head rarely changes between appends.
+    if (last) {
+      this._verifiedHeads ??= new Map();
+      if (!this._verifiedHeads.has(last.hash)) {
+        const pub = signer.keys ? signer.keys() : { [signer.key_id]: { public_key: signer.public_key } };
+        try { verifySigned(JSON.parse(last.envelope), pub, 'audit'); } catch (e) { throw new InvariantError('INV-409-AUDIT-TAMPER', 'Audit head does not verify — ledger tamper', 409, { cause: e }); }
+        if (this._verifiedHeads.size >= 64) this._verifiedHeads.clear();
+        this._verifiedHeads.set(last.hash, true);
+      }
+    }
+    const envelope = signer.sign(entry);
     const hash = digest(envelope.payload);
     this.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run(tenant, entry.sequence, entry.previous, hash, canonical(envelope));
     return { hash, envelope };
@@ -539,7 +621,10 @@ export class Store {
     const row = this.db.prepare('SELECT hash,result FROM idempotency WHERE tenant=? AND scope=? AND key=?').get(tenant, scope, key);
     if (row) {
       requireThat(ctEqual(row.hash, requestHash), 'INV-409-IDEMPOTENCY', 'Idempotency key reused for a different request', 409);
-      return decrypt(row.result, this.key(tenant), idemAad(tenant, scope, key));
+      // A corrupt or transplanted receipt surfaces in the ledger taxonomy,
+      // not as a raw cipher/TypeError (w22-fixverify F9).
+      try { return decrypt(row.result, this.key(tenant), idemAad(tenant, scope, key)); }
+      catch (e) { throw new InvariantError('INV-409-INTEGRITY', 'Stored idempotency receipt failed integrity', 409, { cause: e }); }
     }
     const result = fn();
     this.db.prepare('INSERT INTO idempotency VALUES(?,?,?,?,?)').run(tenant, scope, key, requestHash, encrypt(result, this.key(tenant), idemAad(tenant, scope, key)));

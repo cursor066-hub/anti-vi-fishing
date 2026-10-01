@@ -43,6 +43,12 @@ export const ROUTE_METHODS = new Map(Object.entries({
 }).map(([k, v]) => [k, v.split(',')]));
 
 export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin = `http://127.0.0.1:${port}`, tenantSessionCap = 250, trustProxy = false, proxySecret = null } = {}) {
+  // The session cookie gets Secure on every origin EXCEPT plaintext
+  // loopback — a TLS-terminating upstream proxy serving http internally
+  // still hands the cookie to browsers over https (w22-http F4). The
+  // __Host- prefix is deliberately not used: it requires Secure, which a
+  // loopback-http dev profile cannot set without the cookie being refused.
+  const cookieSecure = !(origin.startsWith('http:') && ['localhost', '127.0.0.1', '::1', '[::1]'].some(h => new URL(origin).hostname === h || new URL(origin).hostname.endsWith('.localhost')));
   requireThat(['127.0.0.1', '::1'].includes(host), 'INV-503-RELEASE', 'Engineering HTTP service must bind to loopback', 503);
   // --trust-proxy without a shared proxy secret is vacuous: the daemon only
   // binds loopback, so EVERY peer is "a trusted loopback peer" and any local
@@ -53,6 +59,10 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
   const web = fileURLToPath(new URL('../web/', import.meta.url));
   const sessions = new Map(), rate = new Map();
   const metrics = { requests: 0, errors: 0, unauthorised: 0, rejections: {}, tenants: {} };
+  // A backward clock recovery must not resurrect a console session that had
+  // legitimately lapsed — mint-time expiry is stored, so the reaper kills
+  // every session whose expiry falls inside the rewound span (w22-http F6).
+  fabric.onClockRecovery = (now, prior) => { if (now < prior) for (const [key, session] of sessions) if (session.expires > now && session.expires <= prior) sessions.delete(key); };
   function rateLimit(key, max, window = 60000) {
     const now = Date.now();
     if (rate.size > 10000) for (const [k, v] of rate) if (v.reset <= now) rate.delete(k);
@@ -115,7 +125,10 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
     }
   };
   async function body(req) {
-    requireThat(req.headers['content-type'] === 'application/json', 'INV-415-CONTENT', 'Use application/json', 415);
+    // The bare media type is required, but standard clients legitimately
+    // append parameters — 'application/json; charset=utf-8' is the same
+    // contract (w22-http F7).
+    requireThat(typeof req.headers['content-type'] === 'string' && /^application\/json\s*(\s*;\s*[^;=\s]+=[^;\s]+)*$/.test(req.headers['content-type']), 'INV-415-CONTENT', 'Use application/json', 415);
     requireThat(!req.headers['content-encoding'], 'INV-415-CONTENT', 'Compressed request bodies are not accepted', 415);
     if (req.headers['content-length']) requireThat(Number(req.headers['content-length']) <= 1048576, 'INV-413-BODY', 'Request body too large', 413);
     let size = 0; const chunks = [];
@@ -131,7 +144,10 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
     let size = 0; const chunks = [];
     for await (const chunk of req) { size += chunk.length; requireThat(size <= 1048576, 'INV-413-BODY', 'Request body too large', 413); chunks.push(chunk); }
     if (!size) return;
-    requireThat(req.headers['content-type'] === 'application/json', 'INV-415-CONTENT', 'Use application/json', 415);
+    // The bare media type is required, but standard clients legitimately
+    // append parameters — 'application/json; charset=utf-8' is the same
+    // contract (w22-http F7).
+    requireThat(typeof req.headers['content-type'] === 'string' && /^application\/json\s*(\s*;\s*[^;=\s]+=[^;\s]+)*$/.test(req.headers['content-type']), 'INV-415-CONTENT', 'Use application/json', 415);
     const parsed = parseStrict(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));
     requireThat(parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Object.keys(parsed).length === 0, 'INV-400-SCHEMA', 'Operation takes no request body', 400);
   }
@@ -160,7 +176,12 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       const presented = req.headers['x-fabric-proxy'];
       const proxyOk = trustProxy && ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(peer)
         && typeof presented === 'string' && timingSafeEqual(Buffer.from(digest(presented)), Buffer.from(digest(proxySecret)));
-      const clientIp = proxyOk ? (req.headers['x-forwarded-for']?.split(',')[0]?.trim() || peer) : peer;
+      // The RIGHTMOST hop is the address the authenticated proxy actually
+      // vouched for: append-semantics proxies (nginx $proxy_add_x_forwarded_for,
+      // ALB, Cloudflare) put raw client input leftmost, so taking [0] lets any
+      // client forge its rate-limit identity (w22-http F1). Under replace-style
+      // configs the single entry is also the rightmost, so both shapes are safe.
+      const clientIp = proxyOk ? (req.headers['x-forwarded-for']?.split(',').at(-1)?.trim() || peer) : peer;
       // Rate-limit before any request validation — malformed traffic must
       // consume the budget too (w9-deploy F9).
       rateLimit(`ip:${clientIp}`, 600);
@@ -193,9 +214,13 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
         // flood lock every other tenant out (w7-console F1).
         requireThat([...sessions.values()].filter(s => s.principal.tenant_id === requestPrincipal.tenant_id).length < tenantSessionCap, 'INV-503-CAPACITY', 'Tenant session capacity reached', 503);
         const sid = randomBytes(32).toString('base64url'), csrf = randomBytes(32).toString('base64url');
-        sessions.set(hashBytes(sid), { principal: requestPrincipal, csrf, expires: Math.min(fabric.clock() + 900000, result.expires), token_hash: hashBytes(input.token) });
-        res.setHeader('Set-Cookie', `if_session=${sid}; HttpOnly; SameSite=Strict; Path=/; Max-Age=900${origin.startsWith('https:') ? '; Secure' : ''}`);
-        return send(200, { ...result.principal, csrf_token: csrf, expires_in: 900 });
+        const expires = Math.min(fabric.clock() + 900000, result.expires);
+        sessions.set(hashBytes(sid), { principal: requestPrincipal, csrf, expires, token_hash: hashBytes(input.token) });
+        res.setHeader('Set-Cookie', `if_session=${sid}; HttpOnly; SameSite=Strict; Path=/; Max-Age=900${cookieSecure ? '; Secure' : ''}`);
+        // expires_in is the REAL clipped lifetime, not the 900s ceiling — a
+        // client scheduling a refresh off the literal must not hold a dead
+        // session (w22-http F3).
+        return send(200, { ...result.principal, csrf_token: csrf, expires_in: Math.max(0, Math.round((expires - fabric.clock()) / 1000)) });
       }
       const p = auth(req); requestPrincipal = p; bumpTenant(); rateLimit(`subject:${p.tenant_id}:${p.subject_id}`, 300);
       if (path === '/session/logout' && req.method === 'POST') {
@@ -223,20 +248,23 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
         const limit = qint(url.searchParams.get('limit'), 'limit', 50, 1, 100), offset = qint(url.searchParams.get('offset'), 'offset', 0, 0, 1000000);
         return send(200, { items: fabric.store.list(p.tenant_id, 'capsule', limit, offset).map(c => fabric.capsuleView(c)), limit, offset });
       }
-      if (path === '/v1/action-capsules' && req.method === 'POST') { const input = await body(req); fields(input, ['input', 'signature']); return send(201, fabric.capsuleView(fabric.propose(p, input.input, req.headers['idempotency-key'], input.signature))); }
+      if (path === '/v1/action-capsules' && req.method === 'POST') { fabric.authorize(p, ['operator', 'workload', 'policy_admin']); const input = await body(req); fields(input, ['input', 'signature']); return send(201, fabric.capsuleView(fabric.propose(p, input.input, req.headers['idempotency-key'], input.signature))); }
       let m;
       if ((m = /^\/v1\/action-capsules\/([A-Za-z0-9-]+)$/.exec(path)) && req.method === 'GET') return send(200, fabric.getCapsule(p, m[1]));
       if ((m = /^\/v1\/action-capsules\/([A-Za-z0-9-]+)\/approval-challenge$/.exec(path)) && req.method === 'GET') return send(200, fabric.approvalChallenge(p, m[1]));
       if ((m = /^\/v1\/action-capsules\/([A-Za-z0-9-]+)\/(evidence|evaluate|cancel)$/.exec(path)) && req.method === 'POST') {
+        // Authorize BEFORE field-shape validation: a 400-vs-403 delta leaks
+        // the route's field whitelist to unauthorized callers (w22-http F2).
+        fabric.authorize(p, m[2] === 'evaluate' ? ['operator', 'policy_admin', 'approver', 'custodian'] : ['operator', 'security', 'policy_admin']);
         const input = await body(req); if (m[2] === 'evidence') return send(201, fabric.attachEvidence(p, m[1], input)); fields(input, []);
         return send(200, m[2] === 'evaluate' ? fabric.evaluate(p, m[1]) : fabric.cancel(p, m[1]));
       }
       if (path === '/v1/approvals' && req.method === 'POST') return send(201, fabric.approve(p, await body(req)));
       if (path === '/v1/approvals/batch' && req.method === 'POST') return send(201, fabric.batchApprove(p, await body(req)));
       if (path === '/v1/containment' && req.method === 'GET') return send(200, fabric.containmentReport(p));
-      if (path === '/v1/certificates' && req.method === 'POST') { const input = await body(req); fields(input, ['capsule_id']); identifier(input.capsule_id); return send(201, fabric.certificate(p, input.capsule_id)); }
+      if (path === '/v1/certificates' && req.method === 'POST') { fabric.authorize(p, ['operator', 'policy_admin']); const input = await body(req); fields(input, ['capsule_id']); identifier(input.capsule_id); return send(201, fabric.certificate(p, input.capsule_id)); }
       if ((m = /^\/v1\/certificates\/([A-Za-z0-9-]+)$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['operator', 'policy_admin', 'security']); return send(200, fabric.store.must(p.tenant_id, 'certificate', m[1]).envelope); }
-      if (path === '/gate/v1/execute' && req.method === 'POST') { const input = await body(req); fields(input, ['certificate', 'dry_run']); requireThat(typeof input.dry_run === 'boolean', 'INV-400-SCHEMA', 'dry_run must be boolean'); return send(200, fabric.execute(p, input.certificate, { dryRun: input.dry_run })); }
+      if (path === '/gate/v1/execute' && req.method === 'POST') { fabric.authorize(p, ['operator', 'policy_admin']); const input = await body(req); fields(input, ['certificate', 'dry_run']); requireThat(typeof input.dry_run === 'boolean', 'INV-400-SCHEMA', 'dry_run must be boolean'); return send(200, fabric.execute(p, input.certificate, { dryRun: input.dry_run })); }
       if ((m = /^\/gate\/v1\/outcomes\/([A-Za-z0-9-]+)$/.exec(path)) && req.method === 'GET') {
         // Read-only view: reconciliation itself is a POST — a GET never writes.
         fabric.authorize(p, ['operator', 'security', 'policy_admin']); const out = fabric.store.get(p.tenant_id, 'outcome', m[1]);
@@ -254,9 +282,9 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       if ((m = /^\/v1\/coverage\/([A-Za-z0-9-]+)\/technical-validation$/.exec(path)) && req.method === 'POST') return send(200, fabric.technicalValidation(p, m[1], await body(req)));
       if (path === '/v1/connectors' && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'policy_admin', 'auditor']); return send(200, fabric.target.manifest()); }
       if (path === '/v1/policies/simulate' && req.method === 'POST') return send(200, fabric.simulate(p, object(await body(req))));
-      if (path === '/v1/audit-exports' && req.method === 'POST') { const input = await body(req); fields(input, ['purpose']); return send(200, fabric.exportAudit(p, input.purpose)); }
+      if (path === '/v1/audit-exports' && req.method === 'POST') { fabric.authorize(p, ['auditor', 'security']); const input = await body(req); fields(input, ['purpose']); return send(200, fabric.exportAudit(p, input.purpose)); }
       if (path === '/v1/retention/hold' && req.method === 'POST') return send(200, fabric.retention(p, object(await body(req))));
-      if (path === '/v1/retention/sweep' && req.method === 'POST') { fields(await body(req), []); return send(200, fabric.retentionSweep(p)); }
+      if (path === '/v1/retention/sweep' && req.method === 'POST') { fabric.authorize(p, ['security']); fields(await body(req), []); return send(200, fabric.retentionSweep(p)); }
       // RUN-006: rejections are reason-coded — every denial carries the INV
       // code so dashboards can facet by cause without parsing message text.
       if (path === '/v1/metrics' && req.method === 'GET') { fabric.authorize(p, ['security']); const tm = metrics.tenants[p.tenant_id] ?? { requests: 0, errors: 0, unauthorised: 0, rejections: {} }; return send(200, { ...tm, scope: 'tenant', analytics_enabled: false }); }
@@ -265,7 +293,7 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       if (path === '/v1/subjects' && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'auditor', 'policy_admin']); return send(200, { items: Object.values(fabric.identities(p.tenant_id)).map(i => ({ subject_id: i.subject_id, roles: i.roles, device_id: i.device_id, identity_class: i.identity_class, health_expires_at: i.health_expires_at })) }); }
       if (path === '/v1/certificates' && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'auditor', 'policy_admin']); const limit = qint(url.searchParams.get('limit'), 'limit', 50, 1, 200), offset = qint(url.searchParams.get('offset'), 'offset', 0, 0, 1000000); return send(200, { items: fabric.store.list(p.tenant_id, 'certificate', limit, offset).map(c => ({ certificate_id: c.certificate_id, status: c.status, issued_at: c.issued_at ?? null, consumed: c.consumed === true })), limit, offset }); }
       if (path === '/v1/policy/history' && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'auditor', 'policy_admin']); return send(200, { items: fabric.store.list(p.tenant_id, 'policy-history', 100, 0), staged: fabric.store.get(p.tenant_id, 'policy', 'staged') ?? null }); }
-      if ((m = /^\/v1\/action-capsules\/([A-Za-z0-9-]+)\/acquire-evidence$/.exec(path)) && req.method === 'POST') { const input = await body(req); fields(input, ['issuer', 'kind', 'claims']); return send(201, await fabric.acquireEvidence(p, m[1], input)); }
+      if ((m = /^\/v1\/action-capsules\/([A-Za-z0-9-]+)\/acquire-evidence$/.exec(path)) && req.method === 'POST') { fabric.authorize(p, ['operator', 'security', 'policy_admin']); const input = await body(req); fields(input, ['issuer', 'kind', 'claims']); return send(201, await fabric.acquireEvidence(p, m[1], input)); }
       if (path === '/v1/connectors/status' && req.method === 'GET') return send(200, fabric.connectorStatus(p));
       if ((m = /^\/v1\/connectors\/([A-Za-z0-9-]+)\/drift-check$/.exec(path)) && req.method === 'POST') return send(200, await fabric.checkIssuerDrift(p, m[1]));
       if ((m = /^\/v1\/audit\/proofs\/(\d+)$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'auditor']); return send(200, fabric.auditProof(p, Number(m[1]))); }
@@ -278,20 +306,20 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
         const input = await body(req);
         if (m[2] === 'acknowledge') return send(200, fabric.acknowledgeCeremony(p, object(input)));
         if (m[2] === 'abort') { object(input); return send(200, fabric.abortCeremony(p, m[1])); }
-        if (m[2] === 'split') { fields(input, ['secret']); return send(200, fabric.splitCeremonySecret(p, m[1], input.secret)); }
-        fields(input, ['shares']); return send(200, fabric.reconstructCeremony(p, m[1], input.shares));
+        if (m[2] === 'split') { fabric.authorize(p, ['security', 'custodian']); fields(input, ['secret']); return send(200, fabric.splitCeremonySecret(p, m[1], input.secret)); }
+        fabric.authorize(p, ['security', 'custodian']); fields(input, ['shares']); return send(200, fabric.reconstructCeremony(p, m[1], input.shares));
       }
       if (path === '/v1/keys' && req.method === 'GET') { fabric.authorize(p, ['security', 'policy_admin']); return send(200, { keys: fabric.vault.list().filter(k => fabric.ownsVaultKey(p.tenant_id, k.key_id)).map(({ wrapped, ...k }) => k), firmware: fabric.vault.firmware }); }
-      if (path === '/v1/keys/rotate-prepare' && req.method === 'POST') { const input = await body(req); fields(input, ['key_class'], ['suite']); return send(201, fabric.prepareRotation(p, input.key_class, input.suite)); }
+      if (path === '/v1/keys/rotate-prepare' && req.method === 'POST') { fabric.authorize(p, ['security', 'custodian']); const input = await body(req); fields(input, ['key_class'], ['suite']); return send(201, fabric.prepareRotation(p, input.key_class, input.suite)); }
       if (path === '/v1/config-drift/reassert' && req.method === 'POST') { await noBody(req); return send(200, fabric.reassertConfig(p)); }
       if (path === '/v1/policy/reanchor' && req.method === 'POST') { await noBody(req); return send(200, fabric.reanchorPolicy(p)); }
       if (path === '/v1/clock/recover' && req.method === 'POST') { await noBody(req); return send(200, fabric.recoverClock(p)); }
       if (path === '/v1/audit/seal' && req.method === 'POST') { await noBody(req); return send(200, fabric.sealAuditChain(p)); }
       if (path === '/v1/config-drift' && req.method === 'GET') return send(200, fabric.configDriftStatus(p));
       if ((m = /^\/v1\/keys\/([A-Za-z0-9_.:-]+)\/attest$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['security', 'auditor']); const e = fabric.vault.keys.get(m[1]); requireThat(e && fabric.ownsVaultKey(p.tenant_id, m[1]), 'INV-404-NOT-FOUND', 'Key not found', 404); return send(200, fabric.vault.attest(m[1])); }
-      if (path === '/v1/secure-perception/sessions' && req.method === 'POST') { const input = await body(req); fields(input, ['attestation']); return send(201, fabric.perceptionSession(p, input.attestation)); }
-      if (path === '/v1/secure-perception/release' && req.method === 'POST') { const input = await body(req); fields(input, ['session_id', 'fields', 'purpose'], ['capsule_id', 'evidence_ref']); const { session_id, ...release } = input; return send(200, fabric.perceptionRelease(p, session_id, release)); }
-      if (path === '/v1/secure-perception/fallback' && req.method === 'POST') { const input = await body(req); fields(input, ['fields', 'purpose'], ['reason', 'capsule_id', 'evidence_ref']); return send(200, fabric.perceptionFallback(p, input)); }
+      if (path === '/v1/secure-perception/sessions' && req.method === 'POST') { fabric.authorize(p, ['operator', 'approver', 'custodian', 'security']); const input = await body(req); fields(input, ['attestation']); return send(201, fabric.perceptionSession(p, input.attestation)); }
+      if (path === '/v1/secure-perception/release' && req.method === 'POST') { fabric.authorize(p, ['operator', 'approver', 'custodian', 'security']); const input = await body(req); fields(input, ['session_id', 'fields', 'purpose'], ['capsule_id', 'evidence_ref']); const { session_id, ...release } = input; return send(200, fabric.perceptionRelease(p, session_id, release)); }
+      if (path === '/v1/secure-perception/fallback' && req.method === 'POST') { fabric.authorize(p, ['operator', 'approver', 'custodian', 'security']); const input = await body(req); fields(input, ['fields', 'purpose'], ['reason', 'capsule_id', 'evidence_ref']); return send(200, fabric.perceptionFallback(p, input)); }
       if (path === '/v1/advisory' && req.method === 'POST') return send(200, fabric.advise(p, object(await body(req))));
       // A real path with the wrong method is a 405, not an ambiguous 404 —
       // keeps the contract honest for method-probing clients (w5-http L-6).
@@ -321,5 +349,10 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
     }
   });
   server.requestTimeout = 15000; server.headersTimeout = 10000; server.keepAliveTimeout = 5000; server.maxRequestsPerSocket = 100;
+  // Connection-count bound independent of request rate: sockets held open
+  // without a completed request line never reach the rate limiter, so an
+  // unbounded accept path is a raw fd-exhaustion vector (w22-http F5).
+  let openConnections = 0;
+  server.on('connection', socket => { if (++openConnections > 2048) { socket.destroy(); return; } socket.on('close', () => openConnections--); });
   return { server, sessions, metrics, listen: () => new Promise(resolve => server.listen(port, host, resolve)), close: () => new Promise((resolve, reject) => { server.closeAllConnections(); server.close(e => e ? reject(e) : resolve()); }) };
 }
