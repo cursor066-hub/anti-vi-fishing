@@ -217,9 +217,9 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
         // Read-only view: reconciliation itself is a POST — a GET never writes.
         fabric.authorize(p, ['operator', 'security', 'policy_admin']); const out = fabric.store.get(p.tenant_id, 'outcome', m[1]);
         requireThat(out, 'INV-404-NOT-FOUND', 'No recorded outcome for this certificate', 404);
-        return send(200, fabric.outcomeView(p.tenant_id, out));
+        return send(200, fabric.outcomeView(p.tenant_id, out, m[1]));
       }
-      if ((m = /^\/gate\/v1\/outcomes\/([A-Za-z0-9-]+)$/.exec(path)) && req.method === 'POST') return send(200, fabric.outcomeView(p.tenant_id, fabric.reconcile(p, m[1])));
+      if ((m = /^\/gate\/v1\/outcomes\/([A-Za-z0-9-]+)$/.exec(path)) && req.method === 'POST') return send(200, fabric.outcomeView(p.tenant_id, fabric.reconcile(p, m[1]), m[1]));
       if ((m = /^\/v1\/resources\/([A-Za-z0-9_.:-]+)$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['operator', 'policy_admin']); requireThat(fabric.target.exists(p.tenant_id, m[1]), 'INV-404-NOT-FOUND', 'Resource not found', 404); const state = fabric.target.state(p.tenant_id, m[1]); if (Array.isArray(state.material_fields.rows)) throw new InvariantError('INV-403-SCOPE', 'Use a data capability for dataset access', 403); return send(200, state); }
       if (path === '/v1/capabilities' && req.method === 'POST') { fabric.authorize(p, ['operator', 'workload']); return send(201, fabric.runtime.issue(p, object(await body(req)))); }
       if (path === '/gate/v1/runtime' && req.method === 'POST') return send(200, fabric.runtime.consume(p, object(await body(req))));

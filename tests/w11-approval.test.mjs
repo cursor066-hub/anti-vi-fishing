@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { fixture, hasCode, setTenant } from './helpers.mjs';
 import { signAcknowledgement } from '../src/ceremony.mjs';
-import { generateKey } from '../src/crypto.mjs';
+import { generateKey, signed } from '../src/crypto.mjs';
 import { validatePolicy } from '../src/policy.mjs';
 import { clone } from '../src/canonical.mjs';
 import { answerQuery, loadIssuers, writeIssuer } from '../src/issuerd.mjs';
@@ -98,10 +98,16 @@ test('w11 F4: quorum counts the signing key domain, not a sibling identity', t =
   // carrying a distinct domain label — e.g. mid-rollover. Frozen config:
   // legitimate edits take the sanctioned clone-and-swap path.
   const key = generateKey();
-  setTenant(h, 'acme', tn => {
+  // Post-F13/F14 the edit rides a config reload — and a reload replays
+  // genesis, so the mutation must arrive as a self-consistent signed
+  // config: the colliding domains are real, and genesis is re-anchored by
+  // three custodians whose domains stay independent (legit bootstrap).
+  h.reconfigure(cfg => {
+    const tn = cfg.tenants.acme;
     tn.identities[c1key].failure_domain = 'acme-SHARED';
     tn.identities[c2key].failure_domain = 'acme-SHARED';
     tn.identities[key.key_id] = { public_key: key.public_key, subject_id: 'custodian-1', identity_class: 'workforce', roles: ['custodian'], device_id: 'custodian-1-device', failure_domain: 'acme-DOMAIN-B', hardware_backed: false, health_expires_at: h.now() + 86400000, grants: { resources: [], actions: [], destinations: [], columns: [], row_ids: [] } };
+    tn.genesis_signatures = ['custodian-3', 'custodian-4', 'custodian-5'].map(s => signed(tn.genesis_policy, h.setup.custodianKeys.acme[s], 'root-policy'));
   });
   ack(h, ceremony, 'custodian-1'); // signed by c1key — the SHARED domain
   ack(h, ceremony, 'custodian-2'); // also SHARED

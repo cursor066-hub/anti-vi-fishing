@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fixture, hasCode, runtimeInput, runtimeRequest } from './helpers.mjs';
+import { fixture, hasCode, runtimeInput, runtimeRequest, setTenant } from './helpers.mjs';
 import { clone, digest } from '../src/canonical.mjs';
 import { signed } from '../src/crypto.mjs';
 import { spawnSync } from 'node:child_process';
@@ -59,7 +59,7 @@ test('DAT-001: caller cannot mislabel dataset jurisdiction or sensitivity', t =>
 test('IDN-001 POL-011: an initiator cannot approve their own protected action even with an eligible signing key', t => {
   const h = fixture(t); const [keyId] = Object.entries(h.f.tenant('acme').identities).find(([, x]) => x.subject_id === 'custodian-1');
   // Frozen tenant config: eligible-role edits take the sanctioned swap path.
-  const tn = clone(h.f.tenant('acme')); tn.identities[keyId].roles.push('operator'); h.f._setTenant('acme', tn);
+  setTenant(h, 'acme', tn => { tn.identities[keyId].roles.push('operator'); });
   const p = h.p('custodian-1'), r = h.proposed(undefined, undefined, {}, p), challenge = h.f.approvalChallenge(p, r.capsule.capsule_id);
   assert.throws(() => h.f.approve(p, signed(challenge, h.setup.custodianKeys.acme['custodian-1'], 'action-approval')), hasCode('INV-403-SEPARATION')); assert.ok(keyId);
 });

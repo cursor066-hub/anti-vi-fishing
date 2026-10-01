@@ -278,7 +278,7 @@ test('EVD-004: fabric.acquireEvidence fetches evidence over HTTP and attaches it
   const port = srv.server.address().port;
   // Point the bank issuer entry at the live daemon
   const bankId = Object.keys(h.f.tenant('acme').issuers).find(k => h.f.tenant('acme').issuers[k].name === 'bank');
-  h.f.tenant('acme').issuers[bankId].endpoint = `http://127.0.0.1:${port}`;
+  h.repoint(bankId, `http://127.0.0.1:${port}`);
   const r = h.proposed('finance.beneficiary.create', { vendor_id: 'vendor-1', bank_account: 'TESTBANK000001', currency: 'EUR' });
   const env = await h.f.acquireEvidence(h.p(), r.capsule.capsule_id, { issuer: 'bank', kind: 'ownership', claims: { account: 'TESTBANK000001', owner_id: 'vendor-1' } });
   assert.equal(env.evidence_id !== undefined, true);

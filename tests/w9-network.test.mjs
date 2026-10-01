@@ -149,7 +149,7 @@ test('w9-network F8: a stale issuer manifest is drift, not freshness', async t =
   const serve = body => new Promise(resolve => { const srv = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); }); srv.listen(0, '127.0.0.1', () => resolve(srv)); });
   const run = async body => {
     const srv = await serve(body); t.after(() => srv.close());
-    issuer.endpoint = `http://127.0.0.1:${srv.address().port}`;
+    h.repoint(issuerKeyId, `http://127.0.0.1:${srv.address().port}`);
     return assert.rejects(() => h.f.checkIssuerDrift(h.p('security'), issuerKeyId), hasCode('INV-401-CONNECTOR'));
   };
   // A captured manifest minted before the freshness window must not
@@ -168,10 +168,9 @@ test('w9-network F9: an unrelated operator cannot cancel another actor\'s capsul
   // plus a security re-assertion (the drift snapshot gates it at boot). The
   // edit lands through the frozen clone (w11-redteam R12).
   const op2key = generateKey();
-  const tn = clone(h.f.tenant('acme'));
-  tn.identities[op2key.key_id] = { public_key: op2key.public_key, subject_id: 'operator-2', identity_class: 'workforce', roles: ['operator'], device_id: 'operator-2-device', failure_domain: 'acme-op2', hardware_backed: false, health_expires_at: h.now() + 86400000, grants: { resources: ['dataset-1'], actions: ['data.read'], destinations: ['customer-vault'], columns: ['id'], row_ids: [] } };
-  h.f._setTenant('acme', tn);
-  h.f.reassertConfig(h.p('security'));
+  h.reconfigure(cfg => {
+    cfg.tenants.acme.identities[op2key.key_id] = { public_key: op2key.public_key, subject_id: 'operator-2', identity_class: 'workforce', roles: ['operator'], device_id: 'operator-2-device', failure_domain: 'acme-op2', hardware_backed: false, health_expires_at: h.now() + 86400000, grants: { resources: ['dataset-1'], actions: ['data.read'], destinations: ['customer-vault'], columns: ['id'], row_ids: [] } };
+  });
   const record = h.proposed();
   assert.throws(() => h.f.cancel(h.p('operator-2'), record.capsule.capsule_id), hasCode('INV-403-SCOPE'));
   // Control: the actor still cancels their own.

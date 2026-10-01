@@ -12,7 +12,7 @@ export const BASE_TIME = 1788648000000;
 export function fixture(t, tenants = ['acme', 'globex']) {
   let time = BASE_TIME;
   const directory = mkdtempSync(join(tmpdir(), 'if-test-')), setup = createConfiguration(tenants, time);
-  const f = new Fabric(setup.config, directory, () => time); seedSyntheticResources(f, tenants);
+  let f = new Fabric(setup.config, directory, () => time); seedSyntheticResources(f, tenants);
   let closed = false;
   const close = () => { if (!closed) { f.close(); closed = true; } };
   t?.after(() => { close(); rmSync(directory, { recursive: true }); });
@@ -66,7 +66,30 @@ export function fixture(t, tenants = ['acme', 'globex']) {
     const kind = options.kind ?? 'ownership'; evidence(record, { kind }); evidence(record, { issuer: 'registry', kind }); approve(record, options.approvals ?? 2);
     return { record, certificate: f.certificate(p('operator', record.capsule.tenant_id), record.capsule.capsule_id) };
   }
-  return { f, setup, directory, p, actor, proposed, evidence, approve, approvalEnvelope, ready, close, now: () => time, advance: ms => { time += ms; }, set: t => { time = t; }, clone };
+  const api = { f, setup, directory, p, actor, proposed, evidence, approve, approvalEnvelope, ready, close, now: () => time, advance: ms => { time += ms; }, set: t => { time = t; }, clone };
+  // Issuer endpoints are frozen trust anchors (w12-provenance F15): the
+  // sanctioned update is a config reload — reopen the fabric on a cloned
+  // configuration carrying the new endpoint. Helpers see the new instance
+  // because they close over the `f` binding, not the object.
+  api.repoint = (keyId, url, tenant = 'acme') => api.reconfigure(cfg => { cfg.tenants[tenant].issuers[keyId].endpoint = url; });
+  // The honest equivalent of editing the config file and restarting: clone
+  // the signed configuration, apply the mutation, reopen on the same
+  // ledger, and let security re-attest the drifted snapshot (F13/F14 make
+  // in-process tenant mutation itself unreachable).
+  api.reconfigure = mutate => {
+    const cfg = clone(setup.config);
+    mutate(cfg);
+    // Flush vault state first — keys generated at runtime must survive the
+    // reopen or the new instance loses their bindings (w6-fix F5).
+    f.persistVault();
+    f.close();
+    f = new Fabric(cfg, directory, () => time);
+    api.f = f;
+    // Re-attest only the tenants whose snapshot actually drifted.
+    for (const tn of Object.keys(cfg.tenants))
+      if (f._configDrift.has(tn) || f.store.get(tn, 'config-flag', 'drift')) f.reassertConfig(api.p('security', tn));
+  };
+  return api;
 }
 export const hasCode = code => e => e?.code === code;
 // A live constitution can only change through the governed policy.change
@@ -85,6 +108,9 @@ export function installPolicy(h, mutate, { approvals = 4, tenant = 'acme' } = {}
 }
 // Tenant configuration is deep-frozen at open — legitimate edits go through
 // the same clone-and-swap path the fabric uses for key rotation.
-export function setTenant(h, tenant, mutate) { const tn = clone(h.f.tenant(tenant)); mutate?.(tn); h.f._setTenant(tenant, tn); }
+// The live-tenant edit + security re-assertion flow, expressed through the
+// only path that still exists: mutate a clone of the live tenant, then a
+// config reload carries it (in-process _setTenant was F14's free swap).
+export function setTenant(h, tenant, mutate) { const tn = clone(h.f.tenant(tenant)); mutate?.(tn); h.reconfigure(cfg => { cfg.tenants[tenant] = tn; }); }
 export function runtimeInput(overrides = {}) { return { device_id: 'operator-device', resource: 'dataset-1', destination: 'customer-vault', action: 'data.read', purpose: 'operations', columns: ['id', 'name'], row_ids: ['row-1'], classification: 'internal', jurisdiction: 'EU', max_cost: 1000, ttl_ms: 60000, ...overrides }; }
 export function runtimeRequest(capability, overrides = {}) { const c = capability.payload; return { capability, device_id: c.device_id, resource: c.resource, destination: c.destination, action: c.action, purpose: c.purpose, columns: c.columns, row_ids: c.row_ids, request_id: randomUUID(), protocol: 'https', port: 443, ...overrides }; }

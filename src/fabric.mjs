@@ -22,12 +22,19 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 
 // Issuer fields that legitimately rotate at runtime; everything else on the
 // issuer record is a trust anchor and stays frozen (w11-redteam R12).
-const ISSUER_MUTABLE = new Set(['endpoint', 'issue_token', 'read_token', 'token_expires_at']);
+const ISSUER_MUTABLE = new Set(['issue_token', 'read_token', 'token_expires_at']);
 
 export class Fabric {
+  // The authoritative tenant map lives behind a private field: an
+  // in-process insider can mutate or replace this.config.tenants but cannot
+  // reach #tenants — phantom tenants and unguarded _setTenant swaps mint
+  // nothing (w12-provenance F13/F14). config.tenants stays populated as a
+  // frozen diagnostic mirror.
+  #tenants = {};
   constructor(config, directory, clock = Date.now, { vault = null } = {}) {
     requireThat(config.profile === 'engineering', 'INV-503-RELEASE', 'Production mode is blocked: external acceptance evidence is missing', 503);
     this.config = config; this.directory = directory; this.clock = clock;
+    this.#tenants = clone(config.tenants ?? {});
     this._configDrift = new Set();
     const encryption = {}, auditSigners = {};
     this.vault = vault ?? this._openVault();
@@ -93,7 +100,7 @@ export class Fabric {
     // of identities/issuers/keys must trip drift detection like a file-level
     // change, and immutability is the only honest in-process answer
     // (w11-redteam R12).
-    for (const t of Object.keys(this.config.tenants)) this._setTenant(t, this.config.tenants[t]);
+    for (const t of Object.keys(this.#tenants)) this.#setTenant(t, this.#tenants[t]);
   }
   // Converge non-transactional side effects to the committed ledger. The
   // outcome tx writes key-rotation / jit-grant records; their vault and
@@ -103,7 +110,7 @@ export class Fabric {
   // grant tables are derived state.
   _reconcileLedger() {
     let dirty = false;
-    for (const tenant of Object.keys(this.config.tenants)) {
+    for (const tenant of Object.keys(this.#tenants)) {
       // Rotation history is newest-first; only the newest record per class
       // may restore a key pointer. Applying every record converged the class
       // to the OLDEST rotation — and resurrected revoked keys (w6 F1).
@@ -185,7 +192,7 @@ export class Fabric {
   // Own-property only: an inherited member must never resolve into a
   // phantom tenant (w10-fixverify F-12 — loadConfiguration also refuses
   // proto-named tenants at boot, defence in depth).
-  tenant(t) { const row = Object.hasOwn(this.config.tenants ?? {}, t) ? this.config.tenants[t] : undefined; requireThat(row, 'INV-404-NOT-FOUND', 'Resource not found', 404); return row; }
+  tenant(t) { const row = Object.hasOwn(this.#tenants, t) ? this.#tenants[t] : undefined; requireThat(row, 'INV-404-NOT-FOUND', 'Resource not found', 404); return row; }
   // the drift snapshot is computed once at boot, so a live in-process edit
   // of identities/issuers/keys would take effect with no drift flag
   // (w11-redteam R12). Legitimate changes (key rotation) replace the record
@@ -208,14 +215,21 @@ export class Fabric {
     }
     return Object.preventExtensions(o);
   }
-  _setTenant(t, next) {
+  #setTenant(t, next) {
     const c = clone(next);
     // Issuer credential fields rotate at runtime — freeze each issuer record
-    // EXCEPT the rotation surface before sealing the tenant object.
+    // EXCEPT the rotation surface before sealing the tenant object. The
+    // endpoint itself is NOT mutable: a live-swap would redirect the
+    // evidence POST (and its Bearer token) to an attacker host — endpoint
+    // changes go through config reload + drift detection (w12-prov F15).
     if (c.issuers) for (const k of Object.keys(c.issuers)) c.issuers[k] = this._freezeExcept(c.issuers[k], ISSUER_MUTABLE);
     for (const k of Object.keys(c)) if (k !== 'issuers') c[k] = this._deepFreeze(c[k]);
     if (c.issuers) Object.freeze(c.issuers);
-    this.config.tenants[t] = Object.freeze(c);
+    const frozen = Object.freeze(c);
+    this.#tenants[t] = frozen;
+    // Diagnostic mirror only — authority is #tenants; mutating the mirror
+    // shifts nothing (w12-provenance F13).
+    if (this.config?.tenants) this.config.tenants[t] = frozen;
   }
   // Tenant data keys are stored wrapped under the vault master key in real
   // deployments (encryption_key_wrapped / watermark_key_wrapped); the
@@ -347,7 +361,7 @@ export class Fabric {
       // expiry falls inside the rewound span would resurrect — refuse
       // (w9-network F4). Forward steps need no such check.
       if (prior !== null && now < prior) {
-        for (const tenant of Object.keys(this.config.tenants)) {
+        for (const tenant of Object.keys(this.#tenants)) {
           for (const c of this.store.list(tenant, 'certificate', 10000))
             requireThat(c.consumed || c.envelope.payload.expires_at <= now || c.envelope.payload.expires_at > prior, 'INV-503-TIME', 'Clock recovery would resurrect an expired certificate', 503);
           for (const r of this.store.list(tenant, 'capsule', 10000))
@@ -371,7 +385,7 @@ export class Fabric {
     // Authentication denials are security events too — an unknown tenant or
     // an unmapped subject must leave a signed ledger trace before the gate
     // ever throws (w11-redteam R13).
-    if (!(p && Object.hasOwn(this.config.tenants ?? {}, p.tenant_id))) {
+    if (!(p && Object.hasOwn(this.#tenants, p.tenant_id))) {
       if (auditDeny && !this.store.db.isTransaction) this._rejectionAudit(p?.tenant_id ?? 'unknown', p?.subject_id ?? 'anonymous', 'INV-401-AUTH', 'Authentication required');
       requireThat(false, 'INV-401-AUTH', 'Authentication required', 401);
     }
@@ -428,7 +442,11 @@ export class Fabric {
   // A stored outcome is only trustworthy as a vault-signed envelope — a
   // planted row (store-level write without vault access) fails the
   // signature, never just shape (w11 F5).
-  _outcomeIntegrity(t, envelope) {
+  _outcomeIntegrity(t, envelope, expectId = null) {
+    // The payload's certificate_id must equal the row key it is served
+    // under: a real signed outcome transplanted onto a sibling key returns
+    // the wrong certificate's verdict (w12-provenance F18).
+    if (expectId !== null) requireThat(envelope?.payload?.certificate_id === expectId, 'INV-409-INTEGRITY', 'Outcome does not belong to this certificate', 409);
     // keys.get, not entry(): a pending key must still verify the recovery
     // envelopes it legitimately signed (w11-lifecycle F2) — only its
     // signature path is gated, never its verification. The revoked flag is
@@ -555,7 +573,7 @@ export class Fabric {
   _auditIndex(t) {
     const maxSeq = this.store.db.prepare('SELECT COALESCE(MAX(seq),0) m FROM audit WHERE tenant=?').get(t).m;
     let idx = this._auditIdx?.get(t);
-    if (!idx) { idx = { maxSeq: 0, building: false, revoked: new Set(), attached: new Map(), proposedNonce: new Set(), proposedAt: new Map(), issued: new Set(), grants: new Map(), policyAnchors: [], dataAccess: [], perceptionNonce: new Set() }; this._auditIdx ??= new Map(); this._auditIdx.set(t, idx); }
+    if (!idx) { idx = { maxSeq: 0, building: false, revoked: new Set(), attached: new Map(), proposedNonce: new Set(), proposedAt: new Map(), issued: new Set(), grants: new Map(), policyAnchors: [], dataAccess: [], perceptionNonce: new Set(), reserved: new Set(), dispatched: new Map(), outcomes: new Map() }; this._auditIdx ??= new Map(); this._auditIdx.set(t, idx); }
     // Re-entrancy: auditPublicKeys -> revoked -> _auditIndex would recurse
     // forever mid-build, so nested readers see the partial projection.
     if (idx.maxSeq === maxSeq || idx.building) return idx;
@@ -583,11 +601,25 @@ export class Fabric {
         case 'POLICY_GENESIS': case 'POLICY_ACTIVATED': case 'EMERGENCY_POLICY_ACTIVATED': if (meta.policy_digest) idx.policyAnchors.push({ staged: false, digest: meta.policy_digest }); break;
         case 'POLICY_STAGED': if (meta.policy_digest) idx.policyAnchors.push({ staged: true, digest: meta.policy_digest }); break;
         case 'PERCEPTION_SESSION': if (meta.nonce) idx.perceptionNonce.add(meta.nonce); break;
-        case 'DATA_ACCESSED': idx.dataAccess.push({ subject: pl.reference, dataset: meta.dataset, row_ids: meta.row_ids ?? [], columns: meta.columns ?? [], at: meta.at ?? pl.time }); break;
+        case 'DATA_ACCESSED': idx.dataAccess.push({ subject: pl.reference, dataset: meta.dataset, row_ids: meta.row_ids ?? [], columns: meta.columns ?? [], at: meta.at ?? pl.time, certificate_id: meta.certificate_id ?? null }); break;
+        case 'EXECUTION_RESERVED': idx.reserved.add(pl.reference); break;
+        case 'EXECUTION_DISPATCHED': if (meta.journal_digest) idx.dispatched.set(pl.reference, meta.journal_digest); break;
+        case 'EXECUTION_OUTCOME': idx.outcomes.set(pl.reference, meta.status); break;
+        case 'ACTION_CANCELLED': if (meta.certificate_id) idx.outcomes.set(meta.certificate_id, 'CANCELLED'); break;
       }
         idx.maxSeq = Math.max(idx.maxSeq, e.sequence ?? 0);
       }
       idx.maxSeq = maxSeq;
+      // Unanchored floor = tamper: every 'revocation' record row must trace
+      // to a consumed AUTHORITY_REVOKED event. Deleting the event before
+      // the index consumes it can no longer silently un-revoke — the
+      // surviving floor row indicts the gap and closes the gate
+      // (w12-provenance F9). Checked inside the build, not per revoked()
+      // call: during the revoke transaction itself the floor row lands a
+      // beat after its event, so a per-call check would deadlock the
+      // writer.
+      for (const row of this.store.db.prepare("SELECT id FROM records WHERE tenant=? AND kind='revocation'").all(t))
+        requireThat(idx.revoked.has(row.id), 'INV-409-INTEGRITY', 'Revocation state diverges from the ledger', 409);
     } finally { idx.building = false; }
     return idx;
   }
@@ -649,8 +681,8 @@ export class Fabric {
   // never re-ships exported rows to readers: a second subject cannot drain
   // row material from the outcome store without a data_access charge
   // (w6-fix F3).
-  outcomeView(t, outcome) {
-    if (outcome) this._outcomeIntegrity(t, outcome);
+  outcomeView(t, outcome, expectId = null) {
+    if (outcome) this._outcomeIntegrity(t, outcome, expectId);
     const view = clone(outcome), output = view?.payload?.output;
     if (Array.isArray(output)) view.payload.output = { row_count: output.length, rows_digest: digest(output), redacted: true };
     return view;
@@ -1114,8 +1146,26 @@ export class Fabric {
       // its children — clearing the mutable composite_parents marker cannot
       // unbind a certified child (w11-redteam R17).
       const idx = this._auditIndex(t);
-      const certifiedParents = this.store.ids(t, 'capsule', 20000).filter(pid => pid !== record.capsule.capsule_id && idx.issued.has(pid) && (this.store.get(t, 'capsule', pid)?.capsule?.requested_state?.children ?? []).includes(record.capsule.capsule_id));
-      requireThat(!certifiedParents.some(pid => ['CERTIFIED', 'EXECUTING'].includes(this.store.get(t, 'capsule', pid)?.status)), 'INV-409-STATE', 'Composite child certificates execute only through their parent', 409);
+      const certifiedParents = this.store.ids(t, 'capsule', 20000).filter(pid => {
+        if (pid === record.capsule.capsule_id || !idx.issued.has(pid)) return false;
+        const parentRow = this.store.get(t, 'capsule', pid);
+        if (!parentRow) return false;
+        // The parent row is integrity-proven before its children list and
+        // state speak: a mutated parent row wedges rather than unbinding
+        // (w12-provenance F19). Terminal-ness comes from the anchored
+        // outcome, never the mutable status field.
+        this._capsuleIntegrity(t, parentRow);
+        const parentCertId = parentRow.certificate_id;
+        // Resolved = an outcome or cancellation exists on the chain for the
+        // parent certificate — its one dispatch slot is spent and it can
+        // never fire again, so wedged children return to free authority
+        // (w7-seam F9). Any other state — issued, reserved, revoked — keeps
+        // children bound: the parent may still legitimately dispatch or is
+        // under a security hold.
+        const terminal = parentCertId ? idx.outcomes.has(parentCertId) : false;
+        return !terminal && (parentRow.capsule?.requested_state?.children ?? []).includes(record.capsule.capsule_id);
+      });
+      requireThat(certifiedParents.length === 0, 'INV-409-STATE', 'Composite child certificates execute only through their parent', 409);
       // A quarantined actor or dispatcher is refused before evidence work —
       // the containment denial must land as INV-403, not as an evidence
       // miss (w9-network F6/F7).
@@ -1179,13 +1229,21 @@ export class Fabric {
     const { cert, capsule, now } = reservation;
     if (fault === 'process-crash') throw new Error('Simulated process death after durable reservation');
     if (capsule.action.type === 'action.composite') return this.executeComposite(p, cert, capsule, now, fault);
-    let raw;
+    let raw, dispatchError = null;
     try { raw = this.target.execute(capsule, cert.certificate_id, now, fault); }
-    catch (e) {
+    catch (e) { dispatchError = e; }
+    // Dispatch is anchored on the signed chain the moment the durable
+    // journal exists — including an after-commit fault whose journal
+    // survived while its response was lost, so reconcile can honestly
+    // confirm VERIFIED against the anchor. A planted journal without the
+    // anchored event can never mint VERIFIED (w12-provenance F16).
+    const journal = this.target.outcome(p.tenant_id, cert.certificate_id);
+    if (journal) this.store.tx(() => this.store.audit(p.tenant_id, 'EXECUTION_DISPATCHED', p.subject_id, cert.certificate_id, { journal_digest: digest(journal) }, now));
+    if (dispatchError) {
       // A deterministic refusal is a FAILED outcome, honestly recorded — only
       // genuinely ambiguous failures (transport/unknown) are UNCERTAIN
       // (runtime-audit F-9).
-      if (e instanceof InvariantError) return this.finish(p, cert, null, /^INV-5/.test(e.code ?? '') ? 'UNCERTAIN' : 'FAILED', e.code);
+      if (dispatchError instanceof InvariantError) return this.finish(p, cert, null, /^INV-5/.test(dispatchError.code ?? '') ? 'UNCERTAIN' : 'FAILED', dispatchError.code);
       return this.finish(p, cert, null, 'UNCERTAIN', 'TARGET_RESULT_UNCONFIRMED');
     }
     return this.finish(p, cert, raw, 'VERIFIED', 'TARGET_RECONCILED', { postRead: true });
@@ -1242,6 +1300,12 @@ export class Fabric {
       let raw, dispatchError = null;
       try { raw = this.target.execute(child.capsule, childCert.certificate_id, childNow, fault); }
       catch (e) { dispatchError = e; }
+      // Same dispatch anchor as a standalone: any durable journal is
+      // attested on the chain, so a wedged child can be honestly settled
+      // later while a planted journal can never mint VERIFIED
+      // (w12-provenance F16).
+      const childJournal = this.target.outcome(t, childCert.certificate_id);
+      if (childJournal) this.store.tx(() => this.store.audit(t, 'EXECUTION_DISPATCHED', p.subject_id, childCert.certificate_id, { journal_digest: digest(childJournal), composite_child_of: cert.certificate_id }, childNow));
       if (dispatchError instanceof InvariantError) {
         // A deterministic refusal is a FAILED child outcome, honestly
         // recorded — same rule as a standalone execution (runtime-audit F-9).
@@ -1269,7 +1333,7 @@ export class Fabric {
     const post = [];
     const envelope = this.transaction(p, now => {
       const t = p.tenant_id, r = this.store.must(t, 'capsule', cert.capsule_id), stored = this.store.must(t, 'certificate', cert.certificate_id);
-      requireThat(stored.consumed, 'INV-409-STATE', 'Certificate was never reserved for execution', 409);
+      requireThat(stored.consumed && this._auditIndex(t).reserved.has(cert.certificate_id), 'INV-409-STATE', 'Certificate was never reserved for execution', 409);
       this._capsuleIntegrity(t, r);
       const existing = this.store.get(t, 'outcome', cert.certificate_id);
       requireThat(!existing || !['VERIFIED', 'FAILED', 'COMPENSATED'].includes(existing.payload.status), 'INV-409-STATE', 'A terminal execution outcome cannot be overwritten', 409);
@@ -1301,6 +1365,10 @@ export class Fabric {
         // attest VERIFIED over a child that failed (w7-seam F6). Effects
         // never re-fire for an already-settled child (w8-composite F6).
         if (status === 'VERIFIED' && childStatus === 'VERIFIED' && !settledTerminal) {
+          // A child's VERIFIED rides on the same anchored dispatch proof as
+          // a standalone: the chain must attest this journal for this cert.
+          const childJournal = this.target.outcome(t, childCertId);
+          requireThat(childJournal && digest(childJournal) === digest(done.raw) && this._auditIndex(t).dispatched.get(childCertId) === digest(childJournal), 'INV-409-INTEGRITY', 'Child outcome lacks a ledger-anchored dispatch', 409);
           extras = this._applyVerifiedEffects(p, t, childRecord, childStored.envelope.payload, done.raw, now, post);
           if (extras?.gate_denied || extras?.rotation_precondition_lapsed || extras?.activation_superseded) {
             status = 'FAILED'; reason = extras?.gate_denied?.code ?? extras?.activation_superseded?.detail ?? 'ROTATION_PRECONDITION_LAPSED';
@@ -1464,8 +1532,8 @@ export class Fabric {
         this.vault.activate(req.new_key_id);
         const tn = clone(this.tenant(t));
         tn.keys[klass] = { key_id: req.new_key_id, public_key: req.new_public_key };
-        tn.keys.retired = [...(tn.keys.retired ?? []), { key_class: klass, key_id: previous.key_id, public_key: previous.public_key, retired_at: now }];
-        this._setTenant(t, tn);
+        tn.keys.retired = [...(tn.keys.retired ?? []), { key_class: klass, key_id: previous.key_id, public_key: previous.public_key, retired_at: now, derived: true }];
+        this.#setTenant(t, tn);
         if (revokeOld) this.vault.revoke(previous.key_id);
         this.persistVault();
       });
@@ -1500,17 +1568,24 @@ export class Fabric {
     // budget check read-only but must not double-charge or double-touch the
     // same disclosure (w10-cert F3).
     const requestKey = `cert:${cert.certificate_id}`;
-    const alreadyCharged = Boolean(this.store.db.prepare('SELECT 1 FROM usage WHERE tenant=? AND capability=? AND request=?').get(t, requestKey, cert.certificate_id));
+    // The charge decision is chain-anchored: a squatted usage row can no
+    // longer suppress billing, coverage or the DATA_ACCESSED attestation —
+    // only a real signed disclosure event for THIS certificate counts
+    // (w12-provenance F17). The usage row stays as the billing mirror.
+    const alreadyCharged = this._auditIndex(t).dataAccess.some(a => a.certificate_id === cert.certificate_id);
     const recon = reconstructionCheck(this.store.db, this.target.db, { tenant: t, subject, dataset: requested.dataset, rows: requested.row_ids, columns: requested.columns, now, policy: this.policy(t).runtime.reconstruction, record: !alreadyCharged, access: this._auditIndex(t).dataAccess });
     const weight = this.policy(t).runtime.sensitivity_weights[dataset.classification] ?? 1;
     const cost = requested.row_ids.length * requested.columns.length * weight;
+    // A squatted mirror row cannot even fail the insert — upsert folds the
+    // honest charge into whatever the insider pre-planted (w12-provenance
+    // F17): the row is a billing projection, the chain decides.
     if (!alreadyCharged)
-      this.store.db.prepare('INSERT INTO usage VALUES(?,?,?,?,?,?,?)').run(t, subject, requested.dataset, now, cost, requestKey, cert.certificate_id);
+      this.store.db.prepare('INSERT INTO usage VALUES(?,?,?,?,?,?,?) ON CONFLICT(tenant,capability,request) DO UPDATE SET cost=cost+excluded.cost,at=excluded.at').run(t, subject, requested.dataset, now, cost, requestKey, cert.certificate_id);
     if (!recon.allowed) return { gate_denied: { code: 'INV-429-BUDGET', detail: { row_count: recon.row_count, column_count: recon.column_count, coverage_percent: recon.coverage_percent } } };
     // Egress disclosure is attested on the signed chain — the touch table
     // is a mirror; wiping it can never reset coverage (w11-redteam R9).
     if (!alreadyCharged)
-      this.store.audit(t, 'DATA_ACCESSED', subject, subject, { dataset: requested.dataset, row_ids: requested.row_ids, columns: requested.columns, at: now }, now);
+      this.store.audit(t, 'DATA_ACCESSED', subject, subject, { dataset: requested.dataset, row_ids: requested.row_ids, columns: requested.columns, at: now, certificate_id: cert.certificate_id }, now);
     // Watermarking requires the dedicated key — falling back to the
     // row-encryption key would fuse two distinct primitives (w10-datagate F10).
     const tenantWatermarkKey = this.dataKey(t, 'watermark');
@@ -1524,17 +1599,27 @@ export class Fabric {
       // finish is reachable only after the reservation consumed the
       // certificate — an outcome row cannot be forged ahead of dispatch
       // (w11 F4). Record integrity is re-proven before effects fire (w11 F1).
-      requireThat(stored.consumed, 'INV-409-STATE', 'Certificate was never reserved for execution', 409);
+      // The reservation anchor, not the mutable consumed flag, proves the
+      // certificate entered execution — a flipped flag without a signed
+      // EXECUTION_RESERVED fails here (w12-provenance F16).
+      requireThat(stored.consumed && this._auditIndex(t).reserved.has(cert.certificate_id), 'INV-409-STATE', 'Certificate was never reserved for execution', 409);
       this._capsuleIntegrity(t, r);
       // Terminal outcomes are immutable — a VERIFIED/FAILED result can never
       // be overwritten by a second finish (only UNCERTAIN may resolve later).
       const existing = this.store.get(t, 'outcome', cert.certificate_id);
       requireThat(!existing || !['VERIFIED', 'FAILED', 'COMPENSATED'].includes(existing.payload.status), 'INV-409-STATE', 'A terminal execution outcome cannot be overwritten', 409);
+      requireThat(!existing || existing.payload.certificate_id === cert.certificate_id, 'INV-409-INTEGRITY', 'Stored outcome belongs to another certificate', 409);
       // A VERIFIED verdict requires the durable dispatch journal — not the
       // caller's word. Reservation != dispatch: the journal row exists only
       // when the target transaction actually committed (w11-redteam R4).
       const journal = this.target.outcome(t, cert.certificate_id);
-      if (status === 'VERIFIED') requireThat(journal && raw && digest(raw) === digest(journal), 'INV-409-INTEGRITY', 'Claimed VERIFIED execution does not match the durable dispatch journal', 409);
+      if (status === 'VERIFIED') {
+        requireThat(journal && raw && digest(raw) === digest(journal), 'INV-409-INTEGRITY', 'Claimed VERIFIED execution does not match the durable dispatch journal', 409);
+        // Dispatch itself is chain-anchored: flipping certificate.consumed
+        // and planting a journal row cannot mint VERIFIED — the ledger must
+        // attest this exact journal at dispatch time (w12-provenance F16).
+        requireThat(this._auditIndex(t).dispatched.get(cert.certificate_id) === digest(journal), 'INV-409-INTEGRITY', 'No ledger-anchored dispatch for this journal', 409);
+      }
       const { valid } = this._validateTargetResponse(r, cert, raw, now, { postRead });
       if (status === 'VERIFIED' && !valid) { status = 'UNCERTAIN'; reason = 'TARGET_RESPONSE_INVALID'; }
       const extras = valid ? this._applyVerifiedEffects(p, t, r, cert, raw, now, post) : null;
@@ -1563,11 +1648,15 @@ export class Fabric {
     // (w11 F4) — the consumed check precedes every stored-row read, and the
     // row itself must re-verify as a vault-signed envelope before it is
     // served (w11 F5).
-    requireThat(stored.consumed, 'INV-409-STATE', 'Execution has not started', 409);
+    // A stored outcome row is integrity-proven before the state checks —
+    // tamper evidence outranks 'not started' (a planted row must scream
+    // INTEGRITY, never hide behind state ordering).
     const current = this.store.get(t, 'outcome', id);
+    if (current) this._outcomeIntegrity(t, current, id);
+    requireThat(stored.consumed && this._auditIndex(t).reserved.has(id), 'INV-409-STATE', 'Execution has not started', 409);
     // COMPENSATED is terminal too — reconcile returns any settled outcome
     // instead of throwing where VERIFIED/FAILED simply answer (w7-seam F8).
-    if (current && ['VERIFIED', 'FAILED', 'COMPENSATED'].includes(current.payload.status)) return this._outcomeIntegrity(t, current);
+    if (current && ['VERIFIED', 'FAILED', 'COMPENSATED'].includes(current.payload.status)) return this._outcomeIntegrity(t, current, id);
     const cert = stored.envelope.payload, raw = this.target.outcome(t, id);
     const record = this.store.must(t, 'capsule', cert.capsule_id);
     if (record.capsule.action.type === 'action.composite') {
@@ -1684,9 +1773,13 @@ export class Fabric {
       // itself would otherwise deadlock inside its own record write
       // (w6-fix F4).
       const envelope = this.signAudit(p.tenant_id, payload, 'revocation');
-      this.store.put(t, 'revocation', `${input.kind}:${input.id}`, payload, now);
+      // The chain event lands BEFORE the floor row: the divergence check
+      // (floor ⊆ anchored revocations, inside _auditIndex) must never see a
+      // floor row whose event is still unwritten — that ordering would
+      // deadlock the revoking write itself (w12-provenance F9).
       if (input.remediation_service) this.store.audit(t, 'REMEDIATION_REQUESTED', p.subject_id, `${input.kind}:${input.id}`, { service: input.remediation_service, dispatched: false, channel: 'external-system-not-integrated' }, now);
       this.store.audit(t, 'AUTHORITY_REVOKED', p.subject_id, `${input.kind}:${input.id}`, { reason_digest: digest(input.reason) }, now);
+      this.store.put(t, 'revocation', `${input.kind}:${input.id}`, payload, now);
       return envelope;
     });
     // The dataplane write lands AFTER the ledger commit: a revocation that

@@ -159,7 +159,7 @@ test('w8 F10/F12/F14: unreachable issuer stales paths; same-ms replays keep writ
   writeIssuer(dir, { issuer: 'bank', tenant: 'acme', channel: 'authoritative', version: '1.0.0', key: h.setup.issuerKeys.acme['bank'], kinds: ISSUER_RULES.bank, records: {}, issue_token: bank.issue_token, read_token: bank.read_token });
   const srv = createIssuerServer(loadIssuers(dir), { port: 0, host: '127.0.0.1', clock: () => h.now() });
   await srv.listen();
-  bank.endpoint = `http://127.0.0.1:${srv.server.address().port}`;
+  h.repoint(bankKeyId, `http://127.0.0.1:${srv.server.address().port}`);
   h.f.declareCoverage(h.p('security'), { path_id: 'p-bank', action_type: 'payment.submit', target: 'bank', environment: 'prod', connector_version: '1.0.0', owner: 'op', status: 'MONITORED', path_class: 'api', max_age_ms: 600000, configuration_digest: 'a'.repeat(64) });
   assert.equal((await h.f.checkIssuerDrift(h.p('security'), bankKeyId)).drifted, false);
   // Kill the issuer → unreachable → drifted AND the dependent path stales.

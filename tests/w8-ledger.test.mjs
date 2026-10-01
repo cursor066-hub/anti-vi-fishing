@@ -31,14 +31,14 @@ test('COV-004: a live manifest drift drops the dependent path to UNKNOWN and ope
   const h = fixture(t, ['acme']);
   const [bankKeyId, bank] = bankEntry(h);
   const baseSpec = { issuer: 'bank', tenant: 'acme', channel: 'authoritative', key: h.setup.issuerKeys.acme['bank'], kinds: ISSUER_RULES.bank, records: {}, issue_token: bank.issue_token, read_token: bank.read_token };
-  bank.endpoint = `http://127.0.0.1:${(await serve(t, { ...baseSpec, version: '1.0.0' }, () => h.now())).server.address().port}`;
+  h.repoint(bankKeyId, `http://127.0.0.1:${(await serve(t, { ...baseSpec, version: '1.0.0' }, () => h.now())).server.address().port}`);
   declareBankPath(h);
   const clean = await h.f.checkIssuerDrift(h.p('security'), bankKeyId);
   assert.equal(clean.drifted, false);
   assert.equal(h.f.store.must('acme', 'coverage', 'path-bank-1').status, 'MONITORED');
   // The issuer upgrades without a matching config registration → drifted.
   const srv2 = await serve(t, { ...baseSpec, version: '9.9.9' }, () => h.now());
-  bank.endpoint = `http://127.0.0.1:${srv2.server.address().port}`;
+  h.repoint(bankKeyId, `http://127.0.0.1:${srv2.server.address().port}`);
   const drifted = await h.f.checkIssuerDrift(h.p('security'), bankKeyId);
   assert.equal(drifted.drifted, true);
   assert.equal(drifted.coverage_paths_staled, 1);
