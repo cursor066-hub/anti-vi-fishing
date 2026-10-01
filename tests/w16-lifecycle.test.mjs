@@ -175,3 +175,73 @@ test('w15-supply F-7/F-8: a FIFO at a listed path fails instead of hanging; dele
   assert.match(res3.stderr + res3.stdout, /unreadable|missing|problems/);
   rmSync(dir, { recursive: true, force: true });
 });
+
+// --- w15-timing ---
+import { answerQuery } from '../src/issuerd.mjs';
+import { generateKey } from '../src/crypto.mjs';
+
+test('w15-timing F1: capsuleView redacts nested arrays and non-regex secret key names', t => {
+  const h = fixture(t);
+  const record = h.f.store.must('acme', 'capsule', h.proposed().capsule.capsule_id);
+  record.capsule.current_state.material_fields = {
+    passphrase: 'hunter2',
+    recovery_codes: ['rk-1', 'rk-2'],
+    nested: { items: [{ secret: 'inside-array' }, { pin: '0420' }] },
+    backup: { seed_phrase: 'alpha bravo charlie', apikey: 'AKIAEXAMPLE', otp_secret: 'JBSWY3DPEHPK3PXP' },
+    rows: [{ id: 'row-1', name: 'Ada' }],
+    safe_label: 'public descriptor'
+  };
+  const view = h.f.capsuleView(record).capsule.current_state.material_fields;
+  assert.equal(view.passphrase, '«redacted»');
+  assert.equal(view.recovery_codes, '«redacted»', 'a secret-named array key redacts whole');
+  assert.equal(view.nested.items[0].secret, '«redacted»');
+  assert.equal(view.nested.items[1].pin, '«redacted»');
+  assert.equal(view.backup.seed_phrase, '«redacted»');
+  assert.equal(view.backup.apikey, '«redacted»');
+  assert.equal(view.safe_label, 'public descriptor', 'non-secret fields survive');
+  assert.equal(view.row_count, 1);
+  const text = JSON.stringify(view);
+  for (const leak of ['hunter2', 'rk-1', 'inside-array', 'alpha bravo', 'AKIAEXAMPLE']) assert.equal(text.includes(leak), false, `${leak} leaked`);
+});
+
+test('w15-timing F2: session-key shredding is decoupled from the reference-scan gate', t => {
+  const h = fixture(t);
+  // Seed enough perception-session rows to have wedged the old flat-cap
+  // path (sessionIds.length === 10000 → truncated → return before shred).
+  h.f.store.tx(() => {
+    for (let i = 0; i < 10001; i++)
+      h.f.store.put('acme', 'perception-session', `s-${i}`, { session_id: `s-${i}`, expires_at: h.now() - 1, _server_private: null }, h.now());
+    h.f.store.put('acme', 'perception-session', 'live-key', { session_id: 'live-key', expires_at: h.now() - 1, _server_private: 'PEM MATERIAL' }, h.now());
+  });
+  const out = h.f.retentionSweep(h.p('security'));
+  assert.equal(out.truncated, false);
+  assert.equal(out.session_keys_shredded, 1, 'the expired ECDH key was still shredded past 10k cumulative rows');
+  assert.equal(out.session_scan_exhausted, true);
+  assert.equal(h.f.store.must('acme', 'perception-session', 'live-key')._server_private, null);
+});
+
+test('w15-timing F9: a secret.use outcome journals the digest, not the registry material', t => {
+  const h = fixture(t);
+  const requested = { secret_id: 'secret-erp-1', operation: 'sign', workload_id: 'workload-1' };
+  const r = h.proposed('secret.use', requested, { action: { type: 'secret.use', target_resource: 'secret-erp-1', purpose: 'Sign payroll batch' } });
+  h.evidence(r, { kind: 'workload_attestation' }); h.evidence(r, { kind: 'workload_attestation', issuer: 'cloud-attestor' }); h.approve(r, 2);
+  const cert = h.f.certificate(h.p(), r.capsule.capsule_id);
+  assert.equal(h.f.execute(h.p(), cert).payload.status, 'VERIFIED');
+  const journal = h.f.target.outcome('acme', cert.payload.certificate_id);
+  assert.equal(journal.observed_state.withheld, true, 'journal carries the digest projection, not the row');
+  assert.equal(journal.observed_state.material_digest, journal.observed_state_digest);
+  assert.equal(JSON.stringify(journal.observed_state).includes('api_key'), false, 'registry material stays out of the durable journal');
+});
+
+test('w15-timing F11: issuerd content/request digests are keyed, not bare sha256 oracles', () => {
+  const issuer = {
+    issuer: 'custom', tenant: 'acme', version: '1.0.0', channel: 'authoritative', key: generateKey(),
+    kinds: { ownership: { lookup: 'acct:${claims.account}', confidence: 90, expect: {} } },
+    records: { 'acct:a-1': { account_id: 'a-1', credential: 'p'.repeat(8) } }
+  };
+  const env = answerQuery(issuer, { tenant_id: 'acme', capsule_digest: 'a'.repeat(64), kind: 'ownership', subject_id: 'x', claims: { account: 'a-1' } }, 1000);
+  assert.match(env.payload.content_digest, /^[a-f0-9]{64}$/, 'hex shape preserved for schema compat');
+  assert.notEqual(env.payload.content_digest, digest({ issuer: 'custom', key: 'acct:a-1', record: issuer.records['acct:a-1'] }), 'no longer recomputable without the issuer key');
+  const miss = answerQuery(issuer, { tenant_id: 'acme', capsule_digest: 'a'.repeat(64), kind: 'ownership', subject_id: 'x', claims: { account: 'ghost' } }, 1000);
+  assert.notEqual(miss.payload.content_digest, digest({ issuer: 'custom', key: 'acct:ghost', record: null }), 'miss path keyed too');
+});

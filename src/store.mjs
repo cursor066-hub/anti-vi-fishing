@@ -220,6 +220,9 @@ export class Store {
     this.db.prepare('INSERT INTO clock VALUES(1,?) ON CONFLICT(id) DO UPDATE SET last=excluded.last').run(now);
     return now;
   }
+  auditHeadSeq(tenant) {
+    return this.db.prepare('SELECT COALESCE(MAX(seq),0) s FROM audit WHERE tenant=?').get(tenant).s;
+  }
   audit(tenant, type, actor, reference, metadata, now) {
     const last = this.db.prepare('SELECT seq,hash,envelope FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1').get(tenant);
     // The chain's `time` is a monotone logical clock: verifyAudit requires

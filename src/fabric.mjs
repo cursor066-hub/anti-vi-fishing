@@ -738,9 +738,14 @@ export class Fabric {
     catch (error) {
       // A rolled-back transaction may have let a reader project chain rows
       // that never committed — the cached index would retain a phantom
-      // anchor forever (w12-provenance F11). Drop it; the next build
-      // re-projects only committed events.
-      this.#auditIdx?.delete(principal?.tenant_id);
+      // anchor forever (w12-provenance F11). But routine denials (bad id,
+      // schema, health) throw just the same: dropping the whole index on
+      // every error lets a low-priv principal force a full-chain re-verify
+      // per request (w15-timing F8). Delete only when the fold could have
+      // seen uncommitted rows — i.e. its head is ahead of the committed
+      // head after rollback.
+      const cachedIdx = this.#auditIdx?.get(principal?.tenant_id);
+      if (cachedIdx && principal?.tenant_id && cachedIdx.maxSeq > this.store.auditHeadSeq(principal.tenant_id)) this.#auditIdx.delete(principal.tenant_id);
       // Every gate-level refusal — schema, actor, intent, health, role —
       // lands in the ledger even when it fired before the transaction could
       // commit (w11-redteam R13). The 60s identical-denial bound inside
@@ -954,17 +959,23 @@ export class Fabric {
   capsuleView(record) {
     const view = clone(record);
     const redact = material_fields => {
-      if (Array.isArray(material_fields?.rows)) return { ...material_fields, rows: undefined, row_count: material_fields.rows.length, rows_digest: digest(material_fields.rows) };
+      // Key names an operator may plausibly store secret bytes under — the
+      // matcher over-redacts rather than leaks: a suppressed display field
+      // costs a reader, a verbatim secret costs the secret (w15-timing F1).
+      const secretKey = k => /secret|private|password|passwd|passphrase|token|share|credential|seed|entropy|otp|pin|bearer|recovery|ssn|cvv|api.?key|key.?material|_key$|^key$|^auth$|_auth$|^value$/i.test(k);
+      // Arrays recurse element-wise — a registry row carrying recovery
+      // codes or nested items must not sail through verbatim (w15-timing F1).
+      const scrub = v => (v && typeof v === 'object') ? (Array.isArray(v) ? v.map(scrub) : Object.fromEntries(Object.entries(v).map(([k, x]) => [k, secretKey(k) ? '«redacted»' : scrub(x)]))) : v;
+      if (Array.isArray(material_fields?.rows)) {
+        // The rows branch must still scrub its OTHER keys — a dataset row
+        // set beside a credential field cannot launder it past redaction.
+        const { rows, ...rest } = material_fields;
+        return { ...scrub(rest), row_count: rows.length, rows_digest: digest(rows) };
+      }
       // Object-shaped material fields (e.g. a secret.use registry row) may
       // carry secret VALUES that the capsule binds only by digest — readers
       // get the binding proof, never the bytes (w11-timing LOW-7).
-      if (material_fields && typeof material_fields === 'object') {
-        // 'value' is redacted unconditionally — a scalar under that key is
-        // exactly the shape a registry secret takes (w13-timing M-2).
-        const secretKey = (k, x) => /secret|private|password|token|share|credential|_key$|^key$/i.test(k) || k === 'value';
-        const scrub = v => (v && typeof v === 'object' && !Array.isArray(v)) ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, secretKey(k, x) ? '«redacted»' : scrub(x)])) : v;
-        return scrub(material_fields);
-      }
+      if (material_fields && typeof material_fields === 'object') return scrub(material_fields);
       return material_fields;
     };
     if (view.capsule?.current_state?.material_fields) view.capsule.current_state = { ...view.capsule.current_state, material_fields: redact(view.capsule.current_state.material_fields) };
@@ -1814,7 +1825,15 @@ export class Fabric {
       const ref = r.capsule.action.type === 'secret.use' ? this.target.secretState(r.capsule.tenant_id, r.capsule.requested_state.secret_id) : this.target.state(r.capsule.tenant_id, r.capsule.action.target_resource);
       postStateOk = Boolean(ref && digest(ref.material_fields) === raw.observed_state_digest && (r.capsule.action.type === 'data.export' ? ref.version === r.capsule.current_state.version : ref.version === r.capsule.current_state.version + 1));
     }
-    const valid = Boolean(responseShape && expected && outputValid && postStateOk && raw.execution_time >= cert.issued_at && raw.execution_time <= now && raw.execution_time < cert.expires_at && digest(expected) === raw.observed_state_digest && raw.status === 'VERIFIED' && raw.target_transaction_id === cert.certificate_id && raw.capsule_digest === cert.capsule_digest && raw.authorised_requested_digest === digest(r.capsule.requested_state) && (r.capsule.action.type === 'data.export' || raw.observed_state_digest === digest(raw.observed_state)) && raw.simulation === true);
+    // The journal's observed_state binds observed_state_digest exactly —
+    // except where residency rules journal only the digest-bearing
+    // projection (secret.use keeps material_digest; export keeps none —
+    // w15-timing F9, w10-datagate F5).
+    const journalBound = raw === null ? false
+      : r.capsule.action.type === 'data.export' ? true
+      : r.capsule.action.type === 'secret.use' ? raw.observed_state?.withheld === true && raw.observed_state?.material_digest === raw.observed_state_digest
+      : raw.observed_state_digest === digest(raw.observed_state);
+    const valid = Boolean(responseShape && expected && outputValid && postStateOk && raw.execution_time >= cert.issued_at && raw.execution_time <= now && raw.execution_time < cert.expires_at && digest(expected) === raw.observed_state_digest && raw.status === 'VERIFIED' && raw.target_transaction_id === cert.certificate_id && raw.capsule_digest === cert.capsule_digest && raw.authorised_requested_digest === digest(r.capsule.requested_state) && journalBound && raw.simulation === true);
     return { valid, expected, exportRows };
   }
   // Post-effects a VERIFIED outcome declares. Store writes happen in the
@@ -2170,7 +2189,13 @@ export class Fabric {
       // the incident report can then cross-check each mutable record
       // against the chain instead of trusting store contents
       // (w13-fixverify L7).
-      this.store.audit(t, 'AUTHORITY_REVOKED', p.subject_id, `${input.kind}:${input.id}`, { reason_digest: digest(input.reason), record_digest: digest(payload) }, now);
+      // Operator free-text digests are keyed under the vault master key —
+      // a bare digest over bounded operator vocabulary ("custodian device
+      // compromised", "contract ended") is an offline dictionary oracle to
+      // every envelope holder (w15-timing F3). Verification then needs
+      // vault custody — the same authority the audit signer already needs.
+      const metaMac = v => createHmac('sha256', this.vault.masterKey).update(canonical(v)).digest('base64url');
+      this.store.audit(t, 'AUTHORITY_REVOKED', p.subject_id, `${input.kind}:${input.id}`, { reason_digest: metaMac(input.reason), record_digest: metaMac(payload) }, now);
       this.store.put(t, 'revocation', `${input.kind}:${input.id}`, payload, now);
       return envelope;
     });
@@ -2196,7 +2221,11 @@ export class Fabric {
     // floor check inside the index already wedges on it, but the report
     // must never present a fabricated revocation as real (w13-fixverify
     // L7).
-    const items = this.store.list(p.tenant_id, 'revocation', 10000).filter(i => idx.revoked.has(`${i.kind}:${i.id}`)).map(i => ({ ...i, anchored: (idx.revocationDigests.get(`${i.kind}:${i.id}`) ?? null) === digest(i) ? true : 'identity-only' }));
+    // record_digest is keyed under the vault master key (w15-timing F3) —
+    // the cross-check recomputes with the same key, so an external reader
+    // cannot and an insider with row-write but no vault still fails it.
+    const metaMac = v => createHmac('sha256', this.vault.masterKey).update(canonical(v)).digest('base64url');
+    const items = this.store.list(p.tenant_id, 'revocation', 10000).filter(i => idx.revoked.has(`${i.kind}:${i.id}`)).map(i => ({ ...i, anchored: (idx.revocationDigests.get(`${i.kind}:${i.id}`) ?? null) === metaMac(i) ? true : 'identity-only' }));
     return { quarantine: items.filter(i => ['subject', 'device'].includes(i.kind)).filter(i => !kind || i.kind === kind), items: kind ? items.filter(i => i.kind === kind) : items };
   }
   listGrants(p, subject = null) {
@@ -2363,7 +2392,10 @@ export class Fabric {
   exportAudit(p, purpose) {
     this.authorize(p, ['auditor', 'security']); text(purpose, 'audit export purpose', 256);
     return this.transaction(p, now => {
-      this.store.audit(p.tenant_id, 'AUDIT_ACCESSED', p.subject_id, 'tenant-log', { purpose_digest: digest(purpose) }, now);
+      // Same keyed-digest treatment as revocation reasons — an exported
+      // log must not hand an offline oracle for enumerable export purposes
+      // like "quarterly PCI audit" (w15-timing F4).
+      this.store.audit(p.tenant_id, 'AUDIT_ACCESSED', p.subject_id, 'tenant-log', { purpose_digest: createHmac('sha256', this.vault.masterKey).update(canonical({ purpose })).digest('base64url') }, now);
       return this.store.auditExport(p.tenant_id, now);
     });
   }
@@ -2488,7 +2520,7 @@ export class Fabric {
       // Enumerate by id and load each record individually: a single
       // undecryptable evidence/capsule row is reported, not a sweep-wedging
       // exception (store-audit MED-3). Any residue is honestly flagged.
-      const evidenceIds = this.store.ids(p.tenant_id, 'evidence', 20000), capsuleIds = this.store.ids(p.tenant_id, 'capsule', 20000), coverageIdsList = this.store.ids(p.tenant_id, 'coverage', 10000), sessionIds = this.store.ids(p.tenant_id, 'perception-session', 10000);
+      const evidenceIds = this.store.ids(p.tenant_id, 'evidence', 20000), capsuleIds = this.store.ids(p.tenant_id, 'capsule', 20000), coverageIdsList = this.store.ids(p.tenant_id, 'coverage', 10000);
       const items = [], records = [], corrupt = [], citedEvidence = new Set();
       for (const id of evidenceIds) { try { items.push(this.store.must(p.tenant_id, 'evidence', id)); } catch { corrupt.push(['evidence', id]); } }
       for (const id of capsuleIds) { try { records.push(this.store.must(p.tenant_id, 'capsule', id)); } catch { corrupt.push(['capsule', id]); } }
@@ -2499,10 +2531,32 @@ export class Fabric {
       // become readable again, so keeping it only leaks ciphertext
       // indefinitely (DEK-audit F5).
       for (const [kind, id] of corrupt) this.store.shred(p.tenant_id, kind, id);
-      const truncated = evidenceIds.length === 20000 || capsuleIds.length === 20000 || coverageIdsList.length === 10000 || sessionIds.length === 10000;
+      // Session-key shredding is decoupled from the reference-scan gate
+      // below: the 'perception-session' kind is tombstoned in place, never
+      // deleted, so a cumulative id count hits the flat scan cap once and
+      // wedges shredding forever (w15-timing F2). Page the whole kind — a
+      // shred can only remove residency, never falsify a reference.
+      let session_keys_shredded = 0, session_rows_scanned = 0, session_scan_exhausted = true;
+      for (let offset = 0; offset < 100000; offset += 2000) {
+        const page = this.store.ids(p.tenant_id, 'perception-session', 2000, offset);
+        if (!page.length) break;
+        session_rows_scanned += page.length;
+        for (const id of page) {
+          try {
+            const s = this.store.must(p.tenant_id, 'perception-session', id);
+            if (typeof s._server_private === 'string' && s.expires_at <= now) {
+              this.store.put(p.tenant_id, 'perception-session', id, { ...s, _server_private: null, key_shredded_at: now }, now);
+              session_keys_shredded++;
+            }
+          } catch { /* undecryptable session rows are reported via corrupt */ }
+        }
+        if (page.length < 2000) break;
+      }
+      if (session_rows_scanned >= 100000) session_scan_exhausted = false;
+      const truncated = evidenceIds.length === 20000 || capsuleIds.length === 20000 || coverageIdsList.length === 10000;
       let deleted = 0, held = 0;
       // Conservative batch boundary: do not erase if a reference could be outside this scan.
-      if (truncated) return { deleted: 0, held: items.length, corrupt: corrupt.length, reason: 'Reference scan limit reached; no deletion performed', complete_payload_erasure: false, truncated: true };
+      if (truncated) return { deleted: 0, held: items.length, session_keys_shredded, session_rows_scanned, session_scan_exhausted, corrupt: corrupt.length, reason: 'Reference scan limit reached; no deletion performed', complete_payload_erasure: false, truncated: true };
       for (const e of items) {
         if (e.payload.retention_until > now) continue;
         const activeReference = records.some(r => Array.isArray(r.evidence) && r.evidence.includes(e.payload.evidence_id) && !['VERIFIED', 'FAILED', 'DENY', 'CANCELLED', 'COMPENSATED'].includes(r.status)) || citedEvidence.has(e.payload.evidence_id);
@@ -2523,18 +2577,8 @@ export class Fabric {
       // expiry no release may be minted from them, so the "ephemeral" key
       // material must not outlive the session in the encrypted ledger
       // (w11-timing MED-3). The record and its binding stay provable — only
-      // the key field is tombstoned.
-      let session_keys_shredded = 0;
-      for (const id of sessionIds) {
-        try {
-          const s = this.store.must(p.tenant_id, 'perception-session', id);
-          if (typeof s._server_private === 'string' && s.expires_at <= now) {
-            this.store.put(p.tenant_id, 'perception-session', id, { ...s, _server_private: null, key_shredded_at: now }, now);
-            session_keys_shredded++;
-          }
-        } catch { /* an undecryptable session row is reported via corrupt elsewhere */ }
-      }
-      return { deleted, held, session_keys_shredded, corrupt: corrupt.length, corrupt_ids: corrupt.slice(0, 64).map(([k, i]) => `${k}:${i}`), corrupt_shredded: corrupt.length, complete_payload_erasure: false, truncated: false, limitation: 'Record DEKs are destroyed and the WAL truncated; ciphertext remaining in pre-erasure backups or external copies is not reachable by this operation.' };
+      // the key field is tombstoned. The paged scan above already ran it.
+      return { deleted, held, session_keys_shredded, session_rows_scanned, session_scan_exhausted, corrupt: corrupt.length, corrupt_ids: corrupt.slice(0, 64).map(([k, i]) => `${k}:${i}`), corrupt_shredded: corrupt.length, complete_payload_erasure: false, truncated: false, limitation: 'Record DEKs are destroyed and the WAL truncated; ciphertext remaining in pre-erasure backups or external copies is not reachable by this operation.' };
     });
     if (result.deleted) this.store.checkpoint();
     return result;
@@ -2638,6 +2682,9 @@ export class Fabric {
       const quorum = this.custodianQuorum(t, ceremony);
       requireThat(quorum.live >= ceremony.threshold, 'INV-409-STATE', 'Ceremony lacks a live custodian quorum across failure domains', 409);
       const shares = encodedShares.map(s => decodeShare(s));
+      // (the plain-array polynomial and its random-coefficient Buffer are
+      // zeroed inside shamir.split — deal side matches reconstruct side,
+      // w15-timing F7)
       // A presented share counts only if its custodian's ack is still live —
       // a revoked custodian's leaked share cannot satisfy reconstruction
       // (w11-approval F2).
@@ -2672,6 +2719,10 @@ export class Fabric {
       const secret = Buffer.from(secretB64, 'base64url');
       requireThat(secret.length >= 16 && secret.length <= 512, 'INV-400-SCHEMA', 'Secret size out of bounds');
       const shares = splitSecret(secret, ceremony);
+      // The deal-side plaintext copy is consumable too — the reconstruct
+      // path already zeroes its material (w11-timing MED-4); asymmetric
+      // residency would leave the ceremony secret on the heap (w15-timing F7).
+      secret.fill(0);
       commitShares(ceremony, shares, now);
       this.store.put(p.tenant_id, 'ceremony', ceremony.ceremony_id, ceremony, now);
       this.store.audit(p.tenant_id, 'CEREMONY_SHARES_COMMITTED', p.subject_id, ceremony.ceremony_id, { count: ceremony.share_commitments.length }, now);

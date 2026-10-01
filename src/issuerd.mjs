@@ -2,9 +2,9 @@
 import http from 'node:http';
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, existsSync, statSync, lstatSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { randomUUID, randomBytes, timingSafeEqual, createPrivateKey, createPublicKey } from 'node:crypto';
+import { randomUUID, randomBytes, timingSafeEqual, createHmac, createPrivateKey, createPublicKey } from 'node:crypto';
 import { canonical, digest, hashBytes, parseStrict } from './canonical.mjs';
-import { signed, verifySigned } from './crypto.mjs';
+import { signed, verifySigned, ctEqual } from './crypto.mjs';
 import { fields, text, identifier, integer, uniqueStrings } from './schema.mjs';
 import { requireThat, InvariantError } from './errors.mjs';
 
@@ -117,7 +117,7 @@ export function answerQuery(issuer, request, now) {
     // A missing record is a signed `conflict`, not an exception — the response
     // shape is identical to a claim mismatch, so /issue cannot be used to
     // enumerate the record store by guessing lookup keys (issuerd-audit MED-5).
-    return signed({ ...base, claim: 'conflict', content_digest: digest({ issuer: issuer.issuer, key, record: null }), claims: {}, provenance: prov('UNSATISFIED'), issuer_version: issuer.version }, issuer.key, 'evidence');
+    return signed({ ...base, claim: 'conflict', content_digest: contentMac(issuer, { issuer: issuer.issuer, key, record: null }), claims: {}, provenance: prov('UNSATISFIED'), issuer_version: issuer.version }, issuer.key, 'evidence');
   }
   let claim = 'supports';
   const extracted = {}, matched = new Set();
@@ -125,11 +125,13 @@ export function answerQuery(issuer, request, now) {
     const want = typeof expected === 'string' && expected.includes('${') ? interpolate(expected, request.claims ?? {}) : expected;
     extracted[field] = record[field] ?? null;
     const got = record[field];
-    if (String(got) === String(want)) matched.add(field); else claim = 'conflict';
+    // Digest-vs-digest equality — early-exit string compare would leak
+    // match depth on credential-shaped fields (w15-timing F5).
+    if (ctEqual(digest(String(got)), digest(String(want)))) matched.add(field); else claim = 'conflict';
   }
   for (const f of rule.extract ?? []) {
     extracted[f] = record[f] ?? null;
-    if (String(record[f]) === String(request.claims?.[f])) matched.add(f);
+    if (ctEqual(digest(String(record[f])), digest(String(request.claims?.[f])))) matched.add(f);
   }
   // A conflict answer reveals nothing: echoing even the correctly-guessed
   // fields is a per-field value-confirmation oracle (w5 F-7).
@@ -160,11 +162,26 @@ export function answerQuery(issuer, request, now) {
   const expectBoundSubject = Object.values(rule.expect ?? {}).some(v => typeof v === 'string' && v.includes('${claims.subject_id}'));
   const resolvedSubject = record.subject_id ?? (Object.hasOwn(lookupBound, 'subject_id') || expectBoundSubject ? request.claims?.subject_id : undefined);
   const revealed = claim === 'conflict' ? {} : { ...lookupBound, ...extracted, ...(resolvedSubject === undefined ? {} : { subject_id: resolvedSubject }) };
-  return signed({ ...base, claim, content_digest: digest({ issuer: issuer.issuer, key, record }), claims: revealed, provenance: prov('*'), issuer_version: issuer.version }, issuer.key, 'evidence');
+  return signed({ ...base, claim, content_digest: contentMac(issuer, { issuer: issuer.issuer, key, record }), claims: revealed, provenance: prov('*'), issuer_version: issuer.version }, issuer.key, 'evidence');
 }
+
+// Evidence content bindings are keyed under the issuer's own private key —
+// a bare sha256 over the record is an offline dictionary oracle for
+// low-entropy rows held by every envelope reader (w15-timing F11). The
+// 64-hex shape is preserved for schema compatibility; recomputation now
+// needs the issuer's private material — the same custody the signature
+// already asserts.
+const contentMac = (issuer, obj) => createHmac('sha256', issuer.key.private_key).update(canonical(obj)).digest('hex');
 
 export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', clock = Date.now, logPath, allow_insecure_loopback = false } = {}) {
   const sequence = { n: 0, previous: '0'.repeat(64) };
+  // request_digest in the chained log gets the same keyed treatment —
+  // request bodies can carry claim/credential material an offline log
+  // holder could dictionary (w15-timing F11). The key derives from every
+  // loaded issuer's private material; anyone able to recompute already
+  // holds the 0600 custody of the spec files.
+  const logKey = digest(Object.values(issuers).map(i => i.key?.private_key ?? '').sort().join('|'));
+  const logMac = v => createHmac('sha256', logKey).update(canonical(v)).digest('hex');
   // Continue the hash chain across restarts: seed sequence/previous from the
   // last logged record so truncation of earlier entries stays detectable
   // (issuerd-audit LOW-3).
@@ -340,22 +357,22 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
         fields(request, ['tenant_id', 'capsule_digest', 'kind', 'subject_id', 'claims'], ['dependencies']);
         identifier(request.tenant_id, 'tenant'); identifier(request.subject_id, 'subject'); text(request.kind, 'kind', 64);
         requireThat(/^[a-f0-9]{64}$/.test(request.capsule_digest), 'INV-400-SCHEMA', 'capsule_digest must be a digest');
-        if (!anyBearer('issue')) { take('probe'); issuanceLog({ issuer: 'unknown', request_digest: digest(request), refused: true, unauthenticated: true, code: 'INV-401-AUTH' }); } gate('issue'); take('issue');
+        if (!anyBearer('issue')) { take('probe'); issuanceLog({ issuer: 'unknown', request_digest: logMac(request), refused: true, unauthenticated: true, code: 'INV-401-AUTH' }); } gate('issue'); take('issue');
         const issuer = resolveIssuer(m[1], request.tenant_id);
         // Authentication failures are logged to the issuance chain too —
         // probing must not be invisible to provenance audit (MED-5) — but
         // the response is a uniform 404 so wrong-issuer bearers cannot
         // enumerate names (w9-deploy F4).
-        try { requireThat(issuer && issuerAuthOk(issuer, 'issue'), 'INV-404-NOT-FOUND', 'Issuer not found', 404); } catch (e) { issuanceLog({ issuer: issuer?.issuer ?? 'unknown', request_digest: digest(request), refused: true, unauthenticated: true, code: 'INV-404-NOT-FOUND' }); throw e; }
+        try { requireThat(issuer && issuerAuthOk(issuer, 'issue'), 'INV-404-NOT-FOUND', 'Issuer not found', 404); } catch (e) { issuanceLog({ issuer: issuer?.issuer ?? 'unknown', request_digest: logMac(request), refused: true, unauthenticated: true, code: 'INV-404-NOT-FOUND' }); throw e; }
         issuer.metrics.requests++; const t0 = performance.now();
         try {
           const envelope = answerQuery(issuer, request, clock());
           issuer.metrics.issued++; issuer.metrics.latencies.push(performance.now() - t0); if (issuer.metrics.latencies.length > 512) issuer.metrics.latencies.shift();
-          issuanceLog({ issuer: issuer.issuer, request_digest: digest(request), evidence_id: envelope.payload.evidence_id, claim: envelope.payload.claim });
+          issuanceLog({ issuer: issuer.issuer, request_digest: logMac(request), evidence_id: envelope.payload.evidence_id, claim: envelope.payload.claim });
           return send(201, envelope);
         } catch (e) {
           issuer.metrics.errors++; issuer.metrics.refused++;
-          issuanceLog({ issuer: issuer.issuer, request_digest: digest(request), refused: true, code: e.code ?? 'ERR' });
+          issuanceLog({ issuer: issuer.issuer, request_digest: logMac(request), refused: true, code: e.code ?? 'ERR' });
           throw e;
         }
       }

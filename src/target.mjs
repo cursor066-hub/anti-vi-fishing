@@ -206,8 +206,13 @@ export class SimulatedTarget {
       // including columns the requester may not see — into the durable
       // journal for no validation benefit: the digest alone proves the
       // snapshot. Export entries keep the digest and the authorised output
-      // only (w10-datagate F5).
-      outcome = { target_transaction_id: transactionId, capsule_digest: digest(capsule), authorised_requested_digest: digest(requested), observed_state_digest: digest(next), observed_state: type === 'data.export' ? null : next, output, status: 'VERIFIED', execution_time: now, simulation: true };
+      // only (w10-datagate F5). A secret.use row gets the same treatment
+      // a fortiori — the registry material may carry secret bytes, so the
+      // journal holds only the digest-bearing projection (w15-timing F9).
+      const journalState = type === 'data.export' ? null
+        : type === 'secret.use' ? { withheld: true, material_digest: digest(next) }
+        : next;
+      outcome = { target_transaction_id: transactionId, capsule_digest: digest(capsule), authorised_requested_digest: digest(requested), observed_state_digest: digest(next), observed_state: journalState, output, status: 'VERIFIED', execution_time: now, simulation: true };
       this.db.prepare('INSERT INTO transactions VALUES(?,?,?)').run(tenant, transactionId, encrypt(outcome, this.key(tenant), AAD('target', 'transaction', tenant, transactionId)));
       this.db.exec('COMMIT');
       // Same commit-boundary truncation as tx() — durable on success, armed

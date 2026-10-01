@@ -1,6 +1,6 @@
 {
-  "tests": 564,
-  "pass": 564,
+  "tests": 568,
+  "pass": 568,
   "fail": 0,
   "runner": "node --test --test-reporter=tap tests/",
   "generated_at": "regenerated on demand by scripts/report.mjs",
