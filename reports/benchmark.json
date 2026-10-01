@@ -8,29 +8,30 @@
     "memory_bytes": 8326717440,
     "isolated_environment": true
   },
-  "environment_calibration_ms": 45.461907999999994,
-  "environment_scale": 0.8468628285464834,
-  "integrated_target_ops_per_second": 85,
+  "environment_calibration_ms": 44.29362599999999,
+  "environment_scale": 1,
+  "integrated_target_ops_per_second": 100,
   "core_deterministic_evaluation": {
     "samples": 2000,
-    "p50_ms": 0.14231399999999894,
-    "p95_ms": 0.2296739999999886,
-    "p99_ms": 0.2828219999999817,
-    "operations_per_second": 6072.385974163185
+    "p50_ms": 0.1434280000000001,
+    "p95_ms": 0.22832999999997128,
+    "p99_ms": 0.2564670000000149,
+    "operations_per_second": 6531.314171896572
   },
   "integrated_evaluation_with_sqlite_audit": {
-    "samples": 500,
-    "p50_ms": 6.20017299999995,
-    "p95_ms": 7.802077000000054,
-    "p99_ms": 17.202612000000045,
-    "operations_per_second": 153.17126367903572
+    "samples": 600,
+    "p50_ms": 6.271518999999898,
+    "p95_ms": 8.337294999999813,
+    "p99_ms": 18.17321400000037,
+    "operations_per_second": 151.14479284147978,
+    "best_round_operations_per_second": 157.45764403546656
   },
   "local_software_runtime_with_signed_audit": {
     "samples": 500,
-    "p50_ms": 4.5155189999995855,
-    "p95_ms": 7.696447000000262,
-    "p99_ms": 13.921633999999813,
-    "operations_per_second": 206.01481878518223
+    "p50_ms": 4.56828300000052,
+    "p95_ms": 5.638926999999967,
+    "p99_ms": 11.05847199999971,
+    "operations_per_second": 207.56496226422198
   },
   "target_network_latency": "not measured: no external target connector",
   "asserted_targets": {
@@ -39,7 +40,7 @@
     "integrated_evaluations_per_second_at_least": true
   },
   "observations": {
-    "runtime_p99_ms": 13.921633999999813,
+    "runtime_p99_ms": 11.05847199999971,
     "runtime_p99_at_1_ms_target_met": false
   },
   "production_capacity_claim": false,
