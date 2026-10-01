@@ -82,12 +82,12 @@
       "bytes": 3876
     },
     "src/store.mjs": {
-      "lines": 390,
-      "bytes": 27668
+      "lines": 386,
+      "bytes": 27114
     },
     "src/target.mjs": {
-      "lines": 274,
-      "bytes": 20388
+      "lines": 302,
+      "bytes": 22106
     },
     "web/app.js": {
       "lines": 230,
@@ -362,10 +362,10 @@
       "bytes": 13949
     },
     "tests/w9-schema.test.mjs": {
-      "lines": 98,
-      "bytes": 6229
+      "lines": 103,
+      "bytes": 6499
     }
   },
   "total_files": 91,
-  "total_lines": 17942
+  "total_lines": 17971
 }

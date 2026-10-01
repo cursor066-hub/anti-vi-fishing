@@ -12,17 +12,12 @@ import { requireThat, InvariantError } from './errors.mjs';
 // caller text ever reaches SQL.
 // Tuple AADs joined by canonical(): a slash-joined AAD collides if any
 // identifier ever admits '/' — 'a/b'+'c' vs 'a'+'b/c' encrypt the same
-// context. Writes use the tuple form; reads fall back to the legacy slash
-// form so ciphertexts written before the migration still open
-// (w9-schema F-8).
+// context. Writes use the tuple form; the legacy slash space was migrated
+// away at open and is dead thereafter — a live fallback IS the transplant
+// surface (w18-crypto F1/F2, uniform closure).
 const AAD = (...parts) => canonical(parts);
 export class SimulatedTarget {
-  _dec(value, tenant, tuple, legacy) {
-    // Any authentication failure (InvariantError or the cipher's own
-    // 'Unsupported state' Error) falls back to the legacy slash AAD.
-    try { return decrypt(value, this.key(tenant), tuple); }
-    catch { return decrypt(value, this.key(tenant), legacy); }
-  }
+  _dec(value, tenant, tuple) { return decrypt(value, this.key(tenant), tuple); }
   constructor(path, tenantKeys) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 }); this.db = new DatabaseSync(path); chmodSync(path, 0o600); this.keys = tenantKeys;
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=30000; PRAGMA secure_delete=ON;
@@ -38,6 +33,39 @@ export class SimulatedTarget {
     // ciphertext in the WAL — truncate at open like the ledger store does
     // (w8-fixverify F3).
     this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    this._migrateAad();
+  }
+  // One-shot migration out of the legacy slash-form AAD space — same shape
+  // as the ledger store's migration: each row that only authenticates
+  // under the legacy form is re-sealed under its tuple form in one tx, a
+  // row authenticating under neither stays sealed and keeps failing on
+  // read (w18-crypto F1/F2).
+  _migrateAad() {
+    const spec = [
+      ['resources', 'value', r => [AAD('target', 'resource', r.tenant, r.id), `${r.tenant}/resource/${r.id}`], r => [r.tenant, r.id]],
+      ['transactions', 'value', r => [AAD('target', 'transaction', r.tenant, r.id), `${r.tenant}/transaction/${r.id}`], r => [r.tenant, r.id]],
+      ['dataset_rows', 'data', r => [AAD('target', 'dataset', r.tenant, r.dataset, r.row_id), `${r.tenant}/dataset/${r.dataset}/${r.row_id}`], r => [r.tenant, r.dataset, r.row_id]],
+      ['secrets_registry', 'value', r => [AAD('target', 'secret', r.tenant, r.secret_id), `${r.tenant}/secret/${r.secret_id}`], r => [r.tenant, r.secret_id]],
+      ['grants', 'value', r => [AAD('target', 'grant', r.tenant, r.grant_id), `${r.tenant}/grant/${r.grant_id}`], r => [r.tenant, r.grant_id]],
+    ];
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const [table, col, aads, pks] of spec) {
+        const where = table === 'dataset_rows' ? 'tenant=? AND dataset=? AND row_id=?'
+          : table === 'secrets_registry' ? 'tenant=? AND secret_id=?'
+          : table === 'grants' ? 'tenant=? AND grant_id=?'
+          : 'tenant=? AND id=?';
+        for (const r of this.db.prepare(`SELECT * FROM ${table}`).all()) {
+          const [tuple, legacy] = aads(r);
+          try { decrypt(r[col], this.key(r.tenant), tuple); continue; } catch { /* legacy-sealed or corrupt */ }
+          try {
+            const plain = decrypt(r[col], this.key(r.tenant), legacy);
+            this.db.prepare(`UPDATE ${table} SET ${col}=? WHERE ${where}`).run(encrypt(plain, this.key(r.tenant), tuple), ...pks(r));
+          } catch { /* corrupt — left sealed, fails on read as before */ }
+        }
+      }
+      this.db.exec('COMMIT');
+    } catch (e) { if (this.db.isTransaction) this.db.exec('ROLLBACK'); throw e; }
   }
   close() { this.db.close(); }
   tx(fn) {
@@ -61,7 +89,7 @@ export class SimulatedTarget {
   }
   _readResource(tenant, id) {
     const row = this.db.prepare('SELECT version,value FROM resources WHERE tenant=? AND id=?').get(tenant, id);
-    return row ? { version: row.version, value: this._dec(row.value, tenant, AAD('target', 'resource', tenant, id), `${tenant}/resource/${id}`) } : { version: 0, value: null };
+    return row ? { version: row.version, value: this._dec(row.value, tenant, AAD('target', 'resource', tenant, id)) } : { version: 0, value: null };
   }
   state(tenant, id) {
     const res = this._readResource(tenant, id);
@@ -79,7 +107,7 @@ export class SimulatedTarget {
     return this.db.prepare('SELECT row_id, data FROM dataset_rows WHERE tenant=? AND dataset=? ORDER BY row_id').all(tenant, dataset)
       // Registry columns win the spread — a stored 'id'/'version' member
       // must not shadow the row's identity or counter (w9-schema F-7).
-      .map(r => ({ ...this._dec(r.data, tenant, AAD('target', 'dataset', tenant, dataset, r.row_id), `${tenant}/dataset/${dataset}/${r.row_id}`), id: r.row_id }));
+      .map(r => ({ ...this._dec(r.data, tenant, AAD('target', 'dataset', tenant, dataset, r.row_id)), id: r.row_id }));
   }
   // Provisioning/fault harness only: not reachable through the HTTP API.
   // The versioned read-modify-write runs in a transaction like every other
@@ -108,7 +136,7 @@ export class SimulatedTarget {
   }
   secret(tenant, secret_id) {
     const row = this.db.prepare('SELECT version,value FROM secrets_registry WHERE tenant=? AND secret_id=?').get(tenant, secret_id);
-    return row ? { ...this._dec(row.value, tenant, AAD('target', 'secret', tenant, secret_id), `${tenant}/secret/${secret_id}`), version: row.version } : null;
+    return row ? { ...this._dec(row.value, tenant, AAD('target', 'secret', tenant, secret_id)), version: row.version } : null;
   }
   // For secret.use the DECISIVE record is the registry row — that is the state
   // a capsule must bind, not an arbitrary resources row (w5 F-7).
@@ -131,7 +159,7 @@ export class SimulatedTarget {
   grants(tenant, subject_id, now) {
     const out = [];
     for (const r of this.db.prepare('SELECT grant_id, value FROM grants WHERE tenant=?').all(tenant)) {
-      let g; try { g = this._dec(r.value, tenant, AAD('target', 'grant', tenant, r.grant_id), `${tenant}/grant/${r.grant_id}`); } catch { this._corruptGrantRows = (this._corruptGrantRows ?? 0) + 1; continue; }
+      let g; try { g = this._dec(r.value, tenant, AAD('target', 'grant', tenant, r.grant_id)); } catch { this._corruptGrantRows = (this._corruptGrantRows ?? 0) + 1; continue; }
       if (g.subject_id === subject_id && g.expires_at > now && !g.revoked) out.push(g);
     }
     return out;
@@ -139,14 +167,14 @@ export class SimulatedTarget {
   allGrants(tenant) {
     const out = [];
     for (const r of this.db.prepare('SELECT grant_id, value FROM grants WHERE tenant=?').all(tenant)) {
-      try { out.push(this._dec(r.value, tenant, AAD('target', 'grant', tenant, r.grant_id), `${tenant}/grant/${r.grant_id}`)); } catch { this._corruptGrantRows = (this._corruptGrantRows ?? 0) + 1; }
+      try { out.push(this._dec(r.value, tenant, AAD('target', 'grant', tenant, r.grant_id))); } catch { this._corruptGrantRows = (this._corruptGrantRows ?? 0) + 1; }
     }
     return out;
   }
   revokeGrant(tenant, grant_id) {
     const row = this.db.prepare('SELECT value FROM grants WHERE tenant=? AND grant_id=?').get(tenant, grant_id);
     requireThat(row, 'INV-404-NOT-FOUND', 'Grant not found', 404);
-    const value = this._dec(row.value, tenant, AAD('target', 'grant', tenant, grant_id), `${tenant}/grant/${grant_id}`);
+    const value = this._dec(row.value, tenant, AAD('target', 'grant', tenant, grant_id));
     value.revoked = true;
     this._deleted = true; // revoke supersedes ciphertext (w8-fixverify F3)
     this.db.prepare('UPDATE grants SET value=? WHERE tenant=? AND grant_id=?').run(encrypt(value, this.key(tenant), AAD('target', 'grant', tenant, grant_id)), tenant, grant_id);
@@ -154,7 +182,7 @@ export class SimulatedTarget {
   }
   outcome(tenant, id) {
     const row = this.db.prepare('SELECT value FROM transactions WHERE tenant=? AND id=?').get(tenant, id);
-    return row ? this._dec(row.value, tenant, AAD('target', 'transaction', tenant, id), `${tenant}/transaction/${id}`) : null;
+    return row ? this._dec(row.value, tenant, AAD('target', 'transaction', tenant, id)) : null;
   }
   // Verified dataset read: caller scope is compiled into a QueryPlan, rebound
   // against the authorising grant, then executed with bound parameters only.
@@ -163,7 +191,7 @@ export class SimulatedTarget {
     requireThat(Array.isArray(dataset.columns), 'INV-404-NOT-FOUND', 'Dataset not found', 404);
     const plan = buildPlan({ dataset: id, columns, row_ids: rowIds, max_rows: ceiling }, dataset.columns);
     verifyPlan(plan, { dataset: id, columns, row_ids: rowIds, max_rows: ceiling });
-    const rows = executePlan(this.db, plan, tenant, (row, r) => this._dec(r.data, tenant, AAD('target', 'dataset', tenant, id, row), `${tenant}/dataset/${id}/${row}`));
+    const rows = executePlan(this.db, plan, tenant, (row, r) => this._dec(r.data, tenant, AAD('target', 'dataset', tenant, id, row)));
     return rows;
   }
   execute(capsule, transactionId, now, fault = null) {

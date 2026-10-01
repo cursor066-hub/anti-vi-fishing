@@ -3642,8 +3642,8 @@ ok 606 - w9-schema F-7/F-8: stored id/version cannot shadow registry columns; tu
   duration_ms: 0
   type: 'test'
   ...
-# Subtest: w9-schema F-8: legacy slash-AAD ciphertexts still decrypt after the migration
-ok 607 - w9-schema F-8: legacy slash-AAD ciphertexts still decrypt after the migration
+# Subtest: w9-schema F-8: legacy slash-AAD ciphertexts migrate at open and stay readable
+ok 607 - w9-schema F-8: legacy slash-AAD ciphertexts migrate at open and stay readable
   ---
   duration_ms: 0
   type: 'test'

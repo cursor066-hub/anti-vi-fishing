@@ -23,9 +23,7 @@ const legacyDekAad = (tenant, kind, id) => `${tenant}/${kind}/${id}/dek`;
   // previous slash form sat inside the legacy records-AAD space and let a
   // raw-writer transplant a sealed receipt into a records row (w18-crypto F1).
 const idemAad = (tenant, scope, key) => canonical({ idempotency: true, tenant, scope, key });
-const decryptEither = (wrapped, key, aad, legacy) => {
-  try { return decrypt(wrapped, key, aad); } catch { return decrypt(wrapped, key, legacy); }
-};
+
 
 export class Store {
   constructor(path, tenantKeys, auditSigners) {
@@ -147,7 +145,6 @@ export class Store {
       }
       this.db.exec('COMMIT');
     } catch (e) { if (this.db.isTransaction) this.db.exec('ROLLBACK'); throw e; }
-    this._aadMigrated = true;
   }
   close() { this.db.close(); }
   tx(fn) {
@@ -186,7 +183,7 @@ export class Store {
   }
   dek(tenant, kind, id) {
     const row = this.db.prepare('SELECT wrapped FROM deks WHERE tenant=? AND kind=? AND id=?').get(tenant, kind, id);
-    return row ? Buffer.from(this._aadMigrated ? decrypt(row.wrapped, this.key(tenant), dekAad(tenant, kind, id)) : decryptEither(row.wrapped, this.key(tenant), dekAad(tenant, kind, id), legacyDekAad(tenant, kind, id)), 'base64url') : null;
+    return row ? Buffer.from(decrypt(row.wrapped, this.key(tenant), dekAad(tenant, kind, id)), 'base64url') : null;
   }
   get(tenant, kind, id) {
     const row = this.db.prepare('SELECT value FROM records WHERE tenant=? AND kind=? AND id=?').get(tenant, kind, id);
@@ -231,7 +228,7 @@ export class Store {
   }
   readValue(tenant, kind, id, wrapped) {
     const key = this.dek(tenant, kind, id) ?? this.key(tenant);
-    return this._aadMigrated ? decrypt(wrapped, key, recAad(tenant, kind, id)) : decryptEither(wrapped, key, recAad(tenant, kind, id), legacyAad(tenant, kind, id));
+    return decrypt(wrapped, key, recAad(tenant, kind, id));
   }
   shred(tenant, kind, id) {
     // Crypto-shredding: destroy the record DEK (secure_delete zeroes its
@@ -360,8 +357,7 @@ export class Store {
     const row = this.db.prepare('SELECT hash,result FROM idempotency WHERE tenant=? AND scope=? AND key=?').get(tenant, scope, key);
     if (row) {
       requireThat(ctEqual(row.hash, requestHash), 'INV-409-IDEMPOTENCY', 'Idempotency key reused for a different request', 409);
-      return this._aadMigrated ? decrypt(row.result, this.key(tenant), idemAad(tenant, scope, key))
-        : decryptEither(row.result, this.key(tenant), idemAad(tenant, scope, key), `${tenant}/idempotency/${scope}/${key}`);
+      return decrypt(row.result, this.key(tenant), idemAad(tenant, scope, key));
     }
     const result = fn();
     this.db.prepare('INSERT INTO idempotency VALUES(?,?,?,?,?)').run(tenant, scope, key, requestHash, encrypt(result, this.key(tenant), idemAad(tenant, scope, key)));
