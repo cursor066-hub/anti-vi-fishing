@@ -235,7 +235,10 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
         // claiming a logout that terminated nothing (w17-console F4).
         const sid = /(?:^|;\s*)if_session=([A-Za-z0-9_-]{43})(?:;|$)/.exec(req.headers.cookie ?? '')?.[1];
         const callerTokenHash = req.headers.authorization ? hashBytes(req.headers.authorization.slice(7)) : (sid ? sessions.get(hashBytes(sid))?.token_hash : null);
-        const doomed = sid ? sessions.get(hashBytes(sid))?.token_hash : null;
+        // A Bearer-only logout presents no sid: retiring the caller's own
+        // credential family is still the honest answer — the token itself
+        // identifies which sessions must die (w25-issuerd logout residual).
+        const doomed = sid ? sessions.get(hashBytes(sid))?.token_hash : callerTokenHash;
         let terminated = 0;
         if (doomed && doomed === callerTokenHash) for (const [key, session] of sessions) if (session.token_hash === doomed) { sessions.delete(key); terminated++; }
         res.setHeader('Set-Cookie', 'if_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'); await noBody(req); return send(200, { logged_out: terminated > 0, sessions_terminated: terminated });

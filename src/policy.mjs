@@ -245,6 +245,10 @@ export function emergencyWeakening(base, next, now = 0) {
   if (!subset(nn.allowed_protocols ?? [], bn.allowed_protocols ?? [])) return 'runtime.network.allowed_protocols';
   if (!subset(nn.allowed_ports ?? [], bn.allowed_ports ?? [])) return 'runtime.network.allowed_ports';
   if (!subset(nr.remediation_services ?? [], br.remediation_services ?? [])) return 'runtime.remediation_services';
+  // The transform bucket floor is a weakening dimension too: lowering it
+  // shrinks the smallest set a transformed disclosure may cover (w25-fixverify
+  // W25-04). Missing reads as no floor, so dropping the key also weakens.
+  if ((nr.transform_min_bucket ?? 0) < (br.transform_min_bucket ?? 0)) return 'runtime.transform_min_bucket';
   // A removed rolling window is a weakening, not just a raised limit —
   // the same-duration loop above can never see it (w9-network F2).
   for (const bw of br.windows) if (!nr.windows.some(w => w.duration_ms === bw.duration_ms)) return 'runtime.windows';

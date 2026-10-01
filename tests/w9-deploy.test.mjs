@@ -103,8 +103,13 @@ test('w9-deploy F9: the coarse bucket is spent before request validation', async
   // a well-formed request is rate-limited rather than reaching the handler.
   for (let i = 0; i < 600; i++)
     assert.equal((await httpJson(`http://127.0.0.1:${port}/healthz`, { headers: { Host: 'spoofed' } })).status, 400, `request ${i}`);
-  const limited = await httpJson(`http://127.0.0.1:${port}/v1/issuers/bank/manifest?tenant=acme`, { token: 'tok' });
+  // The unauthenticated flood spent the shared per-IP line — more anonymous
+  // traffic is refused, but a recognised credential rides its own budget
+  // and must NOT be starved by the flood (w25-issuerd F3).
+  const limited = await httpJson(`http://127.0.0.1:${port}/healthz`, { headers: { Host: 'spoofed' } });
   assert.equal(limited.status, 429); assert.equal(limited.data.error.code, 'INV-429-RATE');
+  const credentialed = await httpJson(`http://127.0.0.1:${port}/v1/issuers/bank/manifest?tenant=acme`, { token: 'tok' });
+  assert.equal(credentialed.status, 200, 'a recognised bearer keeps its own budget through an unauthenticated flood');
 });
 
 test('w9-deploy F10: constructor-name kinds miss own-property lookup; tokenless daemon stays closed', async t => {

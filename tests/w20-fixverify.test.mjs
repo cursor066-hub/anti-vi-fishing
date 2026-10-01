@@ -4,7 +4,7 @@
 // auditor demonstrated.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, unlinkSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -125,9 +125,18 @@ test('w20-fv F-7/F-8: a mid-chain edit refuses boot; a valid prefix resumes', as
   const tampered = JSON.parse(lines[0]); tampered.malformed = false;
   writeFileSync(logPath, JSON.stringify(tampered) + '\n' + lines[1] + '\n');
   assert.throws(() => createIssuerServer(loadIssuers(dir), { port: 0, host: '127.0.0.1', allow_insecure_loopback: true, logPath }), hasCode('INV-503-CONFIG'), 'edited line refuses boot');
-  // A file truncated to a valid prefix resumes on the last honest link —
-  // the acknowledged residual; tail loss beyond that is the off-box duty.
+  // The signed-equivalent head watermark now pins the tail: truncating to
+  // a still-consistent prefix refuses boot (the watermark diverges), and
+  // deleting the watermark alongside refuses too — the honest resume is
+  // operator archival + a fresh segment, never silent truncation
+  // (w25-issuerd F-2/F-3).
   writeFileSync(logPath, lines[0] + '\n');
+  assert.throws(() => createIssuerServer(loadIssuers(dir), { port: 0, host: '127.0.0.1', allow_insecure_loopback: true, logPath }), hasCode('INV-503-CONFIG'), 'a truncated log refuses boot under the head watermark');
+  unlinkSync(logPath + '.head');
+  assert.throws(() => createIssuerServer(loadIssuers(dir), { port: 0, host: '127.0.0.1', allow_insecure_loopback: true, logPath }), hasCode('INV-503-CONFIG'), 'a deleted watermark over a non-empty log refuses boot');
+  // Honest recovery: archive the poisoned segment away — an absent log
+  // genesises a fresh segment with its own head.
+  renameSync(logPath, logPath + '.archived');
   const srv2 = createIssuerServer(loadIssuers(dir), { port: 0, host: '127.0.0.1', allow_insecure_loopback: true, logPath });
   await srv2.listen(); t.after(() => srv2.close());
 });

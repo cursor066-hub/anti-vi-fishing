@@ -169,7 +169,10 @@ export function answerQuery(issuer, request, now) {
   const rule = Object.hasOwn(issuer.kinds, request.kind) ? issuer.kinds[request.kind] : undefined;
   requireThat(rule, 'INV-412-EVIDENCE', `Issuer does not supply evidence kind ${request.kind}`, 412);
   requireThat(Number.isSafeInteger(rule.confidence) && rule.confidence >= 0 && rule.confidence <= 100, 'INV-503-CONFIG', `Evidence rule for ${request.kind} must declare an explicit confidence`);
-  requireThat(request.dependencies === undefined || (Array.isArray(request.dependencies) && request.dependencies.every(d => typeof d === 'string')), 'INV-400-SCHEMA', 'dependencies must be an array of strings');
+  // The fabric's evidence verifier caps dependencies at 32 — a signed
+  // envelope beyond that ceiling could never attach anywhere, so refuse
+  // to mint it rather than sign an unusable artifact (w25-issuerd LOW).
+  requireThat(request.dependencies === undefined || (Array.isArray(request.dependencies) && request.dependencies.length <= 32 && request.dependencies.every(d => typeof d === 'string')), 'INV-400-SCHEMA', 'dependencies must be an array of at most 32 strings');
   const key = interpolate(rule.lookup, request.claims ?? {});
   const record = Object.hasOwn(issuer.records, key) ? issuer.records[key] : null;
   const evidence_id = randomUUID();
@@ -341,7 +344,25 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
         requireThat(ctEqual(logMac(rest), d), 'INV-503-CONFIG', `Issuance log line ${i + 1} fails its keyed HMAC; refuse to re-genesis silently`, 503);
         previous = d; last = rec;
       }
-      if (last) { sequence.n = last.sequence; sequence.previous = last.digest; }
+      if (last) {
+        // Head watermark parity with the fabric's chain-heads.json: the
+        // companion file pins the last committed sequence+MAC outside the
+        // log, so truncating the log to a VALID prefix still diverges at
+        // boot (w25-issuerd residual). The head MAC is keyed over the
+        // CLAIMED tail — copying a stored digest into .head cannot
+        // re-anchor a truncated prefix (w25-issuerd F-3). A missing head
+        // on a non-empty verified chain is indistinguishable from a
+        // deleted-watermark truncation, so it refuses too; legacy
+        // pre-watermark logs re-anchor via the runbook (delete the file
+        // after archiving), never silently (w25-issuerd F-2).
+        const headPath = logPath + '.head';
+        let headRec = null;
+        try { headRec = JSON.parse(readFileSync(headPath, 'utf8')); } catch { headRec = null; }
+        const headMac = (sequence, digest) => logMac({ format: 'ISSUER-LOG-HEAD-1', sequence, digest });
+        requireThat(headRec !== null, 'INV-503-CONFIG', 'Issuance log head watermark is absent over a non-empty log — the file was deleted or the log predates the watermark; archive and re-anchor per runbook', 503);
+        requireThat(headRec.format === 'ISSUER-LOG-HEAD-1' && Number.isSafeInteger(headRec.sequence) && headRec.sequence === last.sequence && ctEqual(headRec.mac ?? '', headMac(last.sequence, last.digest)), 'INV-503-CONFIG', 'Issuance log head watermark diverges from the log tail — the log was truncated or replaced', 503);
+        sequence.n = last.sequence; sequence.previous = last.digest;
+      }
     }
   }
   // The log never rotates on its own: a size ceiling refuses the NEXT
@@ -361,6 +382,13 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
     // rewritten history diverge at the next append (w18-issuerd F-9).
     const next = logMac(record);
     mkdirSync(resolve(logPath, '..'), { recursive: true });
+    // The head watermark is written BEFORE the line lands: a crashed append
+    // leaves head-ahead-of-tail (boot refuses honestly) rather than
+    // tail-ahead-of-head (a silent truncation window) (w25-issuerd). The
+    // MAC is keyed over the claimed tail, so a file-editor cannot
+    // re-anchor a truncated prefix by copying a stored digest (w25-issuerd
+    // F-3).
+    writeFileSync(logPath + '.head', canonical({ format: 'ISSUER-LOG-HEAD-1', sequence: record.sequence, mac: logMac({ format: 'ISSUER-LOG-HEAD-1', sequence: record.sequence, digest: next }) }) + '\n', { mode: 0o600 });
     // O_NOFOLLOW + fstat binds the append to the inode: a dangling
     // symlink planted between checks gets ELOOP, and a FIFO/socket at
     // logPath fails isFile instead of blocking or absorbing writes
@@ -395,11 +423,19 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
     // IPv4-mapped IPv6 forms share one bucket with their dotted twin — a
     // dual-stack bind must not give a client two budgets (w21-issuerd F13).
     const ip = (req.socket.remoteAddress ?? 'unknown').replace(/^::ffff:/, '');
-    // Buckets are scope-keyed only: a per-issuer layer with identical caps
-    // can never bind before the global one — dead bookkeeping removed
-    // (w10-fixverify F-7).
+    // The coarse gate is keyed on the PRESENTED credential when it matches
+    // a configured bearer: a loopback flood holding one token spends its own
+    // budget and can never starve the fabric's drift checks riding a
+    // different credential from the same address (w25-issuerd F3).
+    // Unauthenticated traffic keeps the shared per-IP line.
+    const presented = req.headers.authorization ?? '';
+    const recognized = presented.startsWith('Bearer ') && Object.values(issuers).some(i => {
+      const di = bearerDigest(i, 'issue'), dr = bearerDigest(i, 'read');
+      return (di && bearerMatches(presented, di)) || (dr && bearerMatches(presented, dr));
+    });
+    const principalKey = recognized ? `cred:${hashBytes(presented.slice(7)).slice(0, 24)}` : ip;
     const bucketFor = (scope) => {
-      const key = `${ip}:${scope}`, now = clock();
+      const key = `${principalKey}:${scope}`, now = clock();
       const limits = { ip: [600, 60000], read: [240, 60000], issue: [120, 60000], probe: [30, 60000] };
       const [cap, window] = limits[scope] ?? limits.probe;
       let b = buckets.get(key); if (!b || now >= b.reset) { b = { left: cap, reset: now + window }; buckets.set(key, b); }
@@ -604,11 +640,11 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
         try {
           const envelope = answerQuery(issuer, request, clock());
           issuer.metrics.issued++; issuer.metrics.latencies.push(performance.now() - t0); if (issuer.metrics.latencies.length > 512) issuer.metrics.latencies.shift();
-          issuanceLog({ issuer: issuer.issuer, request_digest: logMac(request), evidence_id: envelope.payload.evidence_id, claim: envelope.payload.claim });
+          issuanceLog({ issuer: issuer.issuer, tenant: issuer.tenant ?? request.tenant_id ?? null, request_digest: logMac(request), evidence_id: envelope.payload.evidence_id, claim: envelope.payload.claim });
           return send(201, envelope);
         } catch (e) {
           issuer.metrics.errors++; issuer.metrics.refused++;
-          issuanceLog({ issuer: issuer.issuer, request_digest: logMac(request), refused: true, code: e.code ?? 'ERR' });
+          issuanceLog({ issuer: issuer.issuer, tenant: issuer.tenant ?? request.tenant_id ?? null, request_digest: logMac(request), refused: true, code: e.code ?? 'ERR' });
           throw e;
         }
       }

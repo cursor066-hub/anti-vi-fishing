@@ -98,7 +98,10 @@ export function watermark(rows, ctx) {
   // caller-chosen request ids must not make two different disclosures
   // produce colliding marks (w10-datagate F7).
   const marks = rows.map((row, i) => {
-    const rowId = row.id ?? ctx.rowIds?.[i];
+    // Never trust the projected row's `id` — a transform (constant, mask,
+    // bucket) may write any value there; the physical row_id executePlan
+    // returned is the only attributable identity (w25-fixverify W25-06).
+    const rowId = ctx.rowIds?.[i];
     requireThat(rowId !== undefined && rowId !== null, 'INV-409-STATE', 'Watermark requires physical row identity', 409);
     return { row_id: rowId, tag: createHmac('sha256', key).update(canonical({ tenant: ctx.tenant, dataset: ctx.dataset, subject: ctx.subject, capability_id: ctx.capabilityId ?? null, request_id: ctx.requestId, row_id: rowId, row })).digest('hex').slice(0, 24) };
   });

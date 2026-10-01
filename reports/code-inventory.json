@@ -34,20 +34,20 @@
       "bytes": 6582
     },
     "src/datagate.mjs": {
-      "lines": 152,
-      "bytes": 10785
+      "lines": 155,
+      "bytes": 11000
     },
     "src/errors.mjs": {
       "lines": 10,
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 4299,
-      "bytes": 344349
+      "lines": 4515,
+      "bytes": 359774
     },
     "src/issuerd.mjs": {
-      "lines": 679,
-      "bytes": 48542
+      "lines": 715,
+      "bytes": 51653
     },
     "src/keystore.mjs": {
       "lines": 213,
@@ -58,8 +58,8 @@
       "bytes": 6684
     },
     "src/policy.mjs": {
-      "lines": 449,
-      "bytes": 45523
+      "lines": 453,
+      "bytes": 45862
     },
     "src/runtime.mjs": {
       "lines": 230,
@@ -74,8 +74,8 @@
       "bytes": 10789
     },
     "src/server.mjs": {
-      "lines": 360,
-      "bytes": 37176
+      "lines": 363,
+      "bytes": 37416
     },
     "src/shamir.mjs": {
       "lines": 91,
@@ -318,8 +318,8 @@
       "bytes": 18172
     },
     "tests/w20-fixverify.test.mjs": {
-      "lines": 194,
-      "bytes": 13045
+      "lines": 203,
+      "bytes": 13873
     },
     "tests/w21-crypto.test.mjs": {
       "lines": 183,
@@ -368,6 +368,10 @@
     "tests/w24-lifecycle.test.mjs": {
       "lines": 193,
       "bytes": 11748
+    },
+    "tests/w25.test.mjs": {
+      "lines": 211,
+      "bytes": 14549
     },
     "tests/w5-mutations.test.mjs": {
       "lines": 194,
@@ -422,8 +426,8 @@
       "bytes": 7577
     },
     "tests/w9-deploy.test.mjs": {
-      "lines": 146,
-      "bytes": 10225
+      "lines": 151,
+      "bytes": 10666
     },
     "tests/w9-fixverify.test.mjs": {
       "lines": 74,
@@ -438,6 +442,6 @@
       "bytes": 6499
     }
   },
-  "total_files": 109,
-  "total_lines": 24010
+  "total_files": 110,
+  "total_lines": 24497
 }
