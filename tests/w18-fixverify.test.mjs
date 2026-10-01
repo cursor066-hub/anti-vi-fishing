@@ -215,3 +215,25 @@ test('w18-fv F16: payload-less forged rows land as INV-409-AUDIT-TAMPER', t => {
 });
 
 const outcomeStatus = out => out?.status ?? out?.outcome?.status ?? 'VERIFIED';
+
+// fixverify-2 B6: an anchored ceremony id is burned forever — a row writer
+// who deletes the row cannot reopen the id and inherit its anchored acks.
+test('w18-fv2 B6: a deleted ceremony row cannot reopen its anchored id', t => {
+  const h = fixture(t);
+  const pending = h.f.prepareRotation(h.p('security'), 'execution');
+  h.f.createCeremony(h.p('security'), { ceremony_id: 'cer-burn', purpose: 'key.rotate', threshold: 2, custodians: CUST2, valid_until: h.now() + 3600000, min_delay_ms: 120000, rotation: { key_class: 'execution', new_key_id: pending.key_id } });
+  const committed = h.f.store.must('acme', 'ceremony', 'cer-burn');
+  for (const subject of CUST2) h.f.acknowledgeCeremony(h.p(subject), signAcknowledgement(committed, subject, h.setup.custodianKeys.acme[subject], h.now()));
+  h.f.store.db.prepare("DELETE FROM records WHERE tenant='acme' AND kind='ceremony' AND id='cer-burn'").run();
+  assert.throws(() => h.f.createCeremony(h.p('security'), { ceremony_id: 'cer-burn', purpose: 'key.rotate', threshold: 2, custodians: ['custodian-1', 'custodian-3'], valid_until: h.now() + 3600000, min_delay_ms: 120000, rotation: { key_class: 'execution', new_key_id: pending.key_id } }), hasCode('INV-409-CONFLICT'), 'the anchored id never reopens — no ack inheritance');
+});
+
+// fixverify-2 MED: designation counts the live domain quorum, not the raw
+// anchored-ack set — a custodian revoked after consenting no longer counts.
+test('w18-fv2 MED: a revoked custodian stops counting toward designation', t => {
+  const h = fixture(t);
+  const pending = designateSuccessor(h, 'execution');
+  assert.equal(h.f.ceremonyDesignated('acme', pending.key_id, 'execution'), true, 'precondition: designated before the revocation');
+  h.f.revoke(h.p('security'), { kind: 'subject', id: 'custodian-1', reason: 'offboarded mid-ceremony' });
+  assert.equal(h.f.ceremonyDesignated('acme', pending.key_id, 'execution'), false, 'the revoked custodian\u2019s anchored ack no longer counts');
+});

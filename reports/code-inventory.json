@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 3332,
-      "bytes": 269502
+      "lines": 3341,
+      "bytes": 270182
     },
     "src/issuerd.mjs": {
       "lines": 448,
@@ -294,8 +294,8 @@
       "bytes": 6769
     },
     "tests/w18-fixverify.test.mjs": {
-      "lines": 218,
-      "bytes": 15903
+      "lines": 240,
+      "bytes": 17893
     },
     "tests/w18-http.test.mjs": {
       "lines": 97,
@@ -371,5 +371,5 @@
     }
   },
   "total_files": 92,
-  "total_lines": 18288
+  "total_lines": 18319
 }

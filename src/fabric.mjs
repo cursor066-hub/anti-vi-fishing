@@ -312,7 +312,11 @@ export class Fabric {
       let planDigest = null;
       try { planDigest = digest({ ceremony_id: cid, tenant_id: ceremony.tenant_id, purpose: ceremony.purpose, threshold: ceremony.threshold, custodians: [...(ceremony.custodians ?? [])].sort(), valid_until: ceremony.valid_until, min_delay_ms: ceremony.min_delay_ms, devices: ceremony.devices ?? null, rotation: ceremony.rotation ?? null }); } catch { /* forged rows fail closed */ }
       if (planDigest === null || !ctEqual(planDigest, plannedDigest)) continue;
-      if ((idx.ceremonyAcks.get(cid)?.size ?? 0) >= ceremony.threshold) return true;
+      // The designation bar is the live quorum, not a raw anchored-ack
+      // count — same-domain signers, revoked custodians and stale-digest
+      // acks must not satisfy designation where custodianQuorum refuses
+      // them (w18-fixverify2 MEDIUM).
+      if (this.custodianQuorum(t, ceremony).live >= ceremony.threshold) return true;
     }
     return false;
   }
@@ -3015,6 +3019,11 @@ export class Fabric {
       }
       requireThat(domains.size >= (input.threshold ?? 0), 'INV-400-SCHEMA', 'Custodian failure domains cannot meet the ceremony threshold', 400);
       const ceremony = createCeremony({ ...input, tenant_id: t });
+      // An anchored ceremony id is burned forever: a row writer who deletes
+      // the row must not reopen the id — a replan would inherit every ack
+      // the ledger already anchored for it (w18-fixverify2 B6).
+      const pidx = this._auditIndex(t);
+      requireThat(!pidx.ceremonyPlanned?.has(ceremony.ceremony_id), 'INV-409-CONFLICT', 'Ceremony id is already anchored in the ledger — plan a new id', 409);
       this.store.insert(t, 'ceremony', ceremony.ceremony_id, ceremony, now);
       this.store.audit(t, 'CEREMONY_PLANNED', p.subject_id, ceremony.ceremony_id, { digest: ceremony.artifact_digest, threshold: ceremony.threshold }, now);
       return ceremony;
