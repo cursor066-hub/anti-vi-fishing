@@ -98,7 +98,9 @@ jobs:
           # Nothing under the generated trees may differ — the gate is
           # directory-scoped (not an enumerative file list) so a NEW report
           # someone forgets to name cannot slip through (w13-supply W12-05).
-          stale="$(git status --porcelain -- docs/ examples/ ai-eval/ vectors/ reports/ | grep -v 'reports/benchmark.json' | grep -v 'reports/source-check.json' | grep -v 'reports/artifact-audit.json' | grep -v 'vectors/envelope-es256-vectors.json')"
+          # sample-audit/checkpoint/pinned-trust mint fresh keys each run —
+          # byte-stability impossible; proven fresh by the live verify steps.
+          stale="$(git status --porcelain -- docs/ examples/ ai-eval/ vectors/ reports/ | grep -v 'reports/benchmark.json' | grep -v 'reports/source-check.json' | grep -v 'reports/artifact-audit.json' | grep -v 'vectors/envelope-es256-vectors.json' | grep -v 'reports/sample-audit.json' | grep -v 'reports/sample-checkpoint.json' | grep -v 'reports/sample-pinned-trust.json')"
           test -z "$stale" || { echo "stale generated artifacts:"; echo "$stale"; exit 1; }
           # reports/benchmark.json is intentionally absent: it embeds measured
           # timings, so byte-equality can never hold — freshness there is
