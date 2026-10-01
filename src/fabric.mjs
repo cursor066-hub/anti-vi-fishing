@@ -57,6 +57,10 @@ export class Fabric {
   #chainHeadRaw = undefined;
   #chainHeadParsed = null;
   #chainHeadVerdicts = new Map();
+  // Last-known durable head watermark per tenant — the file stays
+  // authoritative (every locked bump re-reads it), but equal/regressed
+  // bumps must not pay a lock + parse on every _auditIndex fold.
+  #headWm = new Map();
   constructor(config, directory, clock = Date.now, { vault = null } = {}) {
     requireThat(config.profile === 'engineering', 'INV-503-RELEASE', 'Production mode is blocked: external acceptance evidence is missing', 503);
     this.config = config; this.directory = directory; this.clock = clock;
@@ -526,29 +530,42 @@ export class Fabric {
     if (raw === null) return null;
     try { const f = JSON.parse(raw); return f?.tenants && typeof f.tenants === 'object' && !Array.isArray(f.tenants) ? f.tenants : null; } catch { return null; }
   }
-  _bumpHeadWatermark(tenant, seq) {
+  _bumpHeadWatermark(tenant, seq, force = false) {
+    // Fast path: a bump that does not advance past the last-known durable
+    // value is a no-op — _auditIndex calls this on every fold, so the lock
+    // and file parse only happen when the committed head actually moved.
+    if (!force) {
+      const known = this._headWatermark(tenant);
+      if (known !== undefined && seq <= known) return;
+    }
     try {
       this._headFileLock(staleHold => {
         if (staleHold()) return;
         const tenants = this._readHeadWatermark() ?? {};
-        if ((tenants[tenant] ?? 0) >= seq) return;
+        if ((tenants[tenant] ?? 0) >= seq) { this.#headWm.set(tenant, tenants[tenant]); return; }
         tenants[tenant] = seq;
         const path = join(this.directory, 'head-watermark.json');
         mkdirSync(this.directory, { recursive: true, mode: 0o700 });
         writeFileSync(`${path}.tmp`, canonical({ format: 'IF-HEADMARK-1', tenants }) + '\n', { mode: 0o600 });
         renameSync(`${path}.tmp`, path);
+        this.#headWm.set(tenant, seq);
       });
     } catch { /* a held lock degrades the watermark to the in-memory guard, never a write wedge */ }
   }
   _headWatermark(tenant) {
+    if (this.#headWm.has(tenant)) return this.#headWm.get(tenant);
     const wm = this._readHeadWatermark();
-    if (wm !== null) return wm[tenant];
+    if (wm !== null) { this.#headWm.set(tenant, wm[tenant]); return wm[tenant]; }
     // Bootstrap: absent file adopts the currently committed head (or 0 for
     // a fresh store) — covers first-contact upgrades; a later absence is
     // suspicious but can only launder a consistent rollback (residual).
     const head = this._chainHead(tenant);
     const adopted = head && head !== 'corrupt' ? head.seq : 0;
-    this._bumpHeadWatermark(tenant, adopted);
+    // Cache before bumping so the bump's own fast-path read does not
+    // re-enter the bootstrap path; force the write — the durable floor
+    // must exist from the first contact, not only after the head moves.
+    this.#headWm.set(tenant, adopted);
+    this._bumpHeadWatermark(tenant, adopted, true);
     return adopted;
   }
   persistVault() {
