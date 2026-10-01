@@ -69,7 +69,10 @@ export function explain(decision, model = 'explain-v1') {
   const verdict = decision.decision ?? decision.verdict;
   const reasons = (decision.reasons ?? []).map(r => {
     const code = typeof r === 'string' ? r : r?.code, message = typeof r === 'string' ? null : r?.message;
-    return { code, text: REASON_TEXT[code] ?? message ?? `policy returned ${code}` };
+    // Own-property lookup — a code like 'constructor' must fall through to
+    // the caller's message, never resolve a Function from the prototype
+    // (w18-issuerd F-14).
+    return { code, text: (Object.hasOwn(REASON_TEXT, code) ? REASON_TEXT[code] : undefined) ?? message ?? `policy returned ${code}` };
   });
   return { model: m.version, verdict, reasons, advisory: true, text: `${verdict}: ` + (reasons.map(r => r.text).join('; ') || 'request satisfied all policy conditions') };
 }

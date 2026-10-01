@@ -29,10 +29,12 @@ test('w18-fv F7: stripped device pins diverge the anchored plan digest', t => {
   const h = fixture(t);
   h.f.createCeremony(h.p('security'), { ceremony_id: 'cer-pin', purpose: 'key.recovery', threshold: 2, custodians: CUST2, valid_until: h.now() + 3600000, min_delay_ms: 120000, devices: { 'custodian-1': 'custodian-1-device' } });
   flipCeremony(h, 'cer-pin', r => { r.devices = {}; });
-  h.f.splitCeremonySecret(h.p('security'), 'cer-pin', randomBytes(32).toString('base64url'));
+  // w19-lifecycle F7: a plan-diverged row cannot even collect lifecycle
+  // events — the anchored-plan check runs before dealing or consent.
+  assert.throws(() => h.f.splitCeremonySecret(h.p('security'), 'cer-pin', randomBytes(32).toString('base64url')), hasCode('INV-409-INTEGRITY'), 'plan-diverged row cannot be dealt shares');
   const committed = h.f.store.must('acme', 'ceremony', 'cer-pin');
-  for (const subject of CUST2) h.f.acknowledgeCeremony(h.p(subject), signAcknowledgement(committed, subject, h.setup.custodianKeys.acme[subject], h.now()));
-  assert.equal(h.f.custodianQuorum('acme', h.f.store.must('acme', 'ceremony', 'cer-pin')).live, 0, 'plan-digest divergence kills the quorum anchor');
+  for (const subject of CUST2) assert.throws(() => h.f.acknowledgeCeremony(h.p(subject), signAcknowledgement(committed, subject, h.setup.custodianKeys.acme[subject], h.now())), hasCode('INV-409-INTEGRITY'), 'plan-diverged row collects no anchored acks');
+  assert.equal(h.f.custodianQuorum('acme', committed).live, 0, 'plan-digest divergence kills the quorum anchor');
 });
 
 // F2: lifecycle is chain-anchored — a committed→planned flip cannot re-deal.
@@ -95,7 +97,12 @@ test('w18-fv F5: deleting a certificate row cannot bypass the rewind veto', t =>
   const exp = certificate.payload.expires_at;
   h.f.store.db.prepare("DELETE FROM records WHERE tenant='acme' AND kind='certificate'").run();
   h.f.store.db.prepare('UPDATE clock SET last=? WHERE id=1').run(exp + 1);
-  assert.throws(() => h.f.recoverClock(h.p('security')), hasCode('INV-503-TIME'), 'a missing anchored row is veto evidence, not a skip');
+  // w19-lifecycle F3: the tampered tenant lands in unverifiable_tenants —
+  // recovery proceeds for the rest of the deployment while the tampered
+  // tenant stays wedged until a chain seal.
+  const out = h.f.recoverClock(h.p('security'));
+  assert.ok(out.unverifiable_tenants.includes('acme'), 'missing anchored row quarantines its tenant, not the recovery');
+  assert.throws(() => h.proposed(), hasCode('INV-503-TIME'), 'the tampered tenant stays halted — veto evidence preserved');
 });
 
 // F12: one tenant's poisoned chain cannot veto clock recovery for the rest.

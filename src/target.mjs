@@ -18,8 +18,11 @@ import { requireThat, InvariantError } from './errors.mjs';
 const AAD = (...parts) => canonical(parts);
 export class SimulatedTarget {
   _dec(value, tenant, tuple) { return decrypt(value, this.key(tenant), tuple); }
-  constructor(path, tenantKeys) {
+  constructor(path, tenantKeys, { aadDedup } = {}) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 }); this.db = new DatabaseSync(path); chmodSync(path, 0o600); this.keys = tenantKeys;
+    // Shared with the ledger store — the same ciphertext must never mint
+    // canonical bindings on both sides of a cross-DB graft (w19-aad W19-1).
+    this._aadDedup = aadDedup ?? new Map();
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=30000; PRAGMA secure_delete=ON;
       CREATE TABLE IF NOT EXISTS resources(tenant TEXT, id TEXT, version INTEGER, value TEXT, PRIMARY KEY(tenant,id));
       CREATE TABLE IF NOT EXISTS transactions(tenant TEXT,id TEXT,value TEXT,PRIMARY KEY(tenant,id));
@@ -48,6 +51,14 @@ export class SimulatedTarget {
       ['secrets_registry', 'value', r => [AAD('target', 'secret', r.tenant, r.secret_id), `${r.tenant}/secret/${r.secret_id}`], r => [r.tenant, r.secret_id]],
       ['grants', 'value', r => [AAD('target', 'grant', r.tenant, r.grant_id), `${r.tenant}/grant/${r.grant_id}`], r => [r.tenant, r.grant_id]],
     ];
+    // Same accounting + transplant defenses as the ledger store's
+    // migration: identical bytes under two identities quarantines BOTH
+    // rows, slash-bearing identities stay sealed, and nothing is skipped
+    // silently (w19-aad W19-1/W19-2).
+    const stats = this.aadMigration = new Map();
+    const mark = (tenant, k) => { const s = stats.get(tenant) ?? { migrated: 0, transplants: 0, ambiguous: 0, skipped: 0 }; s[k]++; stats.set(tenant, s); };
+    const seen = this._aadDedup;
+    const slashy = (...parts) => parts.some(p => typeof p === 'string' && p.includes('/'));
     this.db.exec('BEGIN IMMEDIATE');
     try {
       for (const [table, col, aads, pks] of spec) {
@@ -58,14 +69,30 @@ export class SimulatedTarget {
         for (const r of this.db.prepare(`SELECT * FROM ${table}`).all()) {
           const [tuple, legacy] = aads(r);
           try { decrypt(r[col], this.key(r.tenant), tuple); continue; } catch { /* legacy-sealed or corrupt */ }
+          const prior = seen.get(r[col]);
+          if (prior) { prior.revert?.(); mark(r.tenant, 'transplants'); continue; }
+          if (slashy(r.tenant, r.id, r.dataset, r.row_id, r.secret_id, r.grant_id)) { seen.set(r[col], {}); mark(r.tenant, 'ambiguous'); continue; }
           try {
             const plain = decrypt(r[col], this.key(r.tenant), legacy);
-            this.db.prepare(`UPDATE ${table} SET ${col}=? WHERE ${where}`).run(encrypt(plain, this.key(r.tenant), tuple), ...pks(r));
-          } catch { /* corrupt — left sealed, fails on read as before */ }
+            const upd = this.db.prepare(`UPDATE ${table} SET ${col}=? WHERE ${where}`), orig = r[col];
+            seen.set(orig, { revert: () => upd.run(orig, ...pks(r)) });
+            upd.run(encrypt(plain, this.key(r.tenant), tuple), ...pks(r));
+            mark(r.tenant, 'migrated');
+          } catch { mark(r.tenant, 'skipped'); }
         }
       }
       this.db.exec('COMMIT');
-    } catch (e) { if (this.db.isTransaction) this.db.exec('ROLLBACK'); throw e; }
+      // Truncate post-migration so dead legacy ciphertext does not linger
+      // in the WAL (w19-aad W19-3).
+      let migrated = 0; for (const s of stats.values()) migrated += s.migrated;
+      if (migrated > 0) { try { this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); } catch { /* contention: residue clears at next open */ } }
+    } catch (e) {
+      if (this.db.isTransaction) this.db.exec('ROLLBACK');
+      // BEGIN IMMEDIATE contention surfaces in the ledger taxonomy, not
+      // as a raw sqlite error (w19-aad W19-4).
+      if (e?.errcode === 5 || /database is locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
+      throw e;
+    }
   }
   close() { this.db.close(); }
   tx(fn) {

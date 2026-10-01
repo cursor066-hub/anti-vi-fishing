@@ -55,7 +55,7 @@ test('HTTP UX-001: full propose -> evidence -> independent signatures -> ALLOW -
   const input = proposal(type, h.actor(), h.f.target.state('acme', resource), { vendor_id: 'vendor-1', bank_account: 'TESTBANK000004', currency: 'EUR' }, h.now(), { action: { type, target_resource: resource, purpose: 'API contract integration' } });
   const created = await h.request('/v1/action-capsules', { method: 'POST', body: { input, signature: signed(input, h.setup.identityKeys.acme.operator, 'capsule-intent') }, headers: { 'Idempotency-Key': randomUUID() } }); assert.equal(created.status, 201); const r = created.data, id = r.capsule.capsule_id;
   for (const issuer of ['bank', 'registry']) {
-    const payload = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: r.capsule_digest, kind: 'ownership', content_digest: 'a'.repeat(64), acquired_at: h.now(), expires_at: h.now() + 600000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'HTTP synthetic fixture', retention_until: h.now() + 900000, claims: { account: 'TESTBANK000004', owner_id: resource } };
+    const payload = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: r.capsule_digest, kind: 'ownership', content_digest: 'a'.repeat(64), acquired_at: h.now(), expires_at: h.now() + 600000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'HTTP synthetic fixture', retention_until: h.now() + 900000, issuer_version: '1.0.0', claims: { account: 'TESTBANK000004', owner_id: resource } };
     assert.equal((await h.request(`/v1/action-capsules/${id}/evidence`, { method: 'POST', body: signed(payload, h.setup.issuerKeys.acme[issuer], 'evidence') })).status, 201);
   }
   for (const subject of ['custodian-1', 'custodian-2']) {

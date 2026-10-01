@@ -18,6 +18,7 @@ export function loadIssuers(directory) {
   // Null-prototype registry: issuer names like 'constructor' must not resolve
   // via Object.prototype (issuerd-audit LOW-4).
   const issuers = Object.create(null);
+  const parsed = [];
   for (const file of readdirSync(directory)) {
     if (!file.endsWith('.issuer.json')) continue;
     // These files carry private signing keys — group/world-readable specs
@@ -41,7 +42,17 @@ export function loadIssuers(directory) {
     // the vault applies per entry (w11-fixverify R3).
     const derivedPublic = (() => { try { return createPublicKey(createPrivateKey(spec.key.private_key)).export({ type: 'spki', format: 'pem' }).trim(); } catch { return null; } })();
     requireThat(derivedPublic !== null && derivedPublic === spec.key.public_key.trim(), 'INV-400-SCHEMA', 'Issuer key public/private material is inconsistent');
-    for (const [kind, rule] of Object.entries(spec.kinds)) { identifier(kind, 'kind'); requireThat(rule && typeof rule === 'object' && !Array.isArray(rule), 'INV-400-SCHEMA', `Kind rule ${kind} must be an object`); }
+    for (const [kind, rule] of Object.entries(spec.kinds)) {
+      identifier(kind, 'kind'); requireThat(rule && typeof rule === 'object' && !Array.isArray(rule), 'INV-400-SCHEMA', `Kind rule ${kind} must be an object`);
+      // Semantics, not only shape (w18-issuerd F-6): a string ttl_ms would
+      // mint dead string-dated envelopes, an object-valued expect would
+      // crash every request, and a non-string extract would sign nonsense.
+      requireThat(rule.lookup === undefined || typeof rule.lookup === 'string', 'INV-400-SCHEMA', `Kind rule ${kind} lookup must be a string`);
+      requireThat(rule.ttl_ms === undefined || (Number.isSafeInteger(rule.ttl_ms) && rule.ttl_ms > 0), 'INV-400-SCHEMA', `Kind rule ${kind} ttl_ms must be a positive integer`);
+      requireThat(rule.extract === undefined || (Array.isArray(rule.extract) && rule.extract.every(f => typeof f === 'string')), 'INV-400-SCHEMA', `Kind rule ${kind} extract must be an array of field names`);
+      requireThat(rule.expect === undefined || (rule.expect && typeof rule.expect === 'object' && !Array.isArray(rule.expect) && Object.values(rule.expect).every(v => v === null || typeof v !== 'object')), 'INV-400-SCHEMA', `Kind rule ${kind} expect values must be scalars`);
+      requireThat(rule.confidence === undefined || (Number.isSafeInteger(rule.confidence) && rule.confidence >= 0 && rule.confidence <= 100), 'INV-400-SCHEMA', `Kind rule ${kind} confidence must be an integer 0..100`);
+    }
     if (spec.token_expires_at !== undefined) requireThat(Number.isSafeInteger(spec.token_expires_at), 'INV-400-SCHEMA', 'token_expires_at must be an integer epoch-ms');
     // A malformed *_token_digest must fail at boot: bearerMatches compares
     // fixed-length digests and timingSafeEqual throws RangeError on any
@@ -54,13 +65,28 @@ export function loadIssuers(directory) {
     if (spec.tenant !== undefined) requireThat(/^[a-z][a-z0-9-]{1,31}$/.test(spec.tenant), 'INV-400-SCHEMA', 'Issuer tenant must use the tenant charset');
     requireThat(!spec.issuer.includes(':'), 'INV-400-SCHEMA', 'Issuer name must not contain ":"');
     requireThat(['authoritative', 'communication', 'device', 'counterparty'].includes(spec.channel), 'INV-400-SCHEMA', 'Unsupported issuer channel');
-    // Registry key: '<tenant>:<issuer>' when the spec carries a tenant, so
-    // two tenants can run same-named issuers with independent keys/records.
-    // A bare '<issuer>' alias is registered only when unambiguous.
+    parsed.push(spec);
+  }
+  // Registry key: '<tenant>:<issuer>' when the spec carries a tenant, so
+  // two tenants can run same-named issuers with independent keys/records.
+  // Registration is two-pass — every spec keys first, then bare aliases are
+  // decided by the WHOLE set — so readdir order can never pick between a
+  // silent shadow and a boot refusal (w18-issuerd F-7).
+  for (const spec of parsed) {
     const key = spec.tenant ? `${spec.tenant}:${spec.issuer}` : spec.issuer;
     requireThat(!Object.hasOwn(issuers, key), 'INV-409-CONFLICT', `Duplicate issuer ${key}`, 409);
     issuers[key] = spec;
-    if (!Object.hasOwn(issuers, spec.issuer)) issuers[spec.issuer] = spec; else if (issuers[spec.issuer] !== spec) issuers[spec.issuer] = { ambiguous: true };
+  }
+  const bareClaims = new Map();
+  for (const spec of parsed) { const s = bareClaims.get(spec.issuer) ?? new Set(); s.add(spec); bareClaims.set(spec.issuer, s); }
+  for (const [name, claimants] of bareClaims) {
+    if (claimants.size > 1) {
+      // A bare name plus a scoped claim can never resolve deterministically
+      // — refuse the ambiguous registry outright instead of shadowing the
+      // untenanted issuer by file order.
+      requireThat(![...claimants].some(c => !c.tenant), 'INV-409-CONFLICT', `Issuer name ${name} is claimed by both a bare and a tenant-scoped spec`, 409);
+      issuers[name] = { ambiguous: true };
+    } else if (!Object.hasOwn(issuers, name)) issuers[name] = [...claimants][0];
   }
   requireThat(Object.keys(issuers).length > 0, 'INV-503-CONFIG', 'No issuers configured', 503);
   return issuers;
@@ -112,26 +138,33 @@ export function answerQuery(issuer, request, now) {
     advisory: issuer.channel === 'communication' ? true : Boolean(rule.advisory), dependencies: request.dependencies ?? [],
     retention_until: now + (rule.ttl_ms ?? 300000) + 86400000
   };
-  const prov = suffix => `issuer:${issuer.issuer}@${issuer.version} record:${key.split(':')[0]}:${suffix} transformation:direct`;
+  // The provenance string is uniform for hit and miss alike — a signed
+  // 'UNSATISFIED' vs '*' distinction would make the envelope itself an
+  // authenticated record-existence oracle (w18-issuerd F-3).
+  const prov = `issuer:${issuer.issuer}@${issuer.version} record:${key.split(':')[0]}:lookup transformation:direct`;
   if (!record) {
     // A missing record is a signed `conflict`, not an exception — the response
     // shape is identical to a claim mismatch, so /issue cannot be used to
     // enumerate the record store by guessing lookup keys (issuerd-audit MED-5).
-    return signed({ ...base, claim: 'conflict', content_digest: contentMac(issuer, { issuer: issuer.issuer, key, record: null }), claims: {}, provenance: prov('UNSATISFIED'), issuer_version: issuer.version }, issuer.key, 'evidence');
+    return signed({ ...base, claim: 'conflict', content_digest: contentMac(issuer, { issuer: issuer.issuer, key, record: null }), claims: {}, provenance: prov, issuer_version: issuer.version }, issuer.key, 'evidence');
   }
   let claim = 'supports';
-  const extracted = {}, matched = new Set();
+  const extracted = {};
+  // Objects compare by canonical form — String() on a null-prototype record
+  // value would throw TypeError per-request instead of answering 'conflict'
+  // (w18-issuerd F-6).
+  const scalar = v => v === null || typeof v !== 'object' ? String(v) : canonical(v);
   for (const [field, expected] of Object.entries(rule.expect ?? {})) {
     const want = typeof expected === 'string' && expected.includes('${') ? interpolate(expected, request.claims ?? {}) : expected;
     extracted[field] = record[field] ?? null;
     const got = record[field];
     // Digest-vs-digest equality — early-exit string compare would leak
     // match depth on credential-shaped fields (w15-timing F5).
-    if (ctEqual(digest(String(got)), digest(String(want)))) matched.add(field); else claim = 'conflict';
+    if (!ctEqual(digest(scalar(got)), digest(scalar(want)))) claim = 'conflict';
   }
   for (const f of rule.extract ?? []) {
     extracted[f] = record[f] ?? null;
-    if (ctEqual(digest(String(record[f])), digest(String(request.claims?.[f])))) matched.add(f);
+    void ctEqual(digest(scalar(record[f])), digest(scalar(request.claims?.[f])));
   }
   // A conflict answer reveals nothing: echoing even the correctly-guessed
   // fields is a per-field value-confirmation oracle (w5 F-7).
@@ -162,7 +195,7 @@ export function answerQuery(issuer, request, now) {
   const expectBoundSubject = Object.values(rule.expect ?? {}).some(v => typeof v === 'string' && v.includes('${claims.subject_id}'));
   const resolvedSubject = record.subject_id ?? (Object.hasOwn(lookupBound, 'subject_id') || expectBoundSubject ? request.claims?.subject_id : undefined);
   const revealed = claim === 'conflict' ? {} : { ...lookupBound, ...extracted, ...(resolvedSubject === undefined ? {} : { subject_id: resolvedSubject }) };
-  return signed({ ...base, claim, content_digest: contentMac(issuer, { issuer: issuer.issuer, key, record }), claims: revealed, provenance: prov('*'), issuer_version: issuer.version }, issuer.key, 'evidence');
+  return signed({ ...base, claim, content_digest: contentMac(issuer, { issuer: issuer.issuer, key, record }), claims: revealed, provenance: prov, issuer_version: issuer.version }, issuer.key, 'evidence');
 }
 
 // Evidence content bindings are keyed under the issuer's own private key —
@@ -201,7 +234,10 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
     if (!logPath) return;
     sequence.n += 1;
     const record = { sequence: sequence.n, previous: sequence.previous, ...entry, time: clock() };
-    sequence.previous = digest(record);
+    // The chain itself is keyed — an unkeyed sha256 tail can be recomputed
+    // after selective deletion; HMAC under the issuers' custody makes a
+    // rewritten history diverge at the next append (w18-issuerd F-9).
+    sequence.previous = logMac(record);
     mkdirSync(resolve(logPath, '..'), { recursive: true });
     // Refuse symlinked log paths — appending through a planted link would
     // write signed issuance records into an attacker-chosen file
@@ -260,7 +296,10 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
       // authority alone (w10-fixverify F-8).
       const expected = `${req.socket.localAddress}:${req.socket.localPort}`, expected6 = `[${req.socket.localAddress}]:${req.socket.localPort}`;
       requireThat(req.headers.host === expected || req.headers.host === expected6, 'INV-400-HOST', 'Unrecognised host', 400);
-      const loopback = ['127.0.0.1', '::1', 'localhost'].includes(host);
+      // Literal loopback addresses only — 'localhost' resolves through
+      // DNS and a resolver quirk could route the check off-box
+      // (w18-issuerd F-13).
+      const loopback = ['127.0.0.1', '::1'].includes(host);
       // Whether the presented bearer authorises THIS issuer — boolean, so
       // callers can fold it into the same 404 as a missing name and a
       // wrong-issuer bearer learns nothing (w9-deploy F4). `issue` scope
@@ -355,7 +394,15 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
       }
       if (req.method === 'POST' && (m = /^\/v1\/issuers\/([A-Za-z0-9_-]+)\/issue$/.exec(url.pathname))) {
         const chunks = []; let size = 0;
-        for await (const c of req) { size += c.length; requireThat(size <= 262144, 'INV-413-BODY', 'Request too large', 413); chunks.push(c); }
+        try {
+          for await (const c of req) { size += c.length; requireThat(size <= 262144, 'INV-413-BODY', 'Request too large', 413); chunks.push(c); }
+        } catch (e) {
+          // Oversize probes are probes too: they consume the same bucket
+          // and land in the issuance log — a >256KiB flood must not be
+          // invisible to provenance (w18-issuerd F-2).
+          if (!anyBearer('issue')) { take('probe'); issuanceLog({ issuer: 'unknown', request_digest: logMac({ wire_bytes: size }), refused: true, unauthenticated: true, malformed: true, code: e.code ?? 'INV-413-BODY' }); }
+          throw e;
+        }
         let request;
         try {
           // Same strict content contract as the main API — any other
@@ -377,7 +424,11 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
           if (!anyBearer('issue')) { take('probe'); issuanceLog({ issuer: 'unknown', request_digest: logMac(request ?? { wire_bytes: size }), refused: true, unauthenticated: true, malformed: true, code: e.code ?? 'INV-400-SCHEMA' }); }
           throw e;
         }
-        if (!anyBearer('issue')) { take('probe'); issuanceLog({ issuer: 'unknown', request_digest: logMac(request), refused: true, unauthenticated: true, code: 'INV-401-AUTH' }); } gate('issue'); take('issue');
+        // 'refused' is logged only when the request is actually refused —
+        // a tokenless open-loopback issue must not precede every success
+        // with a phantom denial entry (w18-issuerd F-12).
+        try { gate('issue'); } catch (e) { if (!anyBearer('issue')) { take('probe'); issuanceLog({ issuer: 'unknown', request_digest: logMac(request), refused: true, unauthenticated: true, code: e.code ?? 'INV-401-AUTH' }); } throw e; }
+        take('issue');
         const issuer = resolveIssuer(m[1], request.tenant_id);
         // Authentication failures are logged to the issuance chain too —
         // probing must not be invisible to provenance audit (MED-5) — but
@@ -424,6 +475,12 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
 }
 
 export function writeIssuer(directory, spec) {
+  // The issuer name becomes a filename — bind it to the same identifier
+  // charset the loader enforces so a crafted spec can never write outside
+  // the issuer directory or produce a spec that cannot load back
+  // (w18-issuerd F-10).
+  identifier(spec?.issuer, 'issuer');
+  requireThat(!spec.issuer.includes(':'), 'INV-400-SCHEMA', 'Issuer name must not contain ":"');
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   writeFileSync(join(directory, `${spec.issuer}.issuer.json`), canonical(spec) + '\n', { mode: 0o600, flag: 'wx' });
 }

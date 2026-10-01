@@ -365,7 +365,7 @@ test('COV-001 COV-005 COV-009 COV-010: path classes, owner tasks, history replay
   // COV-010: a valid technical-validation envelope closes the unknown task.
   const path = h.f.store.must('acme', 'coverage', 'path-a');
   const claims = { capsule_digest: digest(path) };
-  const payload = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: digest(path), kind: 'technical_validation', content_digest: digest({ probe: 'ok' }), acquired_at: h.now(), expires_at: h.now() + 60000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'manual probe', retention_until: h.now() + 120000, claims };
+  const payload = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: digest(path), kind: 'technical_validation', content_digest: digest({ probe: 'ok' }), acquired_at: h.now(), expires_at: h.now() + 60000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'manual probe', retention_until: h.now() + 120000, issuer_version: '1.0.0', claims };
   const envelope = signed(payload, h.setup.issuerKeys.acme['security-ops'], 'evidence');
   const out = h.f.technicalValidation(h.p('security'), 'path-a', envelope);
   // A passed independent bypass test is the ENFORCED criterion — stronger

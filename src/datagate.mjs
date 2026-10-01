@@ -47,7 +47,10 @@ export const TRANSFORMS = {
   // The last-two reveal would fully disclose any value of two characters
   // or fewer — short cells suppress to a fixed-length mark (w10-datagate F4).
   mask: (value, field) => value === null || value === undefined ? null : (String(value).length <= 2 ? '\u2022\u2022\u2022\u2022' : '\u2022\u2022\u2022\u2022' + String(value).slice(-2)),
-  tokenise: (value, field, ctx) => 'tok:' + createHmac('sha256', ctx.tenantKey).update(`${ctx.tenant}/${ctx.dataset}/${field}/${canonical(value)}`).digest('hex').slice(0, 24),
+  // Tuple-keyed HMAC: a slash-joined input is ambiguous across component
+  // boundaries — '(a,b/c)' and '(a/b,c)' would tokenise identically and
+  // weaken cross-dataset unlinkability (w19-aad adjacent observation).
+  tokenise: (value, field, ctx) => 'tok:' + createHmac('sha256', ctx.tenantKey).update(canonical({ tenant: ctx.tenant, dataset: ctx.dataset, field, value })).digest('hex').slice(0, 24),
   drop: () => null,
   constant: (value, field, ctx, arg) => arg ?? null,
   // Generalization: replace a numeric value with a fixed-size bucket range.

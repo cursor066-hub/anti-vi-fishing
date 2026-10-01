@@ -43,7 +43,10 @@ export function fixture(t, tenants = ['acme', 'globex']) {
       : kind === 'payment_confirmation' ? { transaction_id: record.capsule.capsule_id }
       : kind === 'device_health' ? { device_id: record.capsule.actor.device_id }
       : {};
-    const payload = { evidence_id: randomUUID(), tenant_id: tenant, capsule_digest: record.capsule_digest, kind, content_digest: digest({ source: 'synthetic-only', claim }), acquired_at: time, expires_at: expiry, confidence, advisory, claim, dependencies, provenance: 'Synthetic test issuer; no external authority assertion', retention_until: expiry + 60000, claims };
+    // Registered issuers declare a version — envelopes must pin it or the
+    // attach gate rejects the drift (w18-issuerd F-8).
+    const issEntry = Object.values(setup.config.tenants[tenant].issuers ?? {}).find(i => i.name === issuer || i.issuer_id === issuer);
+    const payload = { evidence_id: randomUUID(), tenant_id: tenant, capsule_digest: record.capsule_digest, kind, content_digest: digest({ source: 'synthetic-only', claim }), acquired_at: time, expires_at: expiry, confidence, advisory, claim, dependencies, provenance: 'Synthetic test issuer; no external authority assertion', retention_until: expiry + 60000, claims, ...(issEntry?.version !== undefined ? { issuer_version: issEntry.version } : {}) };
     const key = setup.issuerKeys[tenant][issuer], envelope = signed(payload, key, 'evidence');
     f.attachEvidence(p('operator', tenant), record.capsule.capsule_id, envelope); return envelope;
   }

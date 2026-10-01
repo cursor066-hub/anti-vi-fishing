@@ -45,7 +45,7 @@ test('w10-dg F2: dataset-wide coverage binds across subject identities', t => {
   // though their own subject ledger is empty.
   const principal = h.p('policy-admin');
   const r = h.proposed('data.export', { dataset: 'dataset-1', columns: ['id'], row_ids: ['row-2'], max_rows: 1, classification: 'internal', jurisdiction: 'EU' }, { action: { type: 'data.export', target_resource: 'dataset-1', purpose: 'Operations' }, destination: 'customer-vault', policy_version: 2 }, principal);
-  const evPayload = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: r.capsule_digest, kind: 'dataset_authority', content_digest: digest({ source: 'synthetic-only', claim: 'supports' }), acquired_at: h.now(), expires_at: h.now() + 600000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'Synthetic test issuer; no external authority assertion', retention_until: h.now() + 660000, claims: { dataset: 'dataset-1' } };
+  const evPayload = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: r.capsule_digest, kind: 'dataset_authority', content_digest: digest({ source: 'synthetic-only', claim: 'supports' }), acquired_at: h.now(), expires_at: h.now() + 600000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'Synthetic test issuer; no external authority assertion', retention_until: h.now() + 660000, issuer_version: '1.0.0', claims: { dataset: 'dataset-1' } };
   h.f.attachEvidence(principal, r.capsule.capsule_id, signed(evPayload, h.setup.issuerKeys.acme.registry, 'evidence'));
   h.approve(r, 1);
   const cert = h.f.certificate(principal, r.capsule.capsule_id);

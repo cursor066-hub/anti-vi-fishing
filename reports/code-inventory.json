@@ -2,8 +2,8 @@
   "generated_by": "scripts/report.mjs",
   "files": {
     "src/advisory.mjs": {
-      "lines": 102,
-      "bytes": 6489
+      "lines": 105,
+      "bytes": 6716
     },
     "src/bootstrap.mjs": {
       "lines": 262,
@@ -22,8 +22,8 @@
       "bytes": 7186
     },
     "src/connectors.mjs": {
-      "lines": 139,
-      "bytes": 9012
+      "lines": 156,
+      "bytes": 10816
     },
     "src/coverage.mjs": {
       "lines": 73,
@@ -34,20 +34,20 @@
       "bytes": 5927
     },
     "src/datagate.mjs": {
-      "lines": 135,
-      "bytes": 9657
+      "lines": 138,
+      "bytes": 9888
     },
     "src/errors.mjs": {
       "lines": 10,
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 3341,
-      "bytes": 270182
+      "lines": 3449,
+      "bytes": 278768
     },
     "src/issuerd.mjs": {
-      "lines": 448,
-      "bytes": 33280
+      "lines": 505,
+      "bytes": 37206
     },
     "src/keystore.mjs": {
       "lines": 170,
@@ -82,12 +82,12 @@
       "bytes": 3876
     },
     "src/store.mjs": {
-      "lines": 389,
-      "bytes": 27368
+      "lines": 444,
+      "bytes": 31137
     },
     "src/target.mjs": {
-      "lines": 302,
-      "bytes": 22106
+      "lines": 329,
+      "bytes": 23962
     },
     "web/app.js": {
       "lines": 230,
@@ -194,20 +194,20 @@
       "bytes": 10132
     },
     "tests/helpers.mjs": {
-      "lines": 146,
-      "bytes": 11843
+      "lines": 149,
+      "bytes": 12193
     },
     "tests/http-concurrency-ui.test.mjs": {
       "lines": 246,
-      "bytes": 21037
+      "bytes": 21062
     },
     "tests/issuerd.test.mjs": {
-      "lines": 115,
-      "bytes": 9093
+      "lines": 119,
+      "bytes": 9597
     },
     "tests/ledger2.test.mjs": {
       "lines": 415,
-      "bytes": 29498
+      "bytes": 29523
     },
     "tests/ledger3.test.mjs": {
       "lines": 405,
@@ -239,7 +239,7 @@
     },
     "tests/w10-cert-datagate.test.mjs": {
       "lines": 217,
-      "bytes": 14197
+      "bytes": 14222
     },
     "tests/w10-fixverify.test.mjs": {
       "lines": 238,
@@ -294,12 +294,24 @@
       "bytes": 6769
     },
     "tests/w18-fixverify.test.mjs": {
-      "lines": 240,
-      "bytes": 17893
+      "lines": 247,
+      "bytes": 18548
     },
     "tests/w18-http.test.mjs": {
       "lines": 97,
       "bytes": 6168
+    },
+    "tests/w19-aad.test.mjs": {
+      "lines": 190,
+      "bytes": 10921
+    },
+    "tests/w19-issuerd.test.mjs": {
+      "lines": 236,
+      "bytes": 18083
+    },
+    "tests/w19-lifecycle.test.mjs": {
+      "lines": 229,
+      "bytes": 16016
     },
     "tests/w5-mutations.test.mjs": {
       "lines": 192,
@@ -331,7 +343,7 @@
     },
     "tests/w7-seam.test.mjs": {
       "lines": 180,
-      "bytes": 13508
+      "bytes": 13533
     },
     "tests/w8-canonical.test.mjs": {
       "lines": 161,
@@ -339,7 +351,7 @@
     },
     "tests/w8-composite.test.mjs": {
       "lines": 193,
-      "bytes": 14785
+      "bytes": 14810
     },
     "tests/w8-fixverify.test.mjs": {
       "lines": 86,
@@ -370,6 +382,6 @@
       "bytes": 6499
     }
   },
-  "total_files": 92,
-  "total_lines": 18319
+  "total_files": 95,
+  "total_lines": 19258
 }

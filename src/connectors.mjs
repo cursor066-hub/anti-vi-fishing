@@ -31,12 +31,15 @@ export function signedManifest(input, key) {
   return signed(createManifest(input), key, 'connector-manifest');
 }
 
-export function verifyManifest(envelope, issuers, now) {
+export function verifyManifest(envelope, issuers, now, { max_age_ms } = {}) {
   const m = verifySigned(envelope, issuers, 'connector-manifest');
   fields(m, ['connector_id', 'version', 'domain', 'actions', 'permissions', 'limitations', 'idempotency', 'coverage_implications', 'issued_at', 'expires_at'], ['lifecycle']);
   requireThat(m.expires_at > now, 'INV-401-CONNECTOR', 'Connector manifest expired', 401);
   if (m.lifecycle) requireThat(m.lifecycle.end_of_support_at > now, 'INV-410-CONNECTOR', `Connector end of support reached; migrate to ${m.lifecycle.superseded_by}`, 410);
   integer(m.issued_at, 'issued', 1, now + 300000);
+  // The upper bound alone cannot bound staleness — callers that need a
+  // freshness floor must declare it (w18-issuerd F-11).
+  if (max_age_ms !== undefined) requireThat(m.issued_at >= now - max_age_ms, 'INV-401-CONNECTOR', 'Connector manifest older than the declared freshness floor', 401);
   return m;
 }
 
@@ -49,7 +52,10 @@ export async function httpJson(url, { method = 'GET', body, timeout_ms = 10000, 
   // issuer mesh); any remote endpoint must be TLS (w5 F-8).
   // '0.0.0.0' is NOT a loopback address — it is the wildcard bind; some
   // systems route it to an arbitrary interface (w9-deploy F10).
-  const LOOPBACK = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
+  // Literal addresses only — a DNS-resolved name can be pointed off-box by
+  // a resolver quirk; the cleartext exception binds to addresses
+  // (w18-issuerd F-13).
+  const LOOPBACK = new Set(['127.0.0.1', '::1', '[::1]']);
   requireThat(target.protocol === 'https:' || (target.protocol === 'http:' && LOOPBACK.has(target.hostname)), 'INV-400-CONNECTOR', `Refusing cleartext http to non-loopback host ${target.hostname}`, 400);
   const transport = target.protocol === 'https:' ? https : http;
   return await new Promise((resolve, reject) => {
@@ -132,6 +138,17 @@ export function driftCheck(registered, observed, now) {
   else if (removed.length) changes.push({ field: 'actions_reduced', was: sorted(registered.actions), now: sorted(observed.actions), informational: true });
   cmp('channel', registered.channel, observed.channel);
   cmp('key_id', registered.key_id, observed.key_id);
+  // Permissions and limitations are trust fields too — a manifest that
+  // quietly grows its permission set is escalation, and shrinking the
+  // declared set is a recorded informational change (w18-issuerd F-15).
+  const permAdded = (observed.permissions ?? []).filter(x => !(registered.permissions ?? []).includes(x));
+  const permRemoved = (registered.permissions ?? []).filter(x => !(observed.permissions ?? []).includes(x));
+  if (permAdded.length) changes.push({ field: 'permissions', was: sorted(registered.permissions), now: sorted(observed.permissions), escalated: permAdded });
+  else if (permRemoved.length) changes.push({ field: 'permissions_reduced', was: sorted(registered.permissions), now: sorted(observed.permissions), informational: true });
+  const limAdded = (observed.limitations ?? []).filter(x => !(registered.limitations ?? []).includes(x));
+  const limRemoved = (registered.limitations ?? []).filter(x => !(observed.limitations ?? []).includes(x));
+  if (limRemoved.length) changes.push({ field: 'limitations', was: sorted(registered.limitations), now: sorted(observed.limitations), escalated: limRemoved.map(l => `dropped:${l}`) });
+  else if (limAdded.length) changes.push({ field: 'limitations_added', was: sorted(registered.limitations), now: sorted(observed.limitations), informational: true });
   const configDigest = digest({ connector_id: observed.connector_id ?? null, version: observed.version ?? null, actions: observed.actions ?? [], permissions: observed.permissions ?? [] });
   const drifted = changes.some(c => !c.informational);
   return { drifted, changes, configuration_digest: configDigest, checked_at: now, action: drifted ? 'coverage->UNKNOWN pending compatibility, security and bypass revalidation' : 'none' };

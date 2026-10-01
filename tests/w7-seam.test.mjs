@@ -17,7 +17,7 @@ function certified(h, type = 'finance.beneficiary.create', requested = { vendor_
 }
 
 function validationEnvelope(h, path, issuer, overrides = {}) {
-  const payload = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: digest(path), kind: 'technical_validation', content_digest: digest({ probe: 'ok' }), acquired_at: h.now(), expires_at: h.now() + 60000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'manual probe', retention_until: h.now() + 120000, claims: { capsule_digest: digest(path) }, ...overrides };
+  const payload = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: digest(path), kind: 'technical_validation', content_digest: digest({ probe: 'ok' }), acquired_at: h.now(), expires_at: h.now() + 60000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'manual probe', retention_until: h.now() + 120000, issuer_version: '1.0.0', claims: { capsule_digest: digest(path) }, ...overrides };
   return { envelope: signed(payload, h.setup.issuerKeys.acme[issuer], 'evidence'), payload };
 }
 

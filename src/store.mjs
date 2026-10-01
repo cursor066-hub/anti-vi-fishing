@@ -26,10 +26,14 @@ const idemAad = (tenant, scope, key) => canonical({ idempotency: true, tenant, s
 
 
 export class Store {
-  constructor(path, tenantKeys, auditSigners) {
+  constructor(path, tenantKeys, auditSigners, { aadDedup } = {}) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(path); chmodSync(path, 0o600);
     this.tenantKeys = tenantKeys;
+    // Shared with the simulated target: a byte-identical ciphertext under
+    // two identities is always a transplant — the cross-DB graft only
+    // resolves when both migrators consult the same index (w19-aad W19-1).
+    this._aadDedup = aadDedup ?? new Map();
     this._sp = 0;
     // auditSigners[tenant] = {key_id, public_key, sign(payload) -> envelope}.
     // Signing runs inside the keystore; the store never sees private material.
@@ -113,6 +117,24 @@ export class Store {
   // on read, never silently skipped.
   _migrateAad() {
     const master = t => this.key(t);
+    // Per-tenant accounting surfaced to the fabric's AAD_MIGRATION audit
+    // event: a silent skip is indistinguishable from a clean open
+    // (w19-aad W19-2).
+    const stats = this.aadMigration = new Map();
+    const mark = (tenant, k) => { const s = stats.get(tenant) ?? { migrated: 0, transplants: 0, ambiguous: 0, skipped: 0 }; s[k]++; stats.set(tenant, s); };
+    // A byte-identical ciphertext under two identities can never be
+    // legitimate — fresh IVs forbid it. On a collision BOTH rows stay
+    // legacy-sealed: the donor cannot be proven, so neither earns a
+    // canonical binding (w19-aad W19-1). The earlier row's original bytes
+    // are restored in the same transaction.
+    const seen = this._aadDedup;
+    // A slash anywhere in an AAD component makes the legacy string
+    // non-unique, and a records row named like a DEK ('…/dek' tail) or
+    // 'idempotency' row aliases those spaces outright; records rows whose
+    // kind names a target table alias that space exactly. None can be
+    // proven non-transplanted — they stay sealed for operator review.
+    const slashy = (...parts) => parts.some(p => typeof p === 'string' && p.includes('/'));
+    const spaceAlias = kind => ['resource', 'transaction', 'secret', 'grant', 'idempotency'].includes(kind);
     this.db.exec('BEGIN IMMEDIATE');
     try {
       // Each row is isolated: a ciphertext that fails BOTH AAD forms was
@@ -120,10 +142,16 @@ export class Store {
       // never wedge the open for every other tenant.
       for (const r of this.db.prepare('SELECT tenant,kind,id,wrapped FROM deks').all()) {
         try { decrypt(r.wrapped, master(r.tenant), dekAad(r.tenant, r.kind, r.id)); continue; } catch { /* legacy-sealed or corrupt */ }
+        const prior = seen.get(r.wrapped);
+        if (prior) { prior.revert?.(); mark(r.tenant, 'transplants'); continue; }
+        if (slashy(r.tenant, r.kind, r.id)) { seen.set(r.wrapped, {}); mark(r.tenant, 'ambiguous'); continue; }
         try {
           const bare = decrypt(r.wrapped, master(r.tenant), legacyDekAad(r.tenant, r.kind, r.id));
-          this.db.prepare('UPDATE deks SET wrapped=? WHERE tenant=? AND kind=? AND id=?').run(encrypt(bare, master(r.tenant), dekAad(r.tenant, r.kind, r.id)), r.tenant, r.kind, r.id);
-        } catch { /* corrupt — left sealed, fails on read as before */ }
+          const upd = this.db.prepare('UPDATE deks SET wrapped=? WHERE tenant=? AND kind=? AND id=?'), orig = r.wrapped;
+          seen.set(orig, { revert: () => upd.run(orig, r.tenant, r.kind, r.id) });
+          upd.run(encrypt(bare, master(r.tenant), dekAad(r.tenant, r.kind, r.id)), r.tenant, r.kind, r.id);
+          mark(r.tenant, 'migrated');
+        } catch { mark(r.tenant, 'skipped'); }
       }
       const recs = this.db.prepare('SELECT tenant,kind,id,value FROM records').all();
       const dekRow = this.db.prepare('SELECT wrapped FROM deks WHERE tenant=? AND kind=? AND id=?');
@@ -132,19 +160,46 @@ export class Store {
           const d = dekRow.get(r.tenant, r.kind, r.id);
           const key = d ? Buffer.from(decrypt(d.wrapped, master(r.tenant), dekAad(r.tenant, r.kind, r.id)), 'base64url') : master(r.tenant);
           try { decrypt(r.value, key, recAad(r.tenant, r.kind, r.id)); continue; } catch { /* legacy-sealed or corrupt */ }
+        } catch { mark(r.tenant, 'skipped'); continue; }
+        const prior = seen.get(r.value);
+        if (prior) { prior.revert?.(); mark(r.tenant, 'transplants'); continue; }
+        if (slashy(r.tenant, r.kind, r.id) || spaceAlias(r.kind) || (r.kind + '/' + r.id).endsWith('/dek')) { seen.set(r.value, {}); mark(r.tenant, 'ambiguous'); continue; }
+        try {
+          const d = dekRow.get(r.tenant, r.kind, r.id);
+          const key = d ? Buffer.from(decrypt(d.wrapped, master(r.tenant), dekAad(r.tenant, r.kind, r.id)), 'base64url') : master(r.tenant);
           const plain = decrypt(r.value, key, legacyAad(r.tenant, r.kind, r.id));
-          this.db.prepare('UPDATE records SET value=? WHERE tenant=? AND kind=? AND id=?').run(encrypt(plain, key, recAad(r.tenant, r.kind, r.id)), r.tenant, r.kind, r.id);
-        } catch { /* corrupt — left sealed */ }
+          const upd = this.db.prepare('UPDATE records SET value=? WHERE tenant=? AND kind=? AND id=?'), orig = r.value;
+          seen.set(orig, { revert: () => upd.run(orig, r.tenant, r.kind, r.id) });
+          upd.run(encrypt(plain, key, recAad(r.tenant, r.kind, r.id)), r.tenant, r.kind, r.id);
+          mark(r.tenant, 'migrated');
+        } catch { mark(r.tenant, 'skipped'); }
       }
       for (const r of this.db.prepare('SELECT tenant,scope,key,result FROM idempotency').all()) {
         try { decrypt(r.result, master(r.tenant), idemAad(r.tenant, r.scope, r.key)); continue; } catch { /* legacy-sealed or corrupt */ }
+        const prior = seen.get(r.result);
+        if (prior) { prior.revert?.(); mark(r.tenant, 'transplants'); continue; }
+        if (slashy(r.tenant, r.scope, r.key)) { seen.set(r.result, {}); mark(r.tenant, 'ambiguous'); continue; }
         try {
           const plain = decrypt(r.result, master(r.tenant), `${r.tenant}/idempotency/${r.scope}/${r.key}`);
-          this.db.prepare('UPDATE idempotency SET result=? WHERE tenant=? AND scope=? AND key=?').run(encrypt(plain, master(r.tenant), idemAad(r.tenant, r.scope, r.key)), r.tenant, r.scope, r.key);
-        } catch { /* corrupt — left sealed */ }
+          const upd = this.db.prepare('UPDATE idempotency SET result=? WHERE tenant=? AND scope=? AND key=?'), orig = r.result;
+          seen.set(orig, { revert: () => upd.run(orig, r.tenant, r.scope, r.key) });
+          upd.run(encrypt(plain, master(r.tenant), idemAad(r.tenant, r.scope, r.key)), r.tenant, r.scope, r.key);
+          mark(r.tenant, 'migrated');
+        } catch { mark(r.tenant, 'skipped'); }
       }
       this.db.exec('COMMIT');
-    } catch (e) { if (this.db.isTransaction) this.db.exec('ROLLBACK'); throw e; }
+      // Legacy ciphertext physically lingers in the WAL until a checkpoint
+      // — truncate now so the dead form cannot be revived (w19-aad W19-3).
+      let migrated = 0; for (const s of stats.values()) migrated += s.migrated;
+      if (migrated > 0) { this._shredded = true; this.checkpoint(); }
+    } catch (e) {
+      if (this.db.isTransaction) this.db.exec('ROLLBACK');
+      // The migration's BEGIN IMMEDIATE is a writer too — a lost
+      // busy-timeout race surfaces in the ledger taxonomy, not raw
+      // sqlite internals (w19-aad W19-4).
+      if (e?.errcode === 5 || /database is locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
+      throw e;
+    }
   }
   close() { this.db.close(); }
   tx(fn) {
