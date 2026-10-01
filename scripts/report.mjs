@@ -56,9 +56,9 @@ const stableTap = tapText.replace(/ \([\d.]+ms\)/g, '').replace(/(duration_ms: )
 // '# pass 9999' to stdout controls the first regex hit but can never
 // outlive the runner's own summary (w23-supply F8). The four summary
 // counters must also be internally consistent.
-const numLast = (re, s) => { const m = [...s.matchAll(new RegExp(re, 'g'))].at(-1); return m ? Number(m[1]) : 0; };
-const rawFail = numLast('# fail (\d+)', tapText), rawCancel = numLast('# cancelled (\d+)', tapText), rawSkip = numLast('# skipped (\d+)', tapText), rawTodo = numLast('# todo (\d+)', tapText), rawTests = numLast('# tests (\d+)', tapText);
-const counts = { pass: numLast('# pass (\d+)', tapText), fail: rawFail + (tapText.match(/^not ok /gm) ?? []).length, tests: rawTests };
+const numLast = (re, s) => { const m = [...s.matchAll(new RegExp(re.source, 'g'))].at(-1); return m ? Number(m[1]) : 0; };
+const rawFail = numLast(/# fail (\d+)/, tapText), rawCancel = numLast(/# cancelled (\d+)/, tapText), rawSkip = numLast(/# skipped (\d+)/, tapText), rawTodo = numLast(/# todo (\d+)/, tapText), rawTests = numLast(/# tests (\d+)/, tapText);
+const counts = { pass: numLast(/# pass (\d+)/, tapText), fail: rawFail + (tapText.match(/^not ok /gm) ?? []).length, tests: rawTests };
 if (rawTests > 0 && counts.pass + rawFail + rawSkip + rawTodo + rawCancel !== rawTests) { console.error(`TAP summary inconsistent: tests=${rawTests} but pass+fail+skipped+todo+cancelled=${counts.pass + rawFail + rawSkip + rawTodo + rawCancel}`); process.exitCode = 1; }
 write('reports/tests.tap', stableTap);
 write('reports/final-regression.tap', stableTap);
