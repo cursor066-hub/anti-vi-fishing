@@ -2942,6 +2942,7 @@ export class Fabric {
     // so the fold screams instead of running a shorter chain. A watermark
     // behind the tail is legitimate lag (it advances post-commit only).
     const sealing = this.#sealing?.has(t) === true;
+    let sealRecount;
     // A seal cut legitimately moves the committed tail below the consumed
     // point — the incremental index is stale beyond repair and must refold
     // the surviving chain from zero (w25-clock F-3).
@@ -3001,17 +3002,24 @@ export class Fabric {
       // A seal's attested carry residue must still all EXIST — a deleted
       // AUDIT_SEAL_CARRY page never re-folds, so the fold's own replay
       // bookkeeping cannot see the amputation; the recount is derived
-      // from the table itself (w36-seal F-H). The recount is memoized on
-      // the table's (maxSeq,rowCount) fingerprint: any row insert or
-      // delete flips it and re-runs the scan, while an in-place envelope
-      // rewrite keeps it — but that row still fails per-row signature
-      // verification on every read path, so a stale fingerprint costs
-      // nothing. The LIKE scan itself is O(table) — running it once per
-      // fingerprint instead of per window kept NFR-PERF-004's decision
-      // budget honest on the CI runner (w37 CI fix).
-      const fpRow = (idx.sealSeqs?.size ?? 0) > 0 ? this.store.db.prepare('SELECT COUNT(*) c, COALESCE(MAX(seq),0) m FROM audit WHERE tenant=?').get(t) : null;
-      const sealFp = fpRow ? `${fpRow.m}:${fpRow.c}` : null;
-      if (sealFp !== null && idx.sealScanFp !== sealFp) {
+      // from the table itself (w36-seal F-H). It runs POST-FOLD at the
+      // two index exits below (never during sealing): placed there the
+      // sealSeqs gate reflects every committed seal, so a page deleted
+      // between the seal commit and the next read cannot slip a
+      // diminished carry past the first call (w38 self-audit). The
+      // recount is memoized on the table's (maxSeq,rowCount)
+      // fingerprint: any row insert or delete flips it and re-runs the
+      // scan, while an in-place envelope rewrite keeps it — but that row
+      // still fails per-row signature verification on every read path,
+      // so a stale fingerprint costs nothing. The LIKE scan itself is
+      // O(table) — running it once per fingerprint instead of per call
+      // kept NFR-PERF-004's decision budget honest on the CI runner
+      // (w37 CI fix).
+      sealRecount = () => {
+        if (sealing || (idx.sealSeqs?.size ?? 0) === 0) return;
+        const fpRow = this.store.db.prepare('SELECT COUNT(*) c, COALESCE(MAX(seq),0) m FROM audit WHERE tenant=?').get(t);
+        const sealFp = `${fpRow.m}:${fpRow.c}`;
+        if (idx.sealScanFp === sealFp) return;
         idx.sealScanFp = sealFp;
         const claims = new Map(), seen = new Map();
         for (const r of this.store.db.prepare("SELECT seq,envelope FROM audit WHERE tenant=? AND (envelope LIKE '%\"type\":\"AUDIT_SEALED\"%' OR envelope LIKE '%\"type\":\"AUDIT_SEAL_CARRY\"%')").all(t)) {
@@ -3037,7 +3045,7 @@ export class Fabric {
         }
         for (const [sealSeq] of seen)
           requireThat(claims.has(sealSeq), 'INV-409-INTEGRITY', 'Audit carryover page references a seal row that does not exist', 409);
-      }
+      };
       this._probeMemo?.set(t, true);
       }
     }
@@ -3049,7 +3057,7 @@ export class Fabric {
     if (!sealing && idx.maxSeq > 0 && idx.headHash !== undefined) {
       requireThat(probe.headHash != null && ctEqual(probe.headHash, idx.headHash), 'INV-409-AUDIT-TAMPER', 'Audit head diverged from the consumed index', 409);
     }
-    if (idx.maxSeq === maxSeq) { floorCheck(); return idx; }
+    if (idx.maxSeq === maxSeq) { floorCheck(); sealRecount?.(); return idx; }
     // Signature-trust boundary: the seq trigger lets an in-process writer
     // append a self-consistent row whose hash and `previous` link are forged
     // but whose envelope cannot be vault-signed. Every consumed event must
@@ -3124,6 +3132,7 @@ export class Fabric {
       // beat after its event, so a per-call check would deadlock the
       // writer.
       floorCheck();
+      sealRecount?.();
       // Anchored config-drift: the last SIGNED snapshot is the baseline,
       // not a mutable record — a forged/deleted 'config-flag' or
       // 'config-snapshot' row can no longer withdraw or restore gate
