@@ -522,8 +522,14 @@ export class Store {
   remove(tenant, kind, id) {
     this._addr(tenant, kind, id);
     this._shredded = true;
-    this.db.prepare('DELETE FROM deks WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id);
-    this.db.prepare('DELETE FROM records WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id);
+    // The DEK+record delete pair must land or roll back together — a crash
+    // between them leaves a dekless row that wedges the revocation floor
+    // probe as fake tamper evidence (w32-store F5).
+    const pair = () => {
+      this.db.prepare('DELETE FROM deks WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id);
+      this.db.prepare('DELETE FROM records WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id);
+    };
+    if (this.db.isTransaction) pair(); else this.tx(pair);
     if (!this.db.isTransaction) this.checkpoint(); // non-tx paths must not leave the DEK in the WAL (store-audit LOW)
   }
   readValue(tenant, kind, id, wrapped) {
@@ -542,8 +548,11 @@ export class Store {
     // page) and drop the ciphertext; then truncate the WAL so no reachable
     // copy of the wrapped key remains. Pre-erasure backups are out of scope
     // and stay honest in the retention report.
-    const changes = this.db.prepare('DELETE FROM deks WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id).changes
+    // The pair deletes atomically when no caller tx is open — a crash
+    // between them leaves dekless residue, not a verdict (w32-store F5).
+    const pair = () => this.db.prepare('DELETE FROM deks WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id).changes
       + this.db.prepare('DELETE FROM records WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id).changes;
+    const changes = this.db.isTransaction ? pair() : this.tx(pair);
     this._shredded = this._shredded || changes > 0;
     if (!this.db.isTransaction) this.checkpoint();
     return changes > 0;

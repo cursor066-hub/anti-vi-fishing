@@ -114,7 +114,7 @@ test('w21-crypto F-3: a dead key cannot mint the anchored config snapshot', t =>
   const payload = { tenant_id: 'acme', sequence: head.seq + 1, previous: head.hash, type: 'CONFIG_SNAPSHOT', actor: 'mallory', reference: 'config', metadata: { config_digest: 'deadbeef'.repeat(8) }, time: h.now() };
   const envelope = signed(payload, { key_id: auditKey.key_id, private_key: auditKey.private_key }, 'audit');
   h.f.store.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run('acme', head.seq + 1, head.hash, digest(payload), canonical(envelope));
-  assert.equal(h.f._anchoredConfigSnapshot(T), before, 'dead-key snapshot never reaches the baseline');
+  assert.deepEqual(h.f._anchoredConfigSnapshot(T), before, 'dead-key snapshot never reaches the baseline');
 });
 
 // ─── w21-store: append-only triggers actually fire at runtime ───────────────

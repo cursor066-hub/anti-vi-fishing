@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 5448,
-      "bytes": 428137
+      "lines": 5624,
+      "bytes": 441944
     },
     "src/issuerd.mjs": {
       "lines": 797,
@@ -82,8 +82,8 @@
       "bytes": 3876
     },
     "src/store.mjs": {
-      "lines": 871,
-      "bytes": 63775
+      "lines": 880,
+      "bytes": 64293
     },
     "src/target.mjs": {
       "lines": 426,
@@ -323,7 +323,7 @@
     },
     "tests/w21-crypto.test.mjs": {
       "lines": 183,
-      "bytes": 11325
+      "bytes": 11329
     },
     "tests/w21-issuerd.test.mjs": {
       "lines": 238,
@@ -401,6 +401,10 @@
       "lines": 376,
       "bytes": 26665
     },
+    "tests/w32.test.mjs": {
+      "lines": 330,
+      "bytes": 22502
+    },
     "tests/w5-mutations.test.mjs": {
       "lines": 194,
       "bytes": 13645
@@ -470,6 +474,6 @@
       "bytes": 6499
     }
   },
-  "total_files": 117,
-  "total_lines": 27634
+  "total_files": 118,
+  "total_lines": 28149
 }
