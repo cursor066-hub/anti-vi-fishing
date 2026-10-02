@@ -83,20 +83,21 @@ test('P-3: a release cannot cite a capsule belonging to another actor', t => {
 
 test('P-8: fallback release validates and binds citations', t => {
   const h = fixture(t); h.ready();
-  const r = h.proposed();
-  h.evidence(r); h.f.evaluate(h.p(), r.capsule.capsule_id); // cite decided authority (w8-fixverify F4)
+  const r = h.ready().record; // ALLOW-decided authority (w8-fixverify F4, w22-fv F2)
   assert.throws(() => h.f.perceptionFallback(h.p(), { fields: { view: 'x' }, purpose: 'inspect', capsule_id: 'cap-ghost' }), hasCode('INV-404-NOT-FOUND'));
   const out = h.f.perceptionFallback(h.p(), { fields: { view: 'x' }, purpose: 'inspect', capsule_id: r.capsule.capsule_id });
   assert.equal(out.binding.capsule_id, r.capsule.capsule_id);
-  // w8-fixverify F4: undecided capsules, advisory evidence and mismatched
-  // capsule↔evidence pairs are all refused — a citation can never float free
-  // of evaluated authority.
+  // w8-fixverify F4 + w22-fixverify F2: undecided capsules, capsules decided
+  // to anything but ALLOW, advisory evidence and mismatched capsule↔evidence
+  // pairs are all refused — a citation can never float free of allowed
+  // authority.
   const r2 = h.proposed();
   assert.throws(() => h.f.perceptionFallback(h.p(), { fields: { view: 'x' }, purpose: 'inspect', capsule_id: r2.capsule.capsule_id }), hasCode('INV-409-STATE'));
-  const advisory = h.evidence(r, { advisory: true });
+  const r3 = h.proposed(); h.evidence(r3); h.f.evaluate(h.p(), r3.capsule.capsule_id);
+  assert.throws(() => h.f.perceptionFallback(h.p(), { fields: { view: 'x' }, purpose: 'inspect', capsule_id: r3.capsule.capsule_id }), hasCode('INV-412-EVIDENCE'), 'an ESCROW-decided capsule is not release authority');
+  const advisory = h.evidence(h.proposed(), { advisory: true });
   assert.throws(() => h.f.perceptionFallback(h.p(), { fields: { view: 'x' }, purpose: 'inspect', evidence_ref: advisory.payload.evidence_id }), hasCode('INV-412-EVIDENCE'));
   const foreign = h.evidence(h.proposed(), {});
-  h.f.evaluate(h.p(), r.capsule.capsule_id); // re-decide: new evidence reset it
   assert.throws(() => h.f.perceptionFallback(h.p(), { fields: { view: 'x' }, purpose: 'inspect', capsule_id: r.capsule.capsule_id, evidence_ref: foreign.payload.evidence_id }), hasCode('INV-403-SCOPE'));
 });
 

@@ -173,6 +173,11 @@ def main():
         except InvalidSignature:
             pass
     print(f"python: {len(ev2['vectors'])} ES256 envelope vectors, {failed} total failures")
+    # A truncated corpus must not pass: per-vector asserts alone would let a
+    # commit halve coverage undetected (w11-supply SC-10).
+    if len(cv['vectors']) < 18 or len(ev['vectors']) < 11 or len(ev2['vectors']) < 2 or len([v for v in pv['vectors'] if not v.get('impl_only')]) < 21:
+        print(f"FAIL python-corpus: truncated vector sets (canonical={len(cv['vectors'])}, envelope={len(ev['vectors'])}, parse={len(pv['vectors'])}, es256={len(ev2['vectors'])})")
+        return 1
     return 1 if failed else 0
 
 if __name__ == '__main__':

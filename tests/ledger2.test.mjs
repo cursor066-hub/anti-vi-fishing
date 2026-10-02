@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { fixture, hasCode, runtimeInput, runtimeRequest } from './helpers.mjs';
+import { fixture, hasCode, installPolicy, setTenant, runtimeInput, runtimeRequest, coverageIdentity } from './helpers.mjs';
 import { signed, verifySigned, generateKey } from '../src/crypto.mjs';
 import { digest, clone } from '../src/canonical.mjs';
 import { signAcknowledgement } from '../src/ceremony.mjs';
@@ -28,7 +28,7 @@ test('DAT-009: touching every row crosses the coverage threshold and denies', t 
 // ---- H3/NET-010: containment telemetry is real and reconstructable ----
 test('NET-010: denied consumes produce containment records; the report reconstructs the sequence', t => {
   const h = fixture(t);
-  const policy = h.f.policy('acme'); policy.runtime.windows[0].limit = 2; h.f.store.put('acme', 'policy', 'active', policy, h.now());
+  installPolicy(h, p => { p.runtime.windows[0].limit = 2; });
   const cap = h.f.runtime.issue(h.p(), runtimeInput());
   h.f.runtime.consume(h.p(), runtimeRequest(cap));
   const cap2 = h.f.runtime.issue(h.p(), runtimeInput());
@@ -98,6 +98,10 @@ test('UX-006: a batch approves each declared action; hidden additions and omissi
 test('KEY-005: rotating the audit key Ed25519 -> ES256 keeps old entries verifiable', t => {
   const h = fixture(t);
   h.ready(); // entries under the original Ed25519 audit key
+  // Suite migration is policy-driven: the constitution must allow the
+  // incoming suite or the successor cannot sign its own succession
+  // outcome (w14 W13-01 — the outcome now attests under the new key).
+  installPolicy(h, p => { p.algorithms.allowed_suites = ['Ed25519', 'ES256']; });
   const oldHead = h.f.store.auditHashes('acme').at(-1);
   const pending = h.f.prepareRotation(h.p('security'), 'audit', 'ES256');
   const custodians = ['custodian-1', 'custodian-2'];
@@ -144,7 +148,7 @@ test('RUN-009: denial, throttle, quarantine and infrastructure failure produce d
   // policy denial
   assert.throws(() => h.f.runtime.issue(h.p(), runtimeInput({ destination: 'evil-vault' })), e => { codes.add(e.code); return true; });
   // throttle
-  const policy = h.f.policy('acme'); policy.runtime.rate_per_second = 1; h.f.store.put('acme', 'policy', 'active', policy, h.now());
+  installPolicy(h, p => { p.runtime.rate_per_second = 1; });
   const cap = h.f.runtime.issue(h.p(), runtimeInput()); h.f.runtime.consume(h.p(), runtimeRequest(cap));
   const cap2 = h.f.runtime.issue(h.p(), runtimeInput());
   assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap2)), e => { codes.add(e.code); return true; });
@@ -218,7 +222,7 @@ test('PER-010: the controlled-workspace fallback is labelled lower-assurance and
   const h = fixture(t);
   const rel = h.f.perceptionFallback(h.p(), { fields: { view: 'x' }, purpose: 'inspect' });
   assert.equal(rel.mode, 'controlled-workspace'); assert.equal(rel.production, false);
-  const policy = h.f.policy('acme'); policy.secure_perception.fallback = 'denied'; h.f.store.put('acme', 'policy', 'active', policy, h.now());
+  installPolicy(h, p => { p.secure_perception.fallback = 'denied'; });
   assert.throws(() => h.f.perceptionFallback(h.p(), { fields: { view: 'x' }, purpose: 'inspect' }), hasCode('INV-451-POLICY'));
 });
 
@@ -226,31 +230,27 @@ test('PER-010: the controlled-workspace fallback is labelled lower-assurance and
 
 test('IDN-003: rule identity_classes distinguishes and combines all four classes', t => {
   const h = fixture(t);
-  const policy = h.f.policy('acme');
   // The workforce actor is denied when excluded from the class list.
-  policy.rules['finance.beneficiary.create'].identity_classes = ['workload']; h.f.store.put('acme', 'policy', 'active', policy, h.now());
+  installPolicy(h, p => { p.rules['finance.beneficiary.create'].identity_classes = ['workload']; });
   const d = h.f.evaluate(h.p(), h.proposed().capsule.capsule_id);
   assert.equal(d.decision, 'DENY'); assert.ok(d.reasons.some(x => x.code === 'IDENTITY_CLASS'));
   // Combining all four classes admits the workforce actor — each class is
   // distinguishable and composable.
-  policy.rules['finance.beneficiary.create'].identity_classes = ['workforce', 'workload', 'device', 'counterparty']; h.f.store.put('acme', 'policy', 'active', policy, h.now());
+  installPolicy(h, p => { p.rules['finance.beneficiary.create'].identity_classes = ['workforce', 'workload', 'device', 'counterparty']; });
   const d2 = h.f.evaluate(h.p(), h.proposed().capsule.capsule_id);
   assert.ok(!d2.reasons.some(x => x.code === 'IDENTITY_CLASS'));
   // And a list of the other three still excludes the workforce actor.
-  policy.rules['finance.beneficiary.create'].identity_classes = ['workload', 'device', 'counterparty']; h.f.store.put('acme', 'policy', 'active', policy, h.now());
+  installPolicy(h, p => { p.rules['finance.beneficiary.create'].identity_classes = ['workload', 'device', 'counterparty']; });
   const d3 = h.f.evaluate(h.p(), h.proposed().capsule.capsule_id);
   assert.ok(d3.reasons.some(x => x.code === 'IDENTITY_CLASS'));
 });
 
 test('IDN-010: root recovery demands higher proofing than routine access', t => {
   const h = fixture(t);
-  const policy = h.f.policy('acme');
   // Routine action at low floor, root recovery at high floor.
-  policy.rules['finance.beneficiary.create'].min_proofing = 'low';
-  policy.rules['key.ceremony'].min_proofing = 'high';
-  h.f.store.put('acme', 'policy', 'active', policy, h.now());
-  const [, identity] = Object.entries(h.setup.config.tenants.acme.identities).find(([, x]) => x.subject_id === 'operator');
-  identity.proofing_level = 'low';
+  installPolicy(h, p => { p.rules['finance.beneficiary.create'].min_proofing = 'low'; p.rules['key.ceremony'].min_proofing = 'high'; });
+  const [opKey] = Object.entries(h.f.tenant('acme').identities).find(([, x]) => x.subject_id === 'operator');
+  setTenant(h, 'acme', tn => { tn.identities[opKey].proofing_level = 'low'; });
   // Low-proofed identity passes the routine floor but is refused root recovery.
   const routine = h.f.evaluate(h.p(), h.proposed().capsule.capsule_id);
   assert.ok(!routine.reasons.some(x => x.code === 'PROOFING'));
@@ -259,7 +259,7 @@ test('IDN-010: root recovery demands higher proofing than routine access', t => 
   const d = h.f.evaluate(h.p(), root.capsule.capsule_id);
   assert.notEqual(d.decision, 'ALLOW'); assert.ok(d.reasons.some(x => x.code === 'PROOFING'));
   // A high-proofed identity clears the root floor.
-  identity.proofing_level = 'high';
+  setTenant(h, 'acme', tn => { tn.identities[opKey].proofing_level = 'high'; });
   const root2 = h.proposed('key.ceremony', { ceremony_id: 'cer-root-2', purpose: 'Recover root', threshold: 3, custodians: ['custodian-1', 'custodian-2', 'custodian-3'] }, { action: { type: 'key.ceremony', target_resource: 'key-registry', purpose: 'Recover root' } });
   h.advance(120001);
   const d2 = h.f.evaluate(h.p(), root2.capsule.capsule_id);
@@ -275,15 +275,16 @@ test('NET-005: remediation service must be policy-allowlisted and is audited', t
 });
 
 test('AUD-006: evidence cannot claim retention past the per-kind policy ceiling', t => {
-  const h = fixture(t), r = h.proposed();
-  const policy = h.f.policy('acme'); policy.retention = { default_ms: 1000, per_kind: { ownership: 2000 } }; h.f.store.put('acme', 'policy', 'active', policy, h.now());
-  assert.throws(() => h.evidence(r, { expiry: h.now() + 5000 }), hasCode('INV-400-SCHEMA'));
+  const h = fixture(t);
+  installPolicy(h, p => { p.retention = { default_ms: 60000, per_kind: { ownership: 120000 } }; });
+  const r = h.proposed();
+  assert.throws(() => h.evidence(r, { expiry: h.now() + 120000 }), hasCode('INV-400-SCHEMA'));
 });
 
 test('AUD-010: named projections filter the verified page without breaking integrity', t => {
   const h = fixture(t); h.ready();
   const finance = h.f.auditPageScoped(h.p('auditor'), { limit: 500, view: 'finance' });
-  assert.ok(finance.entries.length > 0 && finance.entries.every(e => ['CAPSULE_PROPOSED', 'EVIDENCE_ATTACHED', 'EXACT_ACTION_APPROVED', 'CERTIFICATE_ISSUED', 'EXECUTION_RESERVED', 'EXECUTION_OUTCOME'].includes(e.envelope.payload.type)));
+  assert.ok(finance.entries.length > 0 && finance.entries.every(e => ['CAPSULE_PROPOSED', 'EVIDENCE_ATTACHED', 'EXACT_ACTION_APPROVED', 'CERTIFICATE_ISSUED', 'EXECUTION_RESERVED', 'EXECUTION_OUTCOME', 'POLICY_EVALUATED'].includes(e.envelope.payload.type)));
   const privacy = h.f.auditPageScoped(h.p('auditor'), { limit: 500, view: 'privacy' });
   assert.ok(privacy.entries.every(e => !['CAPSULE_PROPOSED'].includes(e.envelope.payload.type)));
   assert.throws(() => h.f.auditPageScoped(h.p('auditor'), { view: 'nonsense' }), hasCode('INV-400-SCHEMA'));
@@ -321,17 +322,16 @@ test('DAT-005: aggregate transform generalises numeric cells deterministically',
 
 test('NFR-AVL-004: per-class stale_ms tightens but cannot loosen the default window', t => {
   const h = fixture(t);
-  const cap = h.f.runtime.issue(h.p(), runtimeInput());
   // Supersede the policy: the capability falls to the data.read fail mode,
-  // honoured only inside the per-class stale window.
-  const policy = clone(h.f.policy('acme'));
-  policy.fail_modes = { ...policy.fail_modes, 'data.read': 'cached-allow' };
-  policy.stale_ms = { default: 1 };
-  policy.max_capsule_ttl_ms = policy.max_capsule_ttl_ms + 1; // any change to the digest
-  h.f.store.put('acme', 'policy', 'active', policy, h.now());
-  assert.equal(h.f.runtime.consume(h.p(), runtimeRequest(cap)).decision, 'ALLOW');
-  h.advance(10); // past the 1ms class ceiling
-  assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap)), hasCode('INV-503-GATE'));
+  // honoured only inside the per-class stale window. Real governance moves
+  // the constitution forward ~120s, so the capability is minted under a
+  // long-TTL constitution first and goes stale on the second amendment.
+  installPolicy(h, p => { p.capability_ttl_ms = 300000; });
+  const longCap = h.f.runtime.issue(h.p(), runtimeInput({ ttl_ms: 300000 }));
+  installPolicy(h, p => { p.fail_modes = { ...p.fail_modes, 'data.read': 'cached-allow' }; p.stale_ms = { ...p.stale_ms, 'data.read': 200000 }; });
+  assert.equal(h.f.runtime.consume(h.p(), runtimeRequest(longCap)).decision, 'ALLOW');
+  h.advance(100001); // past the 200s class ceiling, inside the capability TTL
+  assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(longCap)), hasCode('INV-503-GATE'));
 });
 
 test('COV-005 COV-009: stale evidence ages a MONITORED path back to UNKNOWN', t => {
@@ -364,8 +364,8 @@ test('COV-001 COV-005 COV-009 COV-010: path classes, owner tasks, history replay
   assert.equal(history.paths['path-a'].status, 'UNKNOWN');
   // COV-010: a valid technical-validation envelope closes the unknown task.
   const path = h.f.store.must('acme', 'coverage', 'path-a');
-  const claims = { capsule_digest: digest(path) };
-  const payload = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: digest(path), kind: 'technical_validation', content_digest: digest({ probe: 'ok' }), acquired_at: h.now(), expires_at: h.now() + 60000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'manual probe', retention_until: h.now() + 120000, claims };
+  const claims = { capsule_digest: coverageIdentity(path) };
+  const payload = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: coverageIdentity(path), kind: 'technical_validation', content_digest: digest({ probe: 'ok' }), acquired_at: h.now(), expires_at: h.now() + 60000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'manual probe', retention_until: h.now() + 120000, issuer_version: '1.0.0', claims };
   const envelope = signed(payload, h.setup.issuerKeys.acme['security-ops'], 'evidence');
   const out = h.f.technicalValidation(h.p('security'), 'path-a', envelope);
   // A passed independent bypass test is the ENFORCED criterion — stronger

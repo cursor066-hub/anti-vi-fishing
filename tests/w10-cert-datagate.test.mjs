@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID, createHmac } from 'node:crypto';
-import { fixture, hasCode, runtimeInput, runtimeRequest } from './helpers.mjs';
+import { fixture, hasCode, setTenant, runtimeInput, runtimeRequest, stageConstitution } from './helpers.mjs';
 import { TRANSFORMS } from '../src/datagate.mjs';
 import { canonical, digest } from '../src/canonical.mjs';
 import { signed } from '../src/crypto.mjs';
@@ -37,7 +37,7 @@ test('w10-dg F2: dataset-wide coverage binds across subject identities', t => {
   policy.version += 1; policy.not_before = h.now();
   policy.runtime.reconstruction.max_coverage_percent = 100;      // subjects never trip
   policy.runtime.reconstruction.max_dataset_coverage_percent = 50; // union cap: ≤1 of 3 rows
-  h.f.store.put('acme', 'policy', 'staged', { policy, activate_at: h.now(), staged_at: h.now() }, h.now());
+  stageConstitution(h, policy);
   h.f.activateDuePolicies('acme', h.now());
   const cap = h.f.runtime.issue(h.p(), runtimeInput());
   h.f.runtime.consume(h.p(), runtimeRequest(cap)); // operator touches row-1
@@ -45,7 +45,7 @@ test('w10-dg F2: dataset-wide coverage binds across subject identities', t => {
   // though their own subject ledger is empty.
   const principal = h.p('policy-admin');
   const r = h.proposed('data.export', { dataset: 'dataset-1', columns: ['id'], row_ids: ['row-2'], max_rows: 1, classification: 'internal', jurisdiction: 'EU' }, { action: { type: 'data.export', target_resource: 'dataset-1', purpose: 'Operations' }, destination: 'customer-vault', policy_version: 2 }, principal);
-  const evPayload = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: r.capsule_digest, kind: 'dataset_authority', content_digest: digest({ source: 'synthetic-only', claim: 'supports' }), acquired_at: h.now(), expires_at: h.now() + 600000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'Synthetic test issuer; no external authority assertion', retention_until: h.now() + 660000, claims: { dataset: 'dataset-1' } };
+  const evPayload = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: r.capsule_digest, kind: 'dataset_authority', content_digest: digest({ source: 'synthetic-only', claim: 'supports' }), acquired_at: h.now(), expires_at: h.now() + 600000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'Synthetic test issuer; no external authority assertion', retention_until: h.now() + 660000, issuer_version: '1.0.0', claims: { dataset: 'dataset-1' } };
   h.f.attachEvidence(principal, r.capsule.capsule_id, signed(evPayload, h.setup.issuerKeys.acme.registry, 'evidence'));
   h.approve(r, 1);
   const cert = h.f.certificate(principal, r.capsule.capsule_id);
@@ -94,19 +94,30 @@ test('w10-dg F7: export watermarks bind tenant, capability and request', t => {
   const out = h.f.execute(h.p(), certificate);
   const certId = certificate.payload.certificate_id;
   const key = Buffer.from(h.f.tenant('acme').watermark_key, 'base64url');
-  const expected = createHmac('sha256', key).update(canonical({ tenant: 'acme', dataset: 'dataset-1', subject: 'operator', capability_id: `cert:${certId}`, request_id: certId, row: out.payload.output[0] })).digest('hex').slice(0, 24);
+  const expected = createHmac('sha256', key).update(canonical({ tenant: 'acme', dataset: 'dataset-1', subject: 'operator', capability_id: `cert:${certId}`, request_id: certId, row_id: 'row-1', row: out.payload.output[0] })).digest('hex').slice(0, 24);
   assert.equal(out.payload.watermarks[0].tag, expected);
 });
 
-// w10-dg F8: two denied consumes with the same caller request id each land
-// their own containment record — dedup must not swallow incidents.
-test('w10-dg F8: identical denied consumes each land a containment record', t => {
+// w10-dg F8: denied consumes are ledger-bounded — identical (subject,
+// code, capability) denials re-record at most once per 60s so a crafted
+// flood cannot mint unbounded chain rows; a distinct incident (different
+// request id AND different denial class) still lands its own record
+// (w17-idx F7).
+test('w10-dg F8: identical denied consumes share one containment record; distinct ones land separately', t => {
   const h = fixture(t);
   const cap = h.f.runtime.issue(h.p(), runtimeInput());
   const request = runtimeRequest(cap, { columns: ['passport'], request_id: 'req-dup' });
-  for (let i = 0; i < 2; i++) assert.throws(() => h.f.runtime.consume(h.p(), request), hasCode('INV-403-SCOPE'));
-  const rows = h.f.store.list('acme', 'containment', 100).filter(c => c.request_id === 'req-dup');
-  assert.equal(rows.length, 2);
+  for (let i = 0; i < 3; i++) assert.throws(() => h.f.runtime.consume(h.p(), request), hasCode('INV-403-SCOPE'));
+  const rows = h.f.store.list('acme', 'containment', 100).filter(c => c.capability_id === cap.payload.capability_id);
+  assert.equal(rows.length, 1, 'identical denials record once — the ledger still proves the denial');
+  // A genuinely different denial (replay of an already-consumed request)
+  // records its own containment row.
+  const cap2 = h.f.runtime.issue(h.p(), runtimeInput());
+  const req2 = runtimeRequest(cap2);
+  h.f.runtime.consume(h.p(), req2);
+  assert.throws(() => h.f.runtime.consume(h.p(), req2), hasCode('INV-409-REPLAY'));
+  const all = h.f.store.list('acme', 'containment', 100);
+  assert.equal(all.length, 2, 'each distinct denial class lands once');
 });
 
 // w10-dg F9: the declared aggregate transform must actually be admissible.
@@ -121,7 +132,7 @@ test('w10-dg F9: the declared aggregate transform is admissible and applies', t 
 // to the row-encryption key.
 test('w10-dg F10: a tenant without a watermark key cannot serve watermarked rows', t => {
   const h = fixture(t);
-  delete h.setup.config.tenants.acme.watermark_key;
+  setTenant(h, 'acme', tn => { delete tn.watermark_key; });
   const cap = h.f.runtime.issue(h.p(), runtimeInput());
   assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap)), hasCode('INV-503-CONFIG'));
 });

@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 import { fixture, runtimeInput, runtimeRequest } from '../tests/helpers.mjs';
-import { writeFileSync, mkdirSync, rmSync, mkdtempSync } from 'node:fs';
+import { writeFileSync, readFileSync, copyFileSync, existsSync, mkdirSync, rmSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { bootstrap } from '../src/bootstrap.mjs';
 import { digest, clone } from '../src/canonical.mjs';
 import { verifyAudit } from '../src/store.mjs';
+import { verifySigned } from '../src/crypto.mjs';
+import { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 const h = fixture(null, ['acme']), scenarios = [];
 function scenario(name, expected, fn) {
@@ -39,7 +42,7 @@ try {
   // its not_before slot, the old constitution keeps serving through the
   // window, then exactly one version promotes at activate_at.
   const active = h.f.policy('acme'), canary = clone(active);
-  canary.version = 2; canary.policy_id = 'constitution:acme:v2'; canary.not_before = h.now() + 240000;
+  canary.version = 2; canary.not_before = h.now() + 240000;
   canary.rules['finance.payment.first'].max_quantity = 5;
   const pc = h.proposed('policy.change', { policy: canary }, { action: { type: 'policy.change', target_resource: 'policy-root', purpose: 'Canary rollout' } });
   h.f.simulate(h.p('policy-admin'), canary); h.advance(120001);
@@ -53,9 +56,14 @@ try {
   h.f.revoke(h.p('security'), { kind: 'device', id: 'operator-device', reason: 'Synthetic endpoint agent loss' });
   scenario('Device quarantine prevents renewal', 'INV-403-QUARANTINE', () => h.f.runtime.issue(h.p(), runtimeInput()));
   const bundle = h.f.exportAudit(h.p('auditor'), 'Synthetic simulation evidence');
-  scenario('Offline signed audit integrity', true, () => verifyAudit(bundle, bundle.public_keys).valid);
+  // The verifier must anchor on the deployment's CONFIGURED keys, never on
+  // the keys the artifact itself ships — bundle.public_keys as the anchor
+  // certifies whatever the bundle claims (w23-supply F15).
+  const simAnchor = {};
+  for (const t of Object.values(h.setup.config.tenants ?? {})) simAnchor[t.keys.audit.key_id] = { public_key: t.keys.audit.public_key };
+  scenario('Offline signed audit integrity', true, () => verifyAudit(bundle, simAnchor).valid);
   const tampered = clone(bundle); tampered.entries.splice(3, 1);
-  scenario('Audit deletion detection', 'INV-409-AUDIT', () => verifyAudit(tampered, bundle.public_keys));
+  scenario('Audit deletion detection', 'INV-409-AUDIT', () => verifyAudit(tampered, simAnchor));
   mkdirSync('reports', { recursive: true });
   writeFileSync('reports/sample-audit.json', JSON.stringify(bundle, null, 2) + '\n');
   writeFileSync('reports/sample-pinned-trust.json', JSON.stringify(bundle.public_keys, null, 2) + '\n');
@@ -72,6 +80,40 @@ try {
     scenario('Engine-native online backup completes', 0, () => drill.status);
     const check = spawnSync(process.execPath, ['scripts/restore-check.mjs', '--dir', join(drillDir, 'backup'), '--trusted-keys', join(drillDir, 'deploy', 'config.json')], { encoding: 'utf8' });
     scenario('Offline restore verification of drill backup', 0, () => check.status);
+    // NFR-OPS-005 rollback drill: a bad release clobbers the live store (a
+    // corrupt write over real bytes is what a broken deploy actually does);
+    // the rollback path restores the VERIFIED backup files, then proves the
+    // restored deployment is both byte-identical to the backup and
+    // functionally healthy — the db opens and every tenant's audit chain
+    // re-verifies against the deployment's configured audit keys (w22-ledger).
+    const drillDeploy = join(drillDir, 'deploy'), drillBackup = join(drillDir, 'backup');
+    const drillConfig = JSON.parse(readFileSync(join(drillDeploy, 'config.json'), 'utf8'));
+    const trustedAudit = {};
+    for (const t of Object.values(drillConfig.tenants ?? {})) trustedAudit[t.keys.audit.key_id] = { public_key: t.keys.audit.public_key };
+    const sha = f => createHash('sha256').update(readFileSync(f)).digest('hex');
+    for (const name of ['fabric.db', 'target.db']) {
+      const backupFile = join(drillBackup, name), liveFile = join(drillDeploy, name);
+      if (!existsSync(backupFile) || !existsSync(liveFile)) continue;
+      writeFileSync(liveFile, Buffer.concat([Buffer.from('BAD-RELEASE\0'), readFileSync(backupFile).subarray(64)]));
+      for (const suffix of ['-wal', '-shm']) rmSync(liveFile + suffix, { force: true });
+      copyFileSync(backupFile, liveFile);
+      scenario(`Rollback of ${name} restores byte-identical deployment`, true, () => sha(liveFile) === sha(backupFile));
+    }
+    scenario('Rolled-back store opens and audit chain re-verifies', true, () => {
+      const db = new DatabaseSync(join(drillDeploy, 'fabric.db'), { readOnly: true });
+      try {
+        const rows = db.prepare('SELECT tenant,seq,previous,hash,envelope FROM audit ORDER BY tenant,seq').all();
+        const seen = {};
+        for (const row of rows) {
+          const prior = seen[row.tenant] ?? { seq: 0, hash: '0'.repeat(64) };
+          if (row.seq !== prior.seq + 1 || row.previous !== prior.hash) return false;
+          const entry = verifySigned(JSON.parse(row.envelope), trustedAudit, 'audit');
+          if (digest(entry) !== row.hash) return false;
+          seen[row.tenant] = { seq: row.seq, hash: row.hash };
+        }
+        return rows.length > 0;
+      } finally { db.close(); }
+    });
   } finally { rmSync(drillDir, { recursive: true, force: true }); }
   // Results are written AFTER every scenario — the report must cover the
   // drill scenarios too, not a prefix of the run.

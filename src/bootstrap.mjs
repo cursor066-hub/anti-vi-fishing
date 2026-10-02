@@ -2,6 +2,7 @@ import { mkdirSync, writeFileSync, existsSync, lstatSync, chmodSync, readFileSyn
 import { join, resolve } from 'node:path';
 import { randomBytes, generateKeyPairSync } from 'node:crypto';
 import { generateKey, signed, encrypt } from './crypto.mjs';
+import { ISSUER_MANIFEST_PERMISSIONS, ISSUER_MANIFEST_LIMITATIONS, ISSUER_MANIFEST_IDEMPOTENCY, ISSUER_MANIFEST_COVERAGE } from './connectors.mjs';
 import { hashBytes, canonical, digest, parseStrict } from './canonical.mjs';
 import { defaultPolicy } from './policy.mjs';
 import { KeyVault } from './keystore.mjs';
@@ -149,14 +150,14 @@ export function createConfiguration(tenantNames = ['acme'], now = Date.now(), { 
       // issue_token for /issue and a read-scope read_token for manifest/
       // health/listing; both expire within a day and rotate via config update.
       const issue_token = randomBytes(24).toString('base64url'), read_token = randomBytes(24).toString('base64url'), token_expires_at = now + 86400000;
-      issuers[key.key_id] = { public_key: key.public_key, name, issuer_id: name, failure_domain: `${tenant}-${name}`, channel: role.channel, kinds: role.kinds, version: '1.0.0', issue_token, read_token, token_expires_at };
+      issuers[key.key_id] = { public_key: key.public_key, name, issuer_id: name, failure_domain: `${tenant}-${name}`, channel: role.channel, kinds: role.kinds, version: '1.0.0', issue_token, read_token, token_expires_at, permissions: ISSUER_MANIFEST_PERMISSIONS, limitations: ISSUER_MANIFEST_LIMITATIONS, idempotency: ISSUER_MANIFEST_IDEMPOTENCY, coverage_implications: ISSUER_MANIFEST_COVERAGE };
       if (issuerEndpoint) issuers[key.key_id].endpoint = `${issuerEndpoint}`;
     }
     // Dev Secure Perception component: generated per tenant; private material
     // goes to the component secret bundle (dev console), never into config.
     const component = createDevComponent(`secure-view-${tenant}`);
     componentSecrets[tenant][component.name] = component;
-    const components = { [component.name]: { signing_key_id: component.signing.key_id, signing: { key_id: component.signing.key_id, public_key: component.signing.public_key }, ecdh_public: component.ecdh_public, firmware_version: component.firmware_version, assurance: 'dev-attested-software', production: false } };
+    const components = { [component.name]: { signing_key_id: component.signing.key_id, signing: { key_id: component.signing.key_id, public_key: component.signing.public_key, suite: component.signing.suite }, ecdh_public: component.ecdh_public, firmware_version: component.firmware_version, assurance: 'dev-attested-software', production: false } };
     // Purpose-bound at creation — no 'any' wildcard signing authority.
     const execution = vault ? vault.generate(['action-certificate', 'capability'], { tenant_id: tenant }) : generateKey();
     const audit = vault ? vault.generate(['audit', 'outcome', 'revocation', 'coverage', 'checkpoint', 'backup-manifest'], { tenant_id: tenant }) : generateKey();
@@ -165,8 +166,8 @@ export function createConfiguration(tenantNames = ['acme'], now = Date.now(), { 
     // (DEK-audit F2). The embedded-custody profile (no vault, dev fixtures
     // only) keeps plaintext fields for compatibility.
     const dataKeys = vault
-      ? { encryption_key_wrapped: encrypt(randomBytes(32).toString('base64url'), vault.masterKey, `data-key/${tenant}/encryption`), watermark_key_wrapped: encrypt(randomBytes(32).toString('base64url'), vault.masterKey, `data-key/${tenant}/watermark`) }
-      : { encryption_key: randomBytes(32).toString('base64url'), watermark_key: randomBytes(32).toString('base64url') };
+      ? { encryption_key_wrapped: encrypt(randomBytes(32).toString('base64url'), vault.masterKey, `data-key/${tenant}/encryption`), watermark_key_wrapped: encrypt(randomBytes(32).toString('base64url'), vault.masterKey, `data-key/${tenant}/watermark`), tokenise_key_wrapped: encrypt(randomBytes(32).toString('base64url'), vault.masterKey, `data-key/${tenant}/tokenise`) }
+      : { encryption_key: randomBytes(32).toString('base64url'), watermark_key: randomBytes(32).toString('base64url'), tokenise_key: randomBytes(32).toString('base64url') };
     config.tenants[tenant] = { ...dataKeys, keys: { execution: { key_id: execution.key_id, public_key: execution.public_key, custody: vault ? 'vault' : 'embedded', ...(vault ? {} : { private_key: execution.private_key }) }, audit: { key_id: audit.key_id, public_key: audit.public_key, custody: vault ? 'vault' : 'embedded', ...(vault ? {} : { private_key: audit.private_key }) } }, identities, issuers, components, auth, genesis_policy: policy, genesis_signatures: Object.values(custodianKeys[tenant]).slice(0, 3).map(k => signed(policy, k, 'root-policy')) };
   }
   return { config, credentials, custodianKeys, issuerKeys, componentSecrets, identityKeys, vault };

@@ -7,3 +7,4 @@ var/
 .env
 *.log
 coverage/
+__pycache__/

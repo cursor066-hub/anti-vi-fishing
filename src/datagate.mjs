@@ -1,5 +1,5 @@
 import { createHmac } from 'node:crypto';
-import { digest, clone, canonical } from './canonical.mjs';
+import { clone, canonical } from './canonical.mjs';
 import { fields, identifier, text, integer, uniqueStrings, oneOf } from './schema.mjs';
 import { requireThat } from './errors.mjs';
 
@@ -38,7 +38,10 @@ export function executePlan(db, plan, tenant, decode = null) {
     .all(tenant, plan.dataset, ...plan.where.row_id, plan.limit)
     .map(r => ({ row_id: r.row_id, data: decode ? decode(r.row_id, r) : JSON.parse(r.data) }));
   requireThat(rows.length === plan.where.row_id.length, 'INV-409-STATE', 'Dataset row set changed since authorisation', 409);
-  return rows.map(r => Object.fromEntries(plan.select.map(c => [c, c === 'id' ? r.row_id : (r.data[c] ?? null)])));
+  // The storage row ids travel beside the projection — attribution marks
+  // bind the physical row, never a digest of the projected content
+  // (w24-datagate F4).
+  return { rows: rows.map(r => Object.fromEntries(plan.select.map(c => [c, c === 'id' ? r.row_id : (r.data[c] ?? null)]))), row_ids: rows.map(r => r.row_id) };
 }
 
 // SHIELD transformations applied to a result set (DAT-005). Each transform is
@@ -47,14 +50,22 @@ export const TRANSFORMS = {
   // The last-two reveal would fully disclose any value of two characters
   // or fewer — short cells suppress to a fixed-length mark (w10-datagate F4).
   mask: (value, field) => value === null || value === undefined ? null : (String(value).length <= 2 ? '\u2022\u2022\u2022\u2022' : '\u2022\u2022\u2022\u2022' + String(value).slice(-2)),
-  tokenise: (value, field, ctx) => 'tok:' + createHmac('sha256', ctx.tenantKey).update(`${ctx.tenant}/${ctx.dataset}/${field}/${canonical(value)}`).digest('hex').slice(0, 24),
+  // Tuple-keyed HMAC: a slash-joined input is ambiguous across component
+  // boundaries — '(a,b/c)' and '(a/b,c)' would tokenise identically and
+  // weaken cross-dataset unlinkability (w19-aad adjacent observation).
+  tokenise: (value, field, ctx) => 'tok:' + createHmac('sha256', ctx.tenantKey).update(canonical({ tenant: ctx.tenant, dataset: ctx.dataset, field, value })).digest('hex').slice(0, 24),
   drop: () => null,
-  constant: (value, field, ctx, arg) => arg ?? null,
+  // The constant literal is scalar-bound — an object arg would reflect
+  // verbatim into egress with no transform semantics (w24-datagate F1).
+  constant: (value, field, ctx, arg) => (arg === null || ['string', 'number', 'boolean'].includes(typeof arg) ? arg : null),
   // Generalization: replace a numeric value with a fixed-size bucket range.
-  // Deterministic so the transformed output is recomputable by an assessor.
+  // Deterministic so an assessor can recompute the transformed output.
+  // A bucket under 2 cells is identity, not generalization — a signed arg
+  // below the floor degrades to the wide default rather than leak the
+  // verbatim value (w24-datagate F1).
   aggregate: (value, field, ctx, arg) => {
     if (value === null || value === undefined) return null;
-    const size = Number.isSafeInteger(arg) && arg > 0 ? arg : 100;
+    const size = Number.isSafeInteger(arg) && arg >= 2 ? arg : 100;
     const n = Number(value); if (!Number.isFinite(n)) return null;
     const lo = Math.floor(n / size) * size; return `${lo}-${lo + size - 1}`;
   }
@@ -79,26 +90,40 @@ export function applyTransforms(rows, transforms, ctx) {
 // without altering source data.
 export function watermark(rows, ctx) {
   const key = Buffer.from(ctx.tenantWatermarkKey, 'base64url');
-  // Row identity falls back to a full-row digest so exports lacking an 'id'
-  // column are still attributable per record (runtime-audit F-3).
+  // Row identity is ALWAYS the physical storage row_id: ctx.rowIds carries
+  // the ids executePlan returned, order-correlated with `rows`. A
+  // projected-content digest cannot be joined back to dataset_rows and
+  // collides on identical projections (w24-datagate F4).
   // The tag binds tenant, dataset, subject, capability and request —
   // caller-chosen request ids must not make two different disclosures
   // produce colliding marks (w10-datagate F7).
-  const marks = rows.map(row => ({ row_id: row.id ?? `digest:${digest(row).slice(0, 24)}`, tag: createHmac('sha256', key).update(canonical({ tenant: ctx.tenant, dataset: ctx.dataset, subject: ctx.subject, capability_id: ctx.capabilityId ?? null, request_id: ctx.requestId, row })).digest('hex').slice(0, 24) }));
+  const marks = rows.map((row, i) => {
+    // Never trust the projected row's `id` — a transform (constant, mask,
+    // bucket) may write any value there; the physical row_id executePlan
+    // returned is the only attributable identity (w25-fixverify W25-06).
+    const rowId = ctx.rowIds?.[i];
+    requireThat(rowId !== undefined && rowId !== null, 'INV-409-STATE', 'Watermark requires physical row identity', 409);
+    return { row_id: rowId, tag: createHmac('sha256', key).update(canonical({ tenant: ctx.tenant, dataset: ctx.dataset, subject: ctx.subject, capability_id: ctx.capabilityId ?? null, request_id: ctx.requestId, row_id: rowId, row })).digest('hex').slice(0, 24) };
+  });
   return { rows, watermarks: marks };
 }
 
 // DAT-009: cumulative reconstruction control. Counts distinct rows and
 // columns a subject has touched per dataset inside the window; crossing the
 // configured coverage threshold produces a budget denial plus an audit signal.
-export function reconstructionCheck(touchDb, catalogDb, { tenant, subject, dataset, rows, columns, now, policy, record = true }) {
+export function reconstructionCheck(touchDb, catalogDb, { tenant, subject, dataset, rows, columns, now, policy, record = true, access = null, droppedEvents = 0 }) {
   // Touch records live on the fabric store's transaction so a rolled-back
   // consume cannot leave phantom access rows (cross-DB atomicity, M2).
   // Counts are computed PROSPECTIVELY before writing: a denied attempt
   // records nothing — the ledger measures disclosure, not probing, and a
   // rejection must not ratchet coverage toward self-DoS (w6-fix F6).
   const window = policy.window_ms ?? 86400000;
-  const touched = touchDb.prepare('SELECT row_id, column_name FROM data_access WHERE tenant=? AND subject=? AND dataset=? AND at>?').all(tenant, subject, dataset, now - window);
+  // When a ledger-derived access view is supplied it is the authority —
+  // wiping the data_access table cannot reset what the signed chain already
+  // attests (w11-redteam R9). The table remains as a fast mirror only.
+  const touched = access
+    ? access.filter(e => e.subject === subject && e.dataset === dataset && e.at > now - window).flatMap(e => e.row_ids.flatMap(r => e.columns.map(c => ({ row_id: r, column_name: c }))))
+    : touchDb.prepare('SELECT row_id, column_name FROM data_access WHERE tenant=? AND subject=? AND dataset=? AND at>?').all(tenant, subject, dataset, now - window);
   const rowSet = new Set(touched.map(x => x.row_id));
   const colSet = new Set(touched.map(x => x.column_name));
   for (const r of rows) rowSet.add(r);
@@ -109,13 +134,21 @@ export function reconstructionCheck(touchDb, catalogDb, { tenant, subject, datas
   // Coverage is also bounded dataset-wide: a second identity minted by
   // jit.grant (or any peer subject) must not let the combined disclosure
   // of a dataset exceed the same window ceiling (w10-datagate F2).
-  const datasetTouched = new Set(touchDb.prepare('SELECT DISTINCT row_id FROM data_access WHERE tenant=? AND dataset=? AND at>?').all(tenant, dataset, now - window).map(x => x.row_id));
+  const datasetTouched = access
+    ? new Set(access.filter(e => e.dataset === dataset && e.at > now - window).flatMap(e => e.row_ids))
+    : new Set(touchDb.prepare('SELECT DISTINCT row_id FROM data_access WHERE tenant=? AND dataset=? AND at>?').all(tenant, dataset, now - window).map(x => x.row_id));
   for (const r of rows) datasetTouched.add(r);
   const datasetCoverage = totalRows ? Math.floor((datasetTouched.size * 100) / totalRows) : 0;
+  // Seal-drop accounting: a seal that destroyed rows it could not re-verify
+  // leaves the ledger unable to re-derive the erased disclosure — every
+  // dropped event might have been a full-dataset access. Worst-case coverage
+  // keeps the configured budget honest instead of under-reporting what the
+  // chain can no longer prove (w34-composite MEDIUM-1).
+  const sealDropped = droppedEvents > 0;
   const limits = policy ?? { max_distinct_rows: 100000, max_distinct_columns: 100000, max_coverage_percent: 100 };
   const maxDatasetCoverage = limits.max_dataset_coverage_percent ?? limits.max_coverage_percent;
-  if (rowCount > limits.max_distinct_rows || colCount > limits.max_distinct_columns || coveragePercent > limits.max_coverage_percent || datasetCoverage > maxDatasetCoverage) {
-    return { allowed: false, code: 'INV-429-BUDGET', row_count: rowCount, column_count: colCount, coverage_percent: coveragePercent, dataset_coverage_percent: datasetCoverage };
+  if (rowCount > limits.max_distinct_rows || colCount > limits.max_distinct_columns || coveragePercent > limits.max_coverage_percent || datasetCoverage > maxDatasetCoverage || sealDropped) {
+    return { allowed: false, code: 'INV-429-BUDGET', row_count: rowCount, column_count: colCount, coverage_percent: sealDropped ? 100 : coveragePercent, dataset_coverage_percent: sealDropped ? 100 : datasetCoverage, seal_dropped_events: droppedEvents };
   }
   // record=false gives a read-only pre-flight: the export admission check
   // must not write touch rows before egress actually commits (w10-datagate F3).
@@ -123,5 +156,5 @@ export function reconstructionCheck(touchDb, catalogDb, { tenant, subject, datas
     const ins = touchDb.prepare('INSERT INTO data_access VALUES(?,?,?,?,?,?)');
     for (const row of rows) for (const c of columns) ins.run(tenant, subject, dataset, row, c, now);
   }
-  return { allowed: true, row_count: rowCount, column_count: colCount, coverage_percent: coveragePercent, dataset_coverage_percent: datasetCoverage };
+  return { allowed: true, row_count: rowCount, column_count: colCount, coverage_percent: sealDropped ? 100 : coveragePercent, dataset_coverage_percent: sealDropped ? 100 : datasetCoverage };
 }

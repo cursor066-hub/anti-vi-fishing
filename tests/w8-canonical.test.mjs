@@ -3,7 +3,7 @@ import http from 'node:http';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { randomUUID, randomBytes } from 'node:crypto';
-import { fixture, hasCode, runtimeInput } from './helpers.mjs';
+import { fixture, hasCode, installPolicy, runtimeInput } from './helpers.mjs';
 import { parseStrict, canonical, digest } from '../src/canonical.mjs';
 import { signed, verifySigned, generateKey } from '../src/crypto.mjs';
 import { KeyVault, verifyAttestation } from '../src/keystore.mjs';
@@ -32,27 +32,23 @@ test('CAN-F2: evidence binding on an inherited member can never be satisfied by 
   const h = fixture(t);
   const rec = h.proposed('finance.beneficiary.create', { vendor_id: 'vendor-1', bank_account: 'TESTBANK000002', currency: 'EUR' });
   // A hostile or buggy policy may bind a claim to a non-scalar path —
-  // enforcement must fail closed, not compare '[object Object]'.
-  const policy = h.f.policy('acme');
-  policy.rules['finance.beneficiary.create'].evidence_bindings.ownership.fake_fn = 'requested_state.toString';
-  h.f.store.put('acme', 'policy', 'active', policy, h.now());
+  // enforcement must fail closed, not compare '[object Object]'. The poisoned
+  // constitution arrives through the governed amendment pipeline itself.
+  installPolicy(h, p => { p.rules['finance.beneficiary.create'].evidence_bindings.ownership.fake_fn = 'requested_state.toString'; });
   const payload = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: rec.capsule_digest, kind: 'ownership', content_digest: digest({ x: 1 }), acquired_at: h.now(), expires_at: h.now() + 600000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 't', retention_until: h.now() + 660000, claims: { account: 'TESTBANK000002', fake_fn: 'function toString() { [native code] }' } };
   const envelope = signed(payload, h.setup.issuerKeys.acme.bank, 'evidence');
   assert.throws(() => h.f.attachEvidence(h.p('operator'), rec.capsule.capsule_id, envelope), hasCode('INV-403-SCOPE'));
 });
 
-test('CAN-F2b: evidence binding on an object-valued leaf can never be satisfied vacuously', t => {
+test('CAN-F2b: evidence binding on an object-valued leaf is refused at the governance gate', t => {
   const h = fixture(t);
+  // The hardening is upstream of enforcement: validatePolicy refuses to even
+  // install a constitution binding a claim to a non-scalar leaf.
+  assert.throws(() => installPolicy(h, p => { p.rules['finance.beneficiary.create'].evidence_bindings.ownership.fake_obj = 'requested_state'; }), hasCode('INV-400-SCHEMA'));
+  // And a non-scalar claim is schema-invalid at envelope verify regardless.
   const rec = h.proposed('finance.beneficiary.create', { vendor_id: 'vendor-1', bank_account: 'TESTBANK000002', currency: 'EUR' });
-  const policy = h.f.policy('acme');
-  policy.rules['finance.beneficiary.create'].evidence_bindings.ownership.fake_obj = 'requested_state';
-  h.f.store.put('acme', 'policy', 'active', policy, h.now());
-  // A non-scalar claim is schema-invalid at envelope verify.
   const bad = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: rec.capsule_digest, kind: 'ownership', content_digest: digest({ x: 1 }), acquired_at: h.now(), expires_at: h.now() + 600000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 't', retention_until: h.now() + 660000, claims: { account: 'TESTBANK000002', fake_obj: { entirely: 'different' } } };
   assert.throws(() => h.f.attachEvidence(h.p('operator'), rec.capsule.capsule_id, signed(bad, h.setup.issuerKeys.acme.bank, 'evidence')), hasCode('INV-400-SCHEMA'));
-  // Even a scalar claim cannot satisfy a non-scalar bound leaf.
-  const scalar = { ...bad, evidence_id: randomUUID(), claims: { account: 'TESTBANK000002', fake_obj: 'x' } };
-  assert.throws(() => h.f.attachEvidence(h.p('operator'), rec.capsule.capsule_id, signed(scalar, h.setup.issuerKeys.acme.bank, 'evidence')), hasCode('INV-403-SCOPE'));
 });
 
 test('CAN-F3: verifyAttestation shares verifySigned strictness — extra keys, malleated encoding, prototype key_id', () => {

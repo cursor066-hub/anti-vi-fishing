@@ -1,5 +1,10 @@
 # Verification-defining files require owner review: whoever can change what
-# "verified" means can change the meaning of green CI.
+# "verified" means can change the meaning of green CI. The VCS assist files
+# are verification-relevant too: .gitignore controls what the manifest's
+# extras scan would have seen, .gitattributes what checkout bytes look like
+# (w11-supply SC-05).
+/.gitignore              @cursor066-hub
+/.gitattributes          @cursor066-hub
 .github/workflows/       @cursor066-hub
 scripts/check.mjs        @cursor066-hub
 scripts/manifest.mjs     @cursor066-hub
@@ -46,3 +51,7 @@ vectors/                 @cursor066-hub
 deploy/                  @cursor066-hub
 docs/SECURITY.md         @cursor066-hub
 docs/requirements.csv    @cursor066-hub
+docs/production-acceptance.json @cursor066-hub
+# The audit-contract surface in docs/ is owner-gated wholesale — API/docs
+# wording is part of what verifiers and auditors rely on (w11-supply SC-05).
+docs/                    @cursor066-hub

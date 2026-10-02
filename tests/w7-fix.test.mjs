@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { fixture } from './helpers.mjs';
+import { fixture, installPolicy } from './helpers.mjs';
 import { createServer } from '../src/server.mjs';
 import { bootstrap } from '../src/bootstrap.mjs';
 import { signed, verifySigned, generateKey } from '../src/crypto.mjs';
@@ -49,10 +49,14 @@ test('w7-clock F1: recoverClock records the discontinuity and un-wedges the gate
 // its own succession — otherwise a lapsed policy wedges the tenant forever.
 test('w7-clock F2: succession certificates survive an expired active policy', t => {
   const h = fixture(t);
-  const expired = h.clone(h.f.policy('acme'));
-  expired.expires_at = h.now() - 1;
-  h.f.store.put('acme', 'policy', 'active', expired, h.now());
-  const next = h.clone(expired); next.version += 1; next.not_before = h.now(); next.expires_at = h.now() + 86400000;
+  // A short-lived successor installs through real governance and then
+  // lapses — the active constitution is honestly expired, not a store
+  // rewrite (which the chain anchor now refuses, w12 red-team).
+  installPolicy(h, p => { p.expires_at = h.now() + 122000; });
+  h.advance(3000); // past v2's expiry — the live constitution has lapsed
+  // v3 inherits v2's allow_weakening declaration — drop it: reviving a
+  // lapsed constitution is no weakening, so the plain threshold applies.
+  const next = h.clone(h.f.policy('acme')); next.version += 1; delete next.allow_weakening; next.not_before = h.now(); next.expires_at = h.now() + 86400000;
   const r = h.proposed('policy.change', { policy: next }, { action: { type: 'policy.change', target_resource: 'policy-root', purpose: 'Succession' } });
   h.f.simulate(h.p('policy-admin'), next);
   h.evidence(r, { kind: 'governance_review' }); h.evidence(r, { kind: 'governance_review', issuer: 'audit-committee' });

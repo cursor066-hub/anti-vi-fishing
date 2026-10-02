@@ -74,16 +74,21 @@ test('w9-schema F-7/F-8: stored id/version cannot shadow registry columns; tuple
   assert.equal(secret.version, 1, 'stored version member must not shadow the registry counter');
 });
 
-test('w9-schema F-8: legacy slash-AAD ciphertexts still decrypt after the migration', t => {
+test('w9-schema F-8: legacy slash-AAD ciphertexts migrate at open and stay readable', t => {
   const dir = mkdtempSync(join(tmpdir(), 'if-tgt-')); t.after(() => rmSync(dir, { recursive: true }));
   const key = randomBytes(32).toString('base64url');
-  const target = new SimulatedTarget(join(dir, 'target.db'), { acme: key }); t.after(() => target.close());
-  // Hand-write a row under the PRE-migration slash AAD, then read it.
+  const dbPath = join(dir, 'target.db');
+  // Stage a pre-migration database, then reopen: a live instance no longer
+  // accepts legacy ciphertext (that WAS the transplant surface), so the
+  // old row must be modelled on disk before open (w18-crypto).
+  const seeded = new SimulatedTarget(dbPath, { acme: key });
   const legacy = encrypt({ v: 42 }, Buffer.from(key, 'base64url'), 'acme/dataset/ds-2/row-9');
-  target.db.prepare('INSERT INTO dataset_rows VALUES(?,?,?,?)').run('acme', 'ds-2', 'row-9', legacy);
+  seeded.db.prepare('INSERT INTO dataset_rows VALUES(?,?,?,?)').run('acme', 'ds-2', 'row-9', legacy);
+  seeded.close();
+  const target = new SimulatedTarget(dbPath, { acme: key }); t.after(() => target.close());
   const rows = target.datasetRows('acme', 'ds-2');
-  assert.equal(rows[0].v, 42);
-  // The AADs are context-bound: a legacy resource ciphertext cannot be
+  assert.equal(rows[0].v, 42, 'migrated row still reads');
+  // The AADs are context-bound: a resource ciphertext can never be
   // replayed as a dataset row (context separation preserved).
   const res = encrypt({ planted: true }, Buffer.from(key, 'base64url'), 'acme/resource/ds-2');
   target.db.prepare('INSERT INTO dataset_rows VALUES(?,?,?,?)').run('acme', 'ds-2', 'row-10', res);

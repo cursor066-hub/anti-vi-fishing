@@ -16,7 +16,17 @@ import { spawnSync } from 'node:child_process';
 // would describe only that subtree (w8-tooling F3).
 process.chdir(new URL('..', import.meta.url).pathname);
 
-const EXCLUDE_DIRS = new Set(['node_modules', '.git', 'var', '.devin-files']);
+// Tarball-verify walks every file except the Git object store — a release
+// tree carrying installed dependencies or runtime state unhashed IS the
+// anomaly the walk exists to catch, not something to exempt (w15-supply F-5).
+const EXCLUDE_DIRS = new Set(['.git', '__pycache__', 'node_modules']);
+// Git-mode untracked scan exempts the runtime dirs that legitimately hold
+// state on a development checkout — but no .gitignore consultation, so a
+// broadened ignore rule cannot hide a payload (w11-supply SC-02).
+const GIT_MODE_EXEMPT = new Set(['node_modules', '.git', 'var']);
+// __pycache__ is exempt at ANY depth — interpreter bytecode caches are
+// runtime artifacts, not payload (w23-supply).
+const exemptPath = f => GIT_MODE_EXEMPT.has(f.split('/')[0]) || f.split('/').includes('__pycache__');
 const EXCLUDE_FILES = new Set(['MANIFEST.sha256']);
 const sha = f => createHash('sha256').update(readFileSync(f)).digest('hex');
 function* walk(dir) {
@@ -40,21 +50,32 @@ if (process.argv.includes('--verify')) {
   const problems = [];
   for (const { hash, name } of listed) {
     if (!existsSync(name)) { problems.push(`missing: ${name}`); continue; }
-    if (lstatSync(name).isSymbolicLink()) { problems.push(`symlinked: ${name}`); continue; }
-    if (sha(name) !== hash) problems.push(`tampered: ${name}`);
+    let st; try { st = lstatSync(name); } catch { problems.push(`unreadable: ${name}`); continue; }
+    if (st.isSymbolicLink()) { problems.push(`symlinked: ${name}`); continue; }
+    // Only regular files may stand at a listed path — a FIFO, socket or
+    // device node would block the re-hash forever and wedge every consumer
+    // gate instead of failing honestly (w15-supply F-7).
+    if (!st.isFile()) { problems.push(`non-regular: ${name}`); continue; }
+    try { if (sha(name) !== hash) problems.push(`tampered: ${name}`); }
+    catch { problems.push(`unreadable: ${name}`); }
   }
-  // Extra files the manifest does not know about — an injected payload must
-  // not pass verification just because it is not listed (supply-chain L4).
+  // The invariant is set equality in BOTH directions: every tracked file is
+  // listed AND every listed file is tracked/present. A committed file absent
+  // from the manifest is a stowaway that ships inside git-archive releases
+  // un-hashed (w11-supply SC-01).
   const tracked = gitFiles();
   let extras = [];
   if (tracked !== null) {
-    // Untracked-and-not-ignored files are unexpected; ignored files (var/,
-    // node_modules, .env) are runtime state and stay out of scope.
-    const untracked = spawnSync('git', ['ls-files', '--others', '--exclude-standard', '-z'], { encoding: 'utf8' });
-    // MANIFEST.sha256 itself may be untracked in a fresh checkout of a tree
-    // that was generated elsewhere — it is the verifier's own artifact, not
-    // payload. Everything else unexpected fails.
-    if (untracked.status === 0) extras = untracked.stdout.split('\0').filter(f => f && !EXCLUDE_FILES.has(f));
+    for (const f of tracked) if (!names.has(f) && !EXCLUDE_FILES.has(f)) problems.push(`unlisted tracked file: ${f}`);
+    // Untracked files are unexpected regardless of .gitignore — ignored
+    // runtime dirs are exempt, but no ignore-rule consultation (w11-supply
+    // SC-02). MANIFEST.sha256 itself may be untracked in a fresh checkout —
+    // it is the verifier's own artifact, not payload.
+    const untracked = spawnSync('git', ['ls-files', '--others', '-z'], { encoding: 'utf8' });
+    // A failed untracked sweep is LOUD — silently empty extras would turn
+    // extra-file detection off (w23-supply F17).
+    if (untracked.status === 0) extras = untracked.stdout.split('\0').filter(f => f && !EXCLUDE_FILES.has(f) && !exemptPath(f));
+    else problems.push('git ls-files --others failed — untracked sweep could not run');
   } else {
     extras = [...walk('.')].map(p => relative('.', p)).filter(f => !names.has(f));
   }
@@ -72,8 +93,14 @@ if (tracked === null) { console.error('git ls-files unavailable — cannot enume
 const files = tracked.filter(f => !EXCLUDE_FILES.has(f)).sort();
 const problems = [];
 const lines = files.map(f => {
-  if (lstatSync(f).isSymbolicLink()) { problems.push(`symlinked: ${f}`); return null; }
-  return `${sha(f)}  ${f}`;
+  // Per-file failures report as problems — a deleted-but-indexed file or a
+  // gitlink crashing generation must surface like every other failure, not
+  // as a stack trace (w15-supply F-8).
+  try {
+    if (lstatSync(f).isSymbolicLink()) { problems.push(`symlinked: ${f}`); return null; }
+    if (!lstatSync(f).isFile()) { problems.push(`non-regular: ${f}`); return null; }
+    return `${sha(f)}  ${f}`;
+  } catch { problems.push(`unreadable: ${f}`); return null; }
 });
 if (problems.length) { console.error(JSON.stringify({ problems })); process.exit(1); }
 writeFileSync('MANIFEST.sha256', lines.join('\n') + '\n');

@@ -6,7 +6,7 @@ import { encrypt, decrypt, SUITES, verifySuite, signSuite, verifySigned, ctEqual
 import { fields, text, identifier, integer } from './schema.mjs';
 import { requireThat, InvariantError } from './errors.mjs';
 
-const derivePublic = pem => createPublicKey(createPrivateKey(pem)).export({ type: 'spki', format: 'pem' });
+export const derivePublic = pem => createPublicKey(createPrivateKey(pem)).export({ type: 'spki', format: 'pem' });
 const stateMac = (masterKey, state) => createHmac('sha256', masterKey).update(canonical(state)).digest('base64url');
 
 // IF-SOFTHSM-1: software keystore profile. Keys are generated inside the
@@ -41,7 +41,14 @@ export class KeyVault {
     for (const p of Array.isArray(purpose) ? purpose : [purpose]) text(p, 'key purpose', 64);
     const raw = this._generateRaw(suite);
     const id = key_id ?? raw.key_id;
+    // A caller-chosen id becomes a Map key, an AAD suffix and a wire
+    // key_id: prototype-member names would silently poison downstream
+    // verification sets (w21-crypto F-6), and 'attestor' would alias the
+    // attestor's own wrap AAD 'vault/attestor' (w24-crypto F3).
+    requireThat(!['__proto__', 'prototype', 'constructor', 'attestor'].includes(id), 'INV-400-SCHEMA', 'Key id collides with a reserved name', 400);
+    requireThat(typeof id === 'string' && id.length <= 128 && /^[A-Za-z0-9_.:-]+$/.test(id), 'INV-400-SCHEMA', 'Invalid key id', 400);
     requireThat(!this.keys.has(id), 'INV-409-CONFLICT', 'Key id already exists', 409);
+    requireThat(tenant_id === null || (typeof tenant_id === 'string' && tenant_id.length <= 128), 'INV-400-SCHEMA', 'Invalid tenant binding', 400);
     // The vault is process-global — every entry carries its owning tenant so
     // no tenant-scoped path can sign, rotate, revoke or list another
     // tenant's material (w6-tenancy F2/F3/F4).
@@ -63,18 +70,39 @@ export class KeyVault {
     fields(key, ['key_id', 'public_key', 'private_key']);
     requireThat(typeof key.private_key === 'string' && key.private_key.includes('PRIVATE KEY') && key.private_key.length <= 8192, 'INV-400-SCHEMA', 'Invalid private key');
     requireThat(Object.hasOwn(SUITES, suite), 'INV-400-SCHEMA', 'Unapproved algorithm suite');
+    // The declared suite must match the private key's real type — a P-256
+    // key imported under the Ed25519 suite (or vice versa) leaves the vault
+    // claiming an agility profile it cannot honour, and a DER/PEM fault
+    // classifies as schema, not a raw crypto exception (w28-crypto F5).
+    try {
+      const pk = createPrivateKey(key.private_key);
+      const actual = pk.asymmetricKeyType === 'ed25519' ? 'Ed25519'
+        : pk.asymmetricKeyType === 'ec' && pk.asymmetricKeyDetails?.namedCurve === 'prime256v1' ? 'ES256' : null;
+      requireThat(actual === suite, 'INV-400-SCHEMA', 'Private key type does not match the declared suite', 400);
+    } catch (e) { if (e instanceof InvariantError) throw e; throw new InvariantError('INV-400-SCHEMA', 'Invalid private key', 400, { cause: e }); }
     // The advertised public key must be the public half of the private key —
     // otherwise the vault would attest a foreign identity while signing with
     // whatever private material was handed in (crypto-audit M-2).
     requireThat(derivePublic(key.private_key) === key.public_key, 'INV-401-SIGNATURE', 'Imported keypair is inconsistent', 401);
+    // Same admission gate as generate(): a non-string id coerces inside the
+    // wrap AAD ('vault/' + 5 aliases 'vault/5'), an uncanonicalizable purpose
+    // wedges save(), and 'attestor' aliases the attestor wrap (w24-crypto
+    // F2/F3).
+    requireThat(typeof key.key_id === 'string' && key.key_id.length <= 128 && /^[A-Za-z0-9_.:-]+$/.test(key.key_id), 'INV-400-SCHEMA', 'Invalid key id', 400);
+    requireThat(!['__proto__', 'prototype', 'constructor', 'attestor'].includes(key.key_id), 'INV-400-SCHEMA', 'Key id collides with a reserved name', 400);
+    for (const p of Array.isArray(purpose) ? purpose : [purpose]) text(p, 'key purpose', 64);
+    requireThat(tenant_id === null || (typeof tenant_id === 'string' && tenant_id.length <= 128), 'INV-400-SCHEMA', 'Invalid tenant binding', 400);
     requireThat(!this.keys.has(key.key_id), 'INV-409-CONFLICT', 'Key id already exists', 409);
     this.keys.set(key.key_id, { key_id: key.key_id, tenant_id, public_key: key.public_key, purpose, suite, exportable, revoked: false, generated_inside: false, wrapped: encrypt(key.private_key, this.masterKey, `vault/${key.key_id}`), created_firmware: 'imported' });
     return { key_id: key.key_id, public_key: key.public_key, suite, purpose, exportable };
   }
   _private(key_id, entry = null) { return decrypt((entry ?? this.entry(key_id)).wrapped, this.masterKey, `vault/${key_id}`); }
-  sign(key_id, purpose, message, { allowPending = false } = {}) {
+  sign(key_id, purpose, message, { allowPending = false, tenant_id = null } = {}) {
     const e = this.keys.get(key_id);
     requireThat(e && !e.revoked && (allowPending || !e.pending), 'INV-401-SIGNATURE', 'Key unavailable, revoked or pending activation', 401);
+    // The vault's own tenant invariant: a scoped entry must never mint for
+    // another tenant when the caller names one (w21-crypto F-7).
+    requireThat(!tenant_id || !e.tenant_id || e.tenant_id === tenant_id, 'INV-403-SCOPE', 'Key belongs to another tenant', 403);
     requireThat(e.purpose === 'any' || e.purpose === purpose || (Array.isArray(e.purpose) && e.purpose.includes(purpose)), 'INV-403-SCOPE', `Key is bound to purpose ${e.purpose}`, 403);
     requireThat(Object.hasOwn(SUITES, e.suite), 'INV-400-SCHEMA', 'Unapproved algorithm suite');
     return signSuite(e.suite, Buffer.isBuffer(message) ? message : Buffer.from(message), this._private(key_id, e));
@@ -93,11 +121,12 @@ export class KeyVault {
   // sign marked recovery envelopes or the tenant bricks (w11-lifecycle F1/F2).
   // Callers opt in only through Fabric._signingKeyId — pending keys can never
   // silently mint ordinary signatures.
-  envelope(key_id, purpose, payload, { allowPending = false } = {}) {
+  envelope(key_id, purpose, payload, { allowPending = false, tenant_id = null } = {}) {
     const e = this.keys.get(key_id);
     requireThat(e && !e.revoked && (allowPending || !e.pending), 'INV-401-SIGNATURE', 'Key unavailable, revoked or pending activation', 401);
+    requireThat(!tenant_id || !e.tenant_id || e.tenant_id === tenant_id, 'INV-403-SCOPE', 'Key belongs to another tenant', 403);
     const h = { profile: 'IF-CJSON-1', suite: e.suite, key_id, purpose };
-    return { protected: h, payload, signature: this.sign(key_id, purpose, canonical({ protected: h, payload }), { allowPending }) };
+    return { protected: h, payload, signature: this.sign(key_id, purpose, canonical({ protected: h, payload }), { allowPending, tenant_id }) };
   }
   export(key_id) {
     const e = this.entry(key_id);
@@ -106,10 +135,15 @@ export class KeyVault {
   }
   revoke(key_id) { const e = this.keys.get(key_id); requireThat(e, 'INV-404-NOT-FOUND', 'Key not found', 404); e.revoked = true; e.pending = false; return { key_id, revoked: true }; }
   list() { return [...this.keys.values()].map(({ wrapped, ...e }) => e); }
-  attest(key_id) {
+  // Key attestations are time-bound, tenant-bound claims: the payload
+  // carries issued_at/expires_at/tenant_id (and an optional verifier
+  // nonce) so an artifact minted for one scope cannot replay forever or
+  // port across tenants (w24-crypto F1).
+  attest(key_id, { now = Date.now(), ttl_ms = 60000, nonce = null } = {}) {
     const e = this.entry(key_id);
+    requireThat(Number.isSafeInteger(now) && Number.isSafeInteger(ttl_ms) && ttl_ms > 0 && ttl_ms <= 86400000, 'INV-400-SCHEMA', 'Invalid attestation window', 400);
     const h = { profile: 'IF-CJSON-1', suite: 'Ed25519', key_id: this.attestor.key_id, purpose: 'key-attestation' };
-    const payload = { subject_key_id: key_id, public_key: e.public_key, purpose: e.purpose, suite: e.suite, firmware: this.firmware, generated_inside: e.generated_inside, exportable: e.exportable, profile: 'IF-SOFTHSM-1', hardware: false };
+    const payload = { subject_key_id: key_id, tenant_id: e.tenant_id, public_key: e.public_key, purpose: e.purpose, suite: e.suite, firmware: this.firmware, generated_inside: e.generated_inside, exportable: e.exportable, profile: 'IF-SOFTHSM-1', hardware: false, issued_at: now, expires_at: now + ttl_ms, ...(nonce !== null ? { nonce } : {}) };
     return { protected: h, payload, signature: sign(null, Buffer.from(canonical({ protected: h, payload })), createPrivateKey(this.attestor.private_key)).toString('base64url') };
   }
   attestorPublicKeys() { return { [this.attestor.key_id]: { public_key: this.attestor.public_key } }; }
@@ -127,18 +161,25 @@ export class KeyVault {
     catch (e) { rmSync(tmp, { force: true }); throw e; }
   }
   static load(path, masterKey) {
-    const { mac, ...state } = JSON.parse(readFileSync(path, 'utf8'));
+    // A hostile or truncated vault file must classify inside the INV
+    // taxonomy like every other store corruption — never a raw
+    // SyntaxError off the boot path (w30-store F2).
+    const { mac, ...state } = (() => { try { return JSON.parse(readFileSync(path, 'utf8')); } catch (e) { throw new InvariantError('INV-503-CONFIG', 'keystore.json is unreadable or corrupt', 503, { cause: e }); } })();
     requireThat(state.format === STORE_FORMAT, 'INV-503-CONFIG', 'Unrecognised keystore format', 503);
     const vault = new KeyVault(masterKey, { firmware: state.firmware });
     requireThat(ctEqual(stateMac(vault.masterKey, state), mac), 'INV-503-CONFIG', 'Keystore integrity check failed (state MAC mismatch)', 503);
-    const attestorPrivate = decrypt(state.attestor_wrapped, vault.masterKey, 'vault/attestor');
+    const attestorPrivate = (() => { try { return decrypt(state.attestor_wrapped, vault.masterKey, 'vault/attestor'); } catch { throw new InvariantError('INV-503-CONFIG', 'Keystore attestor fails to unwrap', 503); } })();
     // Restore the full attestor identity — persisting only the private key
     // corrupted key_id/public_key on every restart (crypto-audit H-1).
     requireThat(state.attestor && derivePublic(attestorPrivate) === state.attestor.public_key, 'INV-503-CONFIG', 'Attestor identity inconsistent', 503);
     vault.attestor = { key_id: state.attestor.key_id, public_key: state.attestor.public_key, private_key: attestorPrivate };
     for (const e of state.keys) {
+      // A duplicate id inside one MAC-valid state file must fail, not
+      // silently overwrite (w21-crypto F-9).
+      requireThat(!vault.keys.has(e.key_id), 'INV-503-CONFIG', `Duplicate key id ${e.key_id} in keystore`, 503);
       // Verify every entry's advertised public key matches its private half.
-      requireThat(derivePublic(decrypt(e.wrapped, vault.masterKey, `vault/${e.key_id}`)) === e.public_key, 'INV-503-CONFIG', `Key ${e.key_id} has inconsistent public material`, 503);
+      const priv = (() => { try { return decrypt(e.wrapped, vault.masterKey, `vault/${e.key_id}`); } catch { throw new InvariantError('INV-503-CONFIG', `Key ${e.key_id} fails to unwrap`, 503); } })();
+      requireThat(derivePublic(priv) === e.public_key, 'INV-503-CONFIG', `Key ${e.key_id} has inconsistent public material`, 503);
       vault.keys.set(e.key_id, { ...e, wrapped: e.wrapped });
     }
     return vault;
@@ -164,6 +205,25 @@ export class KeyVault {
 // exact 4-key protected header, required suite, canonical base64url
 // signature, own-property key lookup, and uniform INV-401 failures
 // (w8-canonical F3).
-export function verifyAttestation(envelope, attestorKeys) {
-  return verifySigned(envelope, attestorKeys, 'key-attestation');
+// Verifying an attestation checks the claim, not just the signature: the
+// artifact must name a live window and its tenant; callers that pin a
+// nonce or tenant enforce the binding here, and a verifier holding the
+// vault can additionally require the subject key to still be live
+// (w24-crypto F1).
+export function verifyAttestation(envelope, attestorKeys, { now = Date.now(), nonce = undefined, tenant_id = undefined, vault = undefined } = {}) {
+  const payload = verifySigned(envelope, attestorKeys, 'key-attestation');
+  requireThat(Number.isSafeInteger(payload.issued_at) && Number.isSafeInteger(payload.expires_at)
+    && payload.issued_at <= payload.expires_at && payload.expires_at > now
+    // A backdated-or-futured issued_at outside a small clock skew means a
+    // minted-for-another-epoch artifact — never a live claim
+    // (w28-crypto F6).
+    && payload.issued_at <= now + 60_000,
+    'INV-401-ATTESTATION', 'Attestation carries no live validity window', 401);
+  if (nonce !== undefined) requireThat(payload.nonce === nonce, 'INV-401-ATTESTATION', 'Attestation nonce does not match the verifier challenge', 401);
+  if (tenant_id !== undefined) requireThat(payload.tenant_id === tenant_id, 'INV-401-ATTESTATION', 'Attestation belongs to another tenant', 401);
+  if (vault !== undefined) {
+    const e = vault.keys.get(payload.subject_key_id);
+    requireThat(e && !e.revoked && !e.pending && e.public_key === payload.public_key, 'INV-401-ATTESTATION', 'Attested key is no longer live', 401);
+  }
+  return payload;
 }

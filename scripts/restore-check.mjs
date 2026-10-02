@@ -10,24 +10,34 @@
 // forged backup (w7-backup F1).
 // Usage: node scripts/restore-check.mjs --dir <backup-dir> --trusted-keys <file>
 import { DatabaseSync } from 'node:sqlite';
-import { readFileSync, createReadStream, existsSync, lstatSync } from 'node:fs';
+import { readFileSync, createReadStream, existsSync, lstatSync, realpathSync, readdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { verifySigned } from '../src/crypto.mjs';
 import { digest } from '../src/canonical.mjs';
 
 const args = process.argv.slice(2);
-const opt = k => { const i = args.indexOf(`--${k}`); return i >= 0 ? args[i + 1] : null; };
+// A flag never satisfies an option's value (same guard as backup.mjs).
+const opt = k => { const i = args.indexOf(`--${k}`); const v = i >= 0 ? args[i + 1] : null; return v && !v.startsWith('--') ? v : null; };
 const dir = opt('dir'), trustedPath = opt('trusted-keys');
 if (!dir || !trustedPath) { console.error('usage: node scripts/restore-check.mjs --dir <backup-dir> --trusted-keys <config.json|key-map.json>'); process.exit(2); }
+
+// The trust anchor MUST live outside the artifact — an anchor file inside
+// --dir is authored by the same hand that wrote the manifest, so the whole
+// verification self-certifies (w23-supply F1).
+{
+  const dirReal = realpathSync(dir), anchorReal = realpathSync(trustedPath);
+  if (anchorReal === dirReal || anchorReal.startsWith(`${dirReal}/`)) { console.error('trust anchor must live OUTSIDE the backup directory — an in-tree anchor self-certifies'); process.exit(2); }
+}
 
 // External trust anchor: either a deployment config.json (audit keys are
 // extracted per tenant — execution keys and other tenants' audit keys never
 // validate audit rows) or a raw {key_id: {public_key}} map (w8-tooling F1).
-let trustedFlat, trustedFor;
+let trustedFlat, trustedFor, anchorIsConfig = false;
 try {
   const raw = JSON.parse(readFileSync(trustedPath, 'utf8'));
   if (raw.tenants) {
+    anchorIsConfig = true;
     const perTenant = {};
     for (const [name, t] of Object.entries(raw.tenants))
       for (const k of [t.keys?.audit].filter(Boolean)) perTenant[name] = { [k.key_id]: { public_key: k.public_key } };
@@ -47,6 +57,14 @@ try {
   payload = verifySigned(manifest.envelope, trustedFlat, 'backup-manifest');
 } catch (e) { console.error(`manifest signature verification failed: ${e.message}`); process.exit(1); }
 if (!Array.isArray(payload.databases) || payload.databases.length === 0) { console.error('manifest lists no databases'); process.exit(1); }
+// A BARE key-map anchor that is verbatim the manifest's own advertised key
+// map is the artifact supplying its own anchor — refuse even if it sat
+// outside --dir (w23-supply F1). A deployment config is exempt: it is
+// operator custody established independently of the artifact, and a
+// manifest that verifies under it was signed by the real audit key (a
+// forged backup never survives the signature check above).
+if (!anchorIsConfig && manifest.public_keys && digest(manifest.public_keys) === digest(trustedFlat)) { console.error('trusted keys equal the manifest\'s advertised key map — the artifact supplied its own anchor'); process.exit(1); }
+if (payload.complete === false) console.error('WARNING: manifest declares an incomplete (partial) backup — expected databases are missing');
 // Signed provenance is verified and surfaced — a replayed or foreign
 // deployment's backup must be visibly attributable (w8-tooling F2/F5).
 if (payload.format !== 'IF-BACKUP-1' || typeof payload.source_dir !== 'string' || typeof payload.created_at !== 'string') { console.error('manifest payload lacks signed format/source_dir/created_at'); process.exit(1); }
@@ -130,9 +148,22 @@ if (fabricDb && targetDb) {
     const certIds = new Set(fabricDb.prepare("SELECT id FROM records WHERE kind='certificate'").all().map(r => r.id));
     const orphans = targetDb.prepare('SELECT id FROM transactions').all().filter(r => !certIds.has(r.id));
     if (orphans.length) { report.valid = false; report.databases.push({ file: 'target.db', reason: `torn cross-database snapshot: ${orphans.length} transaction(s) without a certificate` }); }
-  } catch { /* schema variant without these tables */ }
+  } catch {
+    // A skipped check is a finding, not a pass — a db lacking the schema
+    // this check needs cannot silently verify clean (w23-supply F13).
+    report.databases.push({ file: 'cross-database', reason: 'cross-database consistency check could not run — required tables absent (integrity unproven)' });
+    report.skipped_checks = [...(report.skipped_checks ?? []), 'cross-database-consistency'];
+  }
 }
 for (const { db } of Object.values(opened)) db.close();
-report.manifest = { signer_key_id: manifest.envelope?.protected?.key_id ?? null, source_dir: payload.source_dir, created_at: payload.created_at };
+// Every file in --dir must be manifest-accounted — an unlisted extra
+// (planted script, WAL sidecar of a non-listed db) is uninspected content
+// riding on a signed manifest (w23-supply F13).
+{
+  const listed = new Set([...payload.databases.map(d => d.file), 'manifest.json']);
+  const extras = readdirSync(dir).filter(f => !listed.has(f));
+  if (extras.length) { report.valid = false; report.extra_files = extras; }
+}
+report.manifest = { signer_key_id: manifest.envelope?.protected?.key_id ?? null, source_dir: payload.source_dir, created_at: payload.created_at, complete: payload.complete ?? true };
 console.log(JSON.stringify(report, null, 2));
 process.exit(report.valid ? 0 : 1);

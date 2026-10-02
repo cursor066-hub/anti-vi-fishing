@@ -2,7 +2,7 @@ import test from 'node:test';
 import http from 'node:http';
 import assert from 'node:assert/strict';
 import { createServer, ROUTE_METHODS } from '../src/server.mjs';
-import { fixture, runtimeInput, runtimeRequest, hasCode } from './helpers.mjs';
+import { fixture, installPolicy, runtimeInput, runtimeRequest, hasCode } from './helpers.mjs';
 import { Worker } from 'node:worker_threads';
 import { actionAvailability, typedValue, csvSelection, nextAction } from '../web/app.js';
 import { bootstrap, loadConfiguration } from '../src/bootstrap.mjs';
@@ -55,7 +55,7 @@ test('HTTP UX-001: full propose -> evidence -> independent signatures -> ALLOW -
   const input = proposal(type, h.actor(), h.f.target.state('acme', resource), { vendor_id: 'vendor-1', bank_account: 'TESTBANK000004', currency: 'EUR' }, h.now(), { action: { type, target_resource: resource, purpose: 'API contract integration' } });
   const created = await h.request('/v1/action-capsules', { method: 'POST', body: { input, signature: signed(input, h.setup.identityKeys.acme.operator, 'capsule-intent') }, headers: { 'Idempotency-Key': randomUUID() } }); assert.equal(created.status, 201); const r = created.data, id = r.capsule.capsule_id;
   for (const issuer of ['bank', 'registry']) {
-    const payload = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: r.capsule_digest, kind: 'ownership', content_digest: 'a'.repeat(64), acquired_at: h.now(), expires_at: h.now() + 600000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'HTTP synthetic fixture', retention_until: h.now() + 900000, claims: { account: 'TESTBANK000004', owner_id: resource } };
+    const payload = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: r.capsule_digest, kind: 'ownership', content_digest: 'a'.repeat(64), acquired_at: h.now(), expires_at: h.now() + 600000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'HTTP synthetic fixture', retention_until: h.now() + 900000, issuer_version: '1.0.0', claims: { account: 'TESTBANK000004', owner_id: resource } };
     assert.equal((await h.request(`/v1/action-capsules/${id}/evidence`, { method: 'POST', body: signed(payload, h.setup.issuerKeys.acme[issuer], 'evidence') })).status, 201);
   }
   for (const subject of ['custodian-1', 'custodian-2']) {
@@ -79,9 +79,9 @@ test('PER-007 PER-009: Secure Perception is dev-attested: forged attestations fa
   const release = await h.request('/v1/secure-perception/release', { method: 'POST', body: { session_id: session.data.session_id, fields: { secret_field: 'sensitive-value-123' }, purpose: 'review' } });
   assert.equal(release.status, 200); assert.equal(release.data.mode, 'secure-perception');
   assert.ok(!release.data.ciphertext.includes('sensitive-value-123'), 'ciphertext must not contain plaintext');
-  const opened = openRelease({ ...component, _ecdh_private: component.ecdh_private }, release.data);
+  const opened = openRelease({ ...component, _ecdh_private: component.ecdh_private }, release.data, session.data, h.now());
   assert.equal(opened.data.secret_field, 'sensitive-value-123');
-  const policy = h.f.policy('acme'); policy.secure_perception.fallback = 'denied'; h.f.store.put('acme', 'policy', 'active', policy, h.now());
+  installPolicy(h, p => { p.secure_perception.fallback = 'denied'; });
   const denied = await h.request('/v1/secure-perception/fallback', { method: 'POST', body: { fields: { x: 'y' }, purpose: 'review' } });
   assert.equal(denied.status, 451);
 });
@@ -91,7 +91,7 @@ test('COM-003 NFR-TST-002: eight independent gate workers race; exactly one cert
   const results = await Promise.all(Array.from({ length: 8 }, () => runWorker(data))); assert.equal(results.filter(r => r.success).length, 1, JSON.stringify(results)); assert.ok(results.filter(r => !r.success).every(r => r.code === 'INV-409-REPLAY')); assert.equal(h.f.target.state('acme', record.capsule.action.target_resource).version, 1);
 });
 test('DAT-002: concurrent gates cannot overspend shared rolling budget', async t => {
-  const h = fixture(t), policy = h.f.policy('acme'); policy.runtime.windows[0].limit = 2; h.f.store.put('acme', 'policy', 'active', policy, h.now()); const cap = h.f.runtime.issue(h.p(), runtimeInput());
+  const h = fixture(t); installPolicy(h, p => { p.runtime.windows[0].limit = 2; }); const cap = h.f.runtime.issue(h.p(), runtimeInput());
   const results = await Promise.all(Array.from({ length: 8 }, () => runWorker({ config: h.setup.config, directory: h.directory, now: h.now(), principal: h.p(), runtime: runtimeRequest(cap) })));
   assert.equal(results.filter(r => r.success).length, 1, JSON.stringify(results)); assert.ok(results.filter(r => !r.success).every(r => r.code === 'INV-429-BUDGET'));
 });
@@ -160,10 +160,21 @@ test('UX-007: the controlled-workspace fallback succeeds end-to-end when policy 
 test('AUD-009: security evidence continues while optional analytics is disabled', async t => {
   const h = await httpFixture(t);
   // Product analytics is off by design; the required security evidence (the
-  // signed audit chain) is unaffected.
+  // signed audit chain) is unaffected. The separation is structural, not a
+  // flag: no analytics state may live inside the authority tables —
+  // a future pipeline sneaking analytics columns into the signed store
+  // breaks this assertion (w33-ledger F8).
   const metrics = await h.request('/v1/metrics', { token: h.setup.credentials.acme.security });
   assert.equal(metrics.status, 200);
   assert.equal(metrics.data.analytics_enabled, false);
+  for (const [key, value] of Object.entries(metrics.data))
+    assert.ok(!/analytic/i.test(key) || value === false, `analytics key ${key} carries state in the metrics surface`);
+  const schema = h.f.store.db.prepare("SELECT name, sql FROM sqlite_master WHERE type IN ('table','view')").all();
+  for (const row of schema) {
+    assert.ok(!/analytic/i.test(row.name), `analytics table ${row.name} cohabits the authority store`);
+    for (const col of (row.sql.match(/\b\w+\b/g) ?? []))
+      assert.ok(!/analytic/i.test(col), `analytics column ${col} inside ${row.name}`);
+  }
   const audit = await h.request('/v1/audit/entries?limit=5', { token: h.setup.credentials.acme.auditor });
   assert.equal(audit.status, 200);
   assert.ok(audit.data.entries.length >= 1);

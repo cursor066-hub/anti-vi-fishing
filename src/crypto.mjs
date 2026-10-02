@@ -59,7 +59,10 @@ export function signed(payload, key, purpose) {
 export function verifySigned(envelope, publicKeys, purpose) {
   requireThat(envelope && Object.keys(envelope).sort().join() === 'payload,protected,signature', 'INV-401-SIGNATURE', 'Invalid signed envelope', 401);
   const h = envelope.protected;
-  requireThat(h && Object.keys(h).sort().join() === 'key_id,profile,purpose,suite' && h.profile === 'IF-CJSON-1' && Object.hasOwn(SUITES, h.suite) && h.purpose === purpose, 'INV-401-SIGNATURE', 'Unsupported signature context', 401);
+  requireThat(h && Object.keys(h).sort().join() === 'key_id,profile,purpose,suite' && h.profile === 'IF-CJSON-1'
+    && typeof h.key_id === 'string' && typeof h.suite === 'string' && typeof h.purpose === 'string',
+    'INV-401-SIGNATURE', 'Unsupported signature context', 401);
+  requireThat(Object.hasOwn(SUITES, h.suite) && h.purpose === purpose, 'INV-401-SIGNATURE', 'Unsupported signature context', 401);
   const key = Object.hasOwn(publicKeys ?? {}, h.key_id) ? publicKeys[h.key_id] : undefined;
   requireThat(key && !key.revoked, 'INV-401-SIGNATURE', 'Signer unavailable', 401);
   // An anchor that declares a suite pins it — the protected header is
@@ -81,7 +84,13 @@ export function encrypt(value, key, aad) {
   return [iv, cipher.getAuthTag(), data].map(b => b.toString('base64url')).join('.');
 }
 export function decrypt(value, key, aad) {
-  const [iv, tag, data] = value.split('.').map(x => Buffer.from(x, 'base64url'));
+  // Canonical admission: exactly three base64url segments that round-trip
+  // — a malleated spelling (extra segments, padding, foreign chars) is a
+  // different wire object, and string-keyed dedup must not miss it
+  // (w24-crypto F5).
+  const parts = typeof value === 'string' ? value.split('.') : [];
+  requireThat(parts.length === 3 && parts.every(x => x.length > 0 && Buffer.from(x, 'base64url').toString('base64url') === x), 'INV-400-SCHEMA', 'Invalid ciphertext encoding', 400);
+  const [iv, tag, data] = parts.map(x => Buffer.from(x, 'base64url'));
   const decipher = createDecipheriv('aes-256-gcm', key, iv); decipher.setAAD(Buffer.from(aad)); decipher.setAuthTag(tag);
   return JSON.parse(Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8'));
 }

@@ -684,6 +684,16 @@
               "pattern": "^[A-Za-z0-9-]+$",
               "maxLength": 128
             }
+          },
+          {
+            "name": "signer_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+              "maxLength": 128
+            }
           }
         ]
       }
@@ -1625,6 +1635,48 @@
         }
       }
     },
+    "/v1/policy/reanchor": {
+      "post": {
+        "operationId": "post_v1_policy_reanchor",
+        "summary": "Re-anchor a diverged active policy under a signed remediation event",
+        "description": "Roles: security. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Empty"
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/audit-exports": {
       "post": {
         "operationId": "post_v1_audit_exports",
@@ -1824,7 +1876,7 @@
     "/v1/audit/verify-proof": {
       "post": {
         "operationId": "post_v1_audit_verify_proof",
-        "summary": "Verify a supplied inclusion proof against the live tree",
+        "summary": "Verify a supplied inclusion proof (optional external pin {root,size})",
         "description": "Roles: operator, security, auditor. Engineering profile; all target mutations are simulated.",
         "tags": [
           "Control"
@@ -1857,6 +1909,38 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/ProofVerify"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/audit/seal": {
+      "post": {
+        "operationId": "post_v1_audit_seal",
+        "summary": "Seal a poisoned audit tail: drops unverifiable rows under a signed AUDIT_SEALED event",
+        "description": "Roles: security. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
               }
             }
           }
@@ -1899,7 +1983,7 @@
       "get": {
         "operationId": "get_v1_grants",
         "summary": "Active JIT grants",
-        "description": "Roles: operator, security, auditor, policy_admin. Engineering profile; all target mutations are simulated.",
+        "description": "Roles: operator, security, auditor. Engineering profile; all target mutations are simulated.",
         "tags": [
           "Control"
         ],
@@ -2687,7 +2771,7 @@
       "post": {
         "operationId": "post_v1_advisory",
         "summary": "Deterministic advisory plane (never confers authority)",
-        "description": "Roles: operator, approver, custodian, security, policy_admin. Engineering profile; all target mutations are simulated.",
+        "description": "Roles: operator, approver, custodian, security, policy_admin, auditor. Engineering profile; all target mutations are simulated.",
         "tags": [
           "Control"
         ],
@@ -3018,7 +3102,8 @@
           "status": {
             "enum": [
               "MONITORED",
-              "UNKNOWN"
+              "UNKNOWN",
+              "UNCOVERED"
             ]
           },
           "path_class": {
@@ -3393,11 +3478,6 @@
             "minLength": 1,
             "maxLength": 512
           },
-          "session_id": {
-            "type": "string",
-            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
-            "maxLength": 128
-          },
           "capsule_id": {
             "type": "string",
             "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
@@ -3558,6 +3638,25 @@
         "properties": {
           "proof": {
             "type": "object"
+          },
+          "pin": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "root",
+              "size"
+            ],
+            "properties": {
+              "root": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "size": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000000000000
+              }
+            }
           }
         }
       },

@@ -9,22 +9,30 @@ import { fixture } from './helpers.mjs';
 import { Store } from '../src/store.mjs';
 import { encrypt } from '../src/crypto.mjs';
 
-// w8-fixverify F1: rows sealed before the canonical-tuple AAD change stay
-// readable — record bodies and wrapped DEKs both fall back to the legacy
-// '/`-joined AAD instead of failing closed and getting shredded as "corrupt".
-test('F1: pre-AAD-upgrade rows decrypt via the legacy fallback', t => {
+// w8-fixverify F1 (updated for w18-crypto F2): rows sealed before the
+// canonical-tuple AAD change stay readable — at open the store re-seals
+// them under the tuple form; the live legacy fallback is gone (it WAS the
+// transplant surface), never silently shredding live ciphertext.
+test('F1: pre-AAD-upgrade rows migrate at open and stay readable', t => {
   const dir = mkdtempSync(join(tmpdir(), 'if-legacy-')); t.after(() => rmSync(dir, { recursive: true }));
   const tenantKey = randomBytes(32);
-  const store = new Store(join(dir, 'fabric.db'), { acme: tenantKey.toString('base64url') }, {});
-  t.after(() => store.close());
-  // Pre-DEK era row: value sealed under the tenant key with '/`-joined AAD.
+  const dbPath = join(dir, 'fabric.db');
+  // Stage a pre-upgrade database: records and wrapped DEKs sealed under the
+  // legacy '/`-joined AAD forms (w18-crypto: the live store no longer
+  // accepts legacy ciphertext mid-flight — that WAS the transplant — so a
+  // pre-upgrade DB is modelled by writing the file before open).
+  const seeded = new Store(dbPath, { acme: tenantKey.toString('base64url') }, {});
   const policy = { version: 3, rules: { 'finance.payment.first': { quorum: 2 } } };
-  store.db.prepare('INSERT INTO records VALUES(?,?,?,?,?)').run('acme', 'policy', 'v1', encrypt(policy, tenantKey, 'acme/policy/v1'), 1);
-  assert.deepEqual(store.get('acme', 'policy', 'v1'), policy);
-  // Pre-tuple DEK era: wrapped key under '<aad>/dek', value under '<aad>'.
+  seeded.db.prepare('INSERT INTO records VALUES(?,?,?,?,?)').run('acme', 'policy', 'v1', encrypt(policy, tenantKey, 'acme/policy/v1'), 1);
   const dek = randomBytes(32), capsule = { capsule_id: 'c1', state: 'ALLOW' };
-  store.db.prepare('INSERT INTO deks VALUES(?,?,?,?)').run('acme', 'capsule', 'c1', encrypt(dek.toString('base64url'), tenantKey, 'acme/capsule/c1/dek'));
-  store.db.prepare('INSERT INTO records VALUES(?,?,?,?,?)').run('acme', 'capsule', 'c1', encrypt(capsule, dek, 'acme/capsule/c1'), 2);
+  seeded.db.prepare('INSERT INTO deks VALUES(?,?,?,?)').run('acme', 'capsule', 'c1', encrypt(dek.toString('base64url'), tenantKey, 'acme/capsule/c1/dek'));
+  seeded.db.prepare('INSERT INTO records VALUES(?,?,?,?,?)').run('acme', 'capsule', 'c1', encrypt(capsule, dek, 'acme/capsule/c1'), 2);
+  seeded.close();
+  // The reopened store's one-shot migration re-seals every row under the
+  // tuple AAD — the rows stay readable.
+  const store = new Store(dbPath, { acme: tenantKey.toString('base64url') }, {});
+  t.after(() => store.close());
+  assert.deepEqual(store.get('acme', 'policy', 'v1'), policy);
   assert.deepEqual(store.get('acme', 'capsule', 'c1'), capsule);
   assert.deepEqual(store.list('acme', 'capsule', 10), [capsule]);
   // put() re-seals under the tuple AAD — readable, and the legacy form no

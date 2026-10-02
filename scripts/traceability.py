@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
-"""Map every numbered SRS requirement, including unimplemented/external gaps."""
-import csv, json, re, pathlib, collections
+"""Map every numbered SRS requirement, including unimplemented/external gaps.
+
+--check mode: compute the same outputs and report files that differ from the
+committed tree as `STALE: <path>` lines, exiting 1 — a verify-only sibling
+that never rewrites the tree it is checking (w23-supply F7).
+"""
+import csv, io, json, re, sys, pathlib, collections
 root = pathlib.Path(__file__).resolve().parents[1]
+check_only = '--check' in sys.argv[1:]
 source = (root / 'spec/Invariant_Fabric_SRS_and_System_Architecture.md').read_text()
 rows = []
 for line in source.splitlines():
@@ -12,7 +18,9 @@ assert len(rows) == 211 and len({r['id'] for r in rows}) == 211
 # Hand-maintained per-requirement proof status (w6-ledger S2 — deduped set).
 # UX-001 demoted to PARTIAL: approval_threshold floors at >=1 for every rule,
 # so 'no additional human approval' is unreachable in this profile. COV-003
-# demoted: the ENFORCED coverage label is unreachable in the current model.
+# stays PARTIAL: ENFORCED IS reachable via verified technicalValidation
+# evidence (fabric.mjs promote path + ledger2 test), but assessor-exportable
+# bundles and independently executed rejection tests are still absent.
 _verified_ids = '''COV-002 COV-004 COV-007 COV-008 ACT-001 ACT-002 ACT-003 ACT-004 ACT-005 ACT-006 ACT-007 ACT-008 ACT-009 ACT-010 ACT-011 ACT-012 EVD-001 EVD-002 EVD-003 EVD-004 EVD-005 EVD-006 EVD-007 EVD-008 EVD-009 EVD-010 EVD-011 POL-001 POL-002 POL-003 POL-004 POL-005 POL-006 POL-007 POL-008 POL-009 POL-010 POL-011 POL-012 POL-013 POL-014 POL-015 COM-001 COM-002 COM-003 COM-004 COM-005 COM-006 COM-007 COM-008 COM-009 COM-010 COM-011 COM-012 COM-013 COM-014 RUN-001 RUN-002 RUN-003 RUN-004 RUN-005 RUN-006 RUN-007 RUN-008 RUN-009 RUN-010 DAT-001 DAT-002 DAT-003 DAT-004 DAT-005 DAT-006 DAT-007 DAT-008 DAT-009 DAT-010 DAT-011 DAT-012 IDN-001 IDN-002 IDN-003 IDN-004 IDN-005 IDN-006 IDN-007 IDN-008 IDN-009 IDN-010 AUD-001 AUD-002 AUD-003 AUD-004 AUD-005 AUD-006 AUD-007 AUD-008 AUD-009 AUD-010 AIG-001 AIG-002 AIG-003 AIG-004 AIG-005 AIG-006 AIG-007 AIG-008 AIG-009 AIG-010 CON-001 CON-002 CON-003 CON-004 CON-005 CON-006 CON-007 CON-008 CON-009 CON-010 KEY-002 KEY-004 KEY-005 KEY-007 KEY-008 KEY-009 KEY-010 KEY-012 UX-003 UX-005 UX-006 UX-007 UX-008 UX-009 UX-010 PER-006 PER-007 PER-008 PER-009 PER-010 NET-002 NET-003 NET-004 NET-005 NET-006 NET-007 NET-008 NET-009 NET-010 COV-001 COV-005 COV-006 COV-009 NFR-OPS-004 NFR-OPS-005 NFR-SEC-001 NFR-SEC-004 NFR-SEC-005 NFR-SEC-006 NFR-MNT-001 NFR-MNT-002 NFR-MNT-003 NFR-MNT-004 NFR-MNT-005 NFR-AVL-002 NFR-AVL-004 NFR-PERF-001 NFR-PERF-003 NFR-PERF-004 NFR-PRV-005 NFR-USA-004 NFR-TST-001 NFR-TST-002 NFR-TST-003 NFR-TST-004'''.split()
 assert len(_verified_ids) == len(set(_verified_ids)), 'verified set must not contain duplicate IDs'
 verified = set(_verified_ids)
@@ -42,7 +50,7 @@ by_prefix = {
 'NET': ('Network enforcement owner', 'R4', 'src/runtime.mjs', 'Software envelope decisions only; no kernel, endpoint, switch, proxy, actual packet or network quarantine enforcement.'),
 'PER': ('Trusted hardware owner', 'R5', 'src/server.mjs; src/secureview.mjs; docs/SECURITY.md', 'Hardware unavailable. A dev-attested software Secure Perception profile and a policy-gated controlled-workspace fallback exist and are honestly labelled; neither is a trusted display. No hostile-OS extraction or usability demonstration exists.'),
 'KEY': ('Independent customer custodians', 'R2/R5', 'src/crypto.mjs; src/keystore.mjs; src/shamir.mjs; src/ceremony.mjs; docs/SECURITY.md', 'Software vault (IF-SOFTHSM-1), rotation, revocation, attestation, dual-suite agility (Ed25519+ES256) and Shamir threshold recovery with enforced delay and per-custodian notice records are implemented. No real HSM/MPC, certified custody, physical OOB channel, or post-quantum suite.'),
-'AUD': ('Audit/privacy owner', 'R2', 'src/store.mjs; scripts/verify-export.mjs; scripts/verify-export-webcrypto.mjs', 'Signed local hash chain, cursor-paginated entry access and independently pinned checkpoint verification are implemented. External witness publication, a real analytics pipeline to segregate, external witness publication and independent operational audit remain gaps.'),
+'AUD': ('Audit/privacy owner', 'R2', 'src/store.mjs; scripts/verify-export.mjs; scripts/verify-export-webcrypto.mjs', 'Signed local hash chain, cursor-paginated entry access and independently pinned checkpoint verification are implemented. External witness publication, a real analytics pipeline to segregate, and independent operational audit remain gaps.'),
 'AIG': ('AI governance owner', 'R2', 'src/policy.mjs; src/advisory.mjs; docs/SECURITY.md', 'A deterministic advisory extractor exists with confidence/provenance marking and zero authority. External model providers, continuous evaluation and provider agreements are not implemented.'),
 'CON': ('Target integration owner', 'R2', 'src/target.mjs; src/connectors.mjs; src/issuerd.mjs', 'Controlled SQLite target simulator plus real HTTP evidence issuers with manifest drift revalidation. Real bank/ERP/cloud APIs, least-privilege credentials and support workflow are missing.'),
 'UX': ('Frontend/accessibility owner', 'R2', 'web/index.html; web/app.js; web/style.css', 'Full operator console (actions, policy, runtime, keys, ceremonies, connectors, proofs, perception, grants, audit) over the HTTP API exists. Browser rendering, responsive screenshots, Playwright journeys, WCAG and human comprehension studies were unavailable.'),
@@ -58,19 +66,27 @@ by_prefix = {
 }
 tests = sorted((root/'tests').glob('*.test.mjs'), key=lambda p: p.name) + [root/'scripts/simulate.mjs', root/'scripts/ai-eval.mjs']
 # A citation must name the requirement inside a real test() block that also
-# asserts — an ID sitting in a comment alone cannot mint evidence
-# (w11-ledger F3). Script harnesses (simulate/ai-eval) are executable
-# scenarios cited by file, so their whole text counts.
+# runs a real assertion CALL EXPRESSION. Comments are stripped first, so an
+# ID or the word 'assert' sitting in a comment cannot mint evidence —
+# and a bare identifier or string mention is not an assertion either
+# (w11-ledger F3, w23-supply F9). Block comments and whole-line //
+# comments are removed; `//` inside string literals like 'https://x' is
+# left alone by requiring whitespace or line-start before the marker.
+def _strip_comments(text):
+    text = re.sub(r'/\*.*?\*/', '', text, flags=re.S)
+    # `//` preceded by : or a word char is inside a string/URL — not a comment.
+    return re.sub(r'(?m)(?<![:/\w])//[^\n]*', '', text)
+_ASSERT_CALL = re.compile(r'\b(?:assert(?:\.\w+)?|requireThat|hasCode|throws|rejects|doesNotThrow|strictEqual|deepStrictEqual|expect)\s*\(')
 def evidence_blocks(path):
     text = path.read_text()
     if not path.name.endswith('.test.mjs'):
         return [text]
-    return re.split(r'(?m)^test\(', text)[1:]
+    return [_strip_comments(b) for b in re.split(r'(?m)^test\(', text)[1:]]
 for row in rows:
     prefix = row['id'].rsplit('-', 1)[0]
     owner, baseline, implementation, limitation = by_prefix[prefix]
     matches = [str(p.relative_to(root)) for p in tests
-               if any(row['id'] in b and ('assert' in b or 'requireThat' in b or 'hasCode' in b or 'throws' in b or not p.name.endswith('.test.mjs')) for b in evidence_blocks(p))]
+               if any(row['id'] in b and (_ASSERT_CALL.search(b) or not p.name.endswith('.test.mjs')) for b in evidence_blocks(p))]
     # Evidence lists only the files that literally name the requirement —
     # corpus-level artifacts would be boilerplate on every row (w6-ledger S3).
     status = 'VERIFIED_IN_ENGINEERING_PROFILE' if row['id'] in verified else 'NOT_IMPLEMENTED' if row['id'] in not_implemented else 'BLOCKED_EXTERNAL' if row['id'] in external else 'PARTIAL'
@@ -78,10 +94,25 @@ for row in rows:
     # method must not read as if the requirement itself passed (w9-srs F17).
     method = 'Automated test / simulation' if matches and status in ('VERIFIED_IN_ENGINEERING_PROFILE', 'PARTIAL') else ('Automated test covers rejection legs only; the required capability is absent' if matches else 'Source inspection / analysis; external acceptance still required')
     row.update(status=status, owner_role=owner, named_owner='Not assigned; required before production', release_baseline=baseline, verification_method=method, implementation=implementation, stored_evidence='; '.join(matches) if matches else 'docs/PRODUCTION-ACCEPTANCE.md', limitations=limitation, production_acceptance='NOT_APPROVED')
-(root/'docs').mkdir(exist_ok=True)
-with (root/'docs/requirements.csv').open('w', newline='') as file:
-    writer = csv.DictWriter(file, fieldnames=list(rows[0]), lineterminator="\n"); writer.writeheader(); writer.writerows(rows)
+buf = io.StringIO()
+writer = csv.DictWriter(buf, fieldnames=list(rows[0]), lineterminator="\n"); writer.writeheader(); writer.writerows(rows)
+csv_text = buf.getvalue()
 summary = {'total_requirements':len(rows),'functional_requirements':sum(not r['id'].startswith('NFR-') for r in rows),'nonfunctional_requirements':sum(r['id'].startswith('NFR-') for r in rows),'status_counts':dict(collections.Counter(r['status'] for r in rows)), 'production_ready':False, 'interpretation':'Verified means directly exercised in the declared engineering profile only, not closure of external/production acceptance. Counts are not product completion percentages.'}
-(root/'reports/requirements-summary.json').write_text(json.dumps(summary, indent=2)+'\n')
-(root/'docs/REQUIREMENTS.md').write_text('# Requirements traceability\n\nAll **211** numbered rows in the supplied SRS are preserved in `requirements.csv`: **166 functional** and **45 non-functional**. No missing requirements were silently removed or treated as optional. Original source language, minimum acceptance, evidence method, accountable role, baseline and current gap are recorded. Named human owners remain unassigned, which itself prevents production acceptance.\n\n`VERIFIED_IN_ENGINEERING_PROFILE` means the narrow software behavior was exercised, not that the full real-system or hardware claim is satisfied. `PARTIAL` means relevant code or analysis exists but material acceptance remains. `NOT_IMPLEMENTED` explicitly identifies functionality absent from the build. `BLOCKED_EXTERNAL` identifies absent hardware, customer resources or independent/organisational evidence. No row is marked production-approved.\n\nThe trace references tests by requirement IDs and source modules. Reports are stored under `reports/`. Some tests exercise only the safe-rejection side of a requirement (for example rejecting software signatures under hardware-required policy); that does **not** implement the missing hardware path.\n\nStatus counts: '+json.dumps(summary['status_counts'])+'.\n')
+summary_text = json.dumps(summary, indent=2)+'\n'
+req_md = '# Requirements traceability\n\nAll **211** numbered rows in the supplied SRS are preserved in `requirements.csv`: **166 functional** and **45 non-functional**. No missing requirements were silently removed or treated as optional. Original source language, minimum acceptance, evidence method, accountable role, baseline and current gap are recorded. Named human owners remain unassigned, which itself prevents production acceptance.\n\n`VERIFIED_IN_ENGINEERING_PROFILE` means the narrow software behavior was exercised, not that the full real-system or hardware claim is satisfied. `PARTIAL` means relevant code or analysis exists but material acceptance remains. `NOT_IMPLEMENTED` explicitly identifies functionality absent from the build. `BLOCKED_EXTERNAL` identifies absent hardware, customer resources or independent/organisational evidence. No row is marked production-approved.\n\nThe trace references tests by requirement IDs and source modules. Reports are stored under `reports/`. Some tests exercise only the safe-rejection side of a requirement (for example rejecting software signatures under hardware-required policy); that does **not** implement the missing hardware path.\n\nStatus counts: '+json.dumps(summary['status_counts'])+'.\n'
+outputs = {'docs/requirements.csv': csv_text, 'reports/requirements-summary.json': summary_text, 'docs/REQUIREMENTS.md': req_md}
+if check_only:
+    stale = []
+    for rel, content in outputs.items():
+        p = root / rel
+        if not p.exists() or p.read_text() != content:
+            stale.append(rel)
+    for rel in stale:
+        print(f'STALE:{rel}')
+    if stale:
+        sys.exit(1)
+else:
+    (root/'docs').mkdir(exist_ok=True)
+    for rel, content in outputs.items():
+        (root / rel).write_text(content)
 print(json.dumps(summary))

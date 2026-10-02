@@ -82,7 +82,17 @@ if (typeof document !== 'undefined') {
     const r = await api(`/v1/action-capsules/${id}`); state.selected = r; const c = r.capsule;
     $('detail-title').textContent = c.action.type; $('detail-id').textContent = c.capsule_id; $('detail-status').textContent = r.status; $('detail-status').dataset.state = r.status;
     $('material-details').replaceChildren();
-    for (const [key, value] of Object.entries({ Resource: c.action.target_resource, Destination: c.destination, Quantity: formatQuantity(c), Purpose: c.action.purpose, Owner: c.actor.subject_id, Expires: new Date(c.expires_at).toLocaleString(), Exclusions: c.exclusions.join(', ') || 'None', Coverage: 'Simulation only; production enforcement not established' })) $('material-details').append(node('dt', key), node('dd', value));
+    // UX-009: the coverage row shows this action's own declared path state
+    // (enforced/monitored/uncovered), not a static disclaimer — the manifest
+    // is vault-signed, so what the console shows is what the gate attested.
+    let coverageText;
+    try {
+      const manifest = (await api('/v1/coverage')).payload;
+      const path = (manifest.paths ?? []).find(x => x.action_type === c.action.type && x.target === c.action.target_resource);
+      coverageText = path ? `${path.effective_status ?? path.status}${(path.effective_status ?? path.status) !== path.status ? ` (declared ${path.status})` : ''} — ${path.next_action ?? ''}` : 'No declared coverage path for this action';
+      if (manifest.guarantee === false) coverageText += ` · manifest: ${manifest.assurance ?? 'no guarantee'}`;
+    } catch { coverageText = 'Coverage manifest unavailable'; }
+    for (const [key, value] of Object.entries({ Resource: c.action.target_resource, Destination: c.destination, Quantity: formatQuantity(c), Purpose: c.action.purpose, Owner: c.actor.subject_id, Expires: new Date(c.expires_at).toLocaleString(), Exclusions: c.exclusions.join(', ') || 'None', Coverage: coverageText })) $('material-details').append(node('dt', key), node('dd', value));
     $('old-values').textContent = JSON.stringify(c.current_state.material_fields, null, 2); $('new-values').textContent = JSON.stringify(c.requested_state, null, 2); $('next-action').textContent = nextAction(r.status);
     $('decision-reasons').replaceChildren(); for (const reason of r.decision?.reasons ?? []) $('decision-reasons').append(node('p', `${reason.code}: ${reason.message}`, 'help'));
     $('binding-digests').textContent = `Capsule SHA-256: ${r.capsule_digest}\nEvidence: ${r.evidence.length} · Signed approvals: ${r.approvals.length}`;
@@ -102,12 +112,16 @@ if (typeof document !== 'undefined') {
     const login = await api('/session', { method: 'POST', body: { token: $('token').value } }); $('token').value = ''; state.csrf = login.csrf_token; state.me = await api('/v1/me');
     $('identity').textContent = `${state.me.tenant_id} / ${state.me.subject_id}`; $('logout').hidden = false; $('login-panel').hidden = true; $('workspace').hidden = false;
     state.schemas = await api('/v1/schemas'); $('action-type').replaceChildren(new Option('Choose action type', '')); for (const s of state.schemas.filter(s => s.type.startsWith('finance.'))) $('action-type').append(new Option(s.type, s.type));
-    const canActions = state.me.roles.some(r => ['operator', 'approver', 'custodian', 'security', 'policy_admin'].includes(r));
-    const admin = state.me.roles.some(r => ['security', 'policy_admin', 'custodian'].includes(r));
     const has = (...r) => state.me.roles.some(x => r.includes(x));
+    // GET /v1/action-capsules permits the auditor read path too — the nav
+    // must show the list to exactly the roles the server serves it to.
+    const canActions = has('operator', 'approver', 'custodian', 'security', 'policy_admin', 'auditor');
+    const admin = has('security', 'policy_admin', 'custodian');
     // Affordances mirror the server's own authorization sets — a nav entry is
-    // hidden exactly when every API call under it would 403 (UX-004).
-    const access = { actions: canActions, propose: state.me.roles.includes('operator'), coverage: true, policy: has('policy_admin', 'security'), runtime: has('operator', 'workload'), audit: has('auditor', 'security'), keys: has('security', 'policy_admin'), ceremonies: admin, connectors: has('operator', 'security', 'policy_admin', 'auditor'), proofs: has('operator', 'security', 'auditor'), perception: has('operator', 'approver', 'custodian', 'security'), grants: has('operator', 'security', 'auditor') };
+    // hidden exactly when every API call under it would 403 (UX-004,
+    // w17-console F5: propose includes workload+policy_admin, coverage
+    // excludes workload, grants excludes policy_admin).
+    const access = { actions: canActions, propose: has('operator', 'workload', 'policy_admin'), coverage: has('operator', 'approver', 'custodian', 'security', 'auditor', 'policy_admin'), policy: has('policy_admin', 'security'), runtime: has('operator', 'workload'), audit: has('auditor', 'security'), keys: has('security', 'policy_admin'), ceremonies: admin, connectors: has('operator', 'security', 'policy_admin', 'auditor'), proofs: has('operator', 'security', 'auditor'), perception: has('operator', 'approver', 'custodian', 'security'), grants: has('operator', 'security', 'auditor') };
     document.querySelectorAll('nav button').forEach(b => { b.hidden = !access[b.dataset.view]; });
     // Per-ACTION affordances inside a visible view must also mirror the
     // server's role set: a button that always 403s is a dishonest
@@ -117,7 +131,11 @@ if (typeof document !== 'undefined') {
     $('ack-form').hidden = !has('custodian');
     $('split-form').hidden = !has('security', 'custodian');
     $('reconstruct-form').hidden = !has('security', 'custodian');
-    if (canActions) { show('actions'); await loadList(); } else { show('audit'); }
+    if (canActions) { show('actions'); await loadList(); }
+    // A principal with no list access (e.g. workload) lands on the first
+    // view it can actually use — never on 'audit' it cannot read
+    // (w17-console F5).
+    else { const first = Object.entries(access).find(([, v]) => v)?.[0]; if (first) show(first); }
     notify('Connected to the isolated engineering workspace. Targets and evidence issuers are synthetic.');
   });
   handle('logout', 'click', async () => { await api('/session/logout', { method: 'POST', body: {} }); state.csrf = null; state.me = null; state.selected = null; state.runtime = null; state.currentState = null; location.reload(); });
@@ -136,7 +154,13 @@ if (typeof document !== 'undefined') {
     const schema = state.schemas.find(s => s.type === $('action-type').value), requested = {}; for (const input of $('requested-fields').querySelectorAll('input')) requested[input.name] = typedValue(input.value, input.dataset.rule);
     const policy = await api('/v1/policy'), now = Date.now(), ttl = typedValue($('ttl').value, 'positive');
     const input = { schema_id: schema.id, schema_digest: schema.digest, actor: { subject_id: state.me.subject_id, identity_class: 'workforce', device_id: state.me.device_id }, action: { type: schema.type, target_resource: $('resource').value, purpose: $('purpose').value }, current_state: state.currentState, requested_state: requested, destination: requested.bank_account, quantity: requested.amount_minor ?? 1, exclusions: [], evidence_refs: [], policy_version: policy.version, nonce: crypto.randomUUID(), created_at: now, expires_at: now + ttl * 60000, rollback_or_compensation: $('rollback').value, privacy_classification: 'confidential' };
-    const r = await api('/v1/action-capsules', { method: 'POST', body: input, headers: { 'Idempotency-Key': crypto.randomUUID() } }); notify('Immutable proposal created. No target execution has occurred.'); await detail(r.capsule.capsule_id);
+    // The API requires a signed capsule-intent envelope: the proposal is
+    // signed in-browser via WebCrypto Ed25519 against the loaded identity
+    // key file (w17-console F2 — the previous form POSTed the bare capsule
+    // and could never succeed).
+    if (!state.identityKey) throw new Error('Select your operator identity key file (identity-<tenant>-<subject>.json) — the proposal must be signed in this browser.');
+    const envelope = await signIntent(input, state.identityKey);
+    const r = await api('/v1/action-capsules', { method: 'POST', body: { input, signature: envelope }, headers: { 'Idempotency-Key': crypto.randomUUID() } }); notify('Immutable proposal created. No target execution has occurred.'); await detail(r.capsule.capsule_id);
   });
   handle('evaluate', 'click', async () => { await api(`/v1/action-capsules/${state.selected.capsule.capsule_id}/evaluate`, { method: 'POST', body: {} }); await detail(state.selected.capsule.capsule_id); });
   handle('mint', 'click', async () => { await api('/v1/certificates', { method: 'POST', body: { capsule_id: state.selected.capsule.capsule_id } }); await detail(state.selected.capsule.capsule_id); notify('Single-use certificate issued. It expires shortly and cannot authorise a different action.'); });
@@ -151,7 +175,18 @@ if (typeof document !== 'undefined') {
   handle('evidence-form', 'submit', async () => { await api(`/v1/action-capsules/${state.selected.capsule.capsule_id}/evidence`, { method: 'POST', body: JSON.parse($('evidence-json').value) }); $('evidence-json').value = ''; await detail(state.selected.capsule.capsule_id); notify('Signed evidence attached. Earlier approvals were invalidated.'); });
   handle('challenge', 'click', async () => { const challenge = await api(`/v1/action-capsules/${state.selected.capsule.capsule_id}/approval-challenge`); download(challenge, `approval-challenge-${challenge.capsule_id}.json`); notify('Challenge downloaded. Sign it outside the browser with your independently controlled software key.'); });
   handle('approval-form', 'submit', async () => { const envelope = JSON.parse($('approval-json').value); if (envelope.payload?.capsule_id !== state.selected.capsule.capsule_id) throw new Error('Approval does not match the currently reviewed action.'); await api('/v1/approvals', { method: 'POST', body: envelope }); $('approval-json').value = ''; await detail(state.selected.capsule.capsule_id); notify('Exact-action signature accepted. Policy must still be evaluated.'); });
-  async function loadCoverage() { $('coverage-json').textContent = JSON.stringify((await api('/v1/coverage')).payload, null, 2); $('connector-json').textContent = JSON.stringify(await api('/v1/connectors'), null, 2); }
+  async function loadCoverage() {
+    const manifest = (await api('/v1/coverage')).payload;
+    // UX-009: per-path enforced-vs-monitored state rendered as rows next to
+    // the manifest, not only a raw JSON dump.
+    $('coverage-rows').replaceChildren();
+    for (const p of manifest.paths ?? []) {
+      const tr = node('tr'), status = node('td'), badge = node('span', p.effective_status ?? p.status, 'badge'); badge.dataset.state = p.effective_status ?? p.status; status.append(badge);
+      tr.append(node('td', p.path_id), node('td', p.action_type), node('td', p.target), status, node('td', p.anchored ? 'anchored' : 'unanchored'), node('td', p.next_action ?? ''));
+      $('coverage-rows').append(tr);
+    }
+    $('coverage-json').textContent = JSON.stringify(manifest, null, 2); $('connector-json').textContent = JSON.stringify(await api('/v1/connectors'), null, 2);
+  }
   handle('refresh-coverage', 'click', loadCoverage); handle('load-policy', 'click', async () => { $('policy-json').value = JSON.stringify(await api('/v1/policy'), null, 2); });
   handle('policy-form', 'submit', async () => { $('policy-result').textContent = JSON.stringify(await api('/v1/policies/simulate', { method: 'POST', body: JSON.parse($('policy-json').value) }), null, 2); notify('Simulation complete. No policy was activated.'); });
   handle('runtime-form', 'submit', async () => {

@@ -63,15 +63,28 @@ test('w9-network F2: an emergency policy cannot weaken network, remediation, bin
 
 test('w9-network F3: a widened live policy cannot retro-extend a signed capability channel', t => {
   const h = fixture(t);
-  const cap = h.f.runtime.issue(h.p(), runtimeInput({ action: 'service.connect', resource: 'erp-service', destination: 'erp-service', columns: [], row_ids: [] }));
+  const cap = h.f.runtime.issue(h.p(), runtimeInput({ action: 'service.connect', resource: 'erp-service', destination: 'erp-service', columns: [], row_ids: [], ttl_ms: 60000 }));
   assert.equal(h.f.runtime.consume(h.p(), runtimeRequest(cap, { protocol: 'https', port: 443 })).decision, 'ALLOW');
-  // Widen the live policy: the capability's signed snapshot still denies.
-  const widened = clone(h.f.policy('acme')); widened.runtime.network.allowed_ports.push(8443); widened.runtime.network.allowed_protocols.push('ftp');
-  h.f.store.put('acme', 'policy', 'active', widened, h.now());
+  // Move to policy v2 through the governed policy.change pipeline — the
+  // capability's signed v1 snapshot still denies widened channels even
+  // though the live constitution is newer (a store-level rewrite is
+  // INV-409-INTEGRITY now, w11-redteam R4). A tightening change is enough:
+  // what is under test is the snapshot pin, not the policy direction.
+  const widened = clone(h.f.policy('acme')); widened.version = 2; widened.runtime.reconstruction = { ...widened.runtime.reconstruction, max_distinct_rows: 10 };
+  const r = h.proposed('policy.change', { policy: widened }, { action: { type: 'policy.change', target_resource: 'policy-root', purpose: 'Widen network' } });
+  h.f.simulate(h.p('policy-admin'), widened); h.advance(120001);
+  h.evidence(r, { kind: 'governance_review' }); h.evidence(r, { kind: 'governance_review', issuer: 'audit-committee' }); h.approve(r, 3);
+  h.f.execute(h.p(), h.f.certificate(h.p(), r.capsule.capsule_id));
+  assert.equal(h.f.policy('acme').version, 2, 'policy v2 is live and anchored');
+  // The widened channel is denied by the SIGNED v1 snapshot before any
+  // staleness question is reached — the snapshot pin, not the stale rule.
   assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap, { protocol: 'ftp', port: 443 })), hasCode('INV-400-SCHEMA'));
   assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap, { protocol: 'https', port: 8443 })), hasCode('INV-400-SCHEMA'));
-  // Control: the originally-allowed channel still works.
-  assert.equal(h.f.runtime.consume(h.p(), runtimeRequest(cap)).decision, 'ALLOW');
+  // And under a newer anchored constitution nothing rides the old envelope
+  // at all — the capability is lapsed by the time v2 activates (capability
+  // ttl ≤ 60s vs the 120s policy cooldown), so even the original channel
+  // refuses before any staleness question.
+  assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap)), hasCode('INV-401-CAPABILITY'));
 });
 
 test('w9-network F4: clock recovery never resurrects lapsed authority', t => {
@@ -130,13 +143,13 @@ test('w9-network F7: quarantine denials on execute join the containment ledger',
 
 test('w9-network F8: a stale issuer manifest is drift, not freshness', async t => {
   const h = fixture(t);
-  const [issuerKeyId, issuer] = Object.entries(h.setup.config.tenants.acme.issuers).find(([, i]) => i.name === 'bank');
+  const [issuerKeyId, issuer] = Object.entries(h.f.tenant('acme').issuers).find(([, i]) => i.name === 'bank');
   const key = h.setup.issuerKeys.acme.bank;
   const manifest = extra => signed({ connector_id: 'issuer:bank', version: issuer.version ?? '1.0.0', domain: issuer.channel, actions: Object.keys(issuer.kinds), permissions: [], limitations: [], idempotency: {}, coverage_implications: [], issued_at: h.now(), expires_at: h.now() + 400000, ...extra }, key, 'connector-manifest');
   const serve = body => new Promise(resolve => { const srv = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); }); srv.listen(0, '127.0.0.1', () => resolve(srv)); });
   const run = async body => {
     const srv = await serve(body); t.after(() => srv.close());
-    issuer.endpoint = `http://127.0.0.1:${srv.address().port}`;
+    h.repoint(issuerKeyId, `http://127.0.0.1:${srv.address().port}`);
     return assert.rejects(() => h.f.checkIssuerDrift(h.p('security'), issuerKeyId), hasCode('INV-401-CONNECTOR'));
   };
   // A captured manifest minted before the freshness window must not
@@ -152,10 +165,12 @@ test('w9-network F8: a stale issuer manifest is drift, not freshness', async t =
 test('w9-network F9: an unrelated operator cannot cancel another actor\'s capsule', t => {
   const h = fixture(t);
   // A second operator identity joins via the legitimate path — config edit
-  // plus a security re-assertion (the drift snapshot gates it at boot).
+  // plus a security re-assertion (the drift snapshot gates it at boot). The
+  // edit lands through the frozen clone (w11-redteam R12).
   const op2key = generateKey();
-  h.setup.config.tenants.acme.identities[op2key.key_id] = { public_key: op2key.public_key, subject_id: 'operator-2', identity_class: 'workforce', roles: ['operator'], device_id: 'operator-2-device', failure_domain: 'acme-op2', hardware_backed: false, health_expires_at: h.now() + 86400000, grants: { resources: ['dataset-1'], actions: ['data.read'], destinations: ['customer-vault'], columns: ['id'], row_ids: [] } };
-  h.f.reassertConfig(h.p('security'));
+  h.reconfigure(cfg => {
+    cfg.tenants.acme.identities[op2key.key_id] = { public_key: op2key.public_key, subject_id: 'operator-2', identity_class: 'workforce', roles: ['operator'], device_id: 'operator-2-device', failure_domain: 'acme-op2', hardware_backed: false, health_expires_at: h.now() + 86400000, grants: { resources: ['dataset-1'], actions: ['data.read'], destinations: ['customer-vault'], columns: ['id'], row_ids: [] } };
+  });
   const record = h.proposed();
   assert.throws(() => h.f.cancel(h.p('operator-2'), record.capsule.capsule_id), hasCode('INV-403-SCOPE'));
   // Control: the actor still cancels their own.

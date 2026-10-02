@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { fixture, hasCode } from './helpers.mjs';
+import { fixture, hasCode, setTenant, stageConstitution, designateSuccessor } from './helpers.mjs';
 import { createServer } from '../src/server.mjs';
 import { answerQuery } from '../src/issuerd.mjs';
 import { generateKey, signed } from '../src/crypto.mjs';
@@ -56,7 +56,7 @@ test('w6-fix F6: denied exports do not burn the reconstruction budget', t => {
   const policy = h.clone(h.f.policy('acme'));
   policy.version += 1; policy.not_before = h.now();
   policy.runtime.reconstruction.max_distinct_rows = 1;
-  h.f.store.put('acme', 'policy', 'staged', { policy, activate_at: policy.not_before, staged_at: h.now() }, h.now());
+  stageConstitution(h, policy);
   h.f.activateDuePolicies('acme', h.now());
   const exportRow = row => {
     const r = h.proposed('data.export', { dataset: 'dataset-1', columns: ['id'], row_ids: [row], max_rows: 1, classification: 'internal', jurisdiction: 'EU' }, { action: { type: 'data.export', target_resource: 'dataset-1', purpose: 'Operations' }, destination: 'customer-vault', policy_version: 2 });
@@ -86,7 +86,7 @@ test('w6-fix F4: revoked keys cannot sign; revoked pending keys cannot activate'
   // Revoking a bound signer with no pending successor is refused — rotate
   // first (w11-lifecycle F1/F2).
   assert.throws(() => h.f.revoke(h.p('security'), { kind: 'key', id: execKey, reason: 'compromised' }), hasCode('INV-409-STATE'));
-  const pending = h.f.prepareRotation(h.p('security'), 'execution');
+  const pending = designateSuccessor(h, 'execution');
   h.f.revoke(h.p('security'), { kind: 'key', id: execKey, reason: 'compromised' });
   // Vault-level signing under the revoked key is refused outright.
   assert.throws(() => h.f.vault.sign(execKey, 'capability', 'probe'), hasCode('INV-401-SIGNATURE'));
@@ -96,7 +96,7 @@ test('w6-fix F4: revoked keys cannot sign; revoked pending keys cannot activate'
   assert.equal(env.protected.key_id, pending.key_id);
   assert.equal(env.payload.recovery_signing.superseded_key, execKey);
   assert.throws(() => h.f.revoke(h.p('security'), { kind: 'key', id: auditKey, reason: 'compromised' }), hasCode('INV-409-STATE'));
-  h.f.prepareRotation(h.p('security'), 'audit');
+  designateSuccessor(h, 'audit');
   h.f.revoke(h.p('security'), { kind: 'key', id: auditKey, reason: 'compromised' });
   const aenv = h.f.signAudit('acme', { probe: 1 }, 'outcome');
   assert.equal(aenv.payload.recovery_signing.superseded_key, auditKey);
@@ -123,7 +123,7 @@ test('w6-fix F5: legacy untagged vault keys resolve through tenant bindings', t 
   const h = fixture(t);
   const legacy = h.f.vault.generate('audit', { key_id: 'legacy-audit-1' });
   const orphan = h.f.vault.generate('audit', { key_id: 'orphan-1' });
-  h.f.tenant('acme').keys.legacy_class = { key_id: legacy.key_id, public_key: legacy.public_key };
+  setTenant(h, 'acme', tn => { tn.keys.legacy_class = { key_id: legacy.key_id, public_key: legacy.public_key }; });
   h.f.revoke(h.p('security'), { kind: 'key', id: legacy.key_id, reason: 'retire legacy' });
   assert.ok(h.f.revoked('acme', 'key', legacy.key_id));
   assert.throws(() => h.f.revoke(h.p('security'), { kind: 'key', id: orphan.key_id, reason: 'probe' }), hasCode('INV-404-NOT-FOUND'));

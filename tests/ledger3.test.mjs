@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { fixture, hasCode, runtimeInput, runtimeRequest } from './helpers.mjs';
+import { fixture, hasCode, installPolicy, setTenant, runtimeInput, runtimeRequest } from './helpers.mjs';
 import { generateKey, signed, verifySigned } from '../src/crypto.mjs';
 import { digest } from '../src/canonical.mjs';
 // Wave-4 promotions: each test exercises the engineering-profile acceptance of
@@ -62,6 +62,16 @@ test('RUN-008: adversarial request load neither evicts policy nor crashes the ga
   assert.equal(digest(h.f.policy('acme')), before);
   const cap = h.f.runtime.issue(h.p(), runtimeInput());
   assert.equal(h.f.runtime.consume(h.p(), runtimeRequest(cap)).decision, 'ALLOW');
+  // The gate rate-limits its own decision interface: rate_per_second=20 for
+  // this policy — the 21st consume inside one second is refused INV-429-RATE.
+  const cap2 = h.f.runtime.issue(h.p(), runtimeInput({ max_cost: 10000 }));
+  let lastErr = null;
+  for (let i = 0; i < 21; i++) {
+    try { h.f.runtime.consume(h.p(), runtimeRequest(cap2)); } catch (e) { lastErr = e; }
+  }
+  assert.ok(lastErr?.code === 'INV-429-RATE', `expected INV-429-RATE, got ${lastErr?.code}`);
+  h.advance(1001);
+  assert.equal(h.f.runtime.consume(h.p(), runtimeRequest(cap2)).decision, 'ALLOW', 'the window resets — the limiter never wedges honest traffic');
 });
 
 test('DAT-007: no reusable database credential exists anywhere in configuration or seeded state', t => {
@@ -69,7 +79,11 @@ test('DAT-007: no reusable database credential exists anywhere in configuration 
   const corpus = JSON.stringify(h.setup.config) + JSON.stringify(h.setup.credentials.acme);
   // Issuer and session tokens are opaque random strings scoped to their
   // endpoint — there is no database layer with a credential at all.
-  assert.ok(!/database|jdbc|postgres|mysql|mongodb|db_user|db_pass/i.test(JSON.stringify(h.setup.config)));
+  // A database credential would appear as a credential-named KEY or a
+  // connection-string scheme — scanning raw JSON for the bare words also
+  // matches random base64url key material ('jdbc' inside a public key is a
+  // ~2e-6-per-key false positive; CI hit it once).
+  assert.ok(!/"(database|jdbc|postgres|mysql|mongodb|db_user|db_pass)[a-z_]*"\s*:|jdbc:|postgres:\/\/|mysql:\/\/|mongodb:\/\//i.test(JSON.stringify(h.setup.config)));
   for (const token of Object.values(h.setup.credentials.acme)) assert.match(token, /^[A-Za-z0-9_-]{43}$/);
 });
 
@@ -153,33 +167,32 @@ test('NFR-SEC-006: crypto agility is configurable and both suites sign/verify', 
   assert.ok(algs.allowed_suites.includes('Ed25519') && Array.isArray(algs.deprecation));
   assert.ok(existsSync('scripts/check.mjs'), 'source scanner present');
   // A suite added by policy is usable end-to-end (full rotation e2e: KEY-005).
-  const policy = h.f.policy('acme');
-  policy.algorithms.allowed_suites = ['Ed25519', 'ES256'];
-  h.f.store.put('acme', 'policy', 'active', policy, h.now());
+  installPolicy(h, p => { p.algorithms.allowed_suites = ['Ed25519', 'ES256']; });
   const es = generateKey('ES256');
   // Register the suite key as a scoped issuer for this tenant only.
-  h.f.tenant('acme').issuers[es.key_id] = { public_key: es.public_key, name: 'es-agility-probe', channel: 'authoritative', kinds: ['ownership'], failure_domain: 'acme-es' };
+  setTenant(h, 'acme', tn => { tn.issuers[es.key_id] = { public_key: es.public_key, name: 'es-agility-probe', channel: 'authoritative', kinds: ['ownership'], failure_domain: 'acme-es' }; });
   const env = signed({ evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: digest({ a: 1 }), kind: 'ownership', content_digest: digest({ b: 2 }), acquired_at: h.now(), expires_at: h.now() + 60000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'agility probe', retention_until: h.now() + 120000 }, es, 'evidence');
   const out = h.f.verifyEvidenceEnvelope('acme', env);
   assert.equal(out.kind, 'ownership');
   // And a retired suite is refused: removing ES256 makes the same envelope fail.
-  policy.algorithms.allowed_suites = ['Ed25519'];
-  h.f.store.put('acme', 'policy', 'active', policy, h.now());
+  installPolicy(h, p => { p.algorithms.allowed_suites = ['Ed25519']; });
   assert.throws(() => h.f.verifyEvidenceEnvelope('acme', env), hasCode('INV-451-POLICY'));
 });
 
 test('NFR-PERF-004: the integrated evaluation path sustains >=100 decisions/second in-process', t => {
-  const h = fixture(t); const r = h.ready().record;
-  const record = h.f.getCapsule(h.p(), r.capsule.capsule_id);
-  // Run the real evaluation path (policy + graph + audit write) and measure.
+  const h = fixture(t); const r = h.proposed();
+  // Measure the INTEGRATED path the requirement names: evaluate() runs the
+  // full policy+graph decision AND writes its POLICY_EVALUATED record +
+  // audit event each call — not evaluation(), the pure unaudited variant.
   const iterations = 200, started = process.hrtime.bigint();
-  for (let i = 0; i < iterations; i++) h.f.evaluation('acme', record, h.now());
+  for (let i = 0; i < iterations; i++) h.f.evaluate(h.p(), r.capsule.capsule_id);
   const seconds = Number(process.hrtime.bigint() - started) / 1e9;
   const ops = iterations / seconds;
-  assert.ok(ops >= 100, `in-process evaluation throughput ${ops.toFixed(0)}/s < 100/s`);
+  assert.ok(ops >= 100, `in-process audited evaluation throughput ${ops.toFixed(0)}/s < 100/s`);
   // The committed benchmark artifact must corroborate the same claim.
   const bench = JSON.parse(readFileSync('reports/benchmark.json', 'utf8'));
-  assert.equal(bench.asserted_targets.integrated_100_evaluations_per_second, true);
+  assert.equal(bench.asserted_targets.integrated_evaluations_per_second_at_least, true);
+  assert.ok(bench.integrated_target_ops_per_second >= 60 && bench.integrated_target_ops_per_second <= 100);
   assert.ok(bench.integrated_evaluation_with_sqlite_audit.operations_per_second >= 100);
 });
 
@@ -201,8 +214,10 @@ test('NFR-AVL-002: connector unavailability does not remove already-issued local
   // registered issuer is flagged drifted (as checkIssuerDrift does when the
   // endpoint is unreachable or the manifest is invalid), so no new evidence
   // can be acquired or attached.
+  // Quarantine is anchored by the signed event, not the mutable row
+  // (w13-fixverify M3) — emit CONNECTOR_DRIFT like the drift check does.
   for (const key_id of Object.keys(h.f.tenant('acme').issuers))
-    h.f.store.put('acme', 'issuer-drift', key_id, { drifted_at: h.now(), changes: [{ field: 'endpoint', detail: 'unreachable' }] }, h.now());
+    h.f.store.audit('acme', 'CONNECTOR_DRIFT', 'test', key_id, { drifted: 'endpoint' }, h.now());
   const r = h.proposed();
   assert.throws(() => h.evidence(r), hasCode('INV-403-QUARANTINE'));
   // ...while the already-issued local control still enforces offline.
@@ -211,11 +226,9 @@ test('NFR-AVL-002: connector unavailability does not remove already-issued local
 
 test('NFR-PRV-002: retention policy is configurable per evidence kind', t => {
   const h = fixture(t);
-  const policy = h.f.policy('acme');
-  assert.ok(Number.isSafeInteger(policy.retention.default_ms));
+  assert.ok(Number.isSafeInteger(h.f.policy('acme').retention.default_ms));
   // Tighten the ceiling for one kind only.
-  policy.retention.per_kind.ownership = 60000;
-  h.f.store.put('acme', 'policy', 'active', policy, h.now());
+  installPolicy(h, p => { p.retention.per_kind.ownership = 60000; });
   const rec = h.proposed();
   // A support envelope holding a 2-day retention exceeds the new kind ceiling.
   const env = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: rec.capsule_digest, kind: 'ownership', content_digest: digest({ x: 1 }), acquired_at: h.now(), expires_at: h.now() + 1000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'test', retention_until: h.now() + 172800000, claims: { account: 'TESTBANK000002', owner_id: rec.capsule.action.target_resource } };
@@ -244,6 +257,11 @@ test('NFR-MNT-001: every public route is versioned and the contract is documente
   assert.equal(spec.openapi.split('.')[0], '3');
   const assets = new Set(['/', '/app.js', '/style.css']); // console statics are content, not API routes
   for (const path of Object.keys(spec.paths)) assert.ok(assets.has(path) || /^\/(v1|gate\/v1|session|healthz|readyz)/.test(path), path);
+  // The compatibility leg is documented, not implied: API.md must state the
+  // breaking-change/version-prefix contract explicitly (w25-ledger L3).
+  const api = readFileSync('docs/API.md', 'utf8');
+  assert.match(api, /[Bb]ackward compatibility/);
+  assert.match(api, /new version prefix/);
 });
 
 test('NFR-MNT-003: a CycloneDX SBOM enumerates components and dependencies', () => {
@@ -271,7 +289,13 @@ test('NFR-TST-001: every requirement row carries a verification method, and ever
   const methodIdx = rows[0].indexOf('verification_method'), idIdx = rows[0].indexOf('id'), statusIdx = rows[0].indexOf('status'), limIdx = rows[0].indexOf('limitations');
   assert.ok(methodIdx > 0 && idIdx >= 0 && statusIdx > 0 && limIdx > 0);
   assert.equal(rows.length - 1, 211);
-  const testCorpus = readdirSync('tests').filter(f => f.endsWith('.test.mjs')).map(f => readFileSync(`tests/${f}`, 'utf8')).join('\n');
+  // Mirror of the traceability gate's evidence rule: the id must appear
+  // inside a real test() block that also runs an assertion call — comments
+  // are stripped, so a comment mention cannot mint evidence (w25-ledger L1).
+  const stripComments = s => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(?<![:/\w])\/\/[^\n]*/g, '');
+  const ASSERT_CALL = /\b(?:assert(?:\.\w+)?|requireThat|hasCode|throws|rejects|doesNotThrow|strictEqual|deepStrictEqual|expect)\s*\(/;
+  const evidenceBlocks = readdirSync('tests').filter(f => f.endsWith('.test.mjs'))
+    .flatMap(f => readFileSync(`tests/${f}`, 'utf8').split(/^test\(/m).slice(1).map(stripComments));
   for (const cells of rows.slice(1)) {
     const id = cells[idIdx];
     assert.ok(cells.length > methodIdx, `short row: ${id}`);
@@ -279,7 +303,7 @@ test('NFR-TST-001: every requirement row carries a verification method, and ever
     if (cells[statusIdx] === 'VERIFIED_IN_ENGINEERING_PROFILE') {
       // VERIFIED means a test tagged with this id exists — the row must not
       // be honourable on prose alone.
-      assert.ok(testCorpus.includes(id), `${id} is VERIFIED but no test file mentions it`);
+      assert.ok(evidenceBlocks.some(b => b.includes(id) && ASSERT_CALL.test(b)), `${id} is VERIFIED but no tagged test() block with an assertion mentions it`);
     } else {
       // Every non-verified row must carry an honest limitation gap.
       assert.ok(cells[limIdx].trim().length > 0, `${id} non-verified row lacks a limitations statement`);
@@ -368,7 +392,19 @@ test('AIG-010: the AI advisory plane has a versioned regression suite that is ex
 
 test('NFR-OPS-004: customer-visible incidents carry a detection→containment→recovery→root-cause template', () => {
   const rb = readFileSync('docs/RUNBOOKS.md', 'utf8');
-  for (const phase of ['detect', 'contain', 'recover', 'root cause', 'corrective']) assert.ok(rb.toLowerCase().includes(phase), `incident template missing phase: ${phase}`);
+  // Anchor on the document structure: an incident section must exist as a
+  // real heading, and inside ITS body the response phases must appear in
+  // lifecycle order — scattered word hits anywhere in the file would not
+  // prove the template exists (ledger w31).
+  const sections = [...rb.matchAll(/^##+\s+(.+)$/gm)].map((m, i, all) => ({ title: m[1].toLowerCase(), body: rb.slice(m.index + m[0].length, all[i + 1]?.index ?? rb.length).toLowerCase() }));
+  const incident = sections.filter(s => /incident|breach|compromis/.test(s.title));
+  assert.ok(incident.length >= 1, 'no dedicated incident runbook section');
+  const phases = ['detect', 'contain', 'recover', 'root cause', 'corrective'];
+  const covered = incident.filter(s => {
+    const present = phases.map(p => s.body.indexOf(p)).filter(i => i >= 0);
+    return present.length >= 4 && present.every((v, i) => i === 0 || v > present[i - 1]);
+  });
+  assert.ok(covered.length >= 1, 'no incident section carries the response lifecycle (detection→containment→recovery→root cause→corrective) in order');
 });
 
 test('NFR-OPS-005: staged rollout and rollback are drilled in the simulation suite', () => {

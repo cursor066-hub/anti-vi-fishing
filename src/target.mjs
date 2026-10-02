@@ -12,56 +12,179 @@ import { requireThat, InvariantError } from './errors.mjs';
 // caller text ever reaches SQL.
 // Tuple AADs joined by canonical(): a slash-joined AAD collides if any
 // identifier ever admits '/' — 'a/b'+'c' vs 'a'+'b/c' encrypt the same
-// context. Writes use the tuple form; reads fall back to the legacy slash
-// form so ciphertexts written before the migration still open
-// (w9-schema F-8).
+// context. Writes use the tuple form; the legacy slash space was migrated
+// away at open and is dead thereafter — a live fallback IS the transplant
+// surface (w18-crypto F1/F2, uniform closure).
 const AAD = (...parts) => canonical(parts);
 export class SimulatedTarget {
-  _dec(value, tenant, tuple, legacy) {
-    // Any authentication failure (InvariantError or the cipher's own
-    // 'Unsupported state' Error) falls back to the legacy slash AAD.
+  _dec(value, tenant, tuple) {
+    // A corrupted ciphertext is tamper evidence, not a code crash — every
+    // decrypt failure classifies in the ledger taxonomy (w21-store F-7).
     try { return decrypt(value, this.key(tenant), tuple); }
-    catch { return decrypt(value, this.key(tenant), legacy); }
+    catch (e) { throw new InvariantError('INV-409-INTEGRITY', 'Stored ciphertext does not authenticate', 409); }
   }
-  constructor(path, tenantKeys) {
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 }); this.db = new DatabaseSync(path); chmodSync(path, 0o600); this.keys = tenantKeys;
-    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=30000; PRAGMA secure_delete=ON;
-      CREATE TABLE IF NOT EXISTS resources(tenant TEXT, id TEXT, version INTEGER, value TEXT, PRIMARY KEY(tenant,id));
-      CREATE TABLE IF NOT EXISTS transactions(tenant TEXT,id TEXT,value TEXT,PRIMARY KEY(tenant,id));
-      CREATE TABLE IF NOT EXISTS dataset_rows(tenant TEXT, dataset TEXT, row_id TEXT, data TEXT, PRIMARY KEY(tenant,dataset,row_id));
-      CREATE TABLE IF NOT EXISTS data_access(tenant TEXT, subject TEXT, dataset TEXT, row_id TEXT, column_name TEXT, at INTEGER);
-      CREATE INDEX IF NOT EXISTS data_access_ix ON data_access(tenant,subject,dataset,at);
-      CREATE TABLE IF NOT EXISTS secrets_registry(tenant TEXT, secret_id TEXT, version INTEGER, value TEXT, PRIMARY KEY(tenant,secret_id));
-      CREATE TABLE IF NOT EXISTS grants(tenant TEXT, grant_id TEXT, value TEXT, PRIMARY KEY(tenant,grant_id));
-      CREATE INDEX IF NOT EXISTS grants_subject ON grants(tenant);`);
-    // Crash residue: a post-delete checkpoint that never ran leaves superseded
-    // ciphertext in the WAL — truncate at open like the ledger store does
-    // (w8-fixverify F3).
-    this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+  constructor(path, tenantKeys, { aadDedup } = {}) {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    // A hostile or foreign file must surface inside the ledger taxonomy
+    // from the first touch — a raw ERR_SQLITE_ERROR here is a tamper no
+    // INV-* alert can see (w31-fixverify F2, mirrors the store gate).
+    try { this.db = new DatabaseSync(path); } catch (e) { throw new InvariantError('INV-503-STORAGE', 'Target ledger file is unreadable or not a database', 503, { cause: e }); }
+    chmodSync(path, 0o600); this.keys = tenantKeys;
+    // Shared with the ledger store — the same ciphertext must never mint
+    // canonical bindings on both sides of a cross-DB graft (w19-aad W19-1).
+    this._aadDedup = aadDedup ?? new Map();
+    this._sp = 0; // savepoint counter for nested tx() (w21-store F-3)
+    // Same contention contract as the ledger store: constructor writes lose
+    // a busy-timeout race as INV-503-LEDGER, never a raw sqlite error
+    // (w20-fixverify F-12).
+    try {
+      // user_version stamps the schema like the ledger store does: a
+      // file-writer swapping in a foreign sqlite database is caught by the
+      // version marker before any encrypted row is trusted (w28-store F10).
+      // The marker must be READ before it is re-stamped — stamping alone
+      // silently adopts any foreign file (w29-fixverify F9).
+      this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=30000; PRAGMA secure_delete=ON;');
+      const version = this.db.prepare('PRAGMA user_version').get().user_version;
+      requireThat(version <= 1, 'INV-503-STORAGE', 'Database schema is newer than this application', 503);
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS resources(tenant TEXT, id TEXT, version INTEGER, value TEXT, PRIMARY KEY(tenant,id));
+        CREATE TABLE IF NOT EXISTS transactions(tenant TEXT,id TEXT,value TEXT,PRIMARY KEY(tenant,id));
+        CREATE TABLE IF NOT EXISTS dataset_rows(tenant TEXT, dataset TEXT, row_id TEXT, data TEXT, PRIMARY KEY(tenant,dataset,row_id));
+        CREATE TABLE IF NOT EXISTS data_access(tenant TEXT, subject TEXT, dataset TEXT, row_id TEXT, column_name TEXT, at INTEGER);
+        CREATE INDEX IF NOT EXISTS data_access_ix ON data_access(tenant,subject,dataset,at);
+        CREATE TABLE IF NOT EXISTS secrets_registry(tenant TEXT, secret_id TEXT, version INTEGER, value TEXT, PRIMARY KEY(tenant,secret_id));
+        CREATE TABLE IF NOT EXISTS grants(tenant TEXT, grant_id TEXT, value TEXT, PRIMARY KEY(tenant,grant_id));
+        CREATE INDEX IF NOT EXISTS grants_subject ON grants(tenant);
+        PRAGMA user_version=1;`);
+      // Crash residue: a post-delete checkpoint that never ran leaves superseded
+      // ciphertext in the WAL — truncate at open like the ledger store does
+      // (w8-fixverify F3).
+      this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    } catch (e) {
+      if (e instanceof InvariantError) throw e;
+      if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
+      if (/readonly|not authorized/i.test(e?.message ?? '')) throw new InvariantError('INV-503-STORAGE', 'Target database file is not writable', 503);
+      // A swapped-in foreign or truncated sqlite file must classify inside
+      // the taxonomy, not escape as a raw sqlite error (w31-fixverify F2).
+      if (e?.errcode !== undefined || e?.code === 'ERR_SQLITE_ERROR' || /not a database|malformed|no such column|no such table/i.test(e?.message ?? '')) throw new InvariantError('INV-503-STORAGE', 'Target schema is unrecognised — refusing to interpret a foreign or corrupt database', 503, { cause: e });
+      throw e;
+    }
+    // Migration faults get the same classification — a foreign schema's
+    // missing column must not leak a raw sqlite error (w31-fixverify F2).
+    try { this._migrateAad(); } catch (e) { if (e instanceof InvariantError) throw e; throw new InvariantError('INV-503-STORAGE', 'Target schema is unrecognised — refusing to interpret a foreign or corrupt database', 503, { cause: e }); }
+  }
+  // One-shot migration out of the legacy slash-form AAD space — same shape
+  // as the ledger store's migration: each row that only authenticates
+  // under the legacy form is re-sealed under its tuple form in one tx, a
+  // row authenticating under neither stays sealed and keeps failing on
+  // read (w18-crypto F1/F2).
+  _migrateAad() {
+    const spec = [
+      ['resources', 'value', r => [AAD('target', 'resource', r.tenant, r.id), `${r.tenant}/resource/${r.id}`], r => [r.tenant, r.id]],
+      ['transactions', 'value', r => [AAD('target', 'transaction', r.tenant, r.id), `${r.tenant}/transaction/${r.id}`], r => [r.tenant, r.id]],
+      ['dataset_rows', 'data', r => [AAD('target', 'dataset', r.tenant, r.dataset, r.row_id), `${r.tenant}/dataset/${r.dataset}/${r.row_id}`], r => [r.tenant, r.dataset, r.row_id]],
+      ['secrets_registry', 'value', r => [AAD('target', 'secret', r.tenant, r.secret_id), `${r.tenant}/secret/${r.secret_id}`], r => [r.tenant, r.secret_id]],
+      ['grants', 'value', r => [AAD('target', 'grant', r.tenant, r.grant_id), `${r.tenant}/grant/${r.grant_id}`], r => [r.tenant, r.grant_id]],
+    ];
+    // Same accounting + transplant defenses as the ledger store's
+    // migration: identical bytes under two identities quarantines BOTH
+    // rows, slash-bearing identities stay sealed, and nothing is skipped
+    // silently (w19-aad W19-1/W19-2).
+    const stats = this.aadMigration = new Map();
+    const mark = (tenant, k) => { const s = stats.get(tenant) ?? { migrated: 0, transplants: 0, ambiguous: 0, skipped: 0 }; s[k]++; stats.set(tenant, s); };
+    // Same honest accounting as the store migrator: a grafted donor is
+    // reverted, and its 'migrated' mark must unwind with it — the sibling
+    // migrator's dedup hit invokes this closure (w20-fixverify F-9).
+    const unmark = tenant => { const s = stats.get(tenant); if (s && s.migrated > 0) { s.migrated--; s.reverted = (s.reverted ?? 0) + 1; } };
+    const seen = this._aadDedup;
+    const slashy = (...parts) => parts.some(p => typeof p === 'string' && p.includes('/'));
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const [table, col, aads, pks] of spec) {
+        const where = table === 'dataset_rows' ? 'tenant=? AND dataset=? AND row_id=?'
+          : table === 'secrets_registry' ? 'tenant=? AND secret_id=?'
+          : table === 'grants' ? 'tenant=? AND grant_id=?'
+          : 'tenant=? AND id=?';
+        for (const r of this.db.prepare(`SELECT * FROM ${table}`).all()) {
+          const [tuple, legacy] = aads(r);
+          try { decrypt(r[col], this.key(r.tenant), tuple); continue; } catch { /* legacy-sealed or corrupt */ }
+          const prior = seen.get(r[col]);
+          // Cross-DB collision: the donor's revert closure runs on the
+          // sibling database — outside this transaction and against a live
+          // row. A graft is detected and counted; the donor keeps its
+          // canonical binding instead of being stranded (w24-fixverify
+          // W24-06).
+          if (prior) { if (prior.db === this.db) { prior.revert?.(); prior.unmark?.(); } mark(r.tenant, 'transplants'); continue; }
+          if (slashy(r.tenant, r.id, r.dataset, r.row_id, r.secret_id, r.grant_id)) { seen.set(r[col], {}); mark(r.tenant, 'ambiguous'); continue; }
+          try {
+            const plain = decrypt(r[col], this.key(r.tenant), legacy);
+            const upd = this.db.prepare(`UPDATE ${table} SET ${col}=? WHERE ${where}`), orig = r[col];
+            // A same-DB revert supersedes THIS connection's ciphertext —
+            // re-arm its WAL-truncate flag or the donor's legacy bytes
+            // linger until an unrelated write (w21-store F-9).
+            seen.set(orig, { db: this.db, revert: () => { upd.run(orig, ...pks(r)); this._deleted = true; }, unmark: () => unmark(r.tenant) });
+            upd.run(encrypt(plain, this.key(r.tenant), tuple), ...pks(r));
+            mark(r.tenant, 'migrated');
+          } catch { mark(r.tenant, 'skipped'); }
+        }
+      }
+      this.db.exec('COMMIT');
+      // Truncate post-migration so dead legacy ciphertext does not linger
+      // in the WAL (w19-aad W19-3).
+      let migrated = 0; for (const s of stats.values()) migrated += s.migrated;
+      if (migrated > 0) { try { this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); } catch { /* contention: residue clears at next open */ } }
+    } catch (e) {
+      if (this.db.isTransaction) this.db.exec('ROLLBACK');
+      // BEGIN IMMEDIATE contention surfaces in the ledger taxonomy, not
+      // as a raw sqlite error (w19-aad W19-4).
+      if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
+      throw e;
+    }
   }
   close() { this.db.close(); }
   tx(fn) {
-    if (this.db.isTransaction) return fn();
-    this.db.exec('BEGIN IMMEDIATE');
+    // Same contract as Store.tx: a nested call nests via SAVEPOINT so a
+    // callee's failure cannot half-commit inside the outer transaction,
+    // BEGIN contention surfaces as INV-503-LEDGER, and a ROLLBACK that
+    // itself fails must not mask the original error (w21-store F-3).
+    if (this.db.isTransaction) {
+      const sp = `sp_${++this._sp}`;
+      this.db.exec(`SAVEPOINT ${sp}`);
+      try { const r = fn(); requireThat(typeof r?.then !== 'function', 'INV-409-STATE', 'Transactions must be synchronous — an async body commits before it runs', 409); this.db.exec(`RELEASE ${sp}`); return r; }
+      catch (e) { this.db.exec(`ROLLBACK TO ${sp}; RELEASE ${sp}`); throw e; }
+    }
     try {
-      const r = fn(); this.db.exec('COMMIT');
+      this.db.exec('BEGIN IMMEDIATE');
+      const r = fn();
+      requireThat(typeof r?.then !== 'function', 'INV-409-STATE', 'Transactions must be synchronous — an async body commits before it runs', 409);
+      this.db.exec('COMMIT');
       // Deleted ciphertext must not linger in the WAL — any armed delete
       // truncates the log right at the commit boundary (DEK-audit F4). A
       // contended checkpoint throws SQLITE_LOCKED after the COMMIT: the write
       // is durable, so the flag stays armed for the next tx instead of
       // failing committed work (w8-fixverify F2).
-      if (this._deleted) try { this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); this._deleted = false; } catch { /* retry next tx */ }
+      if (this._deleted) try { this._checkpointDeleted(); } catch { /* retry next tx */ }
       return r;
+    } catch (e) {
+      try { if (this.db.isTransaction) this.db.exec('ROLLBACK'); } catch { /* rollback failure must not mask the real error */ }
+      if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
+      throw e;
     }
-    catch (e) { this.db.exec('ROLLBACK'); throw e; }
   }
-  key(tenant) { requireThat(this.keys[tenant], 'INV-404-NOT-FOUND', 'Resource not found', 404); return Buffer.from(this.keys[tenant], 'base64url'); }
+  // TRUNCATE returns {busy,log,checkpointed}: a reader holding a WAL mark
+  // makes the call a silent no-op — only disarm the delete flag when the
+  // log actually folded, so a later armed write retries (w22-fixverify F4).
+  _checkpointDeleted() {
+    const r = this.db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+    if (r && !r.busy && (r.checkpointed ?? 0) >= (r.log ?? 0)) this._deleted = false;
+  }
+  key(tenant) { requireThat(Object.hasOwn(this.keys, tenant), 'INV-404-NOT-FOUND', 'Resource not found', 404); return Buffer.from(this.keys[tenant], 'base64url'); }
   exists(tenant, id) {
     return this.db.prepare('SELECT 1 FROM resources WHERE tenant=? AND id=?').get(tenant, id) !== undefined;
   }
   _readResource(tenant, id) {
     const row = this.db.prepare('SELECT version,value FROM resources WHERE tenant=? AND id=?').get(tenant, id);
-    return row ? { version: row.version, value: this._dec(row.value, tenant, AAD('target', 'resource', tenant, id), `${tenant}/resource/${id}`) } : { version: 0, value: null };
+    return row ? { version: row.version, value: this._dec(row.value, tenant, AAD('target', 'resource', tenant, id)) } : { version: 0, value: null };
   }
   state(tenant, id) {
     const res = this._readResource(tenant, id);
@@ -79,7 +202,7 @@ export class SimulatedTarget {
     return this.db.prepare('SELECT row_id, data FROM dataset_rows WHERE tenant=? AND dataset=? ORDER BY row_id').all(tenant, dataset)
       // Registry columns win the spread — a stored 'id'/'version' member
       // must not shadow the row's identity or counter (w9-schema F-7).
-      .map(r => ({ ...this._dec(r.data, tenant, AAD('target', 'dataset', tenant, dataset, r.row_id), `${tenant}/dataset/${dataset}/${r.row_id}`), id: r.row_id }));
+      .map(r => ({ ...this._dec(r.data, tenant, AAD('target', 'dataset', tenant, dataset, r.row_id)), id: r.row_id }));
   }
   // Provisioning/fault harness only: not reachable through the HTTP API.
   // The versioned read-modify-write runs in a transaction like every other
@@ -108,7 +231,7 @@ export class SimulatedTarget {
   }
   secret(tenant, secret_id) {
     const row = this.db.prepare('SELECT version,value FROM secrets_registry WHERE tenant=? AND secret_id=?').get(tenant, secret_id);
-    return row ? { ...this._dec(row.value, tenant, AAD('target', 'secret', tenant, secret_id), `${tenant}/secret/${secret_id}`), version: row.version } : null;
+    return row ? { ...this._dec(row.value, tenant, AAD('target', 'secret', tenant, secret_id)), version: row.version } : null;
   }
   // For secret.use the DECISIVE record is the registry row — that is the state
   // a capsule must bind, not an arbitrary resources row (w5 F-7).
@@ -124,38 +247,62 @@ export class SimulatedTarget {
   grant(tenant, grant_id, value) {
     this._deleted = true; // grant upsert supersedes ciphertext (w8-fixverify F3)
     this.db.prepare('INSERT INTO grants VALUES(?,?,?) ON CONFLICT(tenant,grant_id) DO UPDATE SET value=excluded.value').run(tenant, grant_id, encrypt(value, this.key(tenant), AAD('target', 'grant', tenant, grant_id)));
+    // Bare callers arm the flag but never reach tx()'s post-commit
+    // checkpoint — truncate on the autocommit path too, like the store
+    // does (w21-store F-5).
+    if (!this.db.isTransaction) try { this._checkpointDeleted(); } catch { /* retry on next armed write */ }
   }
+  // One undecryptable grant row must not wedge every authorize() call — a
+  // corrupt row can only ever HIDE a grant (anchoring is the authority), so
+  // it is skipped and counted, never fatal (w17-fixverify).
   grants(tenant, subject_id, now) {
-    return this.db.prepare('SELECT grant_id, value FROM grants WHERE tenant=?').all(tenant)
-      .map(r => this._dec(r.value, tenant, AAD('target', 'grant', tenant, r.grant_id), `${tenant}/grant/${r.grant_id}`))
-      .filter(g => g.subject_id === subject_id && g.expires_at > now && !g.revoked);
+    const out = [];
+    for (const r of this.db.prepare('SELECT grant_id, value FROM grants WHERE tenant=?').all(tenant)) {
+      let g; try { g = this._dec(r.value, tenant, AAD('target', 'grant', tenant, r.grant_id)); } catch { this._corruptGrantRows = (this._corruptGrantRows ?? 0) + 1; continue; }
+      if (g.subject_id === subject_id && g.expires_at > now && !g.revoked) out.push(g);
+    }
+    return out;
   }
   allGrants(tenant) {
-    return this.db.prepare('SELECT grant_id, value FROM grants WHERE tenant=?').all(tenant)
-      .map(r => this._dec(r.value, tenant, AAD('target', 'grant', tenant, r.grant_id), `${tenant}/grant/${r.grant_id}`));
+    const out = [];
+    for (const r of this.db.prepare('SELECT grant_id, value FROM grants WHERE tenant=?').all(tenant)) {
+      try { out.push(this._dec(r.value, tenant, AAD('target', 'grant', tenant, r.grant_id))); } catch { this._corruptGrantRows = (this._corruptGrantRows ?? 0) + 1; }
+    }
+    return out;
   }
   revokeGrant(tenant, grant_id) {
-    const row = this.db.prepare('SELECT value FROM grants WHERE tenant=? AND grant_id=?').get(tenant, grant_id);
-    requireThat(row, 'INV-404-NOT-FOUND', 'Grant not found', 404);
-    const value = this._dec(row.value, tenant, AAD('target', 'grant', tenant, grant_id), `${tenant}/grant/${grant_id}`);
-    value.revoked = true;
-    this._deleted = true; // revoke supersedes ciphertext (w8-fixverify F3)
-    this.db.prepare('UPDATE grants SET value=? WHERE tenant=? AND grant_id=?').run(encrypt(value, this.key(tenant), AAD('target', 'grant', tenant, grant_id)), tenant, grant_id);
-    return value;
+    // Read-modify-write inside tx(): an interleaved re-grant on a second
+    // connection must not be clobbered by a stale revocation of the
+    // pre-revocation value (w21-store F-4), and tx() truncates the WAL
+    // residue at commit (w21-store F-5).
+    return this.tx(() => {
+      const row = this.db.prepare('SELECT value FROM grants WHERE tenant=? AND grant_id=?').get(tenant, grant_id);
+      requireThat(row, 'INV-404-NOT-FOUND', 'Grant not found', 404);
+      const value = this._dec(row.value, tenant, AAD('target', 'grant', tenant, grant_id));
+      value.revoked = true;
+      this._deleted = true; // revoke supersedes ciphertext (w8-fixverify F3)
+      this.db.prepare('UPDATE grants SET value=? WHERE tenant=? AND grant_id=?').run(encrypt(value, this.key(tenant), AAD('target', 'grant', tenant, grant_id)), tenant, grant_id);
+      return value;
+    });
   }
   outcome(tenant, id) {
     const row = this.db.prepare('SELECT value FROM transactions WHERE tenant=? AND id=?').get(tenant, id);
-    return row ? this._dec(row.value, tenant, AAD('target', 'transaction', tenant, id), `${tenant}/transaction/${id}`) : null;
+    return row ? this._dec(row.value, tenant, AAD('target', 'transaction', tenant, id)) : null;
   }
   // Verified dataset read: caller scope is compiled into a QueryPlan, rebound
   // against the authorising grant, then executed with bound parameters only.
-  readDataset(tenant, id, columns, rowIds, ceiling) {
+  readDataset(tenant, id, columns, rowIds, ceiling, grant = null) {
     const dataset = this.state(tenant, id).material_fields;
     requireThat(Array.isArray(dataset.columns), 'INV-404-NOT-FOUND', 'Dataset not found', 404);
     const plan = buildPlan({ dataset: id, columns, row_ids: rowIds, max_rows: ceiling }, dataset.columns);
-    verifyPlan(plan, { dataset: id, columns, row_ids: rowIds, max_rows: ceiling });
-    const rows = executePlan(this.db, plan, tenant, (row, r) => this._dec(r.data, tenant, AAD('target', 'dataset', tenant, id, row), `${tenant}/dataset/${id}/${row}`));
-    return rows;
+    // The plan rebinds to the authorising scope when a distinct authority
+    // exists (the capability payload on the consume path); on the certified
+    // export path the capsule's requested_state IS the authority — the
+    // reflexive check stays as a shape guard, and the finish-time
+    // exactOutput recompute is the real binding (w20-datagate F8).
+    verifyPlan(plan, grant ?? { dataset: id, columns, row_ids: rowIds, max_rows: ceiling });
+    const result = executePlan(this.db, plan, tenant, (row, r) => this._dec(r.data, tenant, AAD('target', 'dataset', tenant, id, row)));
+    return result;
   }
   execute(capsule, transactionId, now, fault = null) {
     const tenant = capsule.tenant_id, id = capsule.action.target_resource;
@@ -165,13 +312,18 @@ export class SimulatedTarget {
     // target transaction (e.g. a predicate the reservation check could not
     // see) — the outcome must record FAILED, never UNCERTAIN.
     if (fault === 'state-conflict') throw new InvariantError('INV-409-STATE', 'Simulated deterministic target refusal', 409);
-    this.db.exec('BEGIN IMMEDIATE');
     let outcome;
+    // A caller already inside a transaction cannot nest a bare BEGIN — the
+    // inner COMMIT would commit the caller's writes early (w28-store F10).
+    requireThat(!this.db.isTransaction, 'INV-503-LEDGER', 'Target execute cannot nest inside a live transaction', 503);
     try {
+      // BEGIN inside the try: contention on the BEGIN itself must surface
+      // as INV-503-LEDGER, not a raw sqlite error (w21-store F-3).
+      this.db.exec('BEGIN IMMEDIATE');
       const requested = capsule.requested_state, type = capsule.action.type;
       const state = type === 'secret.use' ? this.secretState(tenant, requested.secret_id) : this.state(tenant, id);
       requireThat(state.version === capsule.current_state.version && state.digest === capsule.current_state.digest, 'INV-409-STATE', 'Target state changed', 409);
-      let next = { ...state.material_fields, ...clone(requested) }, output = null;
+      let next = { ...state.material_fields, ...clone(requested) }, output = null, output_row_ids = null;
       if (['finance.vendor.create', 'finance.beneficiary.create'].includes(type)) requireThat(state.version === 0, 'INV-409-STATE', 'Resource already exists', 409);
       if (type === 'finance.bank.change') { requireThat(state.version > 0, 'INV-409-STATE', 'Bank change requires existing resource', 409); next.first_payment_done = false; next.payment_eligible_at = now + 60000; }
       if (type === 'finance.payment.first') {
@@ -180,7 +332,8 @@ export class SimulatedTarget {
       }
       if (type === 'data.export') {
         requireThat(requested.dataset === id, 'INV-451-POLICY', 'Dataset binding mismatch', 451);
-        output = this.readDataset(tenant, id, requested.columns, requested.row_ids, requested.max_rows);
+        const datasetResult = this.readDataset(tenant, id, requested.columns, requested.row_ids, requested.max_rows);
+        output = datasetResult.rows; output_row_ids = datasetResult.row_ids;
         next = state.material_fields;
       }
       if (type === 'identity.mfa.reset' || type === 'identity.authenticator.enroll' || type === 'identity.account.recover') {
@@ -206,19 +359,27 @@ export class SimulatedTarget {
       // including columns the requester may not see — into the durable
       // journal for no validation benefit: the digest alone proves the
       // snapshot. Export entries keep the digest and the authorised output
-      // only (w10-datagate F5).
-      outcome = { target_transaction_id: transactionId, capsule_digest: digest(capsule), authorised_requested_digest: digest(requested), observed_state_digest: digest(next), observed_state: type === 'data.export' ? null : next, output, status: 'VERIFIED', execution_time: now, simulation: true };
+      // only (w10-datagate F5). A secret.use row gets the same treatment
+      // a fortiori — the registry material may carry secret bytes, so the
+      // journal holds only the digest-bearing projection (w15-timing F9).
+      const journalState = type === 'data.export' ? null
+        : type === 'secret.use' ? { withheld: true, material_digest: digest(next) }
+        : next;
+      outcome = { target_transaction_id: transactionId, capsule_digest: digest(capsule), authorised_requested_digest: digest(requested), observed_state_digest: digest(next), observed_state: journalState, output, output_row_ids, status: 'VERIFIED', execution_time: now, simulation: true };
       this.db.prepare('INSERT INTO transactions VALUES(?,?,?)').run(tenant, transactionId, encrypt(outcome, this.key(tenant), AAD('target', 'transaction', tenant, transactionId)));
       this.db.exec('COMMIT');
       // Same commit-boundary truncation as tx() — durable on success, armed
       // for a later retry when the log is contended (w8-fixverify F2/F3).
-      if (this._deleted) try { this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); this._deleted = false; } catch { /* retry later */ }
+      if (this._deleted) try { this._checkpointDeleted(); } catch { /* retry later */ }
     } catch (e) {
-      this.db.exec('ROLLBACK');
+      try { if (this.db.isTransaction) this.db.exec('ROLLBACK'); } catch { /* a failing ROLLBACK must not mask the real error (w21-store F-3) */ }
+      if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
       // Two processes racing the same transactionId hit the PK constraint
       // inside the write — the loser must get the stored outcome, not an
-      // error (store-audit LOW: idempotent replay under contention).
-      if (/PRIMARYKEY|UNIQUE/.test(String(e.code ?? e.message))) {
+      // error (store-audit LOW: idempotent replay under contention). The
+      // constraint code lives on e.errcode — e.code is always the generic
+      // ERR_SQLITE_ERROR (w28-store F6).
+      if (e?.errcode === 1555 || e?.errcode === 2067 || /PRIMARYKEY|UNIQUE/.test(String(e?.message ?? ''))) {
         const prior = this.outcome(tenant, transactionId);
         if (prior) return prior;
       }
@@ -233,7 +394,7 @@ export class SimulatedTarget {
   // registered, verifiable compensations exist: registry-state restoration for
   // non-monetary mutations. Monetary effects cannot be un-sent — the record
   // says so instead of pretending.
-  compensate(capsule, priorState, now) {
+  compensate(capsule, priorState, now, certId = null) {
     const tenant = capsule.tenant_id, id = capsule.action.target_resource, type = capsule.action.type;
     const compensatable = ['finance.vendor.create', 'finance.beneficiary.create', 'finance.bank.change', 'identity.mfa.reset', 'identity.authenticator.enroll', 'identity.account.recover', 'cloud.firewall.change', 'code.release', 'key.rotate', 'backup.delete'];
     if (!compensatable.includes(type)) {
@@ -250,6 +411,11 @@ export class SimulatedTarget {
       if (state.version !== expected) return { compensated: false, reason: 'STALE_COMPENSATION', note: `Registry moved past the compensated write (version ${state.version}, expected ${expected}); a separately authorised remedy action is required.` };
       this._deleted = true; // restoration supersedes ciphertext (w8-fixverify F3)
       this.db.prepare('UPDATE resources SET version=?, value=? WHERE tenant=? AND id=?').run(state.version + 1, encrypt({ ...priorState, compensated_at: now, compensation_of: digest(capsule) }, this.key(tenant), AAD('target', 'resource', tenant, id)), tenant, id);
+      // The unwind is journaled like a dispatch: a crash between this commit
+      // and the parent's outcome write stays reconstructible — the chain
+      // anchors EXECUTION_COMPENSATED only against this durable row
+      // (w22 F4).
+      if (certId) this.db.prepare('INSERT INTO transactions VALUES(?,?,?)').run(tenant, `comp:${certId}`, encrypt({ target_transaction_id: `comp:${certId}`, capsule_digest: digest(capsule), compensated_at: now, restored_version: state.version + 1, status: 'COMPENSATED', simulation: true }, this.key(tenant), AAD('target', 'transaction', tenant, `comp:${certId}`)));
       return { compensated: true, restored_version: state.version + 1 };
     });
   }

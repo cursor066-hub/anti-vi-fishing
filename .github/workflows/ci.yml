@@ -38,7 +38,9 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24.19.0'
-      - run: pip install 'cryptography==46.0.7'
+      # Hash-pinned install — a version pin alone is satisfied by a poisoned
+      # wheel; --require-hashes binds the exact artifacts (w11-supply SC-04).
+      - run: pip install --require-hashes -r vectors/requirements-hashed.txt
       - name: Static source checks
         run: node scripts/check.mjs
       # NFR-SEC-007: the release-attestation pipeline signs provenance with
@@ -48,10 +50,20 @@ jobs:
       # the later test/simulation steps legitimately rewrite tracked reports
       # (supply-chain M5).
       - name: Release attestation sign/verify roundtrip
+        env:
+          # Test-only overrides (fixture keys, anchor emission) are gated on
+          # this env — set ONLY here, never in a release job (w11-supply
+          # SC-09). The GITHUB_* env already present binds the run into the
+          # signed provenance (SC-07).
+          IF_TEST_ANCHORS: '1'
         run: |
           node scripts/release-sign.mjs --generate-fixture-key var/relkeys
           node scripts/release-sign.mjs --key var/relkeys/release-key.pem --public-key var/relkeys/release-key.pub --out var/release-attestation.json --test-anchors-out var/relkeys/anchors.json
-          node scripts/verify-release.mjs var/release-attestation.json var/relkeys/anchors.json
+          # --anchors-in-tree + --ack-self-anchors: the fixture roundtrip
+          # deliberately ships its anchors under var/ and acknowledges the
+          # self-certification; production consumers must pin out-of-band
+          # and never pass --ack-self-anchors (w23-supply F3).
+          node scripts/verify-release.mjs var/release-attestation.json var/relkeys/anchors.json --require-ci --anchors-in-tree --ack-self-anchors
       - name: Test suite
         run: npm test
       - name: Simulation harness
@@ -87,7 +99,17 @@ jobs:
       - name: Generated artifacts are not stale
         run: |
           node scripts/report.mjs --check-only
-          git diff --exit-code -- docs/ examples/ ai-eval/ vectors/canonical-vectors.json vectors/envelope-vectors.json vectors/parse-vectors.json vectors/keys.json reports/code-inventory.json reports/sbom.cdx.json reports/requirements-summary.json reports/simulation-results.json reports/VERIFICATION.md reports/verification-summary.json reports/test-summary.json reports/tests.tap reports/final-regression.tap reports/final-regression-summary.json reports/production-gate.json
+          # Nothing under the generated trees may differ — the gate is
+          # directory-scoped (not an enumerative file list) so a NEW report
+          # someone forgets to name cannot slip through (w13-supply W12-05).
+          # sample-audit/checkpoint/pinned-trust mint fresh keys each run —
+          # byte-stability impossible; proven fresh by the live verify steps.
+          # Exclusions come from the SHARED list scripts/stale-excludes.txt
+          # applied by exact path equality — a substring grep-v would
+          # silently swallow 'reports/x.evil' under the 'reports/x' prefix
+          # (w23-supply F6).
+          stale="$(git status --porcelain -- docs/ examples/ ai-eval/ vectors/ reports/ | awk 'NR==FNR { if ($0 !~ /^#|^$/) excl[$0]=1; next } { f=$2; if (f != "" && !excl[f]) print }' scripts/stale-excludes.txt - || true)"
+          test -z "$stale" || { echo "stale generated artifacts:"; echo "$stale"; exit 1; }
           # reports/benchmark.json is intentionally absent: it embeds measured
           # timings, so byte-equality can never hold — freshness there is
           # proven by the live `benchmark.mjs --assert` run above (w6-ledger S5).
@@ -95,7 +117,13 @@ jobs:
           # they snapshot check.mjs's live exit code, which depends on
           # working-tree churn this pipeline itself creates — proven by the
           # live `node scripts/check.mjs` step, not by byte equality
-          # (w8-composite CI).
+          # (w8-composite CI). vectors/envelope-es256-vectors.json is absent
+          # because ECDSA signatures are nondeterministic — the vector is
+          # proven fresh by the three independent verify steps, not by bytes.
+          # reports/verification-webcrypto.json snapshots the bun verifier's
+          # output, which depends on whether bun exists in the environment —
+          # proven fresh by the live `bun verify-export-webcrypto.mjs` step
+          # above, not by byte equality across machines (w20 CI).
       - name: Upload verification evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

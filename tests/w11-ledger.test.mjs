@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { fixture, hasCode } from './helpers.mjs';
+import { fixture, hasCode, installPolicy } from './helpers.mjs';
 import { signed, SUITES } from '../src/crypto.mjs';
 import { ASSURANCE } from '../src/secureview.mjs';
 import { clone } from '../src/canonical.mjs';
@@ -15,8 +15,7 @@ test('KEY-011: component firmware trust is policy-enforced — a validly signed 
 });
 test('KEY-011b: removing a firmware from policy.allowed_firmware revokes session capability for previously valid attestations', t => {
   const h = fixture(t), component = h.setup.componentSecrets.acme['secure-view-acme'];
-  const policy = clone(h.f.policy('acme')); policy.secure_perception.allowed_firmware = [];
-  h.f.store.put('acme', 'policy', 'active', policy, h.now());
+  installPolicy(h, p => { p.secure_perception.allowed_firmware = []; });
   assert.throws(() => h.f.perceptionSession(h.p(), component.attest('b'.repeat(64), h.now() + 300000)), hasCode('INV-401-ATTESTATION'));
 });
 test('KEY-006: the agility inventory names every SUITES entry and every suite the policy allowlist can accept', t => {

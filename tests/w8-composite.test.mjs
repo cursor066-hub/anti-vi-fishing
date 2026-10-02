@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { fixture, hasCode } from './helpers.mjs';
+import { fixture, hasCode, coverageIdentity } from './helpers.mjs';
 import { digest } from '../src/canonical.mjs';
 import { signed } from '../src/crypto.mjs';
 import { createIssuerServer, loadIssuers, writeIssuer } from '../src/issuerd.mjs';
@@ -67,7 +67,12 @@ test('w8 F1/F3/F7/F16: uncompensated bail records FAILED parent + per-child outc
   assert.ok(out.payload.wedged_children.includes(c2.record.capsule.capsule_id));
   // F7: the terminal record names every child's fate.
   assert.equal(out.payload.child_outcomes[c1.record.capsule.capsule_id], 'FAILED');
-  assert.equal(out.payload.child_outcomes[c2.record.capsule.capsule_id], 'WEDGED');
+  // A reserved-but-never-dispatched child is released back to free
+  // authority inside the terminal write — never burned forever (w22 F2).
+  assert.equal(out.payload.child_outcomes[c2.record.capsule.capsule_id], 'RELEASED');
+  const releasedChild = h.f.store.must('acme', 'certificate', c2.certificate.payload.certificate_id);
+  assert.equal(releasedChild.consumed, false);
+  assert.equal(releasedChild.status, 'CERTIFIED');
   // F3/F4: reconcile(child) returns the recorded verdict — no resurrection,
   // no JIT grant minted, no effect replay.
   const childOutcome = h.f.reconcile(h.p(), c1.certificate.payload.certificate_id);
@@ -122,7 +127,7 @@ test('w8 F5: reconcile verifies a time-embedded journal entry after the clock mo
 });
 
 const coverageValidationEnvelope = (h, path, issuer = 'security-ops') => {
-  const payload = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: digest(path), kind: 'technical_validation', content_digest: digest({ probe: 'ok' }), acquired_at: h.now(), expires_at: h.now() + 60000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'manual probe', retention_until: h.now() + 120000, claims: { capsule_digest: digest(path) } };
+  const payload = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: coverageIdentity(path), kind: 'technical_validation', content_digest: digest({ probe: 'ok' }), acquired_at: h.now(), expires_at: h.now() + 60000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'manual probe', retention_until: h.now() + 120000, issuer_version: '1.0.0', claims: { capsule_digest: coverageIdentity(path) } };
   return signed(payload, h.setup.issuerKeys.acme[issuer], 'evidence');
 };
 
@@ -154,12 +159,12 @@ test('w8 F11/F13: re-declare preserves validation; UNCOVERED cannot self-promote
 // an unreachable issuer stales its dependent paths.
 test('w8 F10/F12/F14: unreachable issuer stales paths; same-ms replays keep write order; re-drift never throws', async t => {
   const h = fixture(t, ['acme']);
-  const [bankKeyId, bank] = Object.entries(h.setup.config.tenants.acme.issuers).find(([, v]) => v.name === 'bank');
+  const [bankKeyId, bank] = Object.entries(h.f.tenant('acme').issuers).find(([, v]) => v.name === 'bank');
   const dir = mkdtempSync(join(tmpdir(), 'if-unreach-')); t.after(() => rmSync(dir, { recursive: true }));
   writeIssuer(dir, { issuer: 'bank', tenant: 'acme', channel: 'authoritative', version: '1.0.0', key: h.setup.issuerKeys.acme['bank'], kinds: ISSUER_RULES.bank, records: {}, issue_token: bank.issue_token, read_token: bank.read_token });
   const srv = createIssuerServer(loadIssuers(dir), { port: 0, host: '127.0.0.1', clock: () => h.now() });
   await srv.listen();
-  bank.endpoint = `http://127.0.0.1:${srv.server.address().port}`;
+  h.repoint(bankKeyId, `http://127.0.0.1:${srv.server.address().port}`);
   h.f.declareCoverage(h.p('security'), { path_id: 'p-bank', action_type: 'payment.submit', target: 'bank', environment: 'prod', connector_version: '1.0.0', owner: 'op', status: 'MONITORED', path_class: 'api', max_age_ms: 600000, configuration_digest: 'a'.repeat(64) });
   assert.equal((await h.f.checkIssuerDrift(h.p('security'), bankKeyId)).drifted, false);
   // Kill the issuer → unreachable → drifted AND the dependent path stales.

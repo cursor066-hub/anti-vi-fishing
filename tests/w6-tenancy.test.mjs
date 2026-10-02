@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { fixture, hasCode } from './helpers.mjs';
+import { fixture, hasCode, stageConstitution } from './helpers.mjs';
 import { createServer } from '../src/server.mjs';
 import { answerQuery } from '../src/issuerd.mjs';
 import { ISSUER_RULES, issuerRecords } from '../src/bootstrap.mjs';
@@ -67,7 +67,7 @@ test('w6-F5: an export that crosses the reconstruction budget fails with output 
   const policy = h.clone(h.f.policy('acme'));
   policy.version += 1; policy.not_before = h.now();
   policy.runtime.reconstruction.max_distinct_rows = 1;
-  h.f.store.put('acme', 'policy', 'staged', { policy, activate_at: policy.not_before, staged_at: h.now() }, h.now());
+  stageConstitution(h, policy);
   h.f.activateDuePolicies('acme', h.now());
   assert.equal(h.f.policy('acme').runtime.reconstruction.max_distinct_rows, 1);
   const exportRow = row => {

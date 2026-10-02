@@ -6,7 +6,7 @@ export function fields(value, required, optional = []) {
   for (const key of required) if (!Object.hasOwn(value, key)) throw invalid(`Missing field: ${key}`);
   for (const key of Object.keys(value)) if (!required.includes(key) && !optional.includes(key)) throw invalid(`Unknown field: ${key}`);
 }
-export function text(value, name, max = 512) { requireThat(typeof value === 'string' && value.trim().length > 0 && value.length <= max && !/[\x00-\x1F\x7F\u0080-\u009F\u200B-\u200F\u2028-\u202E\u2060-\u2064\u2066-\u2069\uFEFF\u{E0000}-\u{E007F}]/u.test(value), 'INV-400-SCHEMA', `Invalid ${name}`); return value; }
+export function text(value, name, max = 512) { requireThat(typeof value === 'string' && value.trim().length > 0 && value.length <= max && !/[\x00-\x1F\x7F\u0080-\u009F\u00AD\u034F\u061C\u115F\u1160\u180E\u200B-\u200F\u2028-\u202E\u2060-\u2064\u2066-\u2069\uFE00-\uFE0F\uFEFF\u{1BCA0}-\u{1BCA3}\u{1D173}-\u{1D17A}\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]/u.test(value), 'INV-400-SCHEMA', `Invalid ${name}`); return value; }
 export function identifier(value, name = 'identifier') { text(value, name, 128); requireThat(/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/.test(value), 'INV-400-SCHEMA', `Invalid ${name}`); return value; }
 export function integer(value, name, min = 0, max = Number.MAX_SAFE_INTEGER) { requireThat(Number.isSafeInteger(value) && value >= min && value <= max, 'INV-400-SCHEMA', `Invalid ${name}`); return value; }
 export function oneOf(value, values, name) { requireThat(values.includes(value), 'INV-400-SCHEMA', `Unsupported ${name}`); return value; }
@@ -76,11 +76,15 @@ export function validateProposal(input) {
   requireThat(input.current_state.material_fields && typeof input.current_state.material_fields === 'object' && !Array.isArray(input.current_state.material_fields), 'INV-400-SCHEMA', 'Invalid material fields');
   text(input.destination, 'destination', 256); integer(input.quantity, 'quantity', 1, 1_000_000_000_000);
   uniqueStrings(input.exclusions, 'exclusions'); uniqueStrings(input.evidence_refs, 'evidence references');
-  integer(input.policy_version, 'policy version', 1); identifier(input.nonce, 'nonce'); requireThat(input.nonce.length >= 16, 'INV-400-SCHEMA', 'Nonce must be at least 16 characters');
+  integer(input.policy_version, 'policy version', 1); identifier(input.nonce, 'nonce'); requireThat(input.nonce.length >= 16 && !input.nonce.includes(':'), 'INV-400-SCHEMA', 'Nonce must be at least 16 characters and colon-free', 400);
   integer(input.created_at, 'created time', 1); integer(input.expires_at, 'expiry', input.created_at + 1);
   text(input.rollback_or_compensation, 'rollback or compensation'); oneOf(input.privacy_classification, ['internal', 'confidential', 'restricted'], 'privacy classification');
   if (input.action.type === 'finance.payment.first') requireThat(input.quantity === input.requested_state.amount_minor && input.destination === input.requested_state.bank_account, 'INV-400-SCHEMA', 'Payment amount/destination mismatch');
   if (input.action.type === 'data.export') requireThat(input.quantity === input.requested_state.row_ids.length && !input.requested_state.columns.some(c => input.exclusions.includes(c)), 'INV-400-SCHEMA', 'Export quantity or exclusions mismatch');
+  // The declared quantity is the grant's scope size — a caller-declared
+  // number must not diverge from what max_quantity actually bounds
+  // (w27-policy F5).
+  if (input.action.type === 'identity.jit.grant') requireThat(input.quantity === (input.requested_state.row_ids.length || 1), 'INV-400-SCHEMA', 'JIT grant quantity must equal the granted row count (or 1 for row-less scope)');
   canonical(input); return input;
 }
 export function proposal(type, actor, state, requested, now, overrides = {}) {

@@ -28,10 +28,17 @@ export function createCeremony({ ceremony_id, tenant_id, purpose, threshold, cus
     requireThat(['execution', 'audit'].includes(rotation.key_class), 'INV-400-SCHEMA', 'rotation.key_class must be execution or audit');
     identifier(rotation.new_key_id, 'rotation key');
   }
+  // One normalized form feeds the stored row AND the plan digest — a
+  // digest over the raw input while storing the sorted copy mints an
+  // anchor no recomputation can ever match, bricking the ceremony at
+  // quorum check (w18-fixverify F1). Device pins are digested too: an
+  // undigested field is strippable off the mutable row without the anchor
+  // noticing (w18-fixverify F7).
+  const sortedCustodians = [...custodians].sort();
   return {
-    ceremony_id, tenant_id, purpose, threshold, custodians: [...custodians].sort(), valid_until, min_delay_ms, devices, rotation,
+    ceremony_id, tenant_id, purpose, threshold, custodians: sortedCustodians, valid_until, min_delay_ms, devices, rotation,
     status: 'planned', acknowledgements: [], share_commitments: [], exceptions: [], notices: [], committed_at: null, rotation_consumed: null,
-    artifact_digest: digest({ ceremony_id, tenant_id, purpose, threshold, custodians, valid_until, min_delay_ms, rotation })
+    artifact_digest: digest({ ceremony_id, tenant_id, purpose, threshold, custodians: sortedCustodians, valid_until, min_delay_ms, devices: devices ?? null, rotation })
   };
 }
 

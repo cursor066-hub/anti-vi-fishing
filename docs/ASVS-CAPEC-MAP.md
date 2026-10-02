@@ -28,11 +28,11 @@ architecture, WebSocket, GraphQL) are out of scope of this map.
 | `tests/w9-deploy.test.mjs` | Configuration/deployment resilience (serialize-before-write, socket timeouts, Host pinning, early rate bucketing, tokenless-opt-in, digest specs) | CAPEC-125 resource exhaustion; CAPEC-219 rebinding; CAPEC-114 bearer enumeration |
 | `tests/regression.test.mjs`, `tests/lifecycle.test.mjs`, `tests/extended-security.test.mjs` | Cross-domain invariants (approval binding, revocation, replay, idempotency, evidence domain counting) | CAPEC-94 replay; CAPEC-115 authentication bypass |
 | `scripts/verify-vectors.py`, `scripts/verify-vectors-webcrypto.mjs`, `scripts/verify-export-webcrypto.mjs` | Independent conformance: three separate implementations (node:crypto, WebCrypto/Bun, Python cryptography) verify the same canonical/envelope vectors | CAPEC-88 cross-implementation canonicalization divergence |
-| `tests/w5-mutations.test.mjs` | Mutation-kill coverage: seeded source mutations must all fail | whole-map regression anchor |
+| `tests/w5-mutations.test.mjs` | Mutation-kill suite: adversarial gate-level attacks (planted rows, forged envelopes, injected identities) that must all be refused with the classified error | whole-map regression anchor |
 
 ## Not covered by this profile (honest gaps)
 
 - Formal ASVS certification or independent verification report.
 - SAST/DAST tooling runs, independent penetration test, provider advisories.
-- Signed build/release provenance (`NFR-SEC-007` is `NOT_IMPLEMENTED`).
+- Production KMS-backed release signing (`NFR-SEC-007` is `PARTIAL`: engineering-profile SLSA-lite detached-envelope provenance is implemented and pinned-anchor verified via `scripts/release-sign.mjs` + `scripts/verify-release.mjs`).
 - Live-environment fuzzing against a production deployment.

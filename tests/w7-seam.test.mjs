@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID, randomBytes } from 'node:crypto';
-import { fixture, hasCode } from './helpers.mjs';
+import { fixture, hasCode, coverageIdentity } from './helpers.mjs';
 import { signed } from '../src/crypto.mjs';
 import { digest } from '../src/canonical.mjs';
 import { signAcknowledgement } from '../src/ceremony.mjs';
@@ -17,7 +17,7 @@ function certified(h, type = 'finance.beneficiary.create', requested = { vendor_
 }
 
 function validationEnvelope(h, path, issuer, overrides = {}) {
-  const payload = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: digest(path), kind: 'technical_validation', content_digest: digest({ probe: 'ok' }), acquired_at: h.now(), expires_at: h.now() + 60000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'manual probe', retention_until: h.now() + 120000, claims: { capsule_digest: digest(path) }, ...overrides };
+  const payload = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: coverageIdentity(path), kind: 'technical_validation', content_digest: digest({ probe: 'ok' }), acquired_at: h.now(), expires_at: h.now() + 60000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'manual probe', retention_until: h.now() + 120000, issuer_version: '1.0.0', claims: { capsule_digest: coverageIdentity(path) }, ...overrides };
   return { envelope: signed(payload, h.setup.issuerKeys.acme[issuer], 'evidence'), payload };
 }
 
@@ -71,7 +71,11 @@ test('w7-seam F3: drifted issuer evidence stops counting at evaluation', t => {
   h.evidence(r, { issuer: 'registry' });
   h.approve(r, 2);
   assert.equal(h.f.evaluate(h.p(), r.capsule.capsule_id).decision, 'ALLOW');
+  // Drift is chain-anchored, not a mutable record (w13-fixverify M3): the
+  // CONNECTOR_DRIFT event is what suspends the issuer — a bare
+  // 'issuer-drift' store row can no longer gate or ungate anything.
   h.f.store.insert('acme', 'issuer-drift', h.setup.issuerKeys.acme['registry'].key_id, { drifted_at: h.now(), changes: [{ field: 'manifest', detail: 'invalid' }] }, h.now());
+  h.f.store.audit('acme', 'CONNECTOR_DRIFT', 'test', h.setup.issuerKeys.acme['registry'].key_id, { drifted: 'manifest' }, h.now());
   const decision = h.f.evaluate(h.p(), r.capsule.capsule_id);
   assert.notEqual(decision.decision, 'ALLOW');
 });
@@ -168,8 +172,12 @@ test('w7-seam F9: wedged composite reconciles composite-aware', t => {
   const outcome = h.f.reconcile(h.p('security'), cert.payload.certificate_id);
   assert.equal(outcome.payload.status, 'UNCERTAIN');
   assert.equal(outcome.payload.composite, true);
-  assert.deepEqual([...outcome.payload.wedged_children].sort(), [c1.record.capsule.capsule_id, c2.record.capsule.capsule_id].sort());
-  // Wedged children keep live authority — they can still execute standalone.
+  // Children whose reservation never even committed are honestly
+  // NOT_ATTEMPTED, not wedged — they left no durable trace (w22 F9).
+  assert.equal(outcome.payload.child_outcomes[c1.record.capsule.capsule_id], 'NOT_ATTEMPTED');
+  assert.equal(outcome.payload.child_outcomes[c2.record.capsule.capsule_id], 'NOT_ATTEMPTED');
+  // Never-reserved children keep live authority — they can still execute
+  // standalone once the parent carries an anchored outcome.
   const child1 = h.f.execute(h.p(), c1.certificate);
   assert.equal(child1.payload.status, 'VERIFIED');
 });

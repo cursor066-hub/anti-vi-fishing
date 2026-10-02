@@ -107,6 +107,52 @@ export function consistencyProof(hashes, first) {
   return { first_subtrees: partition(0, first).map(([a, b]) => [a, b, subtreeRoot(hashes, a, b)]), tail_subtrees: tail };
 }
 
+// Incremental merkle over an append-only leaf column: leaf list and
+// subtree hashes memoize, so proof/consistency/root queries pay
+// O(new leaves + log n) hashing instead of re-hashing the whole log per
+// request (w33-export F4). The cache binds to leaf CONTENT — a rewritten
+// or truncated prefix resets wholesale.
+export function merkleMemo() {
+  let leaves = [];
+  const memo = new Map();
+  const sub = (lo, hi) => {
+    const n = hi - lo;
+    if (n === 1) return leaf(leaves[lo]);
+    const key = `${lo}:${hi}`;
+    let v = memo.get(key);
+    if (v === undefined) { const k = split(n); v = node(sub(lo, lo + k), sub(lo + k, hi)); memo.set(key, v); }
+    return v;
+  };
+  return {
+    sync(hashes) {
+      checkHashes(hashes);
+      if (leaves.length > hashes.length || leaves.some((h, i) => h !== hashes[i])) { leaves = []; memo.clear(); }
+      for (let i = leaves.length; i < hashes.length; i++) leaves.push(hashes[i]);
+      return leaves.length;
+    },
+    get size() { return leaves.length; },
+    get leaves() { return leaves; },
+    sub,
+    root(lo = 0, hi = leaves.length) { return hi - lo === 0 ? '0'.repeat(64) : sub(lo, hi); },
+    proof(index) {
+      requireThat(Number.isSafeInteger(index) && index >= 0 && index < leaves.length, 'INV-400-MERKLE', 'Inclusion index out of range');
+      const path = [];
+      let lo = 0, hi = leaves.length;
+      while (hi - lo > 1) {
+        const k = split(hi - lo), mid = lo + k;
+        if (index < mid) { path.push({ side: 'right', hash: sub(mid, hi) }); hi = mid; }
+        else { path.push({ side: 'left', hash: sub(lo, mid) }); lo = mid; }
+      }
+      return path.reverse();
+    },
+    consistency(first, size = leaves.length) {
+      requireThat(Number.isSafeInteger(first) && first >= 1 && first <= size, 'INV-400-MERKLE', 'Consistency bound out of range');
+      const tail = first === size ? [] : partition(first, size).map(([a, b]) => [a, b, sub(a, b)]);
+      return { first_subtrees: partition(0, first).map(([a, b]) => [a, b, sub(a, b)]), tail_subtrees: tail };
+    }
+  };
+}
+
 export function verifyConsistency(firstRoot, first, secondRoot, size, proof) {
   requireThat(isDigest(firstRoot) && isDigest(secondRoot) && Number.isSafeInteger(first) && first >= 1 && first <= size, 'INV-400-MERKLE', 'Malformed consistency inputs');
   requireThat(proof && Array.isArray(proof.first_subtrees) && Array.isArray(proof.tail_subtrees), 'INV-400-MERKLE', 'Malformed consistency proof');

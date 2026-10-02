@@ -1,7 +1,17 @@
-// Regenerates every committed report artifact from LIVE data so a stale
+// Regenerates the committed report artifacts from LIVE data so a stale
 // claim can never ship under green CI (release-audit H1, docs-audit M9,
 // partial-audit C1). Runs the real suites — this is a generation step, so
 // it takes about a minute. CI diffs its outputs against the committed tree.
+// Regenerated here: reports/tests.tap + final-regression.tap,
+// test-summary.json + final-regression-summary.json, verification-node /
+// -python / -webcrypto.json, production-gate.json, source-check.json,
+// artifact-audit.json, code-inventory.json, sbom.cdx.json,
+// verification-summary.json, VERIFICATION.md. NOT regenerated — upstream
+// inputs this script consumes or volatile evidence owned elsewhere:
+// benchmark.json (scripts/benchmark.mjs), simulation-results.json
+// (scripts/simulate.mjs), sample-audit/checkpoint/pinned-trust.json
+// (scripts/checkpoint.mjs + the pinned verifier fixtures), and any file in
+// scripts/stale-excludes.txt (w31-ledger F8).
 import { spawnSync } from 'node:child_process';
 import { writeFileSync, readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -12,19 +22,58 @@ const now = new Date().toISOString();
 // (w8-tooling F10).
 const checkOnly = process.argv.includes('--check-only');
 const stale = [];
-const run = (cmd, args, opts = {}) => spawnSync(cmd, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, ...opts });
+const staleDetail = [];
+// Every spawned helper gets a wall-clock ceiling — a hung subprocess must
+// fail the report, never stall CI forever (w23-supply F17).
+const run = (cmd, args, opts = {}) => spawnSync(cmd, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 600000, ...opts });
 const write = (path, content) => {
-  if (checkOnly) { if (!existsSync(path) || readFileSync(path, 'utf8') !== content) stale.push(path); return; }
+  if (checkOnly) {
+    const committed = existsSync(path) ? readFileSync(path, 'utf8') : null;
+    if (committed !== content) {
+      stale.push(path);
+      // First-differing-line context: a name without the diff is unfixable
+      // when the divergence only reproduces in CI's environment (w22 CI).
+      if (committed !== null) {
+        const a = committed.split('\n'), b = content.split('\n');
+        const i = a.findIndex((l, n) => l !== b[n]);
+        staleDetail.push({ path, line: i + 1, committed: a.slice(Math.max(0, i - 1), i + 2), regenerated: b.slice(Math.max(0, i - 1), i + 2) });
+      }
+    }
+    return;
+  }
   writeFileSync(path, content);
 };
 
 // ---- 1. Full test suite → tests.tap / final-regression.tap + summaries ----
-const tap = run(process.execPath, ['--test', '--test-concurrency=1', '--test-reporter=tap', 'tests/**/*.test.mjs']);
+// Explicitly sort the test file list: --test's own glob expansion follows
+// readdir order, which differs across filesystems and made committed
+// tests.tap byte-unstable (w22 CI). Byte-order compare, NOT localeCompare —
+// collation rules are locale-sensitive and diverge between dev machines
+// and the CI image (w22 CI).
+const testFiles = [];
+const collectTests = (dir) => {
+  for (const e of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) {
+    const p = join(dir, e.name);
+    if (e.isDirectory()) collectTests(p); else if (e.name.endsWith('.test.mjs')) testFiles.push(p);
+  }
+};
+collectTests('tests');
+const tap = run(process.execPath, ['--test', '--test-concurrency=1', '--test-reporter=tap', ...testFiles]);
 const tapText = (tap.stdout ?? '') + (tap.stderr ?? '');
 // Strip per-test durations so the committed TAP is byte-stable.
-const stableTap = tapText.replace(/ \([\d.]+ms\)/g, '').replace(/(duration_ms: )[\d.]+/g, '$10').replace(/(# duration_ms )[\d.]+/g, '$10');
-const num = (re, s) => { const m = s.match(re); return m ? Number(m[1]) : 0; };
-const counts = { pass: num(/# pass (\d+)/, tapText), fail: num(/# fail (\d+)/, tapText) + (tapText.match(/^not ok /gm) ?? []).length };
+const stableTap = tapText.replace(/ \([\d.]+ms\)/g, '').replace(/(duration_ms: )[\d.]+/g, '$10').replace(/(# duration_ms )[\d.]+/g, '$10')
+  // issuerd construction warnings ride process.stderr and land at
+  // timing-dependent offsets inside the TAP stream — they are daemon
+  // diagnostics, not test results; strip them like durations.
+  .split('\n').filter(l => !l.startsWith('# issuerd:')).join('\n');
+// TAP footer counts come from the LAST match — a test printing
+// '# pass 9999' to stdout controls the first regex hit but can never
+// outlive the runner's own summary (w23-supply F8). The four summary
+// counters must also be internally consistent.
+const numLast = (re, s) => { const m = [...s.matchAll(new RegExp(re.source, 'g'))].at(-1); return m ? Number(m[1]) : 0; };
+const rawFail = numLast(/# fail (\d+)/, tapText), rawCancel = numLast(/# cancelled (\d+)/, tapText), rawSkip = numLast(/# skipped (\d+)/, tapText), rawTodo = numLast(/# todo (\d+)/, tapText), rawTests = numLast(/# tests (\d+)/, tapText);
+const counts = { pass: numLast(/# pass (\d+)/, tapText), fail: rawFail + (tapText.match(/^not ok /gm) ?? []).length, tests: rawTests };
+if (rawTests > 0 && counts.pass + rawFail + rawSkip + rawTodo + rawCancel !== rawTests) { console.error(`TAP summary inconsistent: tests=${rawTests} but pass+fail+skipped+todo+cancelled=${counts.pass + rawFail + rawSkip + rawTodo + rawCancel}`); process.exitCode = 1; }
 write('reports/tests.tap', stableTap);
 write('reports/final-regression.tap', stableTap);
 const testSummary = { tests: counts.pass + counts.fail, pass: counts.pass, fail: counts.fail, runner: 'node --test --test-reporter=tap tests/', generated_at: 'regenerated on demand by scripts/report.mjs', note: 'Live counts; per-test durations are stripped so the artifact is deterministic.' };
@@ -38,8 +87,11 @@ write('reports/final-regression-summary.json', JSON.stringify({ ...testSummary, 
 const nodeVerify = run(process.execPath, ['scripts/verify-export.mjs', 'reports/sample-audit.pinned.json', 'reports/sample-pinned-trust.pinned.json']);
 write('reports/verification-node.json', JSON.stringify({ verifier: 'scripts/verify-export.mjs (node:crypto)', exit: nodeVerify.status, output: (nodeVerify.stdout ?? '').trim() }, null, 2) + '\n');
 const bun = run('bun', ['scripts/verify-export-webcrypto.mjs', 'reports/sample-audit.pinned.json', 'reports/sample-pinned-trust.pinned.json']);
-if (bun.error || bun.status === null) write('reports/verification-webcrypto.json', JSON.stringify({ verifier: 'scripts/verify-export-webcrypto.mjs (bun WebCrypto)', exit: null, output: 'bun not installed on this machine — verifier not run' }, null, 2) + '\n');
-else write('reports/verification-webcrypto.json', JSON.stringify({ verifier: 'scripts/verify-export-webcrypto.mjs (bun WebCrypto)', exit: bun.status, output: (bun.stdout ?? '').trim() }, null, 2) + '\n');
+// verification-webcrypto.json is volatile evidence (see the source-check
+// note below): its output depends on whether bun exists in this
+// environment, so byte-equality across machines can never hold. The
+// verifier itself is proven by the live bun step in CI (w20 CI gate).
+const bunReport = { verifier: 'scripts/verify-export-webcrypto.mjs (bun WebCrypto)', exit: (bun.error || bun.status === null) ? null : bun.status, output: (bun.error || bun.status === null) ? 'bun not installed on this machine — verifier not run' : (bun.stdout ?? '').trim() };
 const py = run('python3', ['scripts/verify-vectors.py']);
 write('reports/verification-python.json', JSON.stringify({ verifier: 'scripts/verify-vectors.py (Python cryptography)', exit: py.status, output: (py.stdout ?? '').trim() }, null, 2) + '\n');
 
@@ -55,8 +107,19 @@ write('reports/verification-python.json', JSON.stringify({ verifier: 'scripts/ve
 const writeVolatile = (path, content) => { if (!checkOnly) writeFileSync(path, content); };
 const check = run(process.execPath, ['scripts/check.mjs']);
 const checkOut = (check.stdout ?? '').trim().split('\n').at(-1);
-writeVolatile('reports/source-check.json', checkOut + '\n');
-writeVolatile('reports/artifact-audit.json', JSON.stringify({ check_exit: check.status, report: JSON.parse(checkOut), generated_at: 'scripts/report.mjs' }, null, 2) + '\n');
+// Volatile artifacts carry their provenance explicitly: which commit and
+// which cleanliness state they describe — a snapshot that cannot be checked
+// for freshness must at least be honest about what it saw (w11-supply SC-08).
+const treeState = () => {
+  const head = run('git', ['rev-parse', 'HEAD']);
+  const status = run('git', ['status', '--porcelain']);
+  return { commit: head.status === 0 ? head.stdout.trim() : null, clean: status.status === 0 ? !status.stdout.trim() : null };
+};
+const described = treeState();
+const volatileReport = (report) => JSON.stringify({ described_tree: described, note: 'volatile evidence: describes the tree at generation time — freshness is proven by the live CI step, not by this snapshot (w11-supply SC-08)', report }, null, 2) + '\n';
+writeVolatile('reports/source-check.json', volatileReport(JSON.parse(checkOut)));
+writeVolatile('reports/artifact-audit.json', volatileReport({ check_exit: check.status, report: JSON.parse(checkOut) }));
+writeVolatile('reports/verification-webcrypto.json', volatileReport(bunReport));
 const gate = run(process.execPath, ['scripts/release-check.mjs']);
 write('reports/production-gate.json', JSON.stringify({ verifier: 'scripts/release-check.mjs', exit: gate.status, expected_exit: 1, output: (gate.stdout ?? '').trim() }, null, 2) + '\n');
 
@@ -66,7 +129,7 @@ const walk = (dir, prefix) => {
   for (const e of readdirSync(dir, { withFileTypes: true })) {
     const p = join(dir, e.name);
     if (e.isDirectory()) walk(p, prefix);
-    else if (/\.(mjs|js|py|sh)$/.test(e.name)) {
+    else if (/\.(mjs|js|cjs|ts|py|sh)$/.test(e.name)) {
       const s = readFileSync(p, 'utf8');
       inventory[p] = { lines: s.split('\n').length, bytes: statSync(p).size };
     }
@@ -96,7 +159,15 @@ const sbom = {
 write('reports/sbom.cdx.json', JSON.stringify(sbom, null, 2) + '\n');
 
 // ---- 6. VERIFICATION.md + summary from the live ledger ----
-run('python3', ['scripts/traceability.py']);
+// --check-only must not rewrite the tree it verifies: traceability runs
+// its verify-only mode and reports the diffs as stale rather than
+// silently repairing them (w23-supply F7).
+const trace = run('python3', ['scripts/traceability.py', ...(checkOnly ? ['--check'] : [])]);
+if (checkOnly) {
+  const traced = (trace.stdout ?? '').trim().split('\n').filter(l => l.startsWith('STALE:'));
+  for (const l of traced) stale.push(l.slice(6));
+  if (trace.status !== 0 && !traced.length) { console.error(trace.stderr ?? trace.stdout); process.exitCode = 1; }
+}
 const ledgerSummary = existsSync('reports/requirements-summary.json') ? JSON.parse(readFileSync('reports/requirements-summary.json', 'utf8')) : null;
 const statusCounts = ledgerSummary?.status_counts ?? {}, total = ledgerSummary?.total_requirements ?? 0;
 const sims = existsSync('reports/simulation-results.json') ? JSON.parse(readFileSync('reports/simulation-results.json', 'utf8')).scenarios?.length : null;
@@ -129,6 +200,7 @@ VERIFIED_IN_ENGINEERING_PROFILE means directly exercised in the declared enginee
 
 Independent verification: node:crypto export verifier, WebCrypto/bun export verifier, Python cryptography vector verifier — see reports/verification-*.json.
 `);
-console.log(JSON.stringify(checkOnly ? { check_only: true, stale } : { regenerated: true, tests: counts, sims, ledger: statusCounts }));
+const tapFailNames = (tapText.match(/^not ok \d+ [^\n]*/gm) ?? []).slice(0, 25);
+console.log(JSON.stringify(checkOnly ? { check_only: true, stale, stale_detail: staleDetail, tests: counts, tap_status: tap.status, tap_signal: tap.signal ?? null, tap_error: tap.error?.message ?? null, tap_failures: tapFailNames } : { regenerated: true, tests: counts, sims, ledger: statusCounts }));
 if (stale.length) { console.error(`stale committed reports: ${stale.join(', ')} — run node scripts/report.mjs and commit`); process.exitCode = 1; }
 if (counts.fail > 0 || tap.status !== 0) process.exitCode = 1;

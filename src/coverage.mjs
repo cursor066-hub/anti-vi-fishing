@@ -8,8 +8,9 @@ import { requireThat } from './errors.mjs';
 export const PATH_CLASSES = ['web_ui', 'mobile', 'api', 'cli', 'batch', 'import', 'service_account', 'direct_database', 'recovery', 'emergency'];
 
 export function declarePath(input, now) {
-  fields(input, ['path_id', 'action_type', 'target', 'environment', 'connector_version', 'owner', 'status', 'max_age_ms', 'configuration_digest'], ['path_class']);
+  fields(input, ['path_id', 'action_type', 'target', 'environment', 'connector_version', 'owner', 'status', 'max_age_ms', 'configuration_digest'], ['path_class', 'connector_key_id']);
   for (const f of ['path_id', 'target', 'owner']) identifier(input[f], f);
+  if (input.connector_key_id !== undefined) identifier(input.connector_key_id, 'connector_key_id');
   for (const f of ['action_type', 'environment', 'connector_version']) text(input[f], f, 128);
   // Full SRS taxonomy (COV-002): ENFORCED is reserved to independently
   // validated paths (set only by technical-validation transitions), UNCOVERED
@@ -62,8 +63,13 @@ export function coverageAt(events, now) {
   for (const [id, s] of Object.entries(paths)) out[id] = { ...s, path_id: id, status: effectiveStatus(s, now), stored_status: s.status };
   return out;
 }
-export function coverageManifest(tenant, paths, now, sign) {
-  const effective = paths.map(p => ({ ...p, effective_status: effectiveStatus(p, now), next_action: p.status === 'ENFORCED' ? 'Revalidate before evidence expires; verify all bypass paths.' : p.status === 'UNCOVERED' ? 'Close this path or bring it under enforced coverage; it is declared unprotected.' : 'Attach independently executed technical bypass evidence.' }));
+export function coverageManifest(tenant, paths, now, sign, { unanchored = [], missing = [], obligations = [] } = {}) {
+  const effective = paths.map(p => ({ ...p, anchored: true, effective_status: effectiveStatus(p, now), next_action: p.status === 'ENFORCED' ? 'Revalidate before evidence expires; verify all bypass paths.' : p.status === 'UNCOVERED' ? 'Close this path or bring it under enforced coverage; it is declared unprotected.' : 'Attach independently executed technical bypass evidence.' }));
+  // Rows without a ledger-anchored COVERAGE_DECLARED event are excluded —
+  // the manifest names them honestly instead of attesting their state
+  // (w17-redteam A3). Paths declared on chain but deleted from rows are
+  // named in missing_rows; open obligations derive from anchored status so
+  // erased task rows can never hide them (w31-coverage F1/F6).
   // This distribution provides a simulator, not target-wide total mediation.
-  return sign({ tenant_id: tenant, issued_at: now, profile: 'software-engineering', guarantee: false, assurance: 'NO_PRODUCTION_ENFORCEMENT_GUARANTEE', reason: 'Real target coverage and independent bypass assessment have not been supplied.', paths: effective, scope_digest: digest(effective) }, 'coverage');
+  return sign({ tenant_id: tenant, issued_at: now, profile: 'software-engineering', guarantee: false, assurance: 'NO_PRODUCTION_ENFORCEMENT_GUARANTEE', reason: 'Real target coverage and independent bypass assessment have not been supplied.', paths: effective, unanchored_rows: unanchored, missing_rows: missing, open_obligations: obligations, scope_digest: digest(effective) }, 'coverage');
 }

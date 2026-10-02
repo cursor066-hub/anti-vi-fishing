@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -34,7 +34,7 @@ test('EVD-001 CON-002: issuer kind ceiling — bank key cannot mint governance_r
 test('EVD-001: evidence bound to a different bank account is rejected at attach', t => {
   const h = fixture(t);
   const r = h.proposed('finance.bank.change', { bank_account: 'ATTACKER-ACCT-1', currency: 'EUR' }, { action: { type: 'finance.bank.change', target_resource: 'vendor-1', purpose: 'Audit' } });
-  const payload = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: r.capsule_digest, kind: 'ownership', content_digest: digest('x'), acquired_at: h.now(), expires_at: h.now() + 600000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'true fact, wrong subject', retention_until: h.now() + 900000, claims: { account: 'TESTBANK000001', owner_id: 'vendor-1' } };
+  const payload = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: r.capsule_digest, kind: 'ownership', content_digest: digest('x'), acquired_at: h.now(), expires_at: h.now() + 600000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'true fact, wrong subject', retention_until: h.now() + 900000, issuer_version: '1.0.0', claims: { account: 'TESTBANK000001', owner_id: 'vendor-1' } };
   assert.throws(() => h.f.attachEvidence(h.p(), r.capsule.capsule_id, signed(payload, h.setup.issuerKeys.acme.bank, 'evidence')), hasCode('INV-403-SCOPE'));
   // Correct content binds.
   const ok = { ...payload, evidence_id: randomUUID(), claims: { account: 'ATTACKER-ACCT-1', owner_id: 'vendor-1' } };
@@ -46,13 +46,20 @@ test('EVD-001: evidence bound to a different bank account is rejected at attach'
 });
 
 // MED-2: a drifted connector stops being trusted until a clean re-check.
+// Drift quarantine is chain-anchored (w13-fixverify M3): only signed
+// CONNECTOR_DRIFT/CONNECTOR_REVALIDATED events move the gate — the mutable
+// 'issuer-drift' row is observability, not authority.
 test('CON-006: issuer-drift flag suspends evidence until cleared', t => {
   const h = fixture(t);
   const r = h.proposed();
   const bankId = Object.keys(h.f.tenant('acme').issuers).find(k => h.f.tenant('acme').issuers[k].name === 'bank');
+  // A mutable row alone mints no quarantine.
   h.f.store.put('acme', 'issuer-drift', bankId, { drifted_at: h.now(), changes: [{ field: 'actions' }] }, h.now());
+  h.evidence(r, { issuer: 'bank' });
+  h.f.store.audit('acme', 'CONNECTOR_DRIFT', 'test', bankId, { drifted: 'manifest' }, h.now());
   assert.throws(() => h.evidence(r, { issuer: 'bank' }), hasCode('INV-403-QUARANTINE'));
   h.f.store.remove('acme', 'issuer-drift', bankId);
+  h.f.store.audit('acme', 'CONNECTOR_REVALIDATED', 'test', bankId, { configuration_digest: 'x' }, h.now());
   h.evidence(r, { issuer: 'bank' });
 });
 
@@ -102,6 +109,10 @@ test('loadIssuers: prototype-colliding issuer names stay resolvable', t => {
 // LOW-4: tenant/issuer names containing ':' cannot collide on registry keys.
 test('loadIssuers: ":" and malformed tenants are rejected at spec load', t => {
   const dir = mkdtempSync(join(tmpdir(), 'if-issuer-')); t.after(() => rmSync(dir, { recursive: true }));
-  writeIssuer(dir, { issuer: 'b:bank', tenant: 'a', version: '1.0.0', channel: 'authoritative', key: generateKey(), kinds: {}, records: {} });
+  // writeIssuer itself rejects ':' now (w18-issuerd F-10) — the colon name
+  // cannot be placed on disk through the sanctioned path…
+  assert.throws(() => writeIssuer(dir, { issuer: 'b:bank', tenant: 'a', version: '1.0.0', channel: 'authoritative', key: generateKey(), kinds: {}, records: {} }), hasCode('INV-400-SCHEMA'));
+  // …and a hand-placed file bypassing writeIssuer still fails at load.
+  writeFileSync(join(dir, 'bad.issuer.json'), JSON.stringify({ issuer: 'b:bank', tenant: 'a', version: '1.0.0', channel: 'authoritative', key: generateKey(), kinds: {}, records: {} }), { mode: 0o600 });
   assert.throws(() => loadIssuers(dir), hasCode('INV-400-SCHEMA'));
 });

@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { driftCheck } from '../src/connectors.mjs';
-import { workspaceFallback } from '../src/secureview.mjs';
+import { workspaceFallback, createComponent, openSession, releaseFields, openRelease } from '../src/secureview.mjs';
 import { generateKey, signed, verifySigned } from '../src/crypto.mjs';
 import { Store } from '../src/store.mjs';
 import { KeyVault } from '../src/keystore.mjs';
@@ -11,7 +11,7 @@ import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fixture, hasCode } from './helpers.mjs';
+import { fixture, hasCode, installPolicy, setTenant } from './helpers.mjs';
 import { InvariantError } from '../src/errors.mjs';
 import { createConfiguration } from '../src/bootstrap.mjs';
 import { proposal } from '../src/schema.mjs';
@@ -240,8 +240,7 @@ test('AIG-003: extraction preserves provenance (span, confidence, model, documen
 
 test('AIG-009: disabling the advisory plane preserves enforcement (no degradation)', t => {
   const h = fixture(t);
-  const policy = clone(h.f.policy('acme')); policy.mode = 'disabled';
-  h.f.store.put('acme', 'policy', 'active', policy, h.now());
+  installPolicy(h, p => { p.mode = 'disabled'; });
   assert.throws(() => h.f.advise(h.p(), { operation: 'explain', capsule_id: 'none' }), hasCode('INV-451-POLICY'));
   const r = h.ready(); // enforcement path unaffected by advisory plane being off
   assert.equal(h.f.execute(h.p(), r.certificate).payload.status, 'VERIFIED');
@@ -292,7 +291,9 @@ test('H2: issuerd issuance requires the bearer token; conflict answers never lea
   const open = createIssuerServer({ 'acme:bank': { ...spec, issue_token: undefined } }, { port: 0, host: '0.0.0.0' });
   await open.listen(); t.after(() => open.close());
   const refused = await httpJson(`http://127.0.0.1:${open.server.address().port}/v1/issuers/bank/issue`, { method: 'POST', body });
-  assert.equal(refused.status, 503);
+  // w21-issuerd F11: deployment state collapses to a uniform 401 — the
+  // tokenless-registry fingerprint never leaks through the refusal code.
+  assert.equal(refused.status, 401);
 });
 
 test('L1: malleated ES256 signature (r, n-s) is rejected', t => {
@@ -329,13 +330,13 @@ test('L3: secure-perception release binds capsule_id and evidence_ref into the s
   const h = fixture(t);
   const component = h.setup.componentSecrets.acme['secure-view-acme'];
   const session = h.f.perceptionSession(h.p(), component.attest('b'.repeat(64), h.now() + 300000));
-  const r = h.proposed();
-  const evidence = h.evidence(r);
-  // Citations point at decided authority — evaluate first (w8-fixverify F4).
-  h.f.evaluate(h.p(), r.capsule.capsule_id);
-  const released = h.f.perceptionRelease(h.p(), session.session_id, { fields: { vendor: 'v1' }, purpose: 'verify', capsule_id: r.capsule.capsule_id, evidence_ref: evidence.payload.evidence_id });
+  // Citations point at ALLOW-decided authority — the full pipeline first
+  // (w8-fixverify F4, w22-fixverify F2).
+  const r = h.ready().record;
+  const evidence_id = h.f.store.must('acme', 'capsule', r.capsule.capsule_id).evidence[0];
+  const released = h.f.perceptionRelease(h.p(), session.session_id, { fields: { vendor: 'v1' }, purpose: 'verify', capsule_id: r.capsule.capsule_id, evidence_ref: evidence_id });
   assert.equal(released.binding.capsule_id, r.capsule.capsule_id);
-  assert.equal(released.binding.evidence_ref, evidence.payload.evidence_id);
+  assert.equal(released.binding.evidence_ref, evidence_id);
   // Forged provenance is refused (runtime-audit F-6).
   assert.throws(() => h.f.perceptionRelease(h.p(), session.session_id, { fields: { vendor: 'v1' }, purpose: 'verify', capsule_id: 'cap-ghost' }), (e) => e.code === 'INV-404-NOT-FOUND');
 });
@@ -343,7 +344,7 @@ test('L3: secure-perception release binds capsule_id and evidence_ref into the s
 test('L4: evidence signed under a retired suite is rejected policy-wide', t => {
   const h = fixture(t), r = h.proposed('finance.beneficiary.create', { vendor_id: 'v', bank_account: 'TESTBANK000001', currency: 'EUR' });
   const esKey = generateKey('ES256');
-  h.f.tenant('acme').issuers[esKey.key_id] = { public_key: esKey.public_key, name: 'es-issuer', issuer_id: 'es-issuer', channel: 'authoritative', kinds: ['ownership'], failure_domain: 'acme-es', version: '1.0.0' };
+  setTenant(h, 'acme', tn => { tn.issuers[esKey.key_id] = { public_key: esKey.public_key, name: 'es-issuer', issuer_id: 'es-issuer', channel: 'authoritative', kinds: ['ownership'], failure_domain: 'acme-es', version: '1.0.0' }; });
   const env = signed({ evidence_id: 'ev-es-1', tenant_id: 'acme', capsule_digest: r.capsule.capsule_id, kind: 'ownership', content_digest: digest({ x: 1 }), acquired_at: h.now(), expires_at: h.now() + 60000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'x', retention_until: h.now() + 120000 }, esKey, 'evidence');
   // Default constitution allows Ed25519 only — a valid ES256 envelope must fail policy, not crypto.
   assert.throws(() => h.f.attachEvidence(h.p(), r.capsule.capsule_id, env), hasCode('INV-451-POLICY'));
@@ -401,6 +402,29 @@ test('audit PER-006: releaseFields honour a policy allowlist (INV-451 on unliste
   assert.throws(() => workspaceFallback({ fields: { bank_account: 'TESTBANK1', ssn: '001' }, purpose: 'review', reason: 'x' }, policy, 1), hasCode('INV-451-POLICY'));
 });
 
+test('audit PER-006: purpose, field and time constraints bind every release', () => {
+  const now = 1700000000000;
+  const component = createComponent('ev-viewer', '1.2.3');
+  const policy = { secure_perception: { allowed_firmware: ['1.2.3'], session_ttl_ms: 300000, release_fields: ['bank_account'] } };
+  const session = openSession(component, component.attest('a'.repeat(64), now + 120000), policy, now);
+  const rel = { fields: { bank_account: 'TESTBANK1' }, purpose: 'review-ticket-7' };
+  const out = releaseFields(session, rel, policy, now);
+  // Purpose leg: the authenticated binding names the declared purpose.
+  assert.equal(out.binding.purpose, 'review-ticket-7');
+  // Field leg: the allowlist runs inside releaseFields too, and the binding
+  // records exactly the released field names.
+  assert.deepEqual(out.binding.fields, ['bank_account']);
+  assert.throws(() => releaseFields(session, { fields: { ssn: '001' }, purpose: 'p' }, policy, now), hasCode('INV-451-POLICY'));
+  // Time leg: the binding carries the session expiry and a release past it
+  // is refused.
+  assert.equal(out.binding.expires_at, session.expires_at);
+  assert.throws(() => releaseFields(session, rel, policy, session.expires_at + 1), hasCode('INV-409-STATE'));
+  // The purpose-bound plaintext is readable only by the attested component.
+  const inner = openRelease(component, out, session, now);
+  assert.equal(inner.purpose, 'review-ticket-7');
+  assert.equal(inner.data.bank_account, 'TESTBANK1');
+});
+
 test('audit: configDriftStatus reports per-section digests and no drift on fresh snapshot', t => {
   const h = fixture(t);
   const s = h.f.configDriftStatus(h.p('security'));
@@ -426,8 +450,8 @@ test('R2-1: a grant narrowed since issuance cannot ride a signed capability', t 
   const h = fixture(t);
   const cap = h.f.runtime.issue(h.p(), runtimeInput({ columns: ['id', 'name'] }));
   assert.equal(h.f.runtime.consume(h.p(), runtimeRequest(cap, { columns: ['id', 'name'] })).decision, 'ALLOW');
-  const ident = Object.values(h.f.tenant('acme').identities).find(i => i.subject_id === 'operator');
-  ident.grants = { ...ident.grants, columns: ['id'] };
+  const [opKey] = Object.entries(h.f.tenant('acme').identities).find(([, i]) => i.subject_id === 'operator');
+  setTenant(h, 'acme', tn => { tn.identities[opKey].grants = { ...tn.identities[opKey].grants, columns: ['id'] }; });
   assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap, { columns: ['id', 'name'] })), hasCode('INV-403-SCOPE'));
 });
 
@@ -436,9 +460,7 @@ test('R2-2: transform policy binds capabilities; row key is never transformable'
   assert.throws(() => h.f.runtime.issue(h.p(), runtimeInput({ transforms: { id: { op: 'drop' } } })), hasCode('INV-403-SCOPE'));
   assert.throws(() => h.f.runtime.issue(h.p(), runtimeInput({ resource: 'dataset-9' })), hasCode('INV-403-SCOPE'));
   assert.throws(() => h.f.runtime.issue(h.p(), runtimeInput({ columns: ['id', 'salary'] })), hasCode('INV-403-SCOPE'));
-  const active = h.f.policy('acme'), next = clone(active);
-  next.runtime.allowed_transforms = ['mask', 'drop', 'constant'];
-  h.f.store.put('acme', 'policy', 'active', next, h.now());
+  installPolicy(h, p => { p.runtime.allowed_transforms = ['mask', 'drop', 'constant']; });
   assert.throws(() => h.f.runtime.issue(h.p(), runtimeInput({ transforms: { name: { op: 'tokenise' } } })), hasCode('INV-403-SCOPE'));
 });
 
@@ -452,12 +474,12 @@ test('R2-3: deterministic target refusals record FAILED, not UNCERTAIN', t => {
 
 test('RUN-005 R2-4: constrained fail mode allows stale reads at half budget only', t => {
   const h = fixture(t);
-  const cap = h.f.runtime.issue(h.p(), runtimeInput({ max_cost: 10, columns: ['id', 'name'], row_ids: ['row-1', 'row-2'] }));
-  const serviceCap = h.f.runtime.issue(h.p(), runtimeInput({ action: 'service.connect', resource: 'erp-service', destination: 'erp-service', columns: [], row_ids: [] }));
-  const next = clone(h.f.policy('acme'));
-  next.fail_modes = { ...next.fail_modes, 'data.read': 'constrained', 'service.connect': 'constrained' };
-  next.version += 1;
-  h.f.store.put('acme', 'policy', 'active', next, h.now());
+  // Governed policy moves cost ~120s > the 60s capability TTL, so the stale
+  // capabilities are minted under a long-TTL constitution first.
+  installPolicy(h, p => { p.capability_ttl_ms = 300000; });
+  const cap = h.f.runtime.issue(h.p(), runtimeInput({ max_cost: 10, columns: ['id', 'name'], row_ids: ['row-1', 'row-2'], ttl_ms: 300000 }));
+  const serviceCap = h.f.runtime.issue(h.p(), runtimeInput({ action: 'service.connect', resource: 'erp-service', destination: 'erp-service', columns: [], row_ids: [], ttl_ms: 300000 }));
+  installPolicy(h, p => { p.fail_modes = { ...p.fail_modes, 'data.read': 'constrained', 'service.connect': 'constrained' }; });
   const first = h.f.runtime.consume(h.p(), runtimeRequest(cap));
   assert.equal(first.decision, 'ALLOW');
   assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap)), hasCode('INV-429-BUDGET'));
@@ -826,10 +848,25 @@ test('IDN-009 R2-32: service credentials are short-lived capabilities, not stand
 
 test('KEY-004 R2-33: key generation uses CSPRNG and is non-deterministic', t => {
   const h = fixture(t);
-  const a = h.f.vault.generate('backup-manifest');
-  const b = h.f.vault.generate('backup-manifest');
-  assert.notEqual(a.public_key, b.public_key);
-  assert.equal(a.suite, 'Ed25519');
+  // A counter or seeded RNG would still pass a two-sample inequality —
+  // the honest bar is a batch of pairwise-distinct keys that are each a
+  // REAL Ed25519 pair: a generated key must sign and verify under its own
+  // public half, which no fabricated string can (ledger w31).
+  const keys = Array.from({ length: 8 }, () => h.f.vault.generate('backup-manifest'));
+  assert.equal(new Set(keys.map(k => k.public_key)).size, keys.length, 'generated public keys must be pairwise distinct');
+  assert.equal(new Set(keys.map(k => k.key_id)).size, keys.length, 'generated key ids must be pairwise distinct');
+  const payload = { probe: randomBytes(8).toString('hex') };
+  for (const k of keys) {
+    assert.equal(k.suite, 'Ed25519');
+    const envelope = h.f.vault.envelope(k.key_id, 'backup-manifest', payload);
+    assert.equal(verifySigned(envelope, { [k.key_id]: { public_key: k.public_key, suite: 'Ed25519' } }, 'backup-manifest').probe, payload.probe);
+  }
+  // CSPRNG provenance: generation must ride node:crypto primitives —
+  // Math.random in the crypto module would invalidate the claim.
+  const cryptoSource = readFileSync('src/crypto.mjs', 'utf8');
+  assert.match(cryptoSource, /from 'node:crypto'/);
+  assert.match(cryptoSource, /generateKeyPairSync/);
+  assert.doesNotMatch(cryptoSource, /Math\.random/);
 });
 
 test('KEY-007 R2-34: a purpose-bound key cannot sign outside its purpose', t => {
@@ -896,8 +933,7 @@ test('CON-002 CON-007 R2-37: issuer evidence stays purpose-bound and customer-ho
 test('NET-001 NET-002 NET-003 NET-010 R2-38: segmentation is identity-bound, envelope-bound and reconstructable', t => {
   const h = fixture(t);
   // Workstation peers are never service destinations.
-  const cfg = h.f.policy('acme'); cfg.runtime.network = { deny_workstation_peers: true, allowed_protocols: ['https'], allowed_ports: [443] };
-  h.f.store.put('acme', 'policy', 'active', cfg, h.now());
+  installPolicy(h, p => { p.runtime.network = { deny_workstation_peers: true, allowed_protocols: ['https'], allowed_ports: [443] }; });
   const cap = h.f.runtime.issue(h.p(), runtimeInput());
   const ws = runtimeRequest(cap); ws.resource = 'ws-janedoe';
   assert.throws(() => h.f.runtime.consume(h.p(), ws), e => /^INV-/.test(e.code));
@@ -972,22 +1008,28 @@ test('CONC-D R2-43: reconcile-superseded outcomes name their predecessor digest'
   assert.ok(audited.at(-1).envelope.payload.metadata.supersedes, 'audit chain carries the supersession pointer');
 });
 
-test('CONC-E R2-44: config drift quarantine is durable across Fabric instances', t => {
+test('CONC-E R2-44: config drift quarantine is anchored — a forged flag delete cannot clear it', t => {
   const h = fixture(t, ['acme']);
-  // A second Fabric instance on the same deployment directory whose config
-  // disagrees with the stored snapshot detects drift — and crucially the
-  // consequence (privilege withdrawal) is visible to the FIRST instance,
-  // which never performed the detection (concurrency-audit M4).
+  // Drift consequence rides the LAST SIGNED snapshot, not the mutable
+  // 'config-flag'/'config-snapshot' rows (w13-fixverify M4): a store-level
+  // writer who deletes the flag or re-baselines the record can no longer
+  // un-drift the gate — only a signed CONFIG_REASSERTED moves the anchor.
   const tampered = JSON.parse(JSON.stringify(h.setup.config));
   delete tampered.tenants.acme.issuers[Object.keys(tampered.tenants.acme.issuers)[0]];
-  const f2 = new Fabric(tampered, h.directory, () => h.now() + 1);
+  const f2 = new Fabric(tampered, h.directory, () => h.now());
   try {
     assert.equal(Boolean(f2.store.get('acme', 'config-flag', 'drift')), true, 'drift flag persisted to the ledger');
-    // Instance A (h.f) has an EMPTY in-memory drift set — only the durable
-    // flag can block it.
-    assert.throws(() => h.proposed(), e => e.code === 'INV-403-QUARANTINE');
+    // Forge a clean slate at the store layer: delete the flag AND the
+    // snapshot record — the anchored compare must still hold the gate.
+    f2.store.remove('acme', 'config-flag', 'drift');
+    f2.store.remove('acme', 'config-snapshot', 'current');
+    assert.throws(() => f2.evaluate({ tenant_id: 'acme', subject_id: 'operator' }, 'any'), e => e.code === 'INV-403-QUARANTINE');
+    // Instance A runs the ORIGINAL config, which honestly matches the
+    // anchor — per-instance divergence, not a shared poisoned flag.
+    h.f.store.remove('acme', 'config-flag', 'drift');
+    assert.doesNotThrow(() => h.proposed());
     f2.reassertConfig({ tenant_id: 'acme', subject_id: 'security' });
-    assert.equal(f2.store.get('acme', 'config-flag', 'drift') ?? null, null, 'reassert clears the durable flag');
+    assert.equal(f2._auditIndex('acme').tenantDrifted, false, 'reassert moves the anchor and clears the gate');
   } finally { f2.close(); }
 });
 

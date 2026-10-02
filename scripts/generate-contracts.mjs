@@ -12,7 +12,7 @@ const components = {
   CertificateRequest: object({ capsule_id: type.id }),
   ExecuteRequest: object({ certificate: Ref('Envelope'), dry_run: { type: 'boolean' } }),
   Revocation: object({ kind: { enum: ['certificate', 'evidence', 'issuer', 'key', 'subject', 'device', 'capability', 'grant', 'token'] }, id: type.id, reason: type.text }),
-  CoverageDeclaration: object({ path_id: type.id, action_type: Str, target: type.id, environment: Str, connector_version: Str, owner: type.id, status: { enum: ['MONITORED', 'UNKNOWN'] }, path_class: { enum: ['web_ui', 'mobile', 'api', 'cli', 'batch', 'import', 'service_account', 'direct_database', 'recovery', 'emergency'] }, max_age_ms: { type: 'integer', minimum: 1000, maximum: 2592000000 }, configuration_digest: type.hash }),
+  CoverageDeclaration: object({ path_id: type.id, action_type: Str, target: type.id, environment: Str, connector_version: Str, owner: type.id, status: { enum: ['MONITORED', 'UNKNOWN', 'UNCOVERED'] }, path_class: { enum: ['web_ui', 'mobile', 'api', 'cli', 'batch', 'import', 'service_account', 'direct_database', 'recovery', 'emergency'] }, max_age_ms: { type: 'integer', minimum: 1000, maximum: 2592000000 }, configuration_digest: type.hash }),
   AuditRequest: object({ purpose: type.text }),
   BatchApproval: object({ capsule_ids: { type: 'array', items: type.id, minItems: 2, maxItems: 32, uniqueItems: true }, signatures: { type: 'array', items: Ref('Envelope'), minItems: 2, maxItems: 32 } }),
   RetentionHold: object({ evidence_id: type.id, legal_hold: { type: 'boolean' } }),
@@ -24,7 +24,7 @@ const components = {
   AcquireEvidence: object({ issuer: type.id, kind: type.text, claims: { type: 'object' } }, ['issuer', 'kind', 'claims']),
   PerceptionSession: object({ attestation: { type: 'object' } }),
   PerceptionRelease: object({ session_id: type.id, fields: { type: 'object' }, purpose: type.text, capsule_id: type.id, evidence_ref: type.id }, ['session_id', 'fields', 'purpose']),
-  PerceptionFallback: object({ fields: { type: 'object' }, purpose: type.text, reason: type.text, session_id: type.id, capsule_id: type.id, evidence_ref: type.id }, ['fields', 'purpose']),
+  PerceptionFallback: object({ fields: { type: 'object' }, purpose: type.text, reason: type.text, capsule_id: type.id, evidence_ref: type.id }, ['fields', 'purpose']),
   Advisory: object({ operation: { enum: ['extract', 'explain', 'intent'] }, document: { type: 'string', maxLength: 1000000 }, decision: Str, kind_hint: Str, capsule_id: type.id }, ['operation']),
   CeremonyCreate: object({ ceremony_id: type.id, tenant_id: type.id, purpose: { type: 'string', minLength: 1, maxLength: 64 }, threshold: { type: 'integer', minimum: 2, maximum: 16 }, custodians: { type: 'array', items: type.id, minItems: 2, maxItems: 16, uniqueItems: true }, valid_until: { type: 'integer', minimum: 1 }, min_delay_ms: { type: 'integer', minimum: 0, maximum: 2592000000 } }, ['ceremony_id', 'tenant_id', 'purpose', 'threshold', 'custodians', 'valid_until']),
   // The acknowledgement body is the signed envelope itself.
@@ -32,7 +32,7 @@ const components = {
   CeremonySplit: object({ secret: { type: 'string', minLength: 1, maxLength: 8192 } }),
   CeremonyReconstruct: object({ shares: { type: 'array', items: Str, minItems: 2, maxItems: 16 } }),
   RotatePrepare: object({ key_class: type.text, suite: { enum: ['Ed25519', 'ES256'] } }, ['key_class']),
-  ProofVerify: object({ proof: { type: 'object' } })
+  ProofVerify: object({ proof: { type: 'object' }, pin: object({ root: type.hash, size: type.positive }) }, ['proof'])
 };
 const variants = [];
 for (const s of Object.values(SCHEMAS)) {
@@ -61,6 +61,7 @@ function operation(path, method, description, role, request = null, status = 200
     { name: 'limit', in: 'query', required: false, schema: qintSchema(1, 200) },
     { name: 'offset', in: 'query', required: false, schema: qintSchema(0, 1e6) });
   if (path === '/v1/grants' && method === 'get') params.push({ name: 'subject', in: 'query', required: false, schema: type.id });
+  if (path === '/v1/action-capsules/{id}/approval-challenge' && method === 'get') params.push({ name: 'signer_id', in: 'query', required: false, schema: type.id });
   if (params.length) op.parameters = params;
   paths[path] ??= {}; paths[path][method] = op;
   if (PUBLIC_PATHS.has(path)) op.security = [];
@@ -80,17 +81,17 @@ for (const row of [
  ['/v1/revocations','post','Permanently revoke local authority','security','Revocation',201], ['/v1/revocations','get','List revocations','operator, security, auditor, policy_admin'],
  ['/v1/coverage','get','Read signed conservative coverage manifest','operator, approver, custodian, security, auditor, policy_admin'], ['/v1/coverage','post','Declare monitored or unknown path','security','CoverageDeclaration',201], ['/v1/coverage/history','get','Coverage state reconstructed at instant ?at=','operator, approver, custodian, security, auditor, policy_admin'], ['/v1/coverage/{id}/technical-validation','post','Attach independently executed validation evidence to a path','security','Envelope'],
  ['/v1/connectors','get','Read simulator connector limitations','operator, security, policy_admin, auditor'], ['/v1/connectors/status','get','Issuer and target connector status incl. drift','operator, security, policy_admin, auditor'], ['/v1/connectors/{id}/drift-check','post','Live manifest drift check against issuer endpoint','security, policy_admin'],
- ['/v1/policies/simulate','post','Compare exact candidate without activation','policy_admin, security','Policy'], ['/v1/policy/history','get','Staged and historical policy versions','operator, security, auditor, policy_admin'],
+ ['/v1/policies/simulate','post','Compare exact candidate without activation','policy_admin, security','Policy'], ['/v1/policy/history','get','Staged and historical policy versions','operator, security, auditor, policy_admin'], ['/v1/policy/reanchor','post','Re-anchor a diverged active policy under a signed remediation event','security','Empty'],
  ['/v1/audit-exports','post','Export audited purpose-bound integrity metadata','auditor, security','AuditRequest'],
- ['/v1/audit/entries','get','Paginated audit view (cursor + limit 1–5000)','operator, security, auditor, policy_admin'], ['/v1/audit/proofs/{sequence}','get','RFC 6962 inclusion proof','operator, security, auditor'], ['/v1/audit/consistency','get','Consistency proof between tree sizes','operator, security, auditor'], ['/v1/audit/verify-proof','post','Verify a supplied inclusion proof against the live tree','operator, security, auditor','ProofVerify'],
- ['/v1/subjects','get','Identity inventory','operator, security, auditor, policy_admin'], ['/v1/grants','get','Active JIT grants','operator, security, auditor, policy_admin'],
+ ['/v1/audit/entries','get','Paginated audit view (cursor + limit 1–5000)','operator, security, auditor, policy_admin'], ['/v1/audit/proofs/{sequence}','get','RFC 6962 inclusion proof','operator, security, auditor'], ['/v1/audit/consistency','get','Consistency proof between tree sizes','operator, security, auditor'], ['/v1/audit/verify-proof','post','Verify a supplied inclusion proof (optional external pin {root,size})','operator, security, auditor','ProofVerify'], ['/v1/audit/seal','post','Seal a poisoned audit tail: drops unverifiable rows under a signed AUDIT_SEALED event','security'],
+ ['/v1/subjects','get','Identity inventory','operator, security, auditor, policy_admin'], ['/v1/grants','get','Active JIT grants','operator, security, auditor'],
  ['/v1/retention/hold','post','Set or release evidence legal hold','security','RetentionHold'], ['/v1/retention/sweep','post','Apply conservative logical retention','security','Empty'], ['/v1/metrics','get','Read process-wide counters without target payloads','security'],
  ['/v1/ceremonies','get','List key ceremonies','security, custodian, policy_admin'], ['/v1/ceremonies','post','Plan a threshold ceremony','security, custodian','CeremonyCreate',201],
  ['/v1/ceremonies/{id}/acknowledge','post','Custodian acknowledges participation','custodian','CeremonyAcknowledge'], ['/v1/ceremonies/{id}/split','post','Split exportable material into committed shares','security, custodian','CeremonySplit'], ['/v1/ceremonies/{id}/reconstruct','post','Reconstruct under ceremony quorum (digest returned, not material)','security, custodian','CeremonyReconstruct'], ['/v1/ceremonies/{id}/abort','post','Abort a live ceremony (security officer or member custodian)','security, custodian','Empty'],
  ['/v1/keys','get','List vault keys (public metadata only)','security, policy_admin'], ['/v1/keys/rotate-prepare','post','Pre-stage a pending rotation key','security, custodian','RotatePrepare',201], ['/v1/keys/{id}/attest','get','Vault-signed key attestation','security, auditor'],
  ['/v1/config-drift','get','Configuration drift status','security, policy_admin'], ['/v1/config-drift/reassert','post','Re-attest config after correction','security'], ['/v1/clock/recover','post','Audited clock repair after stall','security, policy_admin'],
  ['/v1/secure-perception/sessions','post','Open dev-attested sealed perception session','operator, approver, custodian, security','PerceptionSession',201], ['/v1/secure-perception/release','post','Release sealed fields under purpose binding','operator, approver, custodian, security','PerceptionRelease'], ['/v1/secure-perception/fallback','post','Labelled non-perception fallback submission','operator, approver, custodian, security','PerceptionFallback'],
- ['/v1/advisory','post','Deterministic advisory plane (never confers authority)','operator, approver, custodian, security, policy_admin','Advisory'],
+ ['/v1/advisory','post','Deterministic advisory plane (never confers authority)','operator, approver, custodian, security, policy_admin, auditor','Advisory'],
  ['/session','post','Establish same-origin session','token holder','Session'], ['/session/logout','post','Destroy current cookie session','authenticated']
 ]) operation(...row);
 paths['/session'].post.security = [];

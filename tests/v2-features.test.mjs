@@ -132,7 +132,7 @@ function policyChange(h, next, approvals = 3) {
 test('POL-008: staged policy activates only when trusted time reaches not_before', t => {
   const h = fixture(t);
   const active = h.f.policy('acme');
-  const next = clone(active); next.version = 2; next.policy_id = 'constitution:acme:v2'; next.not_before = h.now() + 240000;
+  const next = clone(active); next.version = 2; next.not_before = h.now() + 240000;
   const { r, cert } = policyChange(h, next);
   const out = h.f.execute(h.p(), cert);
   assert.equal(out.payload.status, 'VERIFIED');
@@ -148,7 +148,7 @@ test('POL-008: staged policy activates only when trusted time reaches not_before
 test('POL-013: emergency policy with sufficient custodians activates', t => {
   const h = fixture(t);
   const active = h.f.policy('acme');
-  const next = clone(active); next.version = 2; next.policy_id = 'constitution:acme:em2'; next.emergency_of = 1; next.expires_at = h.now() + 3600000; next.not_before = 1;
+  const next = clone(active); next.version = 2; next.emergency_of = 1; next.expires_at = h.now() + 3600000; next.not_before = 1;
   for (const r of Object.values(next.rules)) r.approval_threshold += 1; // emergency must tighten, never loosen
   const { cert } = policyChange(h, next, 4); // emergency = normal quorum + emergency_extra_custodians
   assert.equal(h.f.execute(h.p(), cert).payload.status, 'VERIFIED');
@@ -278,7 +278,7 @@ test('EVD-004: fabric.acquireEvidence fetches evidence over HTTP and attaches it
   const port = srv.server.address().port;
   // Point the bank issuer entry at the live daemon
   const bankId = Object.keys(h.f.tenant('acme').issuers).find(k => h.f.tenant('acme').issuers[k].name === 'bank');
-  h.f.tenant('acme').issuers[bankId].endpoint = `http://127.0.0.1:${port}`;
+  h.repoint(bankId, `http://127.0.0.1:${port}`);
   const r = h.proposed('finance.beneficiary.create', { vendor_id: 'vendor-1', bank_account: 'TESTBANK000001', currency: 'EUR' });
   const env = await h.f.acquireEvidence(h.p(), r.capsule.capsule_id, { issuer: 'bank', kind: 'ownership', claims: { account: 'TESTBANK000001', owner_id: 'vendor-1' } });
   assert.equal(env.evidence_id !== undefined, true);
@@ -328,7 +328,7 @@ test('DAT-009 DAT-011: reconstruction budget and watermarks on released rows', t
   // over (tenant, dataset, subject, capability, request_id, row) with the
   // tenant watermark key (w10-datagate F7).
   const key = Buffer.from(h.f.tenant('acme').watermark_key, 'base64url');
-  const expected = createHmac('sha256', key).update(canonical({ tenant: 'acme', dataset: 'dataset-1', subject: 'operator', capability_id: cap.payload.capability_id, request_id, row: out.rows[0] })).digest('hex').slice(0, 24);
+  const expected = createHmac('sha256', key).update(canonical({ tenant: 'acme', dataset: 'dataset-1', subject: 'operator', capability_id: cap.payload.capability_id, request_id, row_id: 'row-1', row: out.rows[0] })).digest('hex').slice(0, 24);
   assert.equal(out.watermarks[0].tag, expected);
   // A different request id or subject does not reproduce the tag.
   const wrong = createHmac('sha256', key).update(canonical({ dataset: 'dataset-1', subject: 'auditor', request_id, row: out.rows[0] })).digest('hex').slice(0, 24);

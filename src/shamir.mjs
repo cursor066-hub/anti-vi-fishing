@@ -32,6 +32,10 @@ function splitByte(secret, n, k, rand) {
     for (let d = poly.length - 1; d >= 0; d--) y = mul(y, i) ^ poly[d];
     shares[i - 1] = y;
   }
+  // Deal-side consumables: the random coefficients and the polynomial row
+  // (whose [0] is the secret byte) are zeroed — only the shares leave here
+  // (w15-timing F7).
+  rand.fill(0); poly.fill(0);
   return shares;
 }
 

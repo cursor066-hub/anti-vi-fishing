@@ -28,7 +28,11 @@ test('w5-F3: issuer credential rotation does not invalidate the evidence graph',
   // Rotate every bearer credential on every registered issuer — a routine
   // operational event that must leave the certified graph untouched.
   for (const iss of Object.values(h.f.tenant(t0).issuers)) {
-    iss.issue_token = 'rotated-issue-token'; iss.read_token = 'rotated-read-token'; iss.token_expires_at += 60000; iss.endpoint = 'https://issuer.internal:9';
+    iss.issue_token = 'rotated-issue-token'; iss.read_token = 'rotated-read-token'; iss.token_expires_at += 60000;
+    // The endpoint itself is a frozen trust anchor: a live re-point would
+    // let an in-process insider redirect the evidence POST — and its
+    // Bearer token — to a hostile host (w12-provenance F15).
+    assert.throws(() => { iss.endpoint = 'https://issuer.internal:9'; }, TypeError);
   }
   assert.equal(h.f.graph(t0, r).digest, before);
   // …and the certificate still issues against the unchanged digest.
