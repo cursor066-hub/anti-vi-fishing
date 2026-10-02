@@ -167,7 +167,7 @@ test('w32 store F2/F3: a signed watermark stranded above the committed tip still
   assert.throws(() => cold._auditIndex('acme'), hasCode('INV-409-INTEGRITY'), 'a signed floor above the committed tip must still wedge');
   const res = cold.sealAuditChain(h.p('security'));
   assert.equal(res.sealed, false, 'chain verifies — no cut needed');
-  assert.equal(cold._headWatermark('acme'), staleSeq, 'watermark re-anchored at the verified tip');
+  assert.equal(cold._headWatermark('acme'), staleSeq + 1, 'the floor now covers the committed re-anchor row');
   assert.doesNotThrow(() => cold._auditIndex('acme'), 'fold works again post-repair');
 });
 

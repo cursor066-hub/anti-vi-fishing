@@ -3066,6 +3066,11 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 512
+          },
+          "remediation_service": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
           }
         }
       },
@@ -3080,7 +3085,6 @@
           "connector_version",
           "owner",
           "status",
-          "path_class",
           "max_age_ms",
           "configuration_digest"
         ],
@@ -3129,6 +3133,11 @@
               "recovery",
               "emergency"
             ]
+          },
+          "connector_key_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+            "maxLength": 128
           },
           "max_age_ms": {
             "type": "integer",
@@ -3234,7 +3243,8 @@
           "classification",
           "jurisdiction",
           "max_cost",
-          "ttl_ms"
+          "ttl_ms",
+          "transforms"
         ],
         "properties": {
           "device_id": {
@@ -3302,6 +3312,10 @@
             "type": "integer",
             "minimum": 1000,
             "maximum": 300000
+          },
+          "transforms": {
+            "type": "object",
+            "description": "Column-keyed transform policy ({op: mask|tokenise|drop|constant|aggregate})"
           }
         }
       },
@@ -3518,12 +3532,6 @@
             "type": "string",
             "maxLength": 1000000
           },
-          "decision": {
-            "type": "string"
-          },
-          "kind_hint": {
-            "type": "string"
-          },
           "capsule_id": {
             "type": "string",
             "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
@@ -3582,6 +3590,31 @@
             "type": "integer",
             "minimum": 0,
             "maximum": 2592000000
+          },
+          "devices": {
+            "type": "object",
+            "description": "Optional custodian→device_id binding map"
+          },
+          "rotation": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "key_class",
+              "new_key_id"
+            ],
+            "properties": {
+              "key_class": {
+                "enum": [
+                  "execution",
+                  "audit"
+                ]
+              },
+              "new_key_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "maxLength": 128
+              }
+            }
           }
         }
       },

@@ -79,10 +79,11 @@ test('w17 F3: sealAuditChain cuts a dead-key row and attests under the live succ
   const prepB = h.f.prepareRotation(h.p('security'), 'audit');
   h.f.store.audit('acme', 'KEY_ROTATED', 'security', prepB.key_id, { key_class: 'audit', previous_key_id: keyA, ceremony_id: 'cer-b', revoke_old: false }, h.now());
   // A tail row signed under A AFTER the rotation killed it — valid
-  // signature, dead key. This is the wedge scenario.
+  // signature, dead key. This is the wedge scenario. signAudit refuses dead
+  // keys (w39 F4), so mint at the vault primitive — the compromised-key path.
   const last = h.f.store.db.prepare('SELECT seq,hash FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1').get('acme');
   const payload = { tenant_id: 'acme', sequence: last.seq + 1, previous: last.hash, type: 'AUDIT_ACCESSED', actor: 'mallory', reference: 'x', metadata: {}, time: h.now() };
-  const env = h.f.signAudit('acme', payload, 'audit', keyA);
+  const env = h.f.vault.envelope(keyA, 'audit', payload, { tenant_id: 'acme' });
   h.f.store.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run('acme', last.seq + 1, last.hash, digest(env.payload), JSON.stringify(env));
   assert.throws(() => h.f._auditIndex('acme'), e => /^INV-409/.test(e.code ?? ''), 'dead-key row wedges the index');
   const sealed = h.f.sealAuditChain(h.p('security'));

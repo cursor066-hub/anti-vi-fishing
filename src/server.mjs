@@ -309,8 +309,10 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
         const input = await body(req); if (m[2] === 'evidence') return send(201, fabric.attachEvidence(p, m[1], input)); fields(input, []);
         return send(200, fabric.cancel(p, m[1]));
       }
-      if (path === '/v1/approvals' && req.method === 'POST') return send(201, fabric.approve(p, await body(req)));
-      if (path === '/v1/approvals/batch' && req.method === 'POST') return send(201, fabric.batchApprove(p, await body(req)));
+      // Authorize before parsing the body — a body-shape 400 must not leak
+      // parse semantics to a caller who would 403 anyway (w39-ledger F2).
+      if (path === '/v1/approvals' && req.method === 'POST') { fabric.authorize(p, ['approver', 'custodian']); return send(201, fabric.approve(p, await body(req))); }
+      if (path === '/v1/approvals/batch' && req.method === 'POST') { fabric.authorize(p, ['approver', 'custodian']); return send(201, fabric.batchApprove(p, await body(req))); }
       if (path === '/v1/containment' && req.method === 'GET') return send(200, fabric.containmentReport(p));
       if (path === '/v1/certificates' && req.method === 'POST') { fabric.authorize(p, ['operator', 'policy_admin']); const input = await body(req); fields(input, ['capsule_id']); identifier(input.capsule_id); return send(201, fabric.certificate(p, input.capsule_id)); }
       if ((m = /^\/v1\/certificates\/([A-Za-z0-9-]+)$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['operator', 'policy_admin', 'security']); return send(200, fabric.store.must(p.tenant_id, 'certificate', m[1]).envelope); }
@@ -324,16 +326,16 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       if ((m = /^\/gate\/v1\/outcomes\/([A-Za-z0-9-]+)$/.exec(path)) && req.method === 'POST') return send(200, fabric.outcomeView(p.tenant_id, fabric.reconcile(p, m[1]), m[1]));
       if ((m = /^\/v1\/resources\/([A-Za-z0-9_.:-]+)$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['operator', 'policy_admin']); requireThat(fabric.target.exists(p.tenant_id, m[1]), 'INV-404-NOT-FOUND', 'Resource not found', 404); const state = fabric.target.state(p.tenant_id, m[1]); if (Array.isArray(state.material_fields.rows)) throw new InvariantError('INV-403-SCOPE', 'Use a data capability for dataset access', 403); return send(200, fabric.resourceStateView(state)); }
       if (path === '/v1/capabilities' && req.method === 'POST') { fabric.authorize(p, ['operator', 'workload']); return send(201, fabric.runtime.issue(p, object(await body(req)))); }
-      if (path === '/gate/v1/runtime' && req.method === 'POST') return send(200, fabric.runtime.consume(p, object(await body(req))));
-      if (path === '/v1/revocations' && req.method === 'POST') return send(201, fabric.revoke(p, object(await body(req))));
+      if (path === '/gate/v1/runtime' && req.method === 'POST') { fabric.authorize(p, ['operator', 'workload']); return send(200, fabric.runtime.consume(p, object(await body(req)))); }
+      if (path === '/v1/revocations' && req.method === 'POST') { fabric.authorize(p, ['security']); return send(201, fabric.revoke(p, object(await body(req)))); }
       if (path === '/v1/coverage' && req.method === 'GET') return send(200, fabric.coverage(p));
-      if (path === '/v1/coverage' && req.method === 'POST') return send(201, fabric.declareCoverage(p, await body(req)));
+      if (path === '/v1/coverage' && req.method === 'POST') { fabric.authorize(p, ['security']); return send(201, fabric.declareCoverage(p, await body(req))); }
       if (path === '/v1/coverage/history' && req.method === 'GET') return send(200, fabric.coverageAt(p, qint(url.searchParams.get('at'), 'at', fabric.clock(), 0, 1e14)));
-      if ((m = /^\/v1\/coverage\/([A-Za-z0-9-]+)\/technical-validation$/.exec(path)) && req.method === 'POST') return send(200, fabric.technicalValidation(p, m[1], await body(req)));
+      if ((m = /^\/v1\/coverage\/([A-Za-z0-9-]+)\/technical-validation$/.exec(path)) && req.method === 'POST') { fabric.authorize(p, ['security']); return send(200, fabric.technicalValidation(p, m[1], await body(req))); }
       if (path === '/v1/connectors' && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'policy_admin', 'auditor']); return send(200, fabric.target.manifest()); }
-      if (path === '/v1/policies/simulate' && req.method === 'POST') return send(200, fabric.simulate(p, object(await body(req))));
+      if (path === '/v1/policies/simulate' && req.method === 'POST') { fabric.authorize(p, ['policy_admin', 'security']); return send(200, fabric.simulate(p, object(await body(req)))); }
       if (path === '/v1/audit-exports' && req.method === 'POST') { fabric.authorize(p, ['auditor', 'security']); const input = await body(req); fields(input, ['purpose']); return send(200, fabric.exportAudit(p, input.purpose)); }
-      if (path === '/v1/retention/hold' && req.method === 'POST') return send(200, fabric.retention(p, object(await body(req))));
+      if (path === '/v1/retention/hold' && req.method === 'POST') { fabric.authorize(p, ['security']); return send(200, fabric.retention(p, object(await body(req)))); }
       if (path === '/v1/retention/sweep' && req.method === 'POST') { fabric.authorize(p, ['security']); fields(await body(req), []); return send(200, fabric.retentionSweep(p)); }
       // RUN-006: rejections are reason-coded — every denial carries the INV
       // code so dashboards can facet by cause without parsing message text.
@@ -357,7 +359,7 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       // binds the proof to an externally witnessed checkpoint instead.
       if (path === '/v1/audit/verify-proof' && req.method === 'POST') { fabric.authorize(p, ['operator', 'security', 'auditor']); const i = await body(req); fields(i, ['proof'], ['pin']); let pinned = null; if (i.pin !== undefined) { fields(i.pin, ['root', 'size']); text(i.pin.root, 'pin.root', 128); integer(i.pin.size, 'pin.size', 1); pinned = { root: i.pin.root, size: i.pin.size }; } return send(200, { valid: fabric.verifyAuditProof(p.tenant_id, i.proof, pinned) }); }
       if (path === '/v1/ceremonies' && req.method === 'GET') { fabric.authorize(p, ['security', 'custodian', 'policy_admin']); return send(200, { items: fabric.store.list(p.tenant_id, 'ceremony', 100, 0).map(c => ({ ceremony_id: c.ceremony_id, status: fabric.ceremonyStatus(p.tenant_id, c), row_status: c.status, purpose: c.purpose })) }); }
-      if (path === '/v1/ceremonies' && req.method === 'POST') return send(201, fabric.createCeremony(p, object(await body(req))));
+      if (path === '/v1/ceremonies' && req.method === 'POST') { fabric.authorize(p, ['security', 'custodian']); return send(201, fabric.createCeremony(p, object(await body(req)))); }
       if ((m = /^\/v1\/ceremonies\/([A-Za-z0-9_.:-]+)\/(acknowledge|split|reconstruct|abort)$/.exec(path)) && req.method === 'POST') {
         // Authorize before parsing the body — a body-shape 400 must not
         // leak parse semantics to a caller who would 403 anyway
@@ -384,7 +386,7 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       if (path === '/v1/secure-perception/sessions' && req.method === 'POST') { fabric.authorize(p, ['operator', 'approver', 'custodian', 'security']); const input = await body(req); fields(input, ['attestation']); return send(201, fabric.perceptionSession(p, input.attestation)); }
       if (path === '/v1/secure-perception/release' && req.method === 'POST') { fabric.authorize(p, ['operator', 'approver', 'custodian', 'security']); const input = await body(req); fields(input, ['session_id', 'fields', 'purpose'], ['capsule_id', 'evidence_ref']); const { session_id, ...release } = input; return send(200, fabric.perceptionRelease(p, session_id, release)); }
       if (path === '/v1/secure-perception/fallback' && req.method === 'POST') { fabric.authorize(p, ['operator', 'approver', 'custodian', 'security']); const input = await body(req); fields(input, ['fields', 'purpose'], ['reason', 'capsule_id', 'evidence_ref']); return send(200, fabric.perceptionFallback(p, input)); }
-      if (path === '/v1/advisory' && req.method === 'POST') return send(200, fabric.advise(p, object(await body(req))));
+      if (path === '/v1/advisory' && req.method === 'POST') { fabric.authorize(p, ['operator', 'security', 'policy_admin', 'approver', 'custodian', 'auditor']); return send(200, fabric.advise(p, object(await body(req)))); }
       // A real path with the wrong method is a 405, not an ambiguous 404 —
       // keeps the contract honest for method-probing clients (w5-http L-6).
       const routeMethods = ROUTE_METHODS.get(path) ?? ROUTE_METHODS.get([...ROUTE_METHODS.keys()].find(t => t.includes('{') && new RegExp('^' + t.replace(/\{[^}]+\}/g, '[^/]+') + '$').test(path)));

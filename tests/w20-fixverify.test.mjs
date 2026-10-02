@@ -68,7 +68,9 @@ test('w20-fv F-5: a vault persist fault on seal surfaces without un-repointing',
   h.f.store.audit(T, 'KEY_ROTATED', 'security', prepB.key_id, { key_class: 'audit', previous_key_id: keyA, ceremony_id: 'cer-b', revoke_old: false }, h.now());
   const last = h.f.store.db.prepare('SELECT seq,hash FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1').get(T);
   const payload = { tenant_id: T, sequence: last.seq + 1, previous: last.hash, type: 'AUDIT_ACCESSED', actor: 'mallory', reference: 'x', metadata: {}, time: h.now() };
-  const env = h.f.signAudit(T, payload, 'audit', keyA);
+  // signAudit refuses dead keys (w39 F4): the dead-signed row is minted at
+  // the vault primitive — the compromised-key scenario the fold must catch.
+  const env = h.f.vault.envelope(keyA, 'audit', payload, { tenant_id: T });
   h.f.store.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run(T, last.seq + 1, last.hash, digest(env.payload), JSON.stringify(env));
   const realPersist = h.f.persistVault.bind(h.f);
   h.f.persistVault = () => { throw new Error('disk full'); };

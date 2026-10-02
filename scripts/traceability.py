@@ -64,6 +64,14 @@ by_prefix = {
 'NFR-CMP': ('Qualified legal/compliance owner', 'R2', 'docs/PRODUCTION-ACCEPTANCE.md; docs/SECURITY.md', 'No certification, legal opinion, executed compliance mapping, disclosure operation or sector/regulatory assessment is claimed.'),
 'NFR-TST': ('Independent verification/release owner', 'R2', 'tests/; reports/tests.tap; docs/requirements.csv', 'Synthetic software and adversarial evidence is included; independent red team, real target tests and signed production acceptance remain unclosed.')
 }
+# Per-row limitation overrides where the shared prefix text understates or
+# misframes the actual gap (w39-ledger F4/F8/F9).
+_limitation_overrides = {
+'UX-001': 'Full operator console exists, but the first-order blocker is in-engine: policy.mjs floors approval_threshold at >=1 per rule (>=3 for custody types) and requires signers >= requiredApprovals, so straight-through (zero-approval) processing is inexpressible in this profile — not merely unevidenced. Browser rendering, responsive screenshots, Playwright journeys, WCAG and human comprehension studies were unavailable.',
+'KEY-006': 'The stated acceptance artifact exists — docs/ALGORITHM-AGILITY.md is the inventory mapping each algorithm use to an approved profile and transition plan, bound to SUITES by test. The real residual is that no post-quantum suite is implemented; introducing one is in-repo code work (ML-DSA ships in Node 24 crypto), not an external blocker — the row stays PARTIAL on that honest basis.',
+'NFR-CMP-001': 'A self-labelled control-map document is in-repo producible (ASVS-CAPEC-MAP already carries the self-assessed class); only an authoritative, legal-reviewed mapping is external. The named minimum was deliberately deferred until an accountable owner exists.',
+'NFR-CMP-003': 'The policy text and internal workflow document are in-repo producible; SECURITY.md deliberately refuses a fictitious reporting contact. The stated minimum was deliberately deferred until an accountable entity exists.',
+}
 tests = sorted((root/'tests').glob('*.test.mjs'), key=lambda p: p.name) + [root/'scripts/simulate.mjs', root/'scripts/ai-eval.mjs']
 # A citation must name the requirement inside a real test() block that also
 # runs a real assertion CALL EXPRESSION. Comments are stripped first, so an
@@ -75,25 +83,98 @@ tests = sorted((root/'tests').glob('*.test.mjs'), key=lambda p: p.name) + [root/
 def _strip_comments(text):
     text = re.sub(r'/\*.*?\*/', '', text, flags=re.S)
     # `//` preceded by : or a word char is inside a string/URL — not a comment.
-    return re.sub(r'(?m)(?<![:/\w])//[^\n]*', '', text)
+    # A backslash before `//` means an escaped slash inside a regex literal
+    # (e.g. `mongodb:\/\/`), never a comment (w39-ledger F7).
+    return re.sub(r'(?m)(?<![:/\w\\])//[^\n]*', '', text)
 _ASSERT_CALL = re.compile(r'\b(?:assert(?:\.\w+)?|requireThat|hasCode|throws|rejects|doesNotThrow|strictEqual|deepStrictEqual|expect)\s*\(')
+def _is_regex_start(text, i):
+    # `/` after an operand char is division; after an operator/keyword or at a
+    # boundary it opens a regex literal.
+    j = i - 1
+    while j >= 0 and text[j] in ' \t': j -= 1
+    if j < 0 or text[j] == '\n': return True
+    p = text[j]
+    if p in '"\'`': return False
+    if p in '([{,:;!&|?+*~%^<>=}': return True
+    if p.isalnum() or p in '_$)]':
+        k = j
+        while k >= 0 and (text[k].isalnum() or text[k] in '_$'): k -= 1
+        return text[k + 1:j + 1] in {'return', 'typeof', 'case', 'throw', 'do', 'else', 'void', 'delete', 'yield', 'new', 'in', 'of', 'instanceof'}
+    return True
+def _blank_code(text):
+    # Blank the contents of string, template and regex literals (length
+    # preserving) so their brackets, quotes and escapes can't perturb body
+    # boundary detection (w39-ledger F7).
+    out = list(text)
+    i, n, instr = 0, len(text), None
+    while i < n:
+        c = text[i]
+        if instr:
+            if c == '\\':
+                out[i] = ' '
+                if i + 1 < n: out[i + 1] = ' '
+                i += 2; continue
+            if c == instr: instr = None
+            else: out[i] = ' '
+            i += 1; continue
+        if c in '"\'`': instr = c; i += 1; continue
+        if c == '/' and _is_regex_start(text, i):
+            out[i] = ' '
+            j, inclass = i + 1, False
+            while j < n:
+                d = text[j]
+                out[j] = ' '
+                if d == '\\':
+                    if j + 1 < n: out[j + 1] = ' '
+                    j += 2; continue
+                if d == '[': inclass = True
+                elif d == ']': inclass = False
+                elif d == '/' and not inclass: break
+                elif d == '\n': break
+                j += 1
+            i = j + 1; continue
+        i += 1
+    return ''.join(out)
+def _test_bodies(text):
+    # Exact per-test bodies: brace-match each test( call on the literal-blanked
+    # text, then slice the body from the real text so a requirement ID inside a
+    # shared helper can no longer mint evidence for a neighbouring test
+    # (w39-ledger F7).
+    blanked = _blank_code(text)
+    bodies = []
+    for m in re.finditer(r'\btest\(', blanked):
+        i = m.end() - 1  # the '('
+        depth = 0
+        while i < len(blanked):
+            c = blanked[i]
+            if c in '([{': depth += 1
+            elif c in ')]}':
+                depth -= 1
+                if depth == 0:
+                    bodies.append(text[m.start():i + 1]); break
+            i += 1
+    return bodies
 def evidence_blocks(path):
     text = path.read_text()
     if not path.name.endswith('.test.mjs'):
         return [text]
-    return [_strip_comments(b) for b in re.split(r'(?m)^test\(', text)[1:]]
+    return _test_bodies(_strip_comments(text))
 for row in rows:
     prefix = row['id'].rsplit('-', 1)[0]
     owner, baseline, implementation, limitation = by_prefix[prefix]
     matches = [str(p.relative_to(root)) for p in tests
                if any(row['id'] in b and (_ASSERT_CALL.search(b) or not p.name.endswith('.test.mjs')) for b in evidence_blocks(p))]
+    # A VERIFIED row must carry at least one asserting-test citation — the
+    # docs sentinel is honest evidence for PARTIAL/BLOCKED rows only
+    # (w39-ledger F6).
+    assert row['id'] not in verified or matches, f"{row['id']} is VERIFIED but cites no asserting test body"
     # Evidence lists only the files that literally name the requirement —
     # corpus-level artifacts would be boilerplate on every row (w6-ledger S3).
     status = 'VERIFIED_IN_ENGINEERING_PROFILE' if row['id'] in verified else 'NOT_IMPLEMENTED' if row['id'] in not_implemented else 'BLOCKED_EXTERNAL' if row['id'] in external else 'PARTIAL'
     # A test that names a blocked row exercised only its rejection leg — the
     # method must not read as if the requirement itself passed (w9-srs F17).
     method = 'Automated test / simulation' if matches and status in ('VERIFIED_IN_ENGINEERING_PROFILE', 'PARTIAL') else ('Automated test covers rejection legs only; the required capability is absent' if matches else 'Source inspection / analysis; external acceptance still required')
-    row.update(status=status, owner_role=owner, named_owner='Not assigned; required before production', release_baseline=baseline, verification_method=method, implementation=implementation, stored_evidence='; '.join(matches) if matches else 'docs/PRODUCTION-ACCEPTANCE.md', limitations=limitation, production_acceptance='NOT_APPROVED')
+    row.update(status=status, owner_role=owner, named_owner='Not assigned; required before production', release_baseline=baseline, verification_method=method, implementation=implementation, stored_evidence='; '.join(matches) if matches else 'docs/PRODUCTION-ACCEPTANCE.md', limitations=_limitation_overrides.get(row['id'], limitation), production_acceptance='NOT_APPROVED')
 buf = io.StringIO()
 writer = csv.DictWriter(buf, fieldnames=list(rows[0]), lineterminator="\n"); writer.writeheader(); writer.writerows(rows)
 csv_text = buf.getvalue()

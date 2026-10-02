@@ -52,7 +52,7 @@ export class KeyVault {
     // The vault is process-global — every entry carries its owning tenant so
     // no tenant-scoped path can sign, rotate, revoke or list another
     // tenant's material (w6-tenancy F2/F3/F4).
-    this.keys.set(id, { key_id: id, tenant_id, public_key: raw.public_key, purpose, suite, exportable, revoked: false, pending, generated_inside: true, wrapped: encrypt(raw.private_key, this.masterKey, `vault/${id}`), created_firmware: this.firmware });
+    this.keys.set(id, { key_id: id, tenant_id, public_key: raw.public_key, purpose: Array.isArray(purpose) ? [...purpose] : purpose, suite, exportable, revoked: false, pending, generated_inside: true, wrapped: encrypt(raw.private_key, this.masterKey, `vault/${id}`), created_firmware: this.firmware });
     return { key_id: id, public_key: raw.public_key, suite, purpose, exportable, pending };
   }
   // A pending key cannot sign until a verified key.rotate action activates it.
@@ -93,7 +93,7 @@ export class KeyVault {
     for (const p of Array.isArray(purpose) ? purpose : [purpose]) text(p, 'key purpose', 64);
     requireThat(tenant_id === null || (typeof tenant_id === 'string' && tenant_id.length <= 128), 'INV-400-SCHEMA', 'Invalid tenant binding', 400);
     requireThat(!this.keys.has(key.key_id), 'INV-409-CONFLICT', 'Key id already exists', 409);
-    this.keys.set(key.key_id, { key_id: key.key_id, tenant_id, public_key: key.public_key, purpose, suite, exportable, revoked: false, generated_inside: false, wrapped: encrypt(key.private_key, this.masterKey, `vault/${key.key_id}`), created_firmware: 'imported' });
+    this.keys.set(key.key_id, { key_id: key.key_id, tenant_id, public_key: key.public_key, purpose: Array.isArray(purpose) ? [...purpose] : purpose, suite, exportable, revoked: false, generated_inside: false, wrapped: encrypt(key.private_key, this.masterKey, `vault/${key.key_id}`), created_firmware: 'imported' });
     return { key_id: key.key_id, public_key: key.public_key, suite, purpose, exportable };
   }
   _private(key_id, entry = null) { return decrypt((entry ?? this.entry(key_id)).wrapped, this.masterKey, `vault/${key_id}`); }
