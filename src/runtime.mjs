@@ -66,9 +66,17 @@ export class RuntimeGate {
     // Authorize before field-shape validation — a 400-vs-403 delta leaks
     // the field whitelist to unauthorized callers (w22-http F2).
     this.f.authorize(principal, ['operator', 'workload']);
-    fields(input, ['capability', 'device_id', 'resource', 'destination', 'action', 'purpose', 'columns', 'row_ids', 'request_id', 'protocol', 'port']);
-    identifier(input.request_id); identifier(input.device_id); identifier(input.resource); text(input.destination, 'destination');
-    uniqueStrings(input.columns, 'columns', 64); uniqueStrings(input.row_ids, 'row ids', 256);
+    // Schema-level denials still mint containment evidence — every denied
+    // consume lands a forensic row, malformed input included (NET-010,
+    // w44-runtime F5).
+    try {
+      fields(input, ['capability', 'device_id', 'resource', 'destination', 'action', 'purpose', 'columns', 'row_ids', 'request_id', 'protocol', 'port']);
+      identifier(input.request_id); identifier(input.device_id); identifier(input.resource); text(input.destination, 'destination');
+      uniqueStrings(input.columns, 'columns', 64); uniqueStrings(input.row_ids, 'row ids', 256);
+    } catch (e) {
+      if (e instanceof InvariantError) this.recordContainment(principal, input ?? {}, e);
+      throw e;
+    }
     try {
       return this.f.transaction(principal, now => {
       const t = principal.tenant_id, policy = this.f.policy(t);
@@ -76,22 +84,11 @@ export class RuntimeGate {
       // an identity outside the workload plane (runtime-audit F-11).
       this.f.authorize(principal, ['operator', 'workload']);
       const cap = verifySigned(input.capability, this.f.executionPublic(t), 'capability');
-      // NET-003: the wire channel is bound by the capability's SIGNED
-      // runtime_policy snapshot, not whatever the live policy now allows —
-      // a later widening cannot retro-extend an outstanding capability to
-      // adjacent ports or weaker protocols (w9-network F3). An envelope
-      // minted before `network` existed falls to the built-in restrictive
-      // defaults — never to the live, possibly widened, policy
-      // (w42-runtime L-2).
-      const netAllow = cap.runtime_policy?.network ?? {};
-      oneOf(input.protocol, netAllow.allowed_protocols ?? ['https'], 'protocol');
-      oneOf(input.port, netAllow.allowed_ports ?? [443], 'port');
       requireThat(cap.tenant_id === t && cap.subject_id === principal.subject_id && cap.gate_id === this.f.config.gate_id, 'INV-403-SCOPE', 'Capability scope denied', 403);
-      this.f.assertHealthy(t, principal.subject_id, input.device_id, now);
-      // Anchored issuance and row integrity are probed before the
-      // validity checks: an expired-or-revoked capability whose anchored
-      // row was murdered must name the murder, not mask it behind the
-      // routine INV-401 (w43-runtime check-order LOW).
+      // Anchored issuance and row integrity are probed before every other
+      // gate — health, wire-shape, expiry, revocation: a murdered row must
+      // name the murder, never mask it behind a routine denial class
+      // (w43-runtime check-order LOW, w44-runtime F4).
       const idx = this.f._auditIndex(t);
       requireThat(idx.capabilities?.has(cap.capability_id) === true, 'INV-401-CAPABILITY', 'Capability has no ledger-anchored issuance', 401);
       const capRow = this.f.store.get(t, 'capability', cap.capability_id);
@@ -103,6 +100,17 @@ export class RuntimeGate {
       requireThat(digest(capRow) === digest(input.capability), 'INV-409-INTEGRITY', 'Stored capability row diverges from the presented envelope', 409);
       const anchoredDig = idx.capabilityMeta?.get(cap.capability_id)?.digest;
       requireThat(anchoredDig === undefined || anchoredDig === null || anchoredDig === digest(input.capability), 'INV-409-INTEGRITY', 'Presented capability diverges from the anchored issuance', 409);
+      this.f.assertHealthy(t, principal.subject_id, input.device_id, now);
+      // NET-003: the wire channel is bound by the capability's SIGNED
+      // runtime_policy snapshot, not whatever the live policy now allows —
+      // a later widening cannot retro-extend an outstanding capability to
+      // adjacent ports or weaker protocols (w9-network F3). An envelope
+      // minted before `network` existed falls to the built-in restrictive
+      // defaults — never to the live, possibly widened, policy
+      // (w42-runtime L-2).
+      const netAllow = cap.runtime_policy?.network ?? {};
+      oneOf(input.protocol, netAllow.allowed_protocols ?? ['https'], 'protocol');
+      oneOf(input.port, netAllow.allowed_ports ?? [443], 'port');
       requireThat(cap.expires_at > now && cap.issued_at <= now && !this.f.revoked(t, 'capability', cap.capability_id) && !this.f.revoked(t, 'key', input.capability.protected.key_id), 'INV-401-CAPABILITY', 'Capability is expired or revoked', 401);
       // JIT/static grant validity is re-evaluated AT CONSUMPTION — a grant
       // revoked since issuance cannot ride a signed envelope past policy
@@ -252,15 +260,24 @@ export class RuntimeGate {
       // evidence (w18-fixverify F14).
       const memoKey = `${t} ${principal.subject_id} ${e.code}`;
       const last = this.f._containMemo.get(memoKey);
-      if (last !== undefined && now - last.at < 60_000) {
+      // The window only spans forward time: a rewound clock (pushable
+      // within floorLegal) must not make the dedup sticky and collapse a
+      // real burst into one row (w44-runtime F7).
+      let suppressedRow = null;
+      if (last !== undefined && now - last.at >= 0 && now - last.at < 60_000) {
         // The surviving row must count what the dedup swallowed — a
         // 60-second burst of denials is still 50 dropped requests, and
         // the report sums the counter rather than counting rows
         // (w43-runtime dropped_requests LOW). The store's value column is
         // ciphertext — the bump goes through get/put so the row decrypts
         // and re-encrypts under the same AAD. A murdered row lands a
-        // fresh denial instead.
-        const kept = this.f.store.get(t, 'containment', last.id);
+        // fresh denial instead. An undecryptable row cannot bump — the
+        // denial still lands as a fresh mint that names the corrupted
+        // row, rather than swallowing both the denial and the tamper
+        // evidence (w44-ledger F3, w44-runtime F6).
+        let kept = null;
+        try { kept = this.f.store.get(t, 'containment', last.id); }
+        catch { suppressedRow = last.id; }
         if (kept !== null) {
           this.f.store.put(t, 'containment', last.id, { ...kept, dropped_requests: (Number.isInteger(kept.dropped_requests) && kept.dropped_requests > 0 ? kept.dropped_requests : 1) + 1 }, now);
           return;
@@ -279,12 +296,12 @@ export class RuntimeGate {
         capability_id: provenCapId, unverified_capability_id: provenCapId === null ? (input.capability?.payload?.capability_id ?? null) : null,
         resource: input.resource ?? null,
         destination: input.destination ?? null, action: input.action ?? null, code: e.code,
-        request_id: input.request_id, dropped_requests: 1,
+        request_id: input.request_id, dropped_requests: 1, prior_row_unreadable: suppressedRow,
       }, now);
       // The denial anchors on the signed chain too — the containment report
       // cross-checks each mutable row against RUNTIME_DENIED events instead
       // of trusting store contents (w13-fixverify L7).
-      this.f.store.audit(t, 'RUNTIME_DENIED', principal.subject_id, input.request_id ?? 'unknown', { code: e.code, capability_id: provenCapId, unverified_capability_id: provenCapId === null ? (input.capability?.payload?.capability_id ?? null) : null }, now); });
+      this.f.store.audit(t, 'RUNTIME_DENIED', principal.subject_id, input.request_id ?? 'unknown', { code: e.code, capability_id: provenCapId, unverified_capability_id: provenCapId === null ? (input.capability?.payload?.capability_id ?? null) : null, prior_row_unreadable: suppressedRow }, now); });
       this.f._containMemo.set(memoKey, { at: now, id: rid });
     } catch { /* containment logging never masks the original denial */ }
   }

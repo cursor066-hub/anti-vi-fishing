@@ -160,12 +160,78 @@ def _test_title(body):
     # its body (w41-ledger M-1).
     m = re.match(r"\s*test\(\s*(['\"`])((?:\\.|(?!\1)[\s\S])*)\1", body)
     return m.group(2) if m else ''
+_IF_FALSE = re.compile(r'\bif\s*\(\s*(?:false|0|!true|null|undefined)\s*\)')
+_SKIP = re.compile(r'\bt\.(?:skip|todo)\s*\(')
+_DEAD_WRAPPER = re.compile(r'\b(?:setTimeout|setInterval|setImmediate|queueMicrotask|process\.nextTick)\s*\(')
+_FN_DECL = re.compile(r'\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>|\bfunction\s+([A-Za-z_$][\w$]*)')
+def _paren_end(text, i):
+    # i at '(' — index just past its matching ')'
+    d = 0
+    while i < len(text):
+        c = text[i]
+        if c in '([{': d += 1
+        elif c in ')]}':
+            d -= 1
+            if d == 0: return i + 1
+        i += 1
+    return len(text)
+def _live_code(text):
+    # Dead-code shapes that must not mint asserting evidence: asserts inside
+    # an unconditionally-false branch, an assigned-but-never-invoked
+    # function literal, a timer/next-tick callback, or the remainder of a
+    # block after an unconditional t.skip — none of them can execute during
+    # the test run, so surviving asserts in them are decorative
+    # (w44-fixverify F-6). An unawaited .then() callback is the one dead
+    # shape left to review: await binds far from the callback site, so
+    # blanket-removing .then bodies would launder legitimately-awaited
+    # helper asserts the other way.
+    spans = []
+    for m in _IF_FALSE.finditer(text):
+        j = _paren_end(text, text.index('(', m.start()))
+        while j < len(text) and text[j] in ' \t\n': j += 1
+        if j < len(text) and text[j] == '{':
+            spans.append((j, _paren_end(text, j)))
+        else:
+            k = text.find(';', j)
+            spans.append((j, (k if k != -1 else len(text)) + 1))
+    for m in _SKIP.finditer(text):
+        # Only an unconditional skip kills the block: a conditional skip
+        # inside an if/else/catch leaves sibling asserts live — check the
+        # statement leading into this call for a guarding 'if'.
+        lead = text[max(text.rfind('{', 0, m.start()), text.rfind(';', 0, m.start()), text.rfind('}', 0, m.start())) + 1:m.start()]
+        if re.search(r'\bif\b', lead): continue
+        # Blank from the call to the end of the enclosing block: walk
+        # forward tracking depth until a '}' closes at depth 0.
+        d = 0; j = m.end()
+        while j < len(text):
+            if text[j] == '{': d += 1
+            elif text[j] == '}':
+                if d == 0: break
+                d -= 1
+            j += 1
+        spans.append((m.start(), j))
+    for m in _DEAD_WRAPPER.finditer(text):
+        spans.append((m.start(), _paren_end(text, m.end() - 1)))
+    for m in _FN_DECL.finditer(text):
+        name = m.group(1) or m.group(2)
+        # A function literal whose name is never invoked carries dead
+        # asserts — every real caller names it at a call site.
+        if name and not re.search(r'\b' + re.escape(name) + r'\s*\(', text[m.end():]):
+            b = text.find('{', m.end())
+            k = text.find(';', m.end())
+            if b != -1 and (k == -1 or b < k): spans.append((m.start(), _paren_end(text, b)))
+            elif k != -1: spans.append((m.start(), k + 1))  # expression-body arrow: dead to statement end
+    out = list(text)
+    for a, b in spans:
+        for i in range(a, min(b, len(out))): out[i] = ' '
+    return ''.join(out)
 def _asserts(body):
     # The assert probe runs on the literal-blanked body: 'assert(x)' or
     # 'expect(' sitting inside a string/template/regex literal is dead
     # text, not an assertion — only real call syntax survives blanking
-    # (w43-fv M3).
-    return _ASSERT_CALL.search(_blank_code(body))
+    # (w43-fv M3), and only asserts in code that can actually run count
+    # (w44-fixverify F-6).
+    return _ASSERT_CALL.search(_live_code(_blank_code(body)))
 def evidence_blocks(path):
     text = path.read_text()
     if not path.name.endswith('.test.mjs'):

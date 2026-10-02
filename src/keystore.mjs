@@ -1,5 +1,5 @@
 import { createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify, randomBytes, createHmac } from 'node:crypto';
-import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync, renameSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync, renameSync, rmSync, openSync, closeSync, fsyncSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { canonical, digest } from './canonical.mjs';
 import { encrypt, decrypt, SUITES, verifySuite, signSuite, verifySigned, ctEqual } from './crypto.mjs';
@@ -154,13 +154,26 @@ export class KeyVault {
     // public_key metadata without breaking authentication (crypto-audit H-2).
     state.mac = stateMac(this.masterKey, state);
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    // Atomic write: temp + rename so a crash mid-save cannot leave a torn
-    // vault file that fails MAC/parse at next open (concurrency-audit L5).
+    // Atomic write: temp + fsync + rename + dir-fsync — write+rename
+    // alone leaves the rename in page cache while the caller believes the
+    // vault state is durable; a crash in that window either tears the
+    // file (INV-503-CONFIG on every open) or loses the whole rename,
+    // silently un-revoking keys just committed by a ceremony (w44-store
+    // H-2, same discipline as the watermark pair at fabric.mjs).
     const tmp = `${path}.${randomBytes(6).toString('hex')}.tmp`;
-    try { writeFileSync(tmp, canonical(state) + '\n', { mode: 0o600 }); chmodSync(tmp, 0o600); renameSync(tmp, path); }
-    catch (e) { rmSync(tmp, { force: true }); throw e; }
+    try {
+      const fd = openSync(tmp, 'w', 0o600);
+      try { writeFileSync(fd, canonical(state) + '\n'); fsyncSync(fd); } finally { closeSync(fd); }
+      chmodSync(tmp, 0o600); renameSync(tmp, path);
+      const dfd = openSync(dirname(path), 'r');
+      try { fsyncSync(dfd); } finally { closeSync(dfd); }
+    } catch (e) { rmSync(tmp, { force: true }); throw e; }
   }
   static load(path, masterKey) {
+    // The vault file is private material at rest — tighten before
+    // reading, never after: permissive bits healed post-read still
+    // leaked the window (w44-store L-1, same ordering as _openVault).
+    try { chmodSync(path, 0o600); } catch (e) { throw new InvariantError('INV-503-CONFIG', 'keystore.json permissions cannot be tightened to owner-only', 503, { cause: e }); }
     // A hostile or truncated vault file must classify inside the INV
     // taxonomy like every other store corruption — never a raw
     // SyntaxError off the boot path (w30-store F2).
@@ -191,6 +204,9 @@ export class KeyVault {
     // not silently re-key (w9-schema F-4).
     if (!existsSync(storePath) && existsSync(masterPath)) throw new InvariantError('INV-503-CONFIG', 'Master key exists but keystore is missing — refusing to silently re-key', 503);
     if (existsSync(storePath) && existsSync(masterPath)) {
+      // Tighten before reading — the daemon path (KeyVault.open/load) must
+      // heal perms here, not rely on the Fabric sweep (w44-store L-1).
+      try { chmodSync(masterPath, 0o600); } catch (e) { throw new InvariantError('INV-503-CONFIG', 'master.key permissions cannot be tightened to owner-only', 503, { cause: e }); }
       // A corrupt master file is a config failure with an INV code, not a
       // raw parser exception escaping the taxonomy (w11-fixverify R4).
       const master = (() => { try { return JSON.parse(readFileSync(masterPath, 'utf8')); } catch { throw new InvariantError('INV-503-CONFIG', 'master.key is unreadable or corrupt', 503); } })();

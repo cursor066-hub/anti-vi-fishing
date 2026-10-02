@@ -46,6 +46,9 @@ if (config) for (const t of Object.values(config.tenants ?? {})) public_keys[t.k
 let signManifest = null;
 const masterPath = join(dir, 'master.key'), storePath = join(dir, 'keystore.json');
 if (existsSync(masterPath) && existsSync(storePath)) {
+  // Private material reads tighten first — the backup path never relies on
+  // the daemon's own heal (w44-store L-1).
+  chmodSync(masterPath, 0o600); chmodSync(storePath, 0o600);
   const vault = KeyVault.load(storePath, JSON.parse(readFileSync(masterPath, 'utf8')).master_key);
   // Signer: the configured audit key, else the first vault key purpose-bound
   // to 'backup-manifest' (config-less dirs still sign honestly).

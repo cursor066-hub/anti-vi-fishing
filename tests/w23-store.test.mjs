@@ -49,6 +49,7 @@ test('w23 W23-01b: a JIT grant lapsing inside the rewound span vetoes recovery',
   const gid = `grant-${randomBytes(4).toString('hex')}`;
   const grant = { grant_id: gid, subject_id: 'operator', roles: ['operator'], resources: ['dataset-1'], actions: ['data.read'], destinations: ['customer-vault'], columns: ['id'], row_ids: [], issued_at: h.now(), expires_at: h.now() + 60000 };
   h.f.target.grant(T, gid, grant);
+  h.f.store.put(T, 'jit-grant', gid, { grant }, h.now());
   h.f.store.audit(T, 'JIT_GRANT_ISSUED', 'operator', 'operator', { grant_id: gid, scope_digest: 'd', expires_at: grant.expires_at }, h.now());
   h.livedForward(h.now() + 120000);
   assert.throws(() => h.f.recoverClock(h.p('security')), hasCode('INV-503-TIME'), 'un-revoked resurrecting grant must veto');

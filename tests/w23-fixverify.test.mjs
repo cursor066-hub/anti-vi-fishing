@@ -110,10 +110,12 @@ test('w23 F-b: a repointed wedged child cannot release a foreign cert reservatio
   const c2Rec = h.f.store.must('acme', 'capsule', c2.record.capsule.capsule_id);
   h.f.store.put('acme', 'capsule', c2.record.capsule.capsule_id, { ...c2Rec, certificate_id: victimId }, h.now());
   const out = h.f.reconcile(h.p('security'), parentCert.payload.certificate_id);
-  // The release binds c2's anchored cert — the victim keeps its reservation.
-  assert.equal(out.payload.child_outcomes[c2.record.capsule.capsule_id], 'RELEASED');
-  assert.equal(h.f._auditIndex('acme').released.has(c2.certificate.payload.certificate_id), true);
-  assert.equal(h.f._auditIndex('acme').released.has(victimId), false, 'the foreign cert must not be freed');
+  // w44 doctrine: c2's dispatch anchored EXECUTION_INTENT before it threw,
+  // so it can never release — the wedge pins its own anchored cert, and the
+  // repoint still cannot free the foreign reservation either way.
+  assert.equal(out.payload.child_outcomes[c2.record.capsule.capsule_id], 'WEDGED');
+  assert.equal(h.f._auditIndex('acme').released?.has(c2.certificate.payload.certificate_id) ?? false, false);
+  assert.equal(h.f._auditIndex('acme').released?.has(victimId) ?? false, false, 'the foreign cert must not be freed');
   assert.equal(h.f.store.must('acme', 'certificate', victimId).consumed, true);
 });
 

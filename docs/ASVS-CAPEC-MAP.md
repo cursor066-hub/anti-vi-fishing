@@ -29,6 +29,7 @@ architecture, WebSocket, GraphQL) are out of scope of this map.
 | `tests/regression.test.mjs`, `tests/lifecycle.test.mjs`, `tests/extended-security.test.mjs` | Cross-domain invariants (approval binding, revocation, replay, idempotency, evidence domain counting) | CAPEC-94 replay; CAPEC-115 authentication bypass |
 | `scripts/verify-vectors.py`, `scripts/verify-vectors-webcrypto.mjs`, `scripts/verify-export-webcrypto.mjs` | Independent conformance: three separate implementations (node:crypto, WebCrypto/Bun, Python cryptography) verify the same canonical/envelope vectors | CAPEC-88 cross-implementation canonicalization divergence |
 | `tests/w5-mutations.test.mjs` | Mutation-kill suite: adversarial gate-level attacks (planted rows, forged envelopes, injected identities) that must all be refused with the classified error | whole-map regression anchor |
+| `tests/w12*.test.mjs` … `tests/w44.test.mjs` | Insider-tamper provenance waves: deleted/rewritten/transplanted audit rows, signed head-pair rollback (`floor_marker_ahead`), mid-table envelope surgery (`facts_regressed`), murdered execution journals (`journal_missing`), mutable pre-state release forgery — every tamper must wedge INV-409/INV-503 or attest a named kind | CAPEC-94 replay; CAPEC-438 modification during operation; CAPEC-176 artifact rotation; CAPEC-578 tampering with security evidence |
 
 ## Not covered by this profile (honest gaps)
 

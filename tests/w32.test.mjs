@@ -277,9 +277,12 @@ test('w32 composite F2: a wedged child whose journal was deleted over a committe
   assert.ok(!h.f._auditIndex('acme').released?.has(wcertId), 'no EXECUTION_RELEASED was minted');
 });
 
-// composite F-2 control: a child genuinely never dispatched (nothing
-// committed, state untouched) still releases honestly.
-test('w32 composite F2: a never-dispatched wedged child still releases', t => {
+// composite F-2 doctrine (w44): a child whose dispatch was ATTEMPTED — intent
+// anchored, then the journal murdered in the commit window — stays WEDGED
+// forever. 'Reserved + no dispatch anchor' can no longer mint a release now
+// that every dispatch anchors EXECUTION_INTENT first; the only releasable
+// shape left is a wedged child on a pre-intent legacy chain.
+test('w32 composite F2: an intent-anchored wedged child stays wedged — no release over a thrown dispatch', t => {
   const h = fixture(t, ['acme']);
   const c1 = jitChild(h), c2 = beneChild(h, 33);
   const parent = composite(h, [c1.record.capsule.capsule_id, c2.record.capsule.capsule_id]);
@@ -289,8 +292,10 @@ test('w32 composite F2: a never-dispatched wedged child still releases', t => {
   h.f.target.execute = (capsule, id, now, fault) => { calls++; if (calls === 2) throw new Error('lost before journal'); return orig(capsule, id, now, fault); };
   const out = h.f.execute(h.p(), parentCert);
   const c2cert = h.f._auditIndex('acme').issuedCert.get(c2.record.capsule.capsule_id);
-  assert.equal(out.payload.child_outcomes[c2.record.capsule.capsule_id], 'RELEASED', 'untouched wedged child releases honestly');
-  assert.ok(h.f._auditIndex('acme').released?.has(c2cert));
+  assert.equal(out.payload.child_outcomes[c2.record.capsule.capsule_id], 'WEDGED', 'attempted dispatch — intent anchored — never releases');
+  assert.ok(!h.f._auditIndex('acme').released?.has(c2cert), 'no EXECUTION_RELEASED minted');
+  const out2 = h.f.reconcile(h.p('security'), parentCert.payload.certificate_id);
+  assert.equal(out2.payload.status, 'FAILED', 'terminal FAILED verdict — wedge is honest but unrecoverable');
 });
 
 // composite F-3: a child-side integrity verdict is tamper evidence, never a

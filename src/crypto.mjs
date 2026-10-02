@@ -1,4 +1,4 @@
-import { generateKeyPairSync, createPrivateKey, createPublicKey, sign, verify, randomBytes, createCipheriv, createDecipheriv, timingSafeEqual } from 'node:crypto';
+import { generateKeyPairSync, createPrivateKey, createPublicKey, sign, verify, randomBytes, createCipheriv, createDecipheriv, timingSafeEqual, createHash } from 'node:crypto';
 import { canonical, digest } from './canonical.mjs';
 import { requireThat } from './errors.mjs';
 
@@ -22,7 +22,10 @@ const P256_ORDER = BigInt('0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B
 // cache is bounded and self-evicting (oldest-insertion first) (w43-perf).
 const KEY_OBJECTS = new Map();
 const keyObject = (ctor) => (pem) => {
-  const k = `${ctor.name}:${pem}`;
+  // The cache key is a DIGEST of the PEM, never the text itself — keying
+  // the map by raw private material retains every decrypted PKCS8 in
+  // module-global strings for process lifetime (w44-store M-3).
+  const k = `${ctor.name}:${createHash('sha256').update(pem).digest('hex')}`;
   let obj = KEY_OBJECTS.get(k);
   if (obj === undefined) {
     obj = ctor(pem);

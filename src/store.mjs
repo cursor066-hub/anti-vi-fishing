@@ -108,7 +108,12 @@ export class Store {
   // index; standalone verification lacked it (w28-crypto F2).
   _auditKeyDeaths(tenant) {
     const dead = new Map();
-    for (const row of this.db.prepare("SELECT seq,envelope FROM audit WHERE tenant=? AND (envelope LIKE '%\"type\":\"AUTHORITY_REVOKED\"%' OR envelope LIKE '%\"type\":\"KEY_ROTATED\"%' OR envelope LIKE '%\"type\":\"AUDIT_SEALED\"%' OR envelope LIKE '%\"type\":\"AUDIT_SEAL_CARRY\"%')").all(tenant)) {
+    // Stored envelope text is attacker-writable: a respelled row
+    // ('\u0074ype') folds identically yet vanishes from a LIKE scan, so
+    // every fold-free death/rotation/seal sweep keys on the PARSED type
+    // (json_valid guards malformed rows the LIKE would have skipped —
+    // the fold convicts those rows separately) (w44-store H-3).
+    for (const row of this.db.prepare("SELECT seq,envelope FROM audit WHERE tenant=? AND json_valid(envelope) AND json_extract(envelope,'$.payload.type') IN ('AUTHORITY_REVOKED','KEY_ROTATED','AUDIT_SEALED','AUDIT_SEAL_CARRY')").all(tenant)) {
       let env; try { env = JSON.parse(row.envelope); } catch { continue; }
       const pl = env?.payload, meta = pl?.metadata;
       // Earliest death wins — a second death event must never extend a
@@ -272,7 +277,7 @@ export class Store {
       } catch { /* forged or unverifiable tail row — keep walking back */ }
     }
     requireThat(floorSeeded || this.db.prepare('SELECT COUNT(*) n FROM audit').get().n === 0, 'INV-409-AUDIT-TAMPER', 'Audit tail carries no verifiable entry — ledger tamper', 409);
-    for (const row of this.db.prepare("SELECT tenant,envelope FROM audit WHERE envelope LIKE '%\"type\":\"CLOCK_RECOVERED\"%' ORDER BY rowid DESC LIMIT 512").all()) {
+    for (const row of this.db.prepare("SELECT tenant,envelope FROM audit WHERE json_valid(envelope) AND json_extract(envelope,'$.payload.type')='CLOCK_RECOVERED' ORDER BY rowid DESC LIMIT 512").all()) {
       try {
         const env = JSON.parse(row.envelope);
         if (env?.payload?.type !== 'CLOCK_RECOVERED') continue;
@@ -626,7 +631,7 @@ export class Store {
         if (typeof env?.payload?.time === 'number' && Number.isFinite(env.payload.time) && env.payload.time > (this._chainFloor ?? 0)) this._chainFloor = env.payload.time;
       } catch { /* unverifiable head — floor holds its last attested value */ }
     }
-    for (const row of this.db.prepare("SELECT tenant,envelope FROM audit WHERE envelope LIKE '%\"type\":\"CLOCK_RECOVERED\"%' ORDER BY rowid DESC LIMIT 512").all()) {
+    for (const row of this.db.prepare("SELECT tenant,envelope FROM audit WHERE json_valid(envelope) AND json_extract(envelope,'$.payload.type')='CLOCK_RECOVERED' ORDER BY rowid DESC LIMIT 512").all()) {
       try {
         const env = JSON.parse(row.envelope);
         if (env?.payload?.type !== 'CLOCK_RECOVERED') continue;
@@ -673,7 +678,17 @@ export class Store {
     return now;
   }
   auditHeadSeq(tenant) {
-    return this.db.prepare('SELECT COALESCE(MAX(seq),0) s FROM audit WHERE tenant=?').get(tenant).s;
+    return this._schemaGuard(() => this.db.prepare('SELECT COALESCE(MAX(seq),0) s FROM audit WHERE tenant=?').get(tenant).s);
+  }
+  // A dropped or rewritten table is integrity evidence inside the INV
+  // taxonomy, never bare sqlite noise escaping to callers (w44-store M-2).
+  _schemaGuard(run) {
+    try { return run(); }
+    catch (e) {
+      if (/no such table|no such column|not a database|malformed/i.test(e?.message ?? ''))
+        throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e });
+      throw e;
+    }
   }
   audit(tenant, type, actor, reference, metadata, now) {
     // Entry + clock-ratchet must commit together: outside a transaction a
@@ -682,7 +697,7 @@ export class Store {
     // in-band recovery (w28-store F2). Inside a tx the caller's boundary
     // already covers the pair.
     if (!this.db.isTransaction) return this.tx(() => this.audit(tenant, type, actor, reference, metadata, now));
-    const last = this.db.prepare('SELECT seq,hash,envelope FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1').get(tenant);
+    const last = this._schemaGuard(() => this.db.prepare('SELECT seq,hash,envelope FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1').get(tenant));
     // The chain's `time` is a monotone logical clock: verifyAudit requires
     // non-decreasing entry times, so an accepted host rewind must not write
     // a regressed value into the chain (it would break verification
@@ -717,7 +732,7 @@ export class Store {
     // its explaining CLOCK_RECOVERED right here — refusing would wedge
     // the repair path on the state it exists to fix (w23 W23-04).
     const recoveredBefore = type === 'CLOCK_RECOVERED' ? (entry.metadata?.recovered_at ?? this._lastRecoveredAt) : this._lastRecoveredAt;
-    const crow = this.db.prepare('SELECT last FROM clock WHERE id=1').get();
+    const crow = this._schemaGuard(() => this.db.prepare('SELECT last FROM clock WHERE id=1').get());
     requireThat(!crow || crow.last >= floorBefore || (recoveredBefore !== null && crow.last >= recoveredBefore), 'INV-409-AUDIT-TAMPER', 'Clock floor rewound below attested chain time', 409);
     // Hash what is actually attested: the signer may add a bound marker (the
     // recovery_signing annotation when a pending successor signs after a
@@ -756,12 +771,28 @@ export class Store {
       // went stale under a peer write — same retry semantics as busy.
       if (e?.errcode === 5 || e?.errcode === 6 || e?.errcode === 517 || /database .*locked|database is busy/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
       if (/audit sequence must extend the head/.test(e?.message ?? '')) throw new InvariantError('INV-409-CONFLICT', 'Audit head moved during append; retry', 409);
+      // A dropped or rewritten table is integrity evidence, never raw
+      // sqlite noise on the write path (w44-store M-2).
+      if (/no such table|no such column|not a database|malformed/i.test(e?.message ?? '')) throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e });
       throw e;
     }
+    // In-ledger fold marker: the signed head files are peer-facing hints
+    // that replay backward losslessly, so a coherent two-file rollback
+    // needs a witness inside the write boundary the file pair cannot
+    // reach — this marker commits atomically with the audit row it names,
+    // survives tail-cuts (it is not a chained row), and a fresh open can
+    // attest any head/watermark pair that claims less than it
+    // (w44-fixverify F-2).
+    this.db.prepare("INSERT INTO meta_kv VALUES(?,'fold_floor',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, `${entry.sequence}:${hash}`);
     // Post-commit ordering: only a landed entry may move the anchors and
     // ratchet the detector (w23 W23-05). Our own head is the newest
     // verifiable row — mark it scanned so a later refresh skips it.
-    this._anchorScanned = canonical(envelope);
+    this._anchorScanned = envText;
+    // Append counter for the fabric's in-tx chain-facts memo: inside an
+    // IMMEDIATE transaction the table can only move through our writes, so
+    // a memo keyed on this counter (scoped to the tx window) is sound
+    // without re-running the tamper fingerprint (w44-perf).
+    this._auditAppends = (this._auditAppends ?? 0) + 1;
     if (entry.time > floorBefore) this._chainFloor = entry.time;
     if (type === 'CLOCK_RECOVERED') this._lastRecoveredAt = entry.metadata?.recovered_at ?? this._lastRecoveredAt;
     // Every committed write ratchets the detector to its own host time —

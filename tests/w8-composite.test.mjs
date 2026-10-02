@@ -67,12 +67,15 @@ test('w8 F1/F3/F7/F16: uncompensated bail records FAILED parent + per-child outc
   assert.ok(out.payload.wedged_children.includes(c2.record.capsule.capsule_id));
   // F7: the terminal record names every child's fate.
   assert.equal(out.payload.child_outcomes[c1.record.capsule.capsule_id], 'FAILED');
-  // A reserved-but-never-dispatched child is released back to free
-  // authority inside the terminal write — never burned forever (w22 F2).
-  assert.equal(out.payload.child_outcomes[c2.record.capsule.capsule_id], 'RELEASED');
-  const releasedChild = h.f.store.must('acme', 'certificate', c2.certificate.payload.certificate_id);
-  assert.equal(releasedChild.consumed, false);
-  assert.equal(releasedChild.status, 'CERTIFIED');
+  // w44 doctrine: c2's dispatch WAS attempted — the intent anchored before
+  // target.execute threw — so 'reserved + no dispatch anchor' can never
+  // mint a release: the child stays wedged for reconcile, never silently
+  // freed over an attempted dispatch (w44-fixverify F-1).
+  assert.equal(out.payload.child_outcomes[c2.record.capsule.capsule_id], 'WEDGED');
+  const wedgedChild = h.f.store.must('acme', 'certificate', c2.certificate.payload.certificate_id);
+  assert.equal(wedgedChild.consumed, true, 'the reservation stands — the cert is not freed');
+  assert.equal(wedgedChild.status, 'EXECUTING');
+  assert.ok(!h.f._auditIndex('acme').released?.has(c2.certificate.payload.certificate_id), 'no EXECUTION_RELEASED');
   // F3/F4: reconcile(child) returns the recorded verdict — no resurrection,
   // no JIT grant minted, no effect replay.
   const childOutcome = h.f.reconcile(h.p(), c1.certificate.payload.certificate_id);
