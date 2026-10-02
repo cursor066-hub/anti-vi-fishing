@@ -2,7 +2,7 @@ import { randomUUID, randomBytes, createHmac, createPrivateKey, createPublicKey 
 import { Store } from './store.mjs';
 import { SimulatedTarget } from './target.mjs';
 import { RuntimeGate } from './runtime.mjs';
-import { digest, clone, canonical } from './canonical.mjs';
+import { digest, clone, canonical, hashBytes } from './canonical.mjs';
 import { verifySigned, decrypt, ctEqual } from './crypto.mjs';
 import { KeyVault, derivePublic } from './keystore.mjs';
 import { merkleMemo, verifyInclusion } from './merkle.mjs';
@@ -3814,7 +3814,14 @@ export class Fabric {
         const rKeys = this.auditPublicKeys(t);
         for (const r of idx.reVerifyQ.all(t, from, to)) {
           let pl = null;
-          try { pl = verifySigned(JSON.parse(r.envelope), rKeys, 'audit'); } catch { pl = null; }
+          if (this.store.selfRowEnv?.(t, r.seq) === hashBytes(r.envelope)) {
+            // Self-written row still carrying its minted bytes: the
+            // byte-for-byte match means the signature is the one this
+            // instance produced (w43-perf).
+            try { pl = JSON.parse(r.envelope).payload; } catch { pl = null; }
+          } else {
+            try { pl = verifySigned(JSON.parse(r.envelope), rKeys, 'audit'); } catch { pl = null; }
+          }
           requireThat(pl && pl.sequence === r.seq && digest(pl) === r.hash, 'INV-409-INTEGRITY', `Consumed audit row ${r.seq} diverges from what the index folded — mid-chain surgery`, 409);
         }
       };
@@ -3925,7 +3932,15 @@ export class Fabric {
       // death — the verification set is still every legitimate key, the
       // window binds which seqs it may cover.
       const kid = e.envelope?.protected?.key_id, deadAt = kid !== undefined ? idx.keyDeadAt.get(kid) : undefined;
-      let pl; try { pl = e.envelope && !(deadAt !== undefined && deadAt < e.sequence) ? verifySigned(e.envelope, keys, 'audit') : null; } catch { pl = null; }
+      // A row this instance minted needs no second ECDSA pass — only when
+      // the stored bytes reserialize identically to the minted envelope
+      // (a signature or payload transplant breaks the match and falls
+      // through to full verification) (w43-perf).
+      let pl;
+      let selfMinted = false;
+      try { selfMinted = e.envelope !== undefined && this.store.selfRowEnv?.(t, e.sequence) === hashBytes(canonical(e.envelope)); } catch { selfMinted = false; }
+      if (selfMinted) pl = deadAt !== undefined && deadAt < e.sequence ? null : e.envelope?.payload;
+      else { try { pl = e.envelope && !(deadAt !== undefined && deadAt < e.sequence) ? verifySigned(e.envelope, keys, 'audit') : null; } catch { pl = null; } }
       requireThat(pl && pl.tenant_id === t, 'INV-409-INTEGRITY', 'Audit row fails ledger signature verification', 409);
       // Time-sanity bound (w13-supply W13-04): a forged row claiming a
       // far-future timestamp can never be consumed silently — chain time

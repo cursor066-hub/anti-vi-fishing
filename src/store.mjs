@@ -4,7 +4,7 @@ import { dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { encrypt, decrypt, verifySigned, ctEqual } from './crypto.mjs';
 import { merkleRoot } from './merkle.mjs';
-import { canonical, digest } from './canonical.mjs';
+import { canonical, digest, hashBytes } from './canonical.mjs';
 import { requireThat, InvariantError } from './errors.mjs';
 
 // Record/dek AAD is an injective tuple encoding — distinct (kind,id)
@@ -731,16 +731,23 @@ export class Store {
     if (last) {
       this._verifiedHeads ??= new Map();
       if (!this._verifiedHeads.has(last.hash)) {
-        const pub = signer.keys ? signer.keys() : { [signer.key_id]: { public_key: signer.public_key } };
-        try { verifySigned(JSON.parse(last.envelope), pub, 'audit'); } catch (e) { throw new InvariantError('INV-409-AUDIT-TAMPER', 'Audit head does not verify — ledger tamper', 409, { cause: e }); }
+        // A head this instance minted skips the ECDSA pass when the stored
+        // bytes still digest to the minted hash — byte-identical means the
+        // signature is the one this signer produced (w43-perf).
+        const selfMinted = this._selfRows?.get(tenant)?.get(last.seq) === hashBytes(last.envelope);
+        if (!selfMinted) {
+          const pub = signer.keys ? signer.keys() : { [signer.key_id]: { public_key: signer.public_key } };
+          try { verifySigned(JSON.parse(last.envelope), pub, 'audit'); } catch (e) { throw new InvariantError('INV-409-AUDIT-TAMPER', 'Audit head does not verify — ledger tamper', 409, { cause: e }); }
+        }
         if (this._verifiedHeads.size >= 64) this._verifiedHeads.clear();
         this._verifiedHeads.set(last.hash, true);
       }
     }
     const envelope = signer.sign(entry);
     const hash = digest(envelope.payload);
+    const envText = canonical(envelope);
     try {
-      this.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run(tenant, entry.sequence, entry.previous, hash, canonical(envelope));
+      this.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run(tenant, entry.sequence, entry.previous, hash, envText);
     } catch (e) {
       // A peer instance appending between our head-read and this insert
       // trips the seq guard — that is a retryable conflict, not tamper
@@ -770,8 +777,25 @@ export class Store {
     // post-commit — a truncated tail can never drag the watermark back
     // with it (w24-fixverify W24-01).
     this.onAuditAppend?.(tenant, entry.sequence, hash);
+    // Self-write memo: this instance minted the row's signature over these
+    // exact BYTES — the memo binds the serialized envelope, so a signature
+    // or payload transplant lands as a mismatch and falls back to full
+    // verification (w43-perf; a payload-only digest would miss a signature
+    // swap — w41-http F7). Bounded per tenant; a stale entry after
+    // rollback/rewrite only ever falls back to full verify.
+    {
+      this._selfRows ??= new Map();
+      let sr = this._selfRows.get(tenant);
+      if (!sr) { sr = new Map(); this._selfRows.set(tenant, sr); }
+      sr.set(entry.sequence, hashBytes(envText));
+      if (sr.size > 8192) sr.delete(sr.keys().next().value);
+    }
     return { hash, envelope };
   }
+  // Serialized-envelope digest this instance minted for (tenant, seq) —
+  // consumers skip the ECDSA pass only while the stored bytes still match
+  // byte-for-byte (w43-perf).
+  selfRowEnv(tenant, seq) { return this._selfRows?.get(tenant)?.get(seq); }
   auditHashes(tenant) {
     return this.db.prepare('SELECT hash FROM audit WHERE tenant=? ORDER BY seq').all(tenant).map(r => r.hash);
   }
@@ -808,8 +832,13 @@ export class Store {
       // Hash+previous are attacker-computable (the seq trigger permits a raw
       // MAX+1 append): without signature verification the read path would
       // serve an unsigned forged row as a legitimate chain entry (w15).
-      try { verifySigned(envelope, public_keys, 'audit'); }
-      catch { throw new InvariantError('INV-409-AUDIT-TAMPER', 'Audit row failed signature verification', 409); }
+      // Rows this instance minted skip the ECDSA pass only when the stored
+      // BYTES match the memo — byte-identical means the signature is the
+      // one this signer produced (w43-perf).
+      if (this._selfRows?.get(tenant)?.get(r.seq) !== hashBytes(r.envelope)) {
+        try { verifySigned(envelope, public_keys, 'audit'); }
+        catch { throw new InvariantError('INV-409-AUDIT-TAMPER', 'Audit row failed signature verification', 409); }
+      }
       // The signed payload must attest THIS tenant's row — a validly
       // signed foreign-tenant envelope keyed under this tenant is still
       // tamper evidence (w21-store F-8).
