@@ -2856,7 +2856,7 @@ export class Fabric {
           requireThat(meta.seal_seq === idx.lastSealSeq, 'INV-409-INTEGRITY', 'Audit carryover page references no live seal', 409);
         } else {
           idx.clockUnverifiable = false;
-          if (pl.type === 'AUDIT_SEALED') idx.lastSealSeq = seq;
+          if (pl.type === 'AUDIT_SEALED') { idx.lastSealSeq = seq; (idx.sealSeqs ??= new Set()).add(seq); }
         }
         // A seal (and its overflow pages) re-attests the cut span's
         // surviving spend and disclosure authority (w31-runtime F-1):
@@ -3001,9 +3001,18 @@ export class Fabric {
       // A seal's attested carry residue must still all EXIST — a deleted
       // AUDIT_SEAL_CARRY page never re-folds, so the fold's own replay
       // bookkeeping cannot see the amputation; the recount is derived
-      // from the table itself (w36-seal F-H). Seal rows and their pages
-      // are rare — the per-window cadence of this block covers it.
-      {
+      // from the table itself (w36-seal F-H). The recount is memoized on
+      // the table's (maxSeq,rowCount) fingerprint: any row insert or
+      // delete flips it and re-runs the scan, while an in-place envelope
+      // rewrite keeps it — but that row still fails per-row signature
+      // verification on every read path, so a stale fingerprint costs
+      // nothing. The LIKE scan itself is O(table) — running it once per
+      // fingerprint instead of per window kept NFR-PERF-004's decision
+      // budget honest on the CI runner (w37 CI fix).
+      const fpRow = (idx.sealSeqs?.size ?? 0) > 0 ? this.store.db.prepare('SELECT COUNT(*) c, COALESCE(MAX(seq),0) m FROM audit WHERE tenant=?').get(t) : null;
+      const sealFp = fpRow ? `${fpRow.m}:${fpRow.c}` : null;
+      if (sealFp !== null && idx.sealScanFp !== sealFp) {
+        idx.sealScanFp = sealFp;
         const claims = new Map(), seen = new Map();
         for (const r of this.store.db.prepare("SELECT seq,envelope FROM audit WHERE tenant=? AND (envelope LIKE '%\"type\":\"AUDIT_SEALED\"%' OR envelope LIKE '%\"type\":\"AUDIT_SEAL_CARRY\"%')").all(t)) {
           let env; try { env = JSON.parse(r.envelope); } catch { continue; }

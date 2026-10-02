@@ -42,9 +42,11 @@ external review.
   the repository, and returned severity-tagged findings with reproduction.
 - Findings were re-verified against the live tree before any fix; stale or
   already-fixed findings were closed with the commit that pre-dated them.
-- Every accepted finding landed with a dedicated regression test — one
-  `tests/w<N>-*.test.mjs` file per wave (w5 through the current wave) —
-  so a repeated auditor can check each repair independently.
+- Every accepted finding landed with a dedicated regression test —
+  `tests/w<N>-*.test.mjs` files named per wave (w5 through the current
+  wave; a wave's fixes land in the next wave's file when the report
+  closes after the freeze) — so a repeated auditor can check each
+  repair independently.
 - Fix-verification auditors specifically hunt for defects *inside* the
   fixes of the same wave, closing the self-review loop.
 

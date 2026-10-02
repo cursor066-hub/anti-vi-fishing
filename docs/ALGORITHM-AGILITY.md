@@ -24,7 +24,7 @@ Every cryptographic use in the engineering profile, the approved profile it maps
 | Watermark / attribution MACs | HMAC-SHA-256 | RFC 2104 | Key-rotation bound; verify-only window for old watermarks |
 | Secure Perception session seal | ECDH P-256 + AES-256-GCM | NIST SP 800-56A | Dev-attested profile only; hardware suite is an external upgrade |
 | Shamir threshold shares | GF(256) polynomial interpolation | Shamir (1979) | Suite-independent; re-deal on custody changes |
-| Content digests | SHA-256 | FIPS 180-4 | Digest agility is encoded per envelope (`protected.digest`) |
+| Content digests | SHA-256 | FIPS 180-4 | Envelope headers pin a fixed 4-key set `{profile,suite,key_id,purpose}` — verifiers reject any extra key, so digest agility rides on the suite/profile pair, not a per-envelope field |
 
 ## Suite-confusion posture
 
