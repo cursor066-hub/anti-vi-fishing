@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 6697,
-      "bytes": 522617
+      "lines": 6841,
+      "bytes": 532383
     },
     "src/issuerd.mjs": {
       "lines": 797,
@@ -62,8 +62,8 @@
       "bytes": 48125
     },
     "src/runtime.mjs": {
-      "lines": 251,
-      "bytes": 22074
+      "lines": 265,
+      "bytes": 23176
     },
     "src/schema.mjs": {
       "lines": 94,
@@ -74,8 +74,8 @@
       "bytes": 13696
     },
     "src/server.mjs": {
-      "lines": 439,
-      "bytes": 44312
+      "lines": 502,
+      "bytes": 49265
     },
     "src/shamir.mjs": {
       "lines": 91,
@@ -150,8 +150,8 @@
       "bytes": 269
     },
     "scripts/traceability.py": {
-      "lines": 200,
-      "bytes": 20773
+      "lines": 208,
+      "bytes": 21316
     },
     "scripts/verify-export-webcrypto.mjs": {
       "lines": 114,
@@ -194,12 +194,12 @@
       "bytes": 10132
     },
     "tests/helpers.mjs": {
-      "lines": 158,
-      "bytes": 13199
+      "lines": 169,
+      "bytes": 13909
     },
     "tests/http-concurrency-ui.test.mjs": {
-      "lines": 257,
-      "bytes": 21883
+      "lines": 263,
+      "bytes": 22300
     },
     "tests/issuerd.test.mjs": {
       "lines": 119,
@@ -210,8 +210,8 @@
       "bytes": 29561
     },
     "tests/ledger3.test.mjs": {
-      "lines": 440,
-      "bytes": 30014
+      "lines": 503,
+      "bytes": 32638
     },
     "tests/lifecycle.test.mjs": {
       "lines": 135,
@@ -287,7 +287,7 @@
     },
     "tests/w17-redteam.test.mjs": {
       "lines": 276,
-      "bytes": 19139
+      "bytes": 19043
     },
     "tests/w18-crypto.test.mjs": {
       "lines": 96,
@@ -295,7 +295,7 @@
     },
     "tests/w18-fixverify.test.mjs": {
       "lines": 256,
-      "bytes": 19162
+      "bytes": 19066
     },
     "tests/w18-http.test.mjs": {
       "lines": 111,
@@ -311,7 +311,7 @@
     },
     "tests/w19-lifecycle.test.mjs": {
       "lines": 242,
-      "bytes": 16810
+      "bytes": 16666
     },
     "tests/w20-audit.test.mjs": {
       "lines": 225,
@@ -319,7 +319,7 @@
     },
     "tests/w20-fixverify.test.mjs": {
       "lines": 205,
-      "bytes": 14048
+      "bytes": 14006
     },
     "tests/w21-crypto.test.mjs": {
       "lines": 187,
@@ -347,7 +347,7 @@
     },
     "tests/w23-store.test.mjs": {
       "lines": 221,
-      "bytes": 12890
+      "bytes": 12848
     },
     "tests/w23-supply.test.mjs": {
       "lines": 151,
@@ -431,7 +431,15 @@
     },
     "tests/w40.test.mjs": {
       "lines": 257,
-      "bytes": 16671
+      "bytes": 16763
+    },
+    "tests/w41.test.mjs": {
+      "lines": 193,
+      "bytes": 12208
+    },
+    "tests/w42.test.mjs": {
+      "lines": 135,
+      "bytes": 9501
     },
     "tests/w5-mutations.test.mjs": {
       "lines": 194,
@@ -494,14 +502,14 @@
       "bytes": 5589
     },
     "tests/w9-network.test.mjs": {
-      "lines": 203,
-      "bytes": 13905
+      "lines": 210,
+      "bytes": 14500
     },
     "tests/w9-schema.test.mjs": {
       "lines": 103,
       "bytes": 6499
     }
   },
-  "total_files": 125,
-  "total_lines": 31296
+  "total_files": 127,
+  "total_lines": 31940
 }

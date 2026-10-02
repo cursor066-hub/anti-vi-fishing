@@ -178,7 +178,7 @@ test('w17-redteam E2: certificate flood cannot hide a resurrecting certificate',
   for (let i = 0; i < 10100; i++) ins.run(`flood-${i}`, h.now() + i);
   // Plant a well-formed fake certificate row too — anchored-membership
   // stops it from vetoing recovery.
-  h.f.store.db.prepare("UPDATE clock SET last=? WHERE id=1").run(exp + 1);
+  h.livedForward(exp + 1);
   assert.throws(() => h.f.recoverClock(h.p('security')), hasCode('INV-503-TIME'),
     'the real certificate still vetoes the rewind despite the flood');
 });
@@ -189,7 +189,7 @@ test('w17-redteam E2-b: planted certificates cannot veto clock recovery', t => {
   // Plant an unanchored certificate whose expiry sits inside the rewind
   // window — membership in idx.issuedCerts is required to veto.
   h.f.store.put('acme', 'certificate', 'planted-cert', { certificate_id: 'planted-cert', consumed: false, envelope: real }, h.now());
-  h.f.store.db.prepare("UPDATE clock SET last=? WHERE id=1").run(h.now() + 120000);
+  h.livedForward(h.now() + 120000);
   // Rewind to a point where the real cert is still within its live window:
   // the planted row is skipped — only an anchored live cert may veto.
   h.set(h.now() + 60000);

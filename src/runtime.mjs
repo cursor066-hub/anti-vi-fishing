@@ -79,8 +79,11 @@ export class RuntimeGate {
       // NET-003: the wire channel is bound by the capability's SIGNED
       // runtime_policy snapshot, not whatever the live policy now allows —
       // a later widening cannot retro-extend an outstanding capability to
-      // adjacent ports or weaker protocols (w9-network F3).
-      const netAllow = cap.runtime_policy?.network ?? policy.runtime.network ?? {};
+      // adjacent ports or weaker protocols (w9-network F3). An envelope
+      // minted before `network` existed falls to the built-in restrictive
+      // defaults — never to the live, possibly widened, policy
+      // (w42-runtime L-2).
+      const netAllow = cap.runtime_policy?.network ?? {};
       oneOf(input.protocol, netAllow.allowed_protocols ?? ['https'], 'protocol');
       oneOf(input.port, netAllow.allowed_ports ?? [443], 'port');
       requireThat(cap.tenant_id === t && cap.subject_id === principal.subject_id && cap.gate_id === this.f.config.gate_id, 'INV-403-SCOPE', 'Capability scope denied', 403);
@@ -112,13 +115,24 @@ export class RuntimeGate {
           requireThat(mode === 'cached-allow' && now - cap.issued_at <= staleWindow, 'INV-503-GATE', `Policy changed; fail mode for ${cap.action} is ${mode}`, 503);
         }
       }
-      requireThat(this.f.store.get(t, 'capability', cap.capability_id), 'INV-401-CAPABILITY', 'Unknown capability', 401);
       // Issuance must be anchored the same way certificates are: a
       // capability minted inside a span a later seal cuts keeps its signed
       // envelope but loses its provable birth — without the anchor check it
       // stays spendable while its issuance is unprovable (w31-runtime F-1).
+      // The anchored probe runs first so a deleted capability row reads as
+      // tamper evidence (murdered anchored row), never as 'unknown'
+      // (w42-runtime F5).
       const idx = this.f._auditIndex(t);
       requireThat(idx.capabilities?.has(cap.capability_id) === true, 'INV-401-CAPABILITY', 'Capability has no ledger-anchored issuance', 401);
+      const capRow = this.f.store.get(t, 'capability', cap.capability_id);
+      requireThat(capRow, 'INV-409-INTEGRITY', 'Anchored capability row is missing from the store', 409);
+      // Row, request and anchor all name the same envelope bytes — a
+      // transplanted envelope swapped in under an anchored id, or a
+      // re-minted envelope the ledger recorded differently, is integrity
+      // evidence rather than a spendable authority (w42-runtime L-3).
+      requireThat(digest(capRow) === digest(input.capability), 'INV-409-INTEGRITY', 'Stored capability row diverges from the presented envelope', 409);
+      const anchoredDig = idx.capabilityMeta?.get(cap.capability_id)?.digest;
+      requireThat(anchoredDig === undefined || anchoredDig === null || anchoredDig === digest(input.capability), 'INV-409-INTEGRITY', 'Presented capability diverges from the anchored issuance', 409);
       for (const key of ['device_id', 'resource', 'destination', 'action', 'purpose']) requireThat(input[key] === cap[key], 'INV-403-SCOPE', 'Capability binding mismatch', 403);
       requireThat(input.columns.every(c => cap.columns.includes(c)) && input.row_ids.every(id => cap.row_ids.includes(id)), 'INV-403-SCOPE', 'Data scope denied', 403);
       requireThat(input.action !== 'data.read' || (input.columns.length > 0 && input.row_ids.length > 0), 'INV-400-SCHEMA', 'Data request requires explicit selection');

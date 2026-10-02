@@ -32,7 +32,7 @@ test('w20-fv F-4: a sweep wedge clears on the clean seal path once rows verify',
   const row = h.f.store.must(T, 'certificate', cid);
   // Forward clock jump + a missing anchored certificate row isolates the
   // tenant at recovery — the wedge is meant to lift via sealAuditChain.
-  h.f.store.tx(() => h.f.store.clock(h.now() + 3600000));
+  h.livedForward(h.now() + 3600000);
   h.f.store.db.prepare("DELETE FROM records WHERE tenant=? AND kind='certificate' AND id=?").run(T, cid);
   const rec = h.f.recoverClock(h.p('security'));
   assert.ok(rec.unverifiable_tenants.includes(T), 'missing anchored cert wedges the tenant');
@@ -50,7 +50,7 @@ test('w20-fv F-4: a sweep wedge clears on the clean seal path once rows verify',
 test('w20-fv F-4b: the clean seal path never clears a wedge that still fails', t => {
   const h = fixture(t);
   const { certificate } = certifyExport(h);
-  h.f.store.tx(() => h.f.store.clock(h.now() + 3600000));
+  h.livedForward(h.now() + 3600000);
   h.f.store.db.prepare("DELETE FROM records WHERE tenant=? AND kind='certificate' AND id=?").run(T, certificate.payload.certificate_id);
   const rec = h.f.recoverClock(h.p('security'));
   assert.ok(rec.unverifiable_tenants.includes(T));

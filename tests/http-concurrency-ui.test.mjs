@@ -93,7 +93,13 @@ test('COM-003 NFR-TST-002: eight independent gate workers race; exactly one cert
 test('DAT-002: concurrent gates cannot overspend shared rolling budget', async t => {
   const h = fixture(t); installPolicy(h, p => { p.runtime.windows[0].limit = 2; }); const cap = h.f.runtime.issue(h.p(), runtimeInput());
   const results = await Promise.all(Array.from({ length: 8 }, () => runWorker({ config: h.setup.config, directory: h.directory, now: h.now(), principal: h.p(), runtime: runtimeRequest(cap) })));
-  assert.equal(results.filter(r => r.success).length, 1, JSON.stringify(results)); assert.ok(results.filter(r => !r.success).every(r => r.code === 'INV-429-BUDGET'));
+  assert.equal(results.filter(r => r.success).length, 1, JSON.stringify(results));
+  // All eight workers present the SAME signed request: a loser that folds
+  // after the winner's commit is convicted as a replay (the precise name
+  // for a re-presented request); one that folds before is convicted by the
+  // rolling budget the winner just spent. Both denials prevent overspend —
+  // any third code (a wedge, a 500) is a real failure.
+  assert.ok(results.filter(r => !r.success).every(r => r.code === 'INV-429-BUDGET' || r.code === 'INV-409-REPLAY'), JSON.stringify(results));
 });
 test('NFR-SEC-004: bootstrap creates random credentials, private files and refuses overwrite', t => {
   const h = fixture(t), directory = join(h.directory, 'new-deployment'); bootstrap(directory); const config = loadConfiguration(directory); assert.equal(config.profile, 'engineering'); assert.ok(readFileSync(join(directory, 'access-tokens.json'), 'utf8').length > 100); assert.throws(() => bootstrap(directory), hasCode('INV-409-CONFLICT')); assert.throws(() => new h.f.constructor({ ...config, profile: 'production' }, directory), hasCode('INV-503-RELEASE'));

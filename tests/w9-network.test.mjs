@@ -89,11 +89,18 @@ test('w9-network F3: a widened live policy cannot retro-extend a signed capabili
 
 test('w9-network F4: clock recovery never resurrects lapsed authority', t => {
   const h = fixture(t);
-  // An unconsumed certificate lapses while the ledger stands far ahead.
-  h.ready(); // certificate issued at fixture time with its expiry window
-  h.f.store.clock(h.now() + 86400000);
-  // Rewinding into the span containing its expiry would resurrect it.
+  // An unconsumed certificate lapses inside the span the chain attests the
+  // gate lived through: the signed probe row is cut by the seal but its
+  // signed time attests the lived horizon, so the veto still grounds on
+  // chain evidence — a bare clock.last write is forged clay (w42-runtime F2).
+  const { certificate } = h.ready(); // cert minted at fixture time, expiry at +60s
+  h.livedForward(h.now() + 90000);
+  // Recovery into the attested span would resurrect the cert — refuse.
   assert.throws(() => h.f.recoverClock(h.p('security')), hasCode('INV-503-TIME'));
+  // The honest remediation: revoke the resurrectable authority, recover.
+  h.f.revoke(h.p('security'), { kind: 'certificate', id: certificate.payload.certificate_id, reason: 'Clock rewind would resurrect it' });
+  const rec = h.f.recoverClock(h.p('security'));
+  assert.equal(rec.recovered_at, h.now(), 'recovery lands once the resurrection is revoked');
   // Control: a rewind that re-opens nothing is the legitimate snapshot-
   // restore path — the gate recovers to the operator-asserted host time.
   const h2 = fixture(t);

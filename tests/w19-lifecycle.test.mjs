@@ -93,10 +93,10 @@ test('w19-F3: a tampered tenant is quarantined, not a recovery-wide veto', t => 
   h.ready(h.proposed());
   const g = h.proposed('finance.beneficiary.create', { vendor_id: 'vendor-g', bank_account: 'TESTBANK000009', currency: 'EUR' }, {}, h.p('operator', 'globex'));
   h.ready(g);
-  h.f.store.db.prepare("DELETE FROM records WHERE tenant='globex' AND kind='certificate'").run();
   // Rewind 30s — inside no authority's remaining validity (the fixture
   // certificates live ≥60s), so the veto has no legitimate acme target.
-  h.f.store.db.prepare('UPDATE clock SET last=? WHERE id=1').run(h.now() + 30000);
+  h.livedForward(h.now() + 30000);
+  h.f.store.db.prepare("DELETE FROM records WHERE tenant='globex' AND kind='certificate'").run();
   const out = h.f.recoverClock(h.p('security', 'acme'));
   assert.ok(out.recovered_at, 'recovery proceeds despite the tampered tenant');
   assert.ok(out.unverifiable_tenants.includes('globex'), 'tampered tenant lands in unverifiable_tenants');
@@ -194,8 +194,8 @@ test('w19-F7: an unplanned planted ceremony collects no anchored lifecycle', t =
 test('w19-F8: unverifiable clears only on a committed seal', t => {
   const h = fixture(t);
   h.ready(h.proposed());
+  h.livedForward(h.now() + 30000);
   h.f.store.db.prepare("DELETE FROM records WHERE tenant='acme' AND kind='certificate'").run();
-  h.f.store.db.prepare('UPDATE clock SET last=? WHERE id=1').run(h.now() + 30000);
   const out = h.f.recoverClock(h.p('security'));
   assert.ok(out.unverifiable_tenants.includes('acme'));
   // Removing the signing key from the vault leaves no live audit signer and
@@ -218,8 +218,8 @@ test('w19-F8: unverifiable clears only on a committed seal', t => {
 test('w19-F8b: a committed seal clears the unverifiable wedge', t => {
   const h = fixture(t);
   h.ready(h.proposed());
+  h.livedForward(h.now() + 30000);
   h.f.store.db.prepare("DELETE FROM records WHERE tenant='acme' AND kind='certificate'").run();
-  h.f.store.db.prepare('UPDATE clock SET last=? WHERE id=1').run(h.now() + 30000);
   assert.ok(h.f.recoverClock(h.p('security')).unverifiable_tenants.includes('acme'));
   const head = h.f.store.db.prepare("SELECT seq,hash FROM audit WHERE tenant='acme' ORDER BY seq DESC LIMIT 1").get();
   h.f.store.db.prepare("INSERT INTO audit (tenant,seq,previous,hash,envelope) VALUES ('acme',?,?,'deadbeef','{}')").run(head.seq + 1, head.hash);

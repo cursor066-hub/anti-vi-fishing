@@ -154,16 +154,24 @@ def _test_bodies(text):
                     bodies.append(text[m.start():i + 1]); break
             i += 1
     return bodies
+def _test_title(body):
+    # The first string literal after `test(` is the title — a requirement
+    # ID must name the test it evidences, not merely appear somewhere in
+    # its body (w41-ledger M-1).
+    m = re.match(r"\s*test\(\s*(['\"`])((?:\\.|(?!\1)[\s\S])*)\1", body)
+    return m.group(2) if m else ''
 def evidence_blocks(path):
     text = path.read_text()
     if not path.name.endswith('.test.mjs'):
-        return [text]
+        # Script files cite requirements inline — comments strip first so a
+        # commented-out ID cannot mint a citation (w41-ledger M-1).
+        return [_strip_comments(text)]
     return _test_bodies(_strip_comments(text))
 for row in rows:
     prefix = row['id'].rsplit('-', 1)[0]
     owner, baseline, implementation, limitation = by_prefix[prefix]
     matches = [str(p.relative_to(root)) for p in tests
-               if any(row['id'] in b and (_ASSERT_CALL.search(b) or not p.name.endswith('.test.mjs')) for b in evidence_blocks(p))]
+               if any((row['id'] in _test_title(b) if p.name.endswith('.test.mjs') else row['id'] in b) and (_ASSERT_CALL.search(b) or not p.name.endswith('.test.mjs')) for b in evidence_blocks(p))]
     # A VERIFIED row must carry at least one asserting-test citation — the
     # docs sentinel is honest evidence for PARTIAL/BLOCKED rows only
     # (w39-ledger F6).

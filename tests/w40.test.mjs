@@ -230,27 +230,27 @@ test('w39-crypto F2: a dead bound headmark signer steers to the quorum-designate
   assert.equal(p2.recovery_signing?.superseded_key, bound, 'the bump carries the same recovery marker');
 });
 
-test('w39-crypto F2: a killed signer with no chain designation writes a named unsigned floor, never a silent one', t => {
+test('w39-crypto F2 / w41-fv F-1: a planted AUTHORITY_REVOKED mints no signer death — unverified rows are evidence, not facts', t => {
   const h = fixture(t, ['acme']);
   h.proposed(); h.f._auditIndex('acme');
   const bound = h.f.keys('acme').audit.key_id;
-  // A bound signer with NO live designation is only reachable through
-  // surgery — the revoke() gate itself requires a designated successor.
-  // Plant the death row: the fold-free scan takes every parsed death
-  // fail-closed (it never needs the signature), so the bump must refuse
-  // to sign under it and name the refusal.
+  // A surgical death row: verified-only chain facts must not let an
+  // unsigned plant kill the signer (a planted death would permanently
+  // unsigned the watermark AND a planted CEREMONY_QUORUM could mint a
+  // successor) — the fold convicts the plant independently instead.
   dropAuditGuards(h);
   const head = h.f.store.db.prepare("SELECT seq,hash FROM audit WHERE tenant='acme' ORDER BY seq DESC LIMIT 1").get();
   const forged = { protected: { profile: 'IF-CJSON-1', suite: 'Ed25519', key_id: bound, purpose: 'audit' }, payload: { type: 'AUTHORITY_REVOKED', tenant_id: 'acme', sequence: head.seq + 1, time: h.now(), actor: 'planted', reference: `key:${bound}`, metadata: { reason_digest: 'x', record_digest: 'y' } }, signature: 'A'.repeat(86) };
   h.f.store.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run('acme', head.seq + 1, head.hash, digest(forged.payload), JSON.stringify(forged));
-  h.f._bumpHeadWatermark('acme', head.seq + 2, { force: true });
+  h.f._bumpHeadWatermark('acme', head.seq + 1, { force: true });
   const wm = JSON.parse(readFileSync(wmPath(h), 'utf8')).tenants.acme;
-  assert.equal(typeof wm, 'number', 'a designation-free dead signer signs nothing — the floor is honestly unsigned');
-  // The degraded state is named on the tamper attest the seal merges into
-  // every refusal — the planted row wedges the fold, so the refusal's
-  // details carry it.
-  let named = false;
-  try { const r = h.f.sealAuditChain(h.p('security')); named = (r.head_watermark_tampered ?? []).some(x => x.tenant_id === 'acme' && x.kind === 'dead_signer'); }
-  catch (e) { named = (e.details?.head_watermark_tampered ?? []).some(x => x.tenant_id === 'acme' && x.kind === 'dead_signer'); }
-  assert.ok(named, 'dead_signer must be named on the seal surface');
+  assert.ok(wm && typeof wm === 'object' && wm.envelope, 'an unverified death-row plant cannot strip the watermark signature');
+  assert.equal(wm.envelope.protected.key_id, bound, 'the bound signer still signs — the plant minted no death');
+  // The fold convicts the surgery independently — the head/watermark
+  // probe or the row verify both arrive at INV-409; evidence the plant
+  // can never be is evidence it still is.
+  assert.throws(() => h.f._auditIndex('acme'), e => e?.code?.startsWith('INV-409'), 'the fold must wedge on the forged plant');
+  // The seal cut removes the plant and names it under dropped evidence.
+  const r = h.f.sealAuditChain(h.p('security'));
+  assert.ok(r.sealed === true && r.carryover_totals?.dropped_events >= 1, 'the seal must cut and count the forged row');
 });

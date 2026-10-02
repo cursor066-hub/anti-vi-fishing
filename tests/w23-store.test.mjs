@@ -37,7 +37,7 @@ test('w23 W23-01a: a capability expiring inside the rewound span vetoes recovery
   assert.ok(cap.payload.expires_at > h.now());
   // Ledger stands where the capability lapses; the rewind re-opens it.
   const span = cap.payload.expires_at - h.now() + 1000;
-  h.f.store.tx(() => h.f.store.clock(h.now() + span));
+  h.livedForward(h.now() + span);
   assert.throws(() => h.f.recoverClock(h.p('security')), hasCode('INV-503-TIME'), 'un-revoked resurrecting capability must veto');
   // Operator remediation: revoke the resurrecting authority, then recover.
   h.f.revoke(h.p('security'), { kind: 'capability', id: cap.payload.capability_id, reason: 'clock rewind' });
@@ -50,7 +50,7 @@ test('w23 W23-01b: a JIT grant lapsing inside the rewound span vetoes recovery',
   const grant = { grant_id: gid, subject_id: 'operator', roles: ['operator'], resources: ['dataset-1'], actions: ['data.read'], destinations: ['customer-vault'], columns: ['id'], row_ids: [], issued_at: h.now(), expires_at: h.now() + 60000 };
   h.f.target.grant(T, gid, grant);
   h.f.store.audit(T, 'JIT_GRANT_ISSUED', 'operator', 'operator', { grant_id: gid, scope_digest: 'd', expires_at: grant.expires_at }, h.now());
-  h.f.store.tx(() => h.f.store.clock(h.now() + 120000));
+  h.livedForward(h.now() + 120000);
   assert.throws(() => h.f.recoverClock(h.p('security')), hasCode('INV-503-TIME'), 'un-revoked resurrecting grant must veto');
   h.f.revoke(h.p('security'), { kind: 'grant', id: gid, reason: 'clock rewind' });
   assert.ok(h.f.recoverClock(h.p('security')).recovered_at);
