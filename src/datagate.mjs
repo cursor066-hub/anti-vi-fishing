@@ -111,7 +111,7 @@ export function watermark(rows, ctx) {
 // DAT-009: cumulative reconstruction control. Counts distinct rows and
 // columns a subject has touched per dataset inside the window; crossing the
 // configured coverage threshold produces a budget denial plus an audit signal.
-export function reconstructionCheck(touchDb, catalogDb, { tenant, subject, dataset, rows, columns, now, policy, record = true, access = null, droppedEvents = 0 }) {
+export function reconstructionCheck(touchDb, catalogDb, { tenant, subject, dataset, rows, columns, now, policy, record = true, access = null, droppedEvents = 0, verifiedRowCount = null }) {
   // Touch records live on the fabric store's transaction so a rolled-back
   // consume cannot leave phantom access rows (cross-DB atomicity, M2).
   // Counts are computed PROSPECTIVELY before writing: a denied attempt
@@ -129,7 +129,13 @@ export function reconstructionCheck(touchDb, catalogDb, { tenant, subject, datas
   for (const r of rows) rowSet.add(r);
   for (const c of columns) colSet.add(c);
   const rowCount = rowSet.size, colCount = colSet.size;
-  const totalRows = catalogDb.prepare('SELECT count(*) AS n FROM dataset_rows WHERE tenant=? AND dataset=?').get(tenant, dataset).n;
+  // The coverage denominator must come from rows that VERIFY — a raw
+  // COUNT(*) counts attacker-inserted ciphertext junk, and every junk row
+  // deflates coverage toward zero (w40-fv F-7). When the caller can prove
+  // row integrity the verified count is the honest denominator.
+  const totalRows = verifiedRowCount !== null
+    ? verifiedRowCount(tenant, dataset)
+    : catalogDb.prepare('SELECT count(*) AS n FROM dataset_rows WHERE tenant=? AND dataset=?').get(tenant, dataset).n;
   const coveragePercent = totalRows ? Math.floor((rowCount * 100) / totalRows) : 0;
   // Coverage is also bounded dataset-wide: a second identity minted by
   // jit.grant (or any peer subject) must not let the combined disclosure

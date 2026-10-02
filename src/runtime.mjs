@@ -164,7 +164,7 @@ export class RuntimeGate {
         // re-verify count as disclosed — the same floor the execute/
         // composite/egress paths already consume (w38-runtime F-1).
         const ridx = this.f._auditIndex(t);
-        recon = reconstructionCheck(this.f.store.db, this.f.target.db, { tenant: t, subject: cap.subject_id, dataset: cap.resource, rows: input.row_ids, columns: input.columns, now, policy: r.reconstruction, access: ridx.dataAccess, droppedEvents: ridx.sealDroppedEvents ?? 0 });
+        recon = reconstructionCheck(this.f.store.db, this.f.target.db, { tenant: t, subject: cap.subject_id, dataset: cap.resource, rows: input.row_ids, columns: input.columns, now, policy: r.reconstruction, access: ridx.dataAccess, droppedEvents: ridx.sealDroppedEvents ?? 0, verifiedRowCount: (dt, ds) => this.f._verifiedDatasetRows(dt, ds) });
         requireThat(recon.allowed, 'INV-429-BUDGET', `Reconstruction limit reached (${recon.coverage_percent}% of dataset rows touched)`, 429, { row_count: recon.row_count, column_count: recon.column_count, coverage_percent: recon.coverage_percent });
         // The plan rebinds to the authorising capability — the request's
         // own fields are not the grant (w20-datagate F8).

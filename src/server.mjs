@@ -42,6 +42,10 @@ export const ROUTE_METHODS = new Map(Object.entries({
 }).map(([k, v]) => [k, v.split(',')]));
 
 export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin = `http://127.0.0.1:${port}`, tenantSessionCap = 250, trustProxy = false, proxySecret = null, connectionCap = 2048 } = {}) {
+  // A non-numeric or negative cap disables the comparison silently:
+  // `openConnections > NaN` is always false and the accept path is then
+  // unbounded. Zero is a legal posture — probes only (w40-fv F-10).
+  requireThat(Number.isSafeInteger(connectionCap) && connectionCap >= 0, 'INV-400-CONFIG', 'connectionCap must be a non-negative integer', 400);
   // The session cookie gets Secure on every origin EXCEPT plaintext
   // loopback — a TLS-terminating upstream proxy serving http internally
   // still hands the cookie to browsers over https (w22-http F4). The
@@ -159,9 +163,9 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
     requireThat(parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Object.keys(parsed).length === 0, 'INV-400-SCHEMA', 'Operation takes no request body', 400);
   }
   const server = http.createServer({ maxHeaderSize: 16384 }, async (req, res) => {
-    // Over-cap sockets get exactly one request and only for a health probe
-    // — the check must run before any byte of a response is produced
-    // (w38-http LOW).
+    // Over-cap sockets serve only health probes — any other request line
+    // kills the socket before a byte of response is produced
+    // (w38-http LOW; comment corrected w40-fv F-11).
     if (req.socket.overCap && req.url !== '/healthz' && req.url !== '/readyz') {
       try { req.socket.destroy(); } catch { /* already gone */ }
       return;
@@ -421,8 +425,8 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
   let openConnections = 0;
   server.on('connection', socket => {
     // The connection cap must not blind the health probes: an over-cap
-    // socket is allowed exactly one request — the handler kills it unless
-    // the request line is a health probe (w38-http LOW).
+    // socket keeps answering probes; the request handler kills it on any
+    // other request line (w38-http LOW; comment corrected w40-fv F-11).
     if (++openConnections > connectionCap) {
       socket.overCap = true;
       socket.setTimeout(5000, () => socket.destroy());

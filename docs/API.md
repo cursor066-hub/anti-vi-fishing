@@ -25,7 +25,7 @@ The approval challenge includes capsule/evidence/policy digests, signer key ID a
 | Code | Handling |
 |---|---|
 | INV-400-SCHEMA / AUDIT / CONNECTOR / HOST / MERKLE / SHAMIR | Correct the typed request; unchanged retries cannot fix it. |
-| INV-401-AUTH / SIGNATURE / CERTIFICATE / CAPABILITY / EVIDENCE / ATTESTATION / CONNECTOR / TAMPER | Re-establish valid identity or authority; never bypass. |
+| INV-401-AUTH / SIGNATURE / CERTIFICATE / CAPABILITY / EVIDENCE / ATTESTATION / CONNECTOR / TAMPER | Re-establish valid identity or authority; never bypass. The 401/403 split is deliberate: absent, malformed or revoked credentials fail `INV-401-AUTH` before any role check (no principal exists to authorize); an authenticated principal lacking the route's role fails `INV-403-ROLE`/`SCOPE` — role disclosure to an unauthenticated caller is not possible (w39-crypto F8). |
 | INV-403-SCOPE / ROLE / HEALTH / QUARANTINE / SEPARATION / CSRF / ORIGIN / ACTOR | Scope, identity, health, separation-of-duties or containment rejection. |
 | INV-404-NOT-FOUND · INV-405-METHOD | No such resource / method on this route. |
 | INV-409-STATE / REPLAY / IDEMPOTENCY / CONFLICT / FORK / AUDIT / AUDIT-TAMPER / MERKLE / INTEGRITY | State, replay, or integrity mismatch; re-canonicalise and re-review. |
