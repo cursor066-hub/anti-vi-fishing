@@ -121,6 +121,7 @@ export class Fabric {
   // F4: the file is re-read every call, the parse is what caches).
   #headWmRaw = undefined;
   #headWmParsed = null;
+  #headWmStatKey = undefined;
   // entry-object → resolved seq memo: #headWmParsed returns the SAME entry
   // object while the file bytes are unchanged, so identity-keying skips the
   // signature re-verify on every fold (w38 CI: verify per read halved
@@ -274,6 +275,11 @@ export class Fabric {
         // folds uncommitted rows too. Evict on rollback so the cache can
         // never outlive the rows that produced it (w43-store F-1).
         this._keyDeathCache.clear();
+        // The tx-window facts memo lives outside _keyDeathCache: its hit
+        // key still matches because _auditAppends is not decremented by a
+        // rollback, so without this eviction the window keeps serving
+        // phantom deaths minted by the doomed rows (w46-store M-1).
+        for (const k of [...(this._probeMemo?.keys() ?? [])]) if (k.startsWith('cf:')) this._probeMemo.delete(k);
       }
     };
     // Migration accounting is observable, not silent: every re-sealed,
@@ -302,14 +308,36 @@ export class Fabric {
     // never suppress the attestation that names the residue (w45-ledger
     // HIGH-1). The SQL narrows to parsed type+field (a LIKE over raw text
     // would let any planted row match — w44-store M-1); the verify pass
-    // makes the plant evidence, not cover.
-    const aadDedupeStmt = this.store.db.prepare("SELECT envelope FROM audit WHERE tenant=? AND json_valid(envelope) AND json_extract(envelope,'$.payload.type') IN ('AAD_MIGRATION','AAD_MIGRATION_MARKER') AND instr(COALESCE(json_extract(envelope,'$.payload.metadata.marker_digests'),''), ?) > 0");
+    // makes the plant evidence, not cover. And the narrowing itself can be
+    // dup-keyed: json_extract reads the FIRST member where JSON.parse
+    // reads the LAST, so a grafted decoy 'payload' carrying the digest
+    // would satisfy the SQL while the verified bytes name nothing — every
+    // dup member makes the row a candidate and the PARSED envelope decides
+    // attestation, never the SQL hit (w46-ledger HIGH-1).
+    const aadDedupeStmt = this.store.db.prepare("SELECT envelope FROM audit WHERE tenant=? AND json_valid(envelope) AND ((json_extract(envelope,'$.payload.type') IN ('AAD_MIGRATION','AAD_MIGRATION_MARKER') AND instr(COALESCE(json_extract(envelope,'$.payload.metadata.marker_digests'),''), ?) > 0) OR EXISTS (SELECT 1 FROM json_each(envelope,'$') GROUP BY \"key\" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload') GROUP BY \"key\" HAVING COUNT(*)>1))");
     const aadAttested = (t, d) => {
       for (const row of aadDedupeStmt.all(t, d)) {
-        try { verifySigned(JSON.parse(row.envelope), this.auditPublicKeys(t), 'audit'); return true; }
-        catch { /* unsigned or malformed candidate — evidence, not cover */ }
+        try {
+          const env = JSON.parse(row.envelope), pl = env?.payload;
+          verifySigned(env, this.auditPublicKeys(t), 'audit');
+          if ((pl?.type === 'AAD_MIGRATION' || pl?.type === 'AAD_MIGRATION_MARKER')
+            && Array.isArray(pl?.metadata?.marker_digests) && pl.metadata.marker_digests.includes(d)) return true;
+          // Verified but names no attested digest: a dup-graft decoy — it
+          // is evidence, never attestation (w46-ledger HIGH-1).
+        } catch { /* unsigned or malformed candidate — evidence, not cover */ }
       }
       return false;
+    };
+    // Sanctioned post-attest marker cleanup: the aad_marker_keep guard is
+    // dropped for the delete and recreated verbatim immediately — a
+    // missing or respelled guard is INV-503 evidence on the next open
+    // (w46-store M-2). The marker row is never deletable in-band on a
+    // live deployment.
+    const markerGuardSql = "CREATE TRIGGER aad_marker_keep BEFORE DELETE ON meta_kv WHEN OLD.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END";
+    const dropAadMarker = (db, t) => {
+      db.exec('DROP TRIGGER IF EXISTS aad_marker_keep');
+      try { db.prepare("DELETE FROM meta_kv WHERE tenant=? AND key='aad_migration'").run(t); }
+      finally { db.exec(`CREATE TRIGGER IF NOT EXISTS ${markerGuardSql.slice('CREATE TRIGGER '.length)}`); }
     };
     for (const t of new Set([...this.store.aadMigration.keys(), ...this.target.aadMigration.keys(), ...migPending.keys()])) {
       const marker = migPending.get(t);
@@ -336,8 +364,8 @@ export class Fabric {
           // under, it stays for a later configured open rather than being
           // erased unnamed (w45-ledger HIGH-1/LOW-5).
           if (anchored) {
-            try { this.store.db.prepare("DELETE FROM meta_kv WHERE tenant=? AND key='aad_migration'").run(t); } catch { /* cosmetic */ }
-            try { this.target.db.prepare("DELETE FROM meta_kv WHERE tenant=? AND key='aad_migration'").run(t); } catch { /* cosmetic */ }
+            try { dropAadMarker(this.store.db, t); } catch { /* cosmetic */ }
+            try { dropAadMarker(this.target.db, t); } catch { /* cosmetic */ }
           }
         }
         continue;
@@ -353,16 +381,16 @@ export class Fabric {
         // Same wedge doctrine as the ghost path: on a convicted head the
         // tx rolls back, the marker survives, and the open continues into
         // the wedged index where sealAuditChain remediates (w45-seal F-1).
-        try { this.store.tx(() => { this.store.clock(this.clock()); this.store.audit(t, 'AAD_MIGRATION', 'system', 'fabric-open', meta, this.clock()); this.store.db.prepare("DELETE FROM meta_kv WHERE tenant=? AND key='aad_migration'").run(t); }); }
+        try { this.store.tx(() => { this.store.clock(this.clock()); this.store.audit(t, 'AAD_MIGRATION', 'system', 'fabric-open', meta, this.clock()); dropAadMarker(this.store.db, t); }); }
         catch { /* wedged chain — marker survives, seal stays reachable */ }
       } else {
-        this.store.db.prepare("DELETE FROM meta_kv WHERE tenant=? AND key='aad_migration'").run(t);
+        dropAadMarker(this.store.db, t);
       }
     }
     // Target-side markers clear after the attestation lands: a crash in
     // the gap leaves a stale marker that re-attests at the next open —
     // never silently unattested (w43-store F-4).
-    for (const t of migPending.keys()) { if (!Object.hasOwn(this.store.auditSigners, t)) continue; try { this.target.db.prepare("DELETE FROM meta_kv WHERE tenant=? AND key='aad_migration'").run(t); } catch { /* clears at next open */ } }
+    for (const t of migPending.keys()) { if (!Object.hasOwn(this.store.auditSigners, t)) continue; try { dropAadMarker(this.target.db, t); } catch { /* clears at next open */ } }
     this.runtime = new RuntimeGate(this);
     // Retired-key declarations are authentic only from the signed config —
     // _reconcileLedger appends store-derived entries (attacker-writable) to
@@ -682,9 +710,13 @@ export class Fabric {
     if (existsSync(storePath)) {
       // Ownership drift on the vault files is reverted at open — the
       // custody sweep writes never hardened an existing deployment whose
-      // files predated the chmod-on-write rule (w43-store F-5).
-      try { chmodSync(storePath, 0o600); } catch { /* permission tightening is best-effort on exotic filesystems */ }
-      try { chmodSync(masterPath, 0o600); } catch { /* same */ }
+      // files predated the chmod-on-write rule (w43-store F-5). A failed
+      // tighten is custody failure inside the INV-503 taxonomy, never a
+      // silently weakened vault (w46-store L-2): the keystore that cannot
+      // be made owner-only is refused rather than trusted wider than the
+      // custody rule allows.
+      try { chmodSync(storePath, 0o600); } catch (e) { throw new InvariantError('INV-503-STORAGE', 'keystore.json cannot be made owner-only', 503, { cause: e }); }
+      try { chmodSync(masterPath, 0o600); } catch (e) { throw new InvariantError('INV-503-STORAGE', 'master.key cannot be made owner-only', 503, { cause: e }); }
       // The commit marker is file-writer shaped too — a corrupt or
       // shapeless master.key classifies as config corruption, never a raw
       // SyntaxError/TypeError off the boot path (w28-crypto F4).
@@ -751,8 +783,9 @@ export class Fabric {
     // (w25-concurrency: a second fabric's locked section blocking on the
     // database serialised every writer into multi-second stalls).
     const landed = new Map();
+    const landedStmt = (this._flushLandedStmt ??= this.store.db.prepare('SELECT hash FROM audit WHERE tenant=? AND seq=?'));
     for (const [tenant, h] of pending) {
-      const row = this.store.db.prepare('SELECT hash FROM audit WHERE tenant=? AND seq=?').get(tenant, h.seq);
+      const row = landedStmt.get(tenant, h.seq);
       if (!row || row.hash !== h.hash) continue;
       // A reanchor head is sanctioned only while it is still the tenant's
       // committed TIP — a delayed seal head must never overwrite a peer's
@@ -760,7 +793,7 @@ export class Fabric {
       // (w28-fixverify F3). Degraded to monotone, a stale reanchor can
       // only lose — drop it like a rolled-back phantom.
       if (h.reanchor) {
-        const tip = this.store.db.prepare('SELECT seq,hash FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1').get(tenant);
+        const tip = (this._flushTipStmt ??= this.store.db.prepare('SELECT seq,hash FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1')).get(tenant);
         if (!(tip && tip.seq === h.seq && tip.hash === h.hash)) continue;
       }
       landed.set(tenant, h);
@@ -827,7 +860,7 @@ export class Fabric {
             const cpFp = Object.keys(cpKeys).sort().map(k => `${k}:${cpKeys[k].public_key}`).join('|');
             let cpCache = this.#cpHeadVerify.get(tenant);
             if (cpCache?.fp !== cpFp) { cpCache = { fp: cpFp, sizes: new Map() }; this.#cpHeadVerify.set(tenant, cpCache); }
-            for (const stored of this.store.db.prepare("SELECT id, value FROM records WHERE tenant=? AND kind='audit-checkpoint' ORDER BY created, id LIMIT 1000000").all(tenant)) {
+            for (const stored of (this._cpSweepStmt ??= this.store.db.prepare("SELECT id, value FROM records WHERE tenant=? AND kind='audit-checkpoint' ORDER BY created, id LIMIT 1000000")).all(tenant)) {
               const id = stored.id;
               // An unreadable or undecryptable stored row is planted
               // residue — the claim counts only what VERIFIES, and a
@@ -854,7 +887,7 @@ export class Fabric {
             }
             const ridxMint = this._auditIndex(tenant);
             let revocations = 0;
-            for (const row of this.store.db.prepare("SELECT id FROM records WHERE tenant=? AND kind='revocation'").all(tenant))
+            for (const row of (this._revScanStmt ??= this.store.db.prepare("SELECT id FROM records WHERE tenant=? AND kind='revocation'")).all(tenant))
               if (ridxMint.revoked.has(row.id)) revocations++;
             // The head attests the durable watermark floor it saw at mint:
             // a later strip of the watermark file is then distinguishable
@@ -1005,6 +1038,7 @@ export class Fabric {
             renameSync(`${wpath}.tmp`, wpath);
             this.#fsyncDir();
             this.#headWmRaw = undefined;
+            this.#headWmStatKey = undefined;
           }
         } catch (err) {
           // A held lock degrades honestly to the fold's own bump path —
@@ -1089,8 +1123,16 @@ export class Fabric {
     let raw = null;
     try {
       const p = join(this.directory, 'head-watermark.json');
-      if (statSync(p).size > 262_144) return 'oversized';
+      // Stat-gate: re-read only when the inode/mtime/size changed — an
+      // atomic rename lands on a different inode, an in-place rewrite on a
+      // new mtime, so a cached parse can never serve a peer's advance
+      // (w45-perf). The stat itself still runs every call.
+      const st = statSync(p);
+      if (st.size > 262_144) return 'oversized';
+      const statKey = `${st.dev}:${st.ino}:${st.mtimeMs}:${st.size}`;
+      if (statKey === this.#headWmStatKey) return this.#headWmParsed;
       raw = readFileSync(p, 'utf8');
+      this.#headWmStatKey = statKey;
     } catch { /* absent or unreadable */ }
     if (raw === this.#headWmRaw) return this.#headWmParsed;
     this.#headWmRaw = raw;
@@ -1646,6 +1688,19 @@ export class Fabric {
   // replays them, and floor_derived refs stay exempt exactly as the fold's
   // keyDeadAt enforcement exempts them (w39-seal F-6, w39-crypto F2).
   _chainFacts(tenant) {
+    // Raw sqlite schema failures (a dropped or rewritten audit table) are
+    // integrity evidence inside the INV taxonomy, never bare ERR_SQLITE
+    // noise on a direct caller — parity with _auditIndex and the store's
+    // bulk readers (w46-store M-3).
+    try { return this._chainFactsInner(tenant); }
+    catch (e) {
+      if (e instanceof InvariantError) throw e;
+      if (/no such table|no such column|not a database|malformed/i.test(e?.message ?? ''))
+        throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e });
+      throw e;
+    }
+  }
+  _chainFactsInner(tenant) {
     // Signature-verified rows only: an unverified planted row can never
     // mint a death, a quorum, or a successor here — the fold itself
     // wedges on that same plant, so absorbing it would only fabricate
@@ -3345,7 +3400,28 @@ export class Fabric {
   // IDN: JIT grants merge with static identity grants. A grant only ever adds
   // scope already permitted by the runtime policy; it cannot exceed it.
   grantsFor(tenant, subject_id, now) {
-    const identity = Object.values(this.tenant(tenant).identities).find(x => x.subject_id === subject_id);
+    const cfg = this.tenant(tenant);
+    const identity = Object.values(cfg.identities).find(x => x.subject_id === subject_id);
+    const idx = this._auditIndex(tenant);
+    // Attested chain time is the monotone floor for expiry: a grant that
+    // any attested row saw die stays dead — a rewound host clock must not
+    // resuscitate expired scope the chain already observed pass
+    // (w45-seal F-5, w45-runtime F1 family).
+    const effNow = Math.max(now, idx.prevPlTime ?? 0);
+    // Every input to the merge below is captured in the memo key: the fold
+    // view (maxSeq covers incremental appends; revoked/grants sizes cover
+    // fold content at a fixed tip), the mutable stores' dirt counters, the
+    // heal-window flag and the resolved effective time. Identity objects
+    // live and die with the tenant config, so a re-attested config holds
+    // no stale entries (w45-perf).
+    const mk = `${subject_id}|${effNow}|${idx.maxSeq}|${idx.revoked.size}|${idx.grants.size}|${this.store._dirtSeq ?? 0}|${this.target._dirtSeq ?? 0}|${this.#pendingEffects.has(tenant) ? 1 : 0}`;
+    const memos = (this._grantsMemo ??= new WeakMap());
+    let memo = memos.get(identity ?? cfg);
+    const hit = memo?.get(mk);
+    // Callers mutate the returned object in places — serve a defensive
+    // copy so a memoized merge can never be poisoned between authorize()
+    // calls (w45-perf).
+    if (hit) return { roles: [...hit.roles], resources: [...hit.resources], actions: [...hit.actions], destinations: [...hit.destinations], columns: [...hit.columns], row_ids: [...hit.row_ids], tuples: hit.tuples.map(tp => ({ resources: [...tp.resources], actions: [...tp.actions], destinations: [...tp.destinations], columns: [...tp.columns], row_ids: [...tp.row_ids] })) };
     const base = identity?.grants ?? { resources: [], actions: [], destinations: [], columns: [], row_ids: [] };
     // CON-008: grant-carried roles merge too — support access confers its
     // operational role ONLY for the grant window; no standing access remains
@@ -3356,16 +3432,10 @@ export class Fabric {
     // never the flat union, so fields approved for a service cannot launder
     // rows of an unrelated dataset (and vice versa).
     const tuples = [{ resources: base.resources ?? [], actions: base.actions ?? [], destinations: base.destinations ?? [], columns: base.columns ?? [], row_ids: base.row_ids ?? [] }];
-    const idx = this._auditIndex(tenant);
     // Without a single anchored JIT grant every grants-table row fails
     // _grantAnchored outright — skip the decrypt scan instead of paying it
     // per authorize/evaluate (w43-perf). The anchored set still drives the
     // row path below whenever it is nonempty.
-    // Attested chain time is the monotone floor for expiry: a grant that
-    // any attested row saw die stays dead — a rewound host clock must not
-    // resuscitate expired scope the chain already observed pass
-    // (w45-seal F-5, w45-runtime F1 family).
-    const effNow = Math.max(now, idx.prevPlTime ?? 0);
     for (const g of (idx.grants.size ? this.target.grants(tenant, subject_id, effNow) : [])) {
       // A grants-table row is derived state, never authority: it is honored
       // only when a ledger JIT_GRANT_ISSUED event anchors it — either by
@@ -3414,6 +3484,10 @@ export class Fabric {
         throw new InvariantError('INV-409-INTEGRITY', 'Ledger-anchored JIT grant rows are missing — tamper evidence', 409);
     }
     merged.tuples = tuples;
+    // The throw paths above are intentionally NOT memoized — a murder
+    // verdict re-derives on every call so evidence stays fresh (w45-perf).
+    if (memo === undefined) { memo = new Map(); memos.set(identity ?? cfg, memo); }
+    if (memo.size < 64) memo.set(mk, merged);
     return merged;
   }
   // A capability's whole selection must fit inside ONE honoured grant tuple
@@ -4278,8 +4352,20 @@ export class Fabric {
     });
   }
   policy(t) {
+    // Memoize on the exact inputs the resolution reads: the two rows' raw
+    // ciphertext (a store rewrite lands on different bytes), the fold view
+    // (maxSeq covers appends; anchors size covers fold content) and the
+    // clock (the staged-activation comparison is time-bound). Ciphertext
+    // equality is checked per hit — a planted same-seq row never reuses a
+    // verified result (w45-perf).
+    const rawStmt = (this._policyRawStmt ??= this.store.db.prepare('SELECT value FROM records WHERE tenant=? AND kind=? AND id=?'));
+    const stagedRaw = rawStmt.get(t, 'policy', 'staged')?.value ?? null, activeRaw = rawStmt.get(t, 'policy', 'active')?.value ?? null;
+    const pIdx = this._auditIndex(t), now = this.clock();
+    const mk = `${t}|${pIdx.maxSeq}|${pIdx.policyAnchors?.size ?? 0}|${now}`;
+    const ent = this._policyMemo?.get(mk);
+    if (ent && ent.stagedRaw === stagedRaw && ent.activeRaw === activeRaw) return ent.result;
     const staged = this.store.get(t, 'policy', 'staged'), active = this._mustAnchored(t, 'policy', 'active');
-    const anchors = this._auditIndex(t).policyAnchors;
+    const anchors = pIdx.policyAnchors;
     const anchor = [...anchors].reverse().find(a => !a.staged);
     // An empty anchor must NOT vacuously pass: on the pre-upgrade ledgers
     // this exists for, ANY rewritten 'active' row would verify. Fail
@@ -4291,11 +4377,16 @@ export class Fabric {
     // swapped or back-dated row degrades to 'active' rather than throwing,
     // so tamper cannot wedge every reader; the transaction-path sweep
     // retires it loudly instead (w18-fixverify F8/F9).
-    if (staged && staged.activate_at <= this.clock() && staged.policy.version === active.version + 1 && staged.policy.expires_at > this.clock()) {
+    if (staged && staged.activate_at <= now && staged.policy.version === active.version + 1 && staged.policy.expires_at > now) {
       const stagedAnchor = [...anchors].reverse().find(a => a.staged);
-      if (stagedAnchor && stagedAnchor.digest === digest(staged.policy) && stagedAnchor.activate_at === staged.activate_at) return staged.policy;
+      if (stagedAnchor && stagedAnchor.digest === digest(staged.policy) && stagedAnchor.activate_at === staged.activate_at) { const result = staged.policy; this._policyMemoSet(mk, stagedRaw, activeRaw, result); return result; }
     }
+    this._policyMemoSet(mk, stagedRaw, activeRaw, active);
     return active;
+  }
+  _policyMemoSet(mk, stagedRaw, activeRaw, result) {
+    const memos = (this._policyMemo ??= new Map());
+    if (memos.size < 64) memos.set(mk, { stagedRaw, activeRaw, result });
   }
   identities(t) { const iIdx = this._auditIndex(t).revoked; return Object.fromEntries(Object.entries(this.tenant(t).identities).map(([id, v]) => [id, { ...v, revoked: v.revoked || iIdx.has(`key:${id}`) || iIdx.has(`subject:${v.subject_id}`) || iIdx.has(`device:${v.device_id}`) }])); }
   assertHealthy(t, subject, device, now) {

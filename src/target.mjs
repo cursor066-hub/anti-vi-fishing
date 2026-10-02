@@ -5,6 +5,7 @@ import { digest, clone, canonical } from './canonical.mjs';
 import { encrypt, decrypt } from './crypto.mjs';
 import { buildPlan, verifyPlan, executePlan } from './datagate.mjs';
 import { requireThat, InvariantError } from './errors.mjs';
+import { randomBytes } from 'node:crypto';
 
 // Controlled target simulator. It NEVER talks to a real bank, ERP, OS, or
 // cloud. Resources and dataset rows live in real tables with per-tenant AES-256-GCM
@@ -75,6 +76,39 @@ export class SimulatedTarget {
     // Migration faults get the same classification — a foreign schema's
     // missing column must not leak a raw sqlite error (w31-fixverify F2).
     try { this._migrateAad(); } catch (e) { if (e instanceof InvariantError) throw e; throw new InvariantError('INV-503-STORAGE', 'Target schema is unrecognised — refusing to interpret a foreign or corrupt database', 503, { cause: e }); }
+    // The AAD migration marker is the only durable signal between the
+    // migration commit and the fabric's attestation — a live delete in the
+    // gap silently suppresses the evidence row (w46-store M-2, parity with
+    // the ledger store's guard). The sanctioned post-attest cleanup drops
+    // and recreates this guard verbatim.
+    try {
+      const expected = "CREATE TRIGGER aad_marker_keep BEFORE DELETE ON meta_kv WHEN OLD.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END";
+      this.db.exec(`CREATE TRIGGER IF NOT EXISTS ${expected.slice('CREATE TRIGGER '.length)}`);
+      const norm = s => (s ?? '').replace(/\s+/g, ' ').trim();
+      const stored = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='aad_marker_keep'").get()?.sql;
+      requireThat(norm(stored) === norm(expected), 'INV-503-STORAGE', 'integrity trigger missing or tampered: aad_marker_keep', 503);
+      for (const stray of this.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger'").all().map(r => r.name).filter(n => n !== 'aad_marker_keep'))
+        this.db.exec(`DROP TRIGGER "${String(stray).replace(/"/g, '""')}"`);
+      const pt = `__integrity_probe__:${randomBytes(8).toString('hex')}`;
+      this.db.exec('SAVEPOINT integrity_probe');
+      let ok = false;
+      try {
+        this.db.prepare("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', '{}')").run(pt);
+        this.db.prepare("DELETE FROM meta_kv WHERE tenant=? AND key='aad_migration'").run(pt);
+      } catch (e) {
+        if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw e;
+        if (e?.message === 'aad migration marker is evidence') ok = true;
+        else throw new InvariantError('INV-503-STORAGE', `Integrity probe fault: ${e?.message ?? e}`, 503);
+      } finally {
+        this.db.exec('ROLLBACK TO integrity_probe'); this.db.exec('RELEASE integrity_probe');
+      }
+      requireThat(ok, 'INV-503-STORAGE', 'aad_migration marker delete trigger not enforced', 503);
+      try { this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); } catch { /* contention: next armed write retries */ }
+    } catch (e) {
+      if (e instanceof InvariantError) throw e;
+      if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Target writer contention exceeded the wait bound; retry', 503);
+      throw e;
+    }
   }
   // One-shot migration out of the legacy slash-form AAD space — same shape
   // as the ledger store's migration: each row that only authenticates
@@ -256,6 +290,7 @@ export class SimulatedTarget {
   grant(tenant, grant_id, value) {
     this._deleted = true; // grant upsert supersedes ciphertext (w8-fixverify F3)
     this.db.prepare('INSERT INTO grants VALUES(?,?,?) ON CONFLICT(tenant,grant_id) DO UPDATE SET value=excluded.value').run(tenant, grant_id, encrypt(value, this.key(tenant), AAD('target', 'grant', tenant, grant_id)));
+    this._dirtSeq = (this._dirtSeq ?? 0) + 1; // grants-table dirt invalidates grantsFor memos (w45-perf)
     // Bare callers arm the flag but never reach tx()'s post-commit
     // checkpoint — truncate on the autocommit path too, like the store
     // does (w21-store F-5).
@@ -306,6 +341,7 @@ export class SimulatedTarget {
       value.revoked = true;
       this._deleted = true; // revoke supersedes ciphertext (w8-fixverify F3)
       this.db.prepare('UPDATE grants SET value=? WHERE tenant=? AND grant_id=?').run(encrypt(value, this.key(tenant), AAD('target', 'grant', tenant, grant_id)), tenant, grant_id);
+      this._dirtSeq = (this._dirtSeq ?? 0) + 1;
       return value;
     });
   }

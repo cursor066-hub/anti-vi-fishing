@@ -107,6 +107,11 @@ export class Store {
   // sequenced after its death — the fabric fold enforces this for the live
   // index; standalone verification lacked it (w28-crypto F2).
   _auditKeyDeaths(tenant) {
+    // A dropped or rewritten audit table classifies in the ledger taxonomy,
+    // never raw ERR_SQLITE noise on the bulk reader (w46-store M-3).
+    return this._schemaGuard(() => this._auditKeyDeathsInner(tenant));
+  }
+  _auditKeyDeathsInner(tenant) {
     const dead = new Map();
     // Stored envelope text is attacker-writable: a respelled row
     // ('\u0074ype') folds identically yet vanishes from a LIKE scan, so
@@ -191,6 +196,12 @@ export class Store {
       // legitimate update is the accumulate path — cost only ever grows
       // and `at` only moves forward (w23 W23-07).
       ['no_usage_rewind', "CREATE TRIGGER no_usage_rewind BEFORE UPDATE ON usage WHEN NEW.cost < OLD.cost OR NEW.at < OLD.at OR NEW.tenant <> OLD.tenant OR NEW.subject <> OLD.subject OR NEW.resource <> OLD.resource OR NEW.capability <> OLD.capability OR NEW.request <> OLD.request BEGIN SELECT RAISE(ABORT, 'usage is monotone'); END", 'usage is monotone'],
+      // The AAD migration marker is the only durable signal between the
+      // migration commit and the fabric's attestation — a live delete in
+      // the gap silently suppresses the evidence row (w46-store M-2). The
+      // sanctioned post-attest cleanup drops and recreates this guard
+      // verbatim; an attacker's delete now aborts in-band.
+      ['aad_marker_keep', "CREATE TRIGGER aad_marker_keep BEFORE DELETE ON meta_kv WHEN OLD.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END", 'aad migration marker is evidence'],
     ];
     const norm = s => (s ?? '').replace(/\s+/g, ' ').trim();
     for (const [name, sql] of guards) this.db.exec(`CREATE TRIGGER IF NOT EXISTS ${sql.slice('CREATE TRIGGER '.length)}`);
@@ -250,6 +261,10 @@ export class Store {
     // INSERT OR IGNORE seeds when absent without firing the delete guard on
     // an existing row; `last=last-1` is a backward write on any live value.
     requireThat(probe(() => { this.db.prepare('INSERT OR IGNORE INTO clock VALUES(1,100)').run(); this.db.prepare('DELETE FROM clock WHERE id=1').run(); }, 'clock is monotone'), 'INV-503-STORAGE', 'clock delete trigger not enforced', 503);
+    // The marker guard fires only on the evidence key — other meta_kv rows
+    // (fold_floor) must stay writable, and a WHEN-less body that aborts
+    // every delete would wedge them (w46-store M-2).
+    requireThat(probe(() => { this.db.prepare("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', '{}')").run(pt); this.db.prepare("DELETE FROM meta_kv WHERE tenant=? AND key='aad_migration'").run(pt); }, 'aad migration marker is evidence'), 'INV-503-STORAGE', 'aad_migration marker delete trigger not enforced', 503);
     // The probes above journal WAL frames even though they roll back —
     // truncate so boot-time verification leaves no residual pages behind
     // (w19-aad W19-3 measures post-migration WAL size).
@@ -551,6 +566,10 @@ export class Store {
     };
     if (this.db.isTransaction) pair(); else this.tx(pair);
     if (!this.db.isTransaction) this.checkpoint();
+    // Record-table dirt: memoized readers (grantsFor/policy) key on this
+    // counter so any rewrite — committed or rolled back — forces a fresh
+    // read instead of serving a stale projection (w45-perf).
+    this._dirtSeq = (this._dirtSeq ?? 0) + 1;
     this.onRecordWrite?.(tenant, kind, id);
   }
   insert(tenant, kind, id, value, at) {
@@ -577,6 +596,7 @@ export class Store {
     };
     if (this.db.isTransaction) pair(); else this.tx(pair);
     if (!this.db.isTransaction) this.checkpoint(); // non-tx paths must not leave the DEK in the WAL (store-audit LOW)
+    this._dirtSeq = (this._dirtSeq ?? 0) + 1;
     this.onRecordWrite?.(tenant, kind, id);
   }
   readValue(tenant, kind, id, wrapped) {
@@ -601,6 +621,7 @@ export class Store {
       + this.db.prepare('DELETE FROM records WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id).changes;
     const changes = this.db.isTransaction ? pair() : this.tx(pair);
     this._shredded = this._shredded || changes > 0;
+    this._dirtSeq = (this._dirtSeq ?? 0) + 1;
     if (!this.db.isTransaction) this.checkpoint();
     return changes > 0;
   }
@@ -749,7 +770,12 @@ export class Store {
     // hash — the head rarely changes between appends.
     if (last) {
       this._verifiedHeads ??= new Map();
-      if (!this._verifiedHeads.has(last.hash)) {
+      // The memo key binds the stored hash column to the row's actual
+      // bytes: the hash column is attacker-writable, so keying on it alone
+      // would let a planted row borrow a previously-verified hash while
+      // carrying a different envelope (w46-store L-1).
+      const vkey = `${last.seq}:${last.hash}:${hashBytes(last.envelope)}`;
+      if (!this._verifiedHeads.has(vkey)) {
         // A head this instance minted skips the ECDSA pass when the stored
         // bytes still digest to the minted hash — byte-identical means the
         // signature is the one this signer produced (w43-perf).
@@ -759,7 +785,7 @@ export class Store {
           try { verifySigned(JSON.parse(last.envelope), pub, 'audit'); } catch (e) { throw new InvariantError('INV-409-AUDIT-TAMPER', 'Audit head does not verify — ledger tamper', 409, { cause: e }); }
         }
         if (this._verifiedHeads.size >= 64) this._verifiedHeads.clear();
-        this._verifiedHeads.set(last.hash, true);
+        this._verifiedHeads.set(vkey, true);
       }
     }
     const envelope = signer.sign(entry);
@@ -832,7 +858,7 @@ export class Store {
   // byte-for-byte (w43-perf).
   selfRowEnv(tenant, seq) { return this._selfRows?.get(tenant)?.get(seq); }
   auditHashes(tenant) {
-    return this.db.prepare('SELECT hash FROM audit WHERE tenant=? ORDER BY seq').all(tenant).map(r => r.hash);
+    return this._schemaGuard(() => this.db.prepare('SELECT hash FROM audit WHERE tenant=? ORDER BY seq').all(tenant).map(r => r.hash));
   }
   auditPage(tenant, { after = 0, limit = 1000 } = {}) {
     // Cursor hygiene: limit=0 would crash on rows.at(-1), a negative limit
@@ -842,13 +868,13 @@ export class Store {
     // the internal index fold legitimately pages through the entire chain
     // (w23 W23-08).
     requireThat(Number.isSafeInteger(after) && after >= 0 && Number.isSafeInteger(limit) && limit >= 1, 'INV-400-SCHEMA', 'Invalid audit cursor or limit', 400);
-    const rows = this.db.prepare('SELECT seq,hash,envelope FROM audit WHERE tenant=? AND seq>? ORDER BY seq LIMIT ?').all(tenant, after, limit);
+    const rows = this._schemaGuard(() => this.db.prepare('SELECT seq,hash,envelope FROM audit WHERE tenant=? AND seq>? ORDER BY seq LIMIT ?').all(tenant, after, limit));
     const signer = this._signer(tenant), public_keys = signer.keys ? signer.keys() : { [signer.key_id]: { public_key: signer.public_key } };
     // Serving the log is a security surface: re-verify each row's stored
     // hash against its signed payload and check chain continuity back to the
     // row preceding the page — an injected or rewritten row cannot pass
     // (store-audit MED-5).
-    const anchor = after ? this.db.prepare('SELECT hash FROM audit WHERE tenant=? AND seq=?').get(tenant, after) : null;
+    const anchor = after ? this._schemaGuard(() => this.db.prepare('SELECT hash FROM audit WHERE tenant=? AND seq=?').get(tenant, after)) : null;
     // Death map spans the WHOLE chain, not just the page — a page reader
     // must catch a row signed after its key's earlier revocation
     // (w28-crypto F2).
@@ -894,7 +920,7 @@ export class Store {
     // for attacker JSON.
     let previous = '0'.repeat(64);
     const deadAt = this._auditKeyDeaths(tenant);
-    const rows = this.db.prepare('SELECT seq,hash,envelope FROM audit WHERE tenant=? ORDER BY seq').all(tenant).map(r => {
+    const rows = this._schemaGuard(() => this.db.prepare('SELECT seq,hash,envelope FROM audit WHERE tenant=? ORDER BY seq').all(tenant)).map(r => {
       let envelope;
       try { envelope = JSON.parse(r.envelope); }
       catch { throw new InvariantError('INV-409-AUDIT-TAMPER', 'Audit row failed integrity verification', 409); }
@@ -920,7 +946,7 @@ export class Store {
     // A file-level attacker can still delete the stored witness too — a truly
     // pinned anchor requires an external copy of a checkpoint, which
     // verifyAudit(priorCheckpoint) accepts; this closes the common case.
-    const priorRow = this.db.prepare("SELECT id,value FROM records WHERE tenant=? AND kind='audit-checkpoint' ORDER BY created DESC LIMIT 1").get(tenant);
+    const priorRow = this._schemaGuard(() => this.db.prepare("SELECT id,value FROM records WHERE tenant=? AND kind='audit-checkpoint' ORDER BY created DESC LIMIT 1").get(tenant));
     const prior_checkpoint = priorRow ? this.readValue(tenant, 'audit-checkpoint', priorRow.id, priorRow.value) : null;
     if (now !== null) this.put(tenant, 'audit-checkpoint', `cp-${checkpoint.payload.size}`, checkpoint, now);
     return { format: 'IF-AUDIT-1', public_keys, prior_checkpoint, checkpoint, entries: rows };

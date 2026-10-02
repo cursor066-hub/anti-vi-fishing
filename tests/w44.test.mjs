@@ -7,7 +7,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, existsSync, statSync, readFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { fixture, hasCode, runtimeInput, runtimeRequest } from './helpers.mjs';
 import { createServer } from '../src/server.mjs';
@@ -414,7 +414,7 @@ test('w44-store H-3a: a respelled AUTHORITY_REVOKED still folds the death window
   assert.equal(h.f._keyDeaths('acme').has('dead-kid-1'), true, 'chain-facts scan survives the respell');
 });
 
-test('w44-store M-2: a dropped audit table classifies INV-409 on both the fold and the write path', t => {
+test('w44-store M-2: a dropped audit table classifies INV-409 on the write path', t => {
   const h = fixture(t);
   dropAuditGuards(h);
   h.f.store.db.exec('DROP TABLE audit');

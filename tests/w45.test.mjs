@@ -8,7 +8,6 @@ import { chmodSync, statSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { DatabaseSync } from 'node:sqlite';
 import { fixture, runtimeInput, runtimeRequest, coverageIdentity } from './helpers.mjs';
 import { Fabric } from '../src/fabric.mjs';
 import { KeyVault } from '../src/keystore.mjs';
@@ -102,7 +101,7 @@ test('w45-ledger HIGH-1d: marker attestation is asserted, not just the delete �
   } finally { f2.close(); }
 });
 
-test('w45-ledger HIGH-1c: marker shaped plant after the honest tail still attests — dedupe consults verified rows only', t => {
+test('w45-ledger HIGH-1c: a ghost marker on the honest tail still attests — the planted-decoy variant is covered by HIGH-1a/1b', t => {
   const h = fixture(t);
   const markerValue = JSON.stringify({ migrated: 5 });
   h.f.store.db.prepare("INSERT INTO meta_kv VALUES('ghost','aad_migration',?)").run(markerValue);

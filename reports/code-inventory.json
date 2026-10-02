@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 7441,
-      "bytes": 576386
+      "lines": 7532,
+      "bytes": 582811
     },
     "src/issuerd.mjs": {
       "lines": 797,
@@ -82,12 +82,12 @@
       "bytes": 3876
     },
     "src/store.mjs": {
-      "lines": 998,
-      "bytes": 73388
+      "lines": 1024,
+      "bytes": 75565
     },
     "src/target.mjs": {
-      "lines": 450,
-      "bytes": 33171
+      "lines": 486,
+      "bytes": 35841
     },
     "web/app.js": {
       "lines": 256,
@@ -447,11 +447,15 @@
     },
     "tests/w44.test.mjs": {
       "lines": 435,
-      "bytes": 30132
+      "bytes": 30100
     },
     "tests/w45.test.mjs": {
-      "lines": 283,
-      "bytes": 18537
+      "lines": 282,
+      "bytes": 18501
+    },
+    "tests/w46.test.mjs": {
+      "lines": 147,
+      "bytes": 8956
     },
     "tests/w5-mutations.test.mjs": {
       "lines": 194,
@@ -522,6 +526,6 @@
       "bytes": 6499
     }
   },
-  "total_files": 130,
-  "total_lines": 33903
+  "total_files": 131,
+  "total_lines": 34202
 }
