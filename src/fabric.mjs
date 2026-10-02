@@ -296,7 +296,11 @@ export class Fabric {
         if (d.digests.length < 4) d.digests.push(hashBytes(r.value));
       }
     }
-    const aadAttested = (t, d) => this.store.db.prepare("SELECT 1 AS x FROM audit WHERE tenant=? AND envelope LIKE '%'||?||'%' LIMIT 1").get(t, d)?.x === 1;
+    // Dedupe consults the parsed marker_digests array on marker rows only —
+    // a LIKE substring would let any attacker-planted envelope text carrying
+    // the digest (or an accidental prefix inside an unrelated field)
+    // suppress the attestation (w44-store M-1 tightened).
+    const aadAttested = (t, d) => this.store.db.prepare("SELECT 1 AS x FROM audit WHERE tenant=? AND json_valid(envelope) AND json_extract(envelope,'$.payload.type')='AAD_MIGRATION_MARKER' AND instr(COALESCE(json_extract(envelope,'$.payload.metadata.marker_digests'),''), ?) > 0 LIMIT 1").get(t, d)?.x === 1;
     for (const t of new Set([...this.store.aadMigration.keys(), ...this.target.aadMigration.keys(), ...migPending.keys()])) {
       const marker = migPending.get(t);
       if (!Object.hasOwn(this.store.auditSigners, t)) {
@@ -1646,24 +1650,21 @@ export class Fabric {
     // attacker clay, and an envelope rewrite that preserves it would leave
     // this fingerprint unchanged while the facts it guards are poisoned —
     // the fingerprint binds the column AND the row bytes together so
-    // either half of the lie re-derives (w44-fixverify F-7). Seals only
-    // ever land as new appends above the previous tip, so the seal probe
-    // is a bounded range scan off the last known tip rather than the
-    // full-table LIKE the fingerprint used to pay on every call (w44-perf);
-    // a new seal landing ABOVE the floor re-derives exactly as before.
-    const sealFloor = cached?.sealTip ?? 0;
+    // either half of the lie re-derives (w44-fixverify F-7). A new seal
+    // always lands as an append, so count/max-seq/tip all move and the
+    // fingerprint re-derives — no separate seal probe is needed, and a
+    // parsed-type subquery would only re-parse every envelope above the
+    // floor on every index call (w44 CI perf regression).
     const shape = (this.#cfShapeStmt ??= this.store.db.prepare(
       'SELECT COUNT(*) n, COALESCE(MAX(seq),0) m,'
       + ' (SELECT hash FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1) h,'
-      + ' (SELECT envelope FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1) e,'
-      + ' COALESCE((SELECT MAX(seq) FROM audit WHERE tenant=? AND seq>? AND json_valid(envelope) AND json_extract(envelope,\'$.payload.type\') LIKE \'AUDIT_SEAL_%\'),0) s'
+      + ' (SELECT envelope FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1) e'
       + ' FROM audit WHERE tenant=?',
-    )).get(tenant, tenant, tenant, sealFloor, tenant);
+    )).get(tenant, tenant, tenant);
     shape.h = shape.h !== null ? `${shape.h}\x00${hashBytes(shape.e)}` : null;
     delete shape.e;
     const prevDead = cached?.dead, prevRefs = cached?.refsDead;
-    if (cached && (shape.m < cached.throughSeq || shape.n < cached.count || shape.h !== cached.tipHash || shape.s !== cached.sealTip)) cached = undefined;
-    const sealTip = Math.max(shape.s, sealFloor);
+    if (cached && (shape.m < cached.throughSeq || shape.n < cached.count || shape.h !== cached.tipHash)) cached = undefined;
     cached ??= { throughSeq: 0, count: 0, dead: new Map(), succ: new Map(), refsDead: new Set(), floorRefs: new Set(), cer: { planned: new Map(), aborted: new Set(), committed: new Map(), acks: new Map() } };
     cached.succ ??= new Map(); cached.refsDead ??= new Set(); cached.floorRefs ??= new Set();
     cached.cer ??= { planned: new Map(), aborted: new Set(), committed: new Map(), acks: new Map() };
@@ -1731,7 +1732,6 @@ export class Fabric {
     // shape.m already IS that tail, so no second tip probe is needed.
     if (shape.m > cached.throughSeq) cached.throughSeq = shape.m;
     cached.count = shape.n;
-    cached.sealTip = sealTip;
     cached.tipHash = shape.h ?? null;
     this._keyDeathCache.set(tenant, cached);
     this._probeMemo?.set(cfMemoKey, { appends: cfAppends, cached });
