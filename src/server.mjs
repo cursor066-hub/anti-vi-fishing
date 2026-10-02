@@ -114,13 +114,24 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
   // code in every state it exists for (w41-http F1). sealAuditChain
   // applies its own static identity gate over this principal.
   function authBreakglass(req) {
+    // Chain-derived checks are enforced whenever the fold can serve them:
+    // on a healthy chain a revoked credential or missing role still
+    // refuses — only a ledger wedge (the state break-glass exists to
+    // repair) exempts the credential (w43-fv M2). Non-wedge failures
+    // always stand: revocation and scope verdicts are never swallowed as
+    // 'wedged'.
+    const chainChecked = (fn) => { try { fn(); } catch (e) { if (!['INV-409-INTEGRITY', 'INV-409-AUDIT-TAMPER', 'INV-503-GATE'].includes(e?.code)) throw e; } };
     const authorization = req.headers.authorization;
     if (authorization) {
       requireThat(/^Bearer [A-Za-z0-9_-]{43}$/.test(authorization), 'INV-401-AUTH', 'Authentication required', 401);
       const hash = hashBytes(authorization.slice(7));
       for (const [tenant, t] of Object.entries(fabric.tenantMap())) {
         const entry = t.auth[hash];
-        if (entry && entry.expires_at > fabric.clock()) return { tenant_id: tenant, subject_id: entry.subject_id };
+        if (entry && entry.expires_at > fabric.clock()) {
+          const principal = { tenant_id: tenant, subject_id: entry.subject_id };
+          chainChecked(() => { requireThat(!fabric.revoked(tenant, 'token', hash), 'INV-401-AUTH', 'Authentication required', 401); fabric.authorize(principal, ['operator', 'approver', 'custodian', 'security', 'auditor', 'policy_admin', 'workload']); });
+          return principal;
+        }
       }
       throw new InvariantError('INV-401-AUTH', 'Authentication required', 401);
     }
@@ -129,6 +140,7 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
     // POST under an ambient cookie keeps the CSRF+Origin binding —
     // break-glass skips chain-derived checks, never ambient-cookie proof.
     requireThat(typeof req.headers['x-csrf-token'] === 'string' && Buffer.byteLength(req.headers['x-csrf-token']) === session.csrf.length && timingSafeEqual(Buffer.from(req.headers['x-csrf-token']), Buffer.from(session.csrf)) && req.headers.origin === origin, 'INV-403-CSRF', 'Request origin or CSRF token rejected', 403);
+    chainChecked(() => { requireThat(!fabric.revoked(session.principal.tenant_id, 'token', session.token_hash), 'INV-401-AUTH', 'Authentication required', 401); fabric.authorize(session.principal, ['operator', 'approver', 'custodian', 'security', 'auditor', 'policy_admin', 'workload']); });
     return session.principal;
   }
   // Canonical integer grammar for query params — the same strictness the
@@ -317,8 +329,11 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
         const p = authBreakglass(req); requestPrincipal = p; bumpTenant();
         rateLimit(`subject:${p.tenant_id}:${p.subject_id}`, 300);
         await noBody(req);
-        const out = fabric.sealAuditChain(p);
+        // Parameter validation must run BEFORE the seal executes — a
+        // malformed request must never rewrite the ledger on its way to a
+        // 400 (w43-fv M1, same ordering doctrine as logout).
         if (queryCheckAfterAuth) queryCheck(url, path);
+        const out = fabric.sealAuditChain(p);
         return send(200, out);
       }
       const p = auth(req, GET_AUDIT_WRITING.has(path) || /^\/v1\/audit\/proofs\/\d+$/.test(path)); requestPrincipal = p; bumpTenant(); rateLimit(`subject:${p.tenant_id}:${p.subject_id}`, 300);

@@ -160,6 +160,12 @@ def _test_title(body):
     # its body (w41-ledger M-1).
     m = re.match(r"\s*test\(\s*(['\"`])((?:\\.|(?!\1)[\s\S])*)\1", body)
     return m.group(2) if m else ''
+def _asserts(body):
+    # The assert probe runs on the literal-blanked body: 'assert(x)' or
+    # 'expect(' sitting inside a string/template/regex literal is dead
+    # text, not an assertion — only real call syntax survives blanking
+    # (w43-fv M3).
+    return _ASSERT_CALL.search(_blank_code(body))
 def evidence_blocks(path):
     text = path.read_text()
     if not path.name.endswith('.test.mjs'):
@@ -171,7 +177,7 @@ for row in rows:
     prefix = row['id'].rsplit('-', 1)[0]
     owner, baseline, implementation, limitation = by_prefix[prefix]
     matches = [str(p.relative_to(root)) for p in tests
-               if any((row['id'] in _test_title(b) if p.name.endswith('.test.mjs') else row['id'] in b) and (_ASSERT_CALL.search(b) or not p.name.endswith('.test.mjs')) for b in evidence_blocks(p))]
+               if any((row['id'] in _test_title(b) if p.name.endswith('.test.mjs') else row['id'] in b) and (_asserts(b) or not p.name.endswith('.test.mjs')) for b in evidence_blocks(p))]
     # A VERIFIED row must carry at least one asserting-test citation — the
     # docs sentinel is honest evidence for PARTIAL/BLOCKED rows only
     # (w39-ledger F6).

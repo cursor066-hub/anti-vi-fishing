@@ -76,6 +76,7 @@ export class Store {
           PRIMARY KEY(tenant,capability,request));
         CREATE INDEX IF NOT EXISTS usage_window ON usage(tenant,subject,resource,at);
         CREATE TABLE IF NOT EXISTS clock (id INTEGER PRIMARY KEY CHECK(id=1), last INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS meta_kv (tenant TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(tenant,key));
         CREATE TABLE IF NOT EXISTS data_access(tenant TEXT, subject TEXT, dataset TEXT, row_id TEXT, column_name TEXT, at INTEGER);
         CREATE INDEX IF NOT EXISTS data_access_ix ON data_access(tenant,subject,dataset,at);
         PRAGMA user_version=1;
@@ -395,6 +396,14 @@ export class Store {
           mark(r.tenant, 'migrated');
         } catch { mark(r.tenant, 'skipped'); }
       }
+      // The migration's own accounting is durable evidence too: the
+      // per-tenant stats persist inside the same tx that re-sealed the
+      // rows, so a crash after COMMIT but before the fabric's
+      // AAD_MIGRATION attestation still surfaces at the next open
+      // (w43-store F-4).
+      for (const [mtenant, ms] of stats)
+        if (ms.migrated + ms.transplants + ms.ambiguous + ms.skipped > 0)
+          this.db.prepare("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', ?)").run(mtenant, JSON.stringify(ms));
       this.db.exec('COMMIT');
       // Legacy ciphertext physically lingers in the WAL until a checkpoint
       // — truncate now so the dead form cannot be revived (w19-aad W19-3).
@@ -491,7 +500,12 @@ export class Store {
   dek(tenant, kind, id) {
     this._addr(tenant, kind, id);
     const row = this.db.prepare('SELECT wrapped FROM deks WHERE tenant=? AND kind=? AND id=?').get(tenant, kind, id);
-    return row ? Buffer.from(decrypt(row.wrapped, this.key(tenant), dekAad(tenant, kind, id)), 'base64url') : null;
+    if (!row) return null;
+    // A wrapped DEK that fails to authenticate is storage-layer tamper
+    // evidence in the ledger taxonomy — never a raw crypto TypeError
+    // (w43-store F-3, same doctrine as readValue's ciphertext path).
+    try { return Buffer.from(decrypt(row.wrapped, this.key(tenant), dekAad(tenant, kind, id)), 'base64url'); }
+    catch { throw new InvariantError('INV-503-STORAGE', 'Wrapped data key does not authenticate', 503); }
   }
   // Non-string addressing coerces at the SQL layer (TEXT affinity makes
   // id=5 match id='5') — the write side must not address rows the
@@ -528,6 +542,7 @@ export class Store {
     };
     if (this.db.isTransaction) pair(); else this.tx(pair);
     if (!this.db.isTransaction) this.checkpoint();
+    this.onRecordWrite?.(tenant, kind, id);
   }
   insert(tenant, kind, id, value, at) {
     requireThat(!this.get(tenant, kind, id), 'INV-409-CONFLICT', 'Record already exists', 409); this.put(tenant, kind, id, value, at);
@@ -553,6 +568,7 @@ export class Store {
     };
     if (this.db.isTransaction) pair(); else this.tx(pair);
     if (!this.db.isTransaction) this.checkpoint(); // non-tx paths must not leave the DEK in the WAL (store-audit LOW)
+    this.onRecordWrite?.(tenant, kind, id);
   }
   readValue(tenant, kind, id, wrapped) {
     const key = this.dek(tenant, kind, id) ?? this.key(tenant);

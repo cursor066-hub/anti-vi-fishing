@@ -30,8 +30,8 @@
       "bytes": 5547
     },
     "src/crypto.mjs": {
-      "lines": 97,
-      "bytes": 6582
+      "lines": 112,
+      "bytes": 7202
     },
     "src/datagate.mjs": {
       "lines": 167,
@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 6841,
-      "bytes": 532383
+      "lines": 7142,
+      "bytes": 554509
     },
     "src/issuerd.mjs": {
       "lines": 797,
@@ -62,8 +62,8 @@
       "bytes": 48125
     },
     "src/runtime.mjs": {
-      "lines": 265,
-      "bytes": 23176
+      "lines": 292,
+      "bytes": 25071
     },
     "src/schema.mjs": {
       "lines": 94,
@@ -74,20 +74,20 @@
       "bytes": 13696
     },
     "src/server.mjs": {
-      "lines": 502,
-      "bytes": 49265
+      "lines": 518,
+      "bytes": 50645
     },
     "src/shamir.mjs": {
       "lines": 91,
       "bytes": 3876
     },
     "src/store.mjs": {
-      "lines": 918,
-      "bytes": 67654
+      "lines": 934,
+      "bytes": 68752
     },
     "src/target.mjs": {
-      "lines": 433,
-      "bytes": 32119
+      "lines": 440,
+      "bytes": 32704
     },
     "web/app.js": {
       "lines": 251,
@@ -150,8 +150,8 @@
       "bytes": 269
     },
     "scripts/traceability.py": {
-      "lines": 208,
-      "bytes": 21316
+      "lines": 214,
+      "bytes": 21610
     },
     "scripts/verify-export-webcrypto.mjs": {
       "lines": 114,
@@ -441,6 +441,10 @@
       "lines": 135,
       "bytes": 9501
     },
+    "tests/w43.test.mjs": {
+      "lines": 323,
+      "bytes": 20728
+    },
     "tests/w5-mutations.test.mjs": {
       "lines": 194,
       "bytes": 13645
@@ -510,6 +514,6 @@
       "bytes": 6499
     }
   },
-  "total_files": 127,
-  "total_lines": 31940
+  "total_files": 128,
+  "total_lines": 32651
 }

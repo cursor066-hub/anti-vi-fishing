@@ -56,6 +56,7 @@ export class SimulatedTarget {
         CREATE TABLE IF NOT EXISTS dataset_rows(tenant TEXT, dataset TEXT, row_id TEXT, data TEXT, PRIMARY KEY(tenant,dataset,row_id));
         CREATE TABLE IF NOT EXISTS secrets_registry(tenant TEXT, secret_id TEXT, version INTEGER, value TEXT, PRIMARY KEY(tenant,secret_id));
         CREATE TABLE IF NOT EXISTS grants(tenant TEXT, grant_id TEXT, value TEXT, PRIMARY KEY(tenant,grant_id));
+        CREATE TABLE IF NOT EXISTS meta_kv (tenant TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(tenant,key));
         CREATE INDEX IF NOT EXISTS grants_subject ON grants(tenant);
         PRAGMA user_version=1;`);
       // Crash residue: a post-delete checkpoint that never ran leaves superseded
@@ -130,6 +131,12 @@ export class SimulatedTarget {
           } catch { mark(r.tenant, 'skipped'); }
         }
       }
+      // Same durable accounting as the ledger store's migration: the
+      // stats persist inside this tx so a crash before the fabric's
+      // attestation still surfaces them at the next open (w43-store F-4).
+      for (const [mtenant, ms] of stats)
+        if (ms.migrated + ms.transplants + ms.ambiguous + ms.skipped > 0)
+          this.db.prepare("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', ?)").run(mtenant, JSON.stringify(ms));
       this.db.exec('COMMIT');
       // Truncate post-migration so dead legacy ciphertext does not linger
       // in the WAL (w19-aad W19-3).

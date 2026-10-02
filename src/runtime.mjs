@@ -88,6 +88,21 @@ export class RuntimeGate {
       oneOf(input.port, netAllow.allowed_ports ?? [443], 'port');
       requireThat(cap.tenant_id === t && cap.subject_id === principal.subject_id && cap.gate_id === this.f.config.gate_id, 'INV-403-SCOPE', 'Capability scope denied', 403);
       this.f.assertHealthy(t, principal.subject_id, input.device_id, now);
+      // Anchored issuance and row integrity are probed before the
+      // validity checks: an expired-or-revoked capability whose anchored
+      // row was murdered must name the murder, not mask it behind the
+      // routine INV-401 (w43-runtime check-order LOW).
+      const idx = this.f._auditIndex(t);
+      requireThat(idx.capabilities?.has(cap.capability_id) === true, 'INV-401-CAPABILITY', 'Capability has no ledger-anchored issuance', 401);
+      const capRow = this.f.store.get(t, 'capability', cap.capability_id);
+      requireThat(capRow, 'INV-409-INTEGRITY', 'Anchored capability row is missing from the store', 409);
+      // Row, request and anchor all name the same envelope bytes — a
+      // transplanted envelope swapped in under an anchored id, or a
+      // re-minted envelope the ledger recorded differently, is integrity
+      // evidence rather than a spendable authority (w42-runtime L-3).
+      requireThat(digest(capRow) === digest(input.capability), 'INV-409-INTEGRITY', 'Stored capability row diverges from the presented envelope', 409);
+      const anchoredDig = idx.capabilityMeta?.get(cap.capability_id)?.digest;
+      requireThat(anchoredDig === undefined || anchoredDig === null || anchoredDig === digest(input.capability), 'INV-409-INTEGRITY', 'Presented capability diverges from the anchored issuance', 409);
       requireThat(cap.expires_at > now && cap.issued_at <= now && !this.f.revoked(t, 'capability', cap.capability_id) && !this.f.revoked(t, 'key', input.capability.protected.key_id), 'INV-401-CAPABILITY', 'Capability is expired or revoked', 401);
       // JIT/static grant validity is re-evaluated AT CONSUMPTION — a grant
       // revoked since issuance cannot ride a signed envelope past policy
@@ -118,21 +133,8 @@ export class RuntimeGate {
       // Issuance must be anchored the same way certificates are: a
       // capability minted inside a span a later seal cuts keeps its signed
       // envelope but loses its provable birth — without the anchor check it
-      // stays spendable while its issuance is unprovable (w31-runtime F-1).
-      // The anchored probe runs first so a deleted capability row reads as
-      // tamper evidence (murdered anchored row), never as 'unknown'
-      // (w42-runtime F5).
-      const idx = this.f._auditIndex(t);
-      requireThat(idx.capabilities?.has(cap.capability_id) === true, 'INV-401-CAPABILITY', 'Capability has no ledger-anchored issuance', 401);
-      const capRow = this.f.store.get(t, 'capability', cap.capability_id);
-      requireThat(capRow, 'INV-409-INTEGRITY', 'Anchored capability row is missing from the store', 409);
-      // Row, request and anchor all name the same envelope bytes — a
-      // transplanted envelope swapped in under an anchored id, or a
-      // re-minted envelope the ledger recorded differently, is integrity
-      // evidence rather than a spendable authority (w42-runtime L-3).
-      requireThat(digest(capRow) === digest(input.capability), 'INV-409-INTEGRITY', 'Stored capability row diverges from the presented envelope', 409);
-      const anchoredDig = idx.capabilityMeta?.get(cap.capability_id)?.digest;
-      requireThat(anchoredDig === undefined || anchoredDig === null || anchoredDig === digest(input.capability), 'INV-409-INTEGRITY', 'Presented capability diverges from the anchored issuance', 409);
+      // stays spendable while its issuance is unprovable (w31-runtime F-1,
+      // probed above so a murdered row names the murder first).
       for (const key of ['device_id', 'resource', 'destination', 'action', 'purpose']) requireThat(input[key] === cap[key], 'INV-403-SCOPE', 'Capability binding mismatch', 403);
       requireThat(input.columns.every(c => cap.columns.includes(c)) && input.row_ids.every(id => cap.row_ids.includes(id)), 'INV-403-SCOPE', 'Data scope denied', 403);
       requireThat(input.action !== 'data.read' || (input.columns.length > 0 && input.row_ids.length > 0), 'INV-400-SCHEMA', 'Data request requires explicit selection');
@@ -208,8 +210,11 @@ export class RuntimeGate {
       // resolves only when the planted row is byte-identical to the honest
       // charge — any other shape screams INV-409-REPLAY (w22 F8).
       this.f.store.db.prepare('INSERT INTO usage VALUES(?,?,?,?,?,?,?) ON CONFLICT(tenant,capability,request) DO NOTHING').run(t, cap.subject_id, cap.resource, now, cost, cap.capability_id, input.request_id);
-      const plantedUsage = this.f.store.db.prepare('SELECT subject,resource,at,cost FROM usage WHERE tenant=? AND capability=? AND request=?').get(t, cap.capability_id, input.request_id);
-      requireThat(plantedUsage && plantedUsage.subject === cap.subject_id && plantedUsage.resource === cap.resource && plantedUsage.at === now && plantedUsage.cost === cost, 'INV-409-REPLAY', 'Usage row already exists with conflicting billing fields', 409);
+      // cost crosses the driver as TEXT — the JS-number affinity path
+      // throws a driver-level RangeError for BIGINTs past 2^53, bypassing
+      // the INV-409-REPLAY probe that names this tamper (w43-runtime M2).
+      const plantedUsage = this.f.store.db.prepare('SELECT subject,resource,at,CAST(cost AS TEXT) AS cost FROM usage WHERE tenant=? AND capability=? AND request=?').get(t, cap.capability_id, input.request_id);
+      requireThat(plantedUsage && plantedUsage.subject === cap.subject_id && plantedUsage.resource === cap.resource && plantedUsage.at === now && plantedUsage.cost === String(cost), 'INV-409-REPLAY', 'Usage row already exists with conflicting billing fields', 409);
       // The disclosure is attested on the signed chain — the data_access
       // table is only a mirror of this event (w11-redteam R9).
       // The disclosure event binds the authorising capability and request
@@ -247,18 +252,40 @@ export class RuntimeGate {
       // evidence (w18-fixverify F14).
       const memoKey = `${t} ${principal.subject_id} ${e.code}`;
       const last = this.f._containMemo.get(memoKey);
-      if (last !== undefined && now - last < 60_000) return;
-      this.f.store.tx(() => { this.f.store.put(t, 'containment', `deny:${randomUUID()}:${e.code}`, {
+      if (last !== undefined && now - last.at < 60_000) {
+        // The surviving row must count what the dedup swallowed — a
+        // 60-second burst of denials is still 50 dropped requests, and
+        // the report sums the counter rather than counting rows
+        // (w43-runtime dropped_requests LOW). The store's value column is
+        // ciphertext — the bump goes through get/put so the row decrypts
+        // and re-encrypts under the same AAD. A murdered row lands a
+        // fresh denial instead.
+        const kept = this.f.store.get(t, 'containment', last.id);
+        if (kept !== null) {
+          this.f.store.put(t, 'containment', last.id, { ...kept, dropped_requests: (Number.isInteger(kept.dropped_requests) && kept.dropped_requests > 0 ? kept.dropped_requests : 1) + 1 }, now);
+          return;
+        }
+      }
+      // An unverified envelope's capability_id is attacker-chosen — it
+      // must never be served as a real capability attribution, but it is
+      // still evidence worth naming: split 'capability_id' (only when the
+      // envelope signature verifies) from 'unverified_capability_id'
+      // (w43-runtime M3).
+      let provenCapId = null;
+      try { provenCapId = verifySigned(input.capability, this.f.executionPublic(t), 'capability').capability_id; } catch { /* unverified — stays null */ }
+      const rid = `deny:${randomUUID()}:${e.code}`;
+      this.f.store.tx(() => { this.f.store.put(t, 'containment', rid, {
         contained_at: now, subject_id: principal.subject_id, device_id: input.device_id ?? null,
-        capability_id: input.capability?.payload?.capability_id ?? null, resource: input.resource ?? null,
+        capability_id: provenCapId, unverified_capability_id: provenCapId === null ? (input.capability?.payload?.capability_id ?? null) : null,
+        resource: input.resource ?? null,
         destination: input.destination ?? null, action: input.action ?? null, code: e.code,
         request_id: input.request_id, dropped_requests: 1,
       }, now);
       // The denial anchors on the signed chain too — the containment report
       // cross-checks each mutable row against RUNTIME_DENIED events instead
       // of trusting store contents (w13-fixverify L7).
-      this.f.store.audit(t, 'RUNTIME_DENIED', principal.subject_id, input.request_id ?? 'unknown', { code: e.code, capability_id: input.capability?.payload?.capability_id ?? null }, now); });
-      this.f._containMemo.set(memoKey, now);
+      this.f.store.audit(t, 'RUNTIME_DENIED', principal.subject_id, input.request_id ?? 'unknown', { code: e.code, capability_id: provenCapId, unverified_capability_id: provenCapId === null ? (input.capability?.payload?.capability_id ?? null) : null }, now); });
+      this.f._containMemo.set(memoKey, { at: now, id: rid });
     } catch { /* containment logging never masks the original denial */ }
   }
 }

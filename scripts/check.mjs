@@ -131,9 +131,13 @@ for (const file of textFiles) {
   const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unauthenticated']);
   const sortR = r => [...r].sort().join(',');
   const isIf = l => /^\s*if \(/.test(l);
+  // A single-statement validation guard (queryCheck/noBody) is not a
+  // handler boundary — the fabric call that carries the role gate may
+  // legitimately sit below it (w43-fv M1 ordering).
+  const isValidationGuard = l => /^\s*if \([^)]*\)\s*(queryCheck|noBody)\s*\(/.test(l);
   const authorizeAt = (lines, from, depth = 6) => {
     for (let i = from; i < Math.min(from + depth, lines.length); i++) {
-      if (i !== from && isIf(lines[i])) break;
+      if (i !== from && isIf(lines[i]) && !isValidationGuard(lines[i])) break;
       const m = /authorize\(p,\s*\[([^\]]+)\]/.exec(lines[i]);
       if (m) return m[1].split(',').map(s => s.trim().replace(/['"]/g, ''));
     }
@@ -163,8 +167,8 @@ for (const file of textFiles) {
     if (hi !== -1) {
       code = authorizeAt(server, hi);
       if (!code) {
-        for (let i = hi; i < Math.min(hi + 8, server.length); i++) {
-          if (i !== hi && isIf(server[i]) && !/m\[2\]/.test(server[i])) break;
+        for (let i = hi; i < Math.min(hi + 12, server.length); i++) {
+          if (i !== hi && isIf(server[i]) && !/m\[2\]/.test(server[i]) && !isValidationGuard(server[i])) break;
           const verb = segs[segs.length - 1];
           if (param && !verb.startsWith('{') && !server[i].includes(verb)) continue;
           const names = [...server[i].matchAll(/fabric\.([a-zA-Z_]+)\(p[\s,)]/g)].map(x => x[1]);
