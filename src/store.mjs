@@ -427,7 +427,7 @@ export class Store {
       // (w43-store F-4).
       for (const [mtenant, ms] of stats)
         if (ms.migrated + ms.transplants + ms.ambiguous + ms.skipped > 0)
-          this.db.prepare("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', ?)").run(mtenant, JSON.stringify(ms));
+          this._schemaGuard(() => this.db.prepare("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', ?)").run(mtenant, JSON.stringify(ms)));
       this.db.exec('COMMIT');
       // Legacy ciphertext physically lingers in the WAL until a checkpoint
       // — truncate now so the dead form cannot be revived (w19-aad W19-3).
@@ -576,13 +576,13 @@ export class Store {
     requireThat(!this.get(tenant, kind, id), 'INV-409-CONFLICT', 'Record already exists', 409); this.put(tenant, kind, id, value, at);
   }
   list(tenant, kind, limit = 500, offset = 0) {
-    return this.db.prepare('SELECT id,value FROM records WHERE tenant=? AND kind=? ORDER BY created DESC,id LIMIT ? OFFSET ?').all(tenant, kind, limit, offset)
+    return this._schemaGuard(() => this.db.prepare('SELECT id,value FROM records WHERE tenant=? AND kind=? ORDER BY created DESC,id LIMIT ? OFFSET ?').all(tenant, kind, limit, offset))
       .map(row => this.readValue(tenant, kind, row.id, row.value));
   }
   // Id-only enumeration: sweeps must not let one undecryptable row wedge the
   // whole pass (store-audit MED-3) — callers isolate failures per id.
   ids(tenant, kind, limit = 500, offset = 0) {
-    return this.db.prepare('SELECT id FROM records WHERE tenant=? AND kind=? ORDER BY created DESC,id LIMIT ? OFFSET ?').all(tenant, kind, limit, offset).map(r => r.id);
+    return this._schemaGuard(() => this.db.prepare('SELECT id FROM records WHERE tenant=? AND kind=? ORDER BY created DESC,id LIMIT ? OFFSET ?').all(tenant, kind, limit, offset).map(r => r.id));
   }
   remove(tenant, kind, id) {
     this._addr(tenant, kind, id);
@@ -813,7 +813,7 @@ export class Store {
     // survives tail-cuts (it is not a chained row), and a fresh open can
     // attest any head/watermark pair that claims less than it
     // (w44-fixverify F-2).
-    this.db.prepare("INSERT INTO meta_kv VALUES(?,'fold_floor',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, `${entry.sequence}:${hash}`);
+    this._schemaGuard(() => this.db.prepare("INSERT INTO meta_kv VALUES(?,'fold_floor',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, `${entry.sequence}:${hash}`));
     // Post-commit ordering: only a landed entry may move the anchors and
     // ratchet the detector (w23 W23-05). Our own head is the newest
     // verifiable row — mark it scanned so a later refresh skips it.

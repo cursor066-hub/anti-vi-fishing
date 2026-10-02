@@ -296,7 +296,16 @@ export class Fabric {
     const migPending = new Map();
     for (const src of [this.store, this.target]) {
       let rows = [];
-      try { rows = src.db.prepare("SELECT tenant,value FROM meta_kv WHERE key='aad_migration'").all(); } catch { /* pre-marker database */ }
+      try { rows = src.db.prepare("SELECT tenant,value FROM meta_kv WHERE key='aad_migration'").all(); }
+      catch (e) {
+        // meta_kv is created unconditionally in the store ctor — a failed
+        // read on a table the schema swears exists is a dropped table, not
+        // a pre-marker database: classify it as tamper evidence rather
+        // than absorbing the pending markers silently (w46-seal F-2).
+        const exists = src.db.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE type='table' AND name='meta_kv'").get()?.n > 0;
+        if (!exists) throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged (meta_kv dropped) — tamper evidence', 409, { cause: e });
+        throw e;
+      }
       for (const r of rows) {
         let d = migPending.get(r.tenant); if (!d) { d = { digests: [] }; migPending.set(r.tenant, d); }
         if (d.digests.length < 4) d.digests.push(hashBytes(r.value));
@@ -337,6 +346,7 @@ export class Fabric {
     const dropAadMarker = (db, t) => {
       db.exec('DROP TRIGGER IF EXISTS aad_marker_keep');
       try { db.prepare("DELETE FROM meta_kv WHERE tenant=? AND key='aad_migration'").run(t); }
+      catch (e) { if (/no such (table|column)|malformed|not a database/i.test(e?.message ?? '')) throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e }); throw e; }
       finally { db.exec(`CREATE TRIGGER IF NOT EXISTS ${markerGuardSql.slice('CREATE TRIGGER '.length)}`); }
     };
     for (const t of new Set([...this.store.aadMigration.keys(), ...this.target.aadMigration.keys(), ...migPending.keys()])) {
@@ -358,7 +368,7 @@ export class Fabric {
           // wedge surface through the index; a post-seal open re-attests.
           let anchored = fresh.length === 0;
           if (!anchored) try { this.store.tx(() => { this.store.audit(attestor, 'AAD_MIGRATION_MARKER', 'system', 'fabric-open', { claimed_tenant: t, reason: 'unconfigured-tenant', marker_digests: fresh }, this.clock()); }); anchored = true; }
-          catch { /* wedged chain — marker survives, seal stays reachable */ }
+          catch (e) { if (!String(e?.code ?? '').startsWith('INV-409')) throw e; /* wedged chain — marker survives, seal stays reachable; non-wedge faults (forged clock, ENOSPC, contention) still convict */ }
           // Dropped only once the residue has a VERIFIED anchor — digests
           // minted just now or already on chain. With no signer to attest
           // under, it stays for a later configured open rather than being
@@ -382,7 +392,7 @@ export class Fabric {
         // tx rolls back, the marker survives, and the open continues into
         // the wedged index where sealAuditChain remediates (w45-seal F-1).
         try { this.store.tx(() => { this.store.clock(this.clock()); this.store.audit(t, 'AAD_MIGRATION', 'system', 'fabric-open', meta, this.clock()); dropAadMarker(this.store.db, t); }); }
-        catch { /* wedged chain — marker survives, seal stays reachable */ }
+        catch (e) { if (!String(e?.code ?? '').startsWith('INV-409')) throw e; /* wedged chain — marker survives, seal stays reachable */ }
       } else {
         dropAadMarker(this.store.db, t);
       }
@@ -391,6 +401,24 @@ export class Fabric {
     // the gap leaves a stale marker that re-attests at the next open —
     // never silently unattested (w43-store F-4).
     for (const t of migPending.keys()) { if (!Object.hasOwn(this.store.auditSigners, t)) continue; try { dropAadMarker(this.target.db, t); } catch { /* clears at next open */ } }
+    // A dropped meta_kv self-heals EMPTY at open (the schema's CREATE IF
+    // NOT EXISTS runs before this): pending markers and fold_floor are
+    // destroyed and every read still succeeds — the only drop class that
+    // would otherwise produce no named row. Non-empty audit under an
+    // empty meta_kv is that drop's residue; attest it under this fabric's
+    // own chain instead of absorbing it silently (w46-seal F-2).
+    for (const src of [this.store, this.target]) {
+      let tenants = [];
+      try {
+        if ((src.db.prepare('SELECT COUNT(*) n FROM meta_kv').get()?.n ?? 0) === 0)
+          tenants = src.db.prepare('SELECT DISTINCT tenant FROM audit').all().map(r => r.tenant);
+      } catch { /* a diverged schema convicts through the schema-guarded readers */ }
+      for (const t of tenants) {
+        if (!Object.hasOwn(this.store.auditSigners, t)) continue;
+        try { this.store.tx(() => { this.store.audit(t, 'STORE_SCHEMA_RESIDUE', 'system', 'fabric-open', { reason: 'meta_kv-empty-under-nonempty-audit', detail: 'dropped meta_kv recreated empty — prior markers and fold_floor lost' }, this.clock()); }); }
+        catch (e) { if (!String(e?.code ?? '').startsWith('INV-409')) throw e; /* wedged chain — residue waits for a healed open */ }
+      }
+    }
     this.runtime = new RuntimeGate(this);
     // Retired-key declarations are authentic only from the signed config —
     // _reconcileLedger appends store-derived entries (attacker-writable) to
@@ -1427,7 +1455,8 @@ export class Fabric {
     // with a keystore it did not wrap (w6-ceremony F12).
     this.vault.save(join(this.directory, 'keystore.json'));
     if (!existsSync(join(this.directory, 'master.key'))) {
-      this.#writeFileSynced(join(this.directory, 'master.key'), canonical({ format: 'IF-MASTERKEY-1', warning: 'software vault master key; custody is the operator\'s responsibility', master_key: this.vault.masterKey.toString('base64url') }) + '\n');
+      this.#writeFileSynced(join(this.directory, 'master.key.tmp'), canonical({ format: 'IF-MASTERKEY-1', warning: 'software vault master key; custody is the operator\'s responsibility', master_key: this.vault.masterKey.toString('base64url') }) + '\n');
+      renameSync(join(this.directory, 'master.key.tmp'), join(this.directory, 'master.key'));
       this.#fsyncDir();
     }
   }
@@ -2390,7 +2419,7 @@ export class Fabric {
           // against attested chain time like recoverClock's veto span.
           let resurrected = [];
           try { resurrected = this._resurrectedAuthorities(t, this._auditIndex(t), now); } catch { /* fold fresh-failed: sweep verdict stands, name nothing */ }
-          this.store.tx(() => { this.store.audit(t, 'AUDIT_WEDGE_CLEARED', p.subject_id, 'audit', { sealed_at_seq: null, cleared_by: p.subject_id, resurrected: resurrected.slice(0, 512), resurrected_total: resurrected.length }, now); });
+          this.store.tx(() => { this.store.audit(t, 'AUDIT_WEDGE_CLEARED', p.subject_id, 'audit', { sealed_at_seq: null, cleared_by: p.subject_id, resurrected: resurrected.slice(-512).reverse(), resurrected_total: resurrected.length }, now); });
           this.#auditIdx?.delete(t);
           // The flag may live only on the chain (restart, no in-memory set)
           // — clear whichever representation exists (w25-clock F-5).
@@ -3478,7 +3507,13 @@ export class Fabric {
       // window closes it deterministically. A crashed apply the chain
       // itself named (EFFECT_APPLY_FAILED for this cert) is exempted
       // honestly: the residue is attested, not wedged (w45-runtime F3).
-      const healWindow = typeof gm?.seq === 'number' && idx.maxSeq - gm.seq <= 8;
+      // The window must close on EITHER bound: nine appends prove a peer's
+      // mid-apply is long past, and sixty seconds of wall time does the
+      // same on an idle tenant where seq never advances — the seq-only
+      // bound left an idle-tenant murder silent forever (w46-fixverify
+      // M-2). Both still dominate the real apply gap (~ms).
+      const healWindow = (typeof gm?.seq === 'number' && idx.maxSeq - gm.seq <= 8)
+        && (typeof gm?.at === 'number' && effNow - gm.at <= 60_000);
       const namedFailure = idx.effectFailedCerts?.has(gid.replace(/^jit-/, '')) === true;
       if (record && !row && !this.#pendingEffects?.has(tenant) && !healWindow && !namedFailure)
         throw new InvariantError('INV-409-INTEGRITY', 'Ledger-anchored JIT grant rows are missing — tamper evidence', 409);
@@ -6857,7 +6892,7 @@ export class Fabric {
     // Rows are mutable store records — each is reported with its chain
     // anchor state so an injected containment/revocation row can never
     // pass as ledger history (w13-fixverify L7).
-    const denials = this.store.list(t, 'containment', 10000).map(c => ({ kind: 'denied_consume', at: c.contained_at, code: c.code, subject_id: c.subject_id, capability_id: c.capability_id, unverified_capability_id: c.unverified_capability_id ?? null, resource: c.resource, request_id: c.request_id, dropped_requests: c.dropped_requests, anchored: (idx.denialsByReq?.get(c.request_id) ?? []).some(d => d.code === c.code && d.actor === c.subject_id && d.capability_id === (c.capability_id ?? null)) }));
+    const denials = this.store.list(t, 'containment', 10000).map(c => ({ kind: 'denied_consume', at: c.contained_at, code: c.code, subject_id: c.subject_id, capability_id: c.capability_id, unverified_capability_id: c.unverified_capability_id ?? null, resource: c.resource, request_id: c.request_id, dropped_requests: c.dropped_requests, anchored: (idx.denialsByReq?.get(c.request_id) ?? []).some(d => d.code === c.code && d.actor === c.subject_id && d.capability_id === (c.capability_id ?? null) && d.at === c.contained_at) }));
     // The anchored digest is vault-keyed (w15-timing F3): the cross-check
     // must recompute the same MAC — a plain digest() compares against a
     // different construction and the flag is always 'identity-only', i.e.
@@ -6875,19 +6910,27 @@ export class Fabric {
     // WHOLE table, paged until every anchor resolves — the served window
     // is newest-N by the mutable 'created' column, so an anchored row
     // outside it must never fabricate missing evidence (w45-runtime F4).
-    const rowNeed = new Map();
-    for (const d of idx.denials) { const k = `${d.request_id}|${d.code}|${d.actor}`; rowNeed.set(k, (rowNeed.get(k) ?? 0) + 1); }
-    let unmatched = idx.denials.length;
-    for (let off = 0; unmatched > 0;) {
+    // Occurrence binding keys on (triple, timestamp): caller-controlled
+    // request_id CAN repeat across events, so a per-triple multiset lets a
+    // fresh same-triple row claim the murdered OLDER anchor's seat and the
+    // report names the live row as the victim. Each anchor instead claims
+    // the surviving row whose contained_at is nearest its own `at` (≤2s —
+    // the pair is minted from the same clock read, so exact matches rule
+    // and the bound only absorbs clock granularity), making the murdered
+    // occurrence itself the named victim (w46-fixverify M-1).
+    const rowsByTriple = new Map();
+    for (let off = 0; ;) {
       const pageRows = this.store.list(t, 'containment', 10000, off);
       if (!pageRows.length) break;
       off += pageRows.length;
       for (const c of pageRows) {
-        const k = `${c.request_id}|${c.code}|${c.subject_id}`, need = rowNeed.get(k) ?? 0;
-        if (need > 0) { rowNeed.set(k, need - 1); unmatched--; }
+        const k = `${c.request_id}|${c.code}|${c.subject_id}`;
+        let arr = rowsByTriple.get(k); if (!arr) { arr = []; rowsByTriple.set(k, arr); }
+        arr.push(c.contained_at);
       }
       if (pageRows.length < 10000) break;
     }
+    for (const arr of rowsByTriple.values()) arr.sort((a, b) => a - b);
     // Name the NEWEST victims first — a >512-row murder must always
     // surface the freshest evidence inside the cap, with the uncapped
     // total published alongside so saturation can never read as 512
@@ -6895,9 +6938,10 @@ export class Fabric {
     const missingDenials = [];
     let missingTotal = 0;
     for (const d of [...idx.denials].reverse()) {
-      const k = `${d.request_id}|${d.code}|${d.actor}`, need = rowNeed.get(k) ?? 0;
-      if (need <= 0) continue;
-      rowNeed.set(k, need - 1);
+      const arr = rowsByTriple.get(`${d.request_id}|${d.code}|${d.actor}`);
+      let hit = -1, best = Infinity;
+      if (arr) for (let i = 0; i < arr.length; i++) { const dt = Math.abs(arr[i] - d.at); if (dt < best) { best = dt; hit = i; } }
+      if (hit >= 0 && best <= 2_000) { arr.splice(hit, 1); continue; }
       missingTotal++;
       if (missingDenials.length < 512) missingDenials.push({ request_id: d.request_id, code: d.code, subject_id: d.actor, at: d.at });
     }

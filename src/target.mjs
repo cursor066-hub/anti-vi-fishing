@@ -170,7 +170,7 @@ export class SimulatedTarget {
       // attestation still surfaces them at the next open (w43-store F-4).
       for (const [mtenant, ms] of stats)
         if (ms.migrated + ms.transplants + ms.ambiguous + ms.skipped > 0)
-          this.db.prepare("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', ?)").run(mtenant, JSON.stringify(ms));
+          this._schemaGuard(() => this.db.prepare("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', ?)").run(mtenant, JSON.stringify(ms)));
       this.db.exec('COMMIT');
       // Truncate post-migration so dead legacy ciphertext does not linger
       // in the WAL (w19-aad W19-3).

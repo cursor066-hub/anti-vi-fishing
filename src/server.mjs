@@ -107,14 +107,17 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
     // char-length gate and throws inside timingSafeEqual — surfacing an
     // INV-500 where the contract promises INV-403 (w17-console F1).
     if (req.method !== 'GET' || getWrites) requireThat(typeof req.headers['x-csrf-token'] === 'string' && Buffer.byteLength(req.headers['x-csrf-token']) === session.csrf.length && timingSafeEqual(Buffer.from(req.headers['x-csrf-token']), Buffer.from(session.csrf)) && req.headers.origin === origin, 'INV-403-CSRF', 'Request origin or CSRF token rejected', 403);
-    fabric.authorize(session.principal, ['operator', 'approver', 'custodian', 'security', 'auditor', 'policy_admin', 'workload']);
     // An ambient cookie GET is not consented evidence — a forged
     // <img>-class request must never mint AUTHORIZATION_DENIED rows
     // against the victim, so denial auditing is suppressed on the
     // principal this request resolves to (w45-http M-1b). Marker is
     // non-enumerable: it never leaks into response bodies or spreads.
+    // The marker must ride INTO the union-role authorize itself — a role
+    // or identity failure there mints denial evidence too, so marking
+    // after the gate would leave that mint reachable (w46-fixverify L).
     const ambientPrincipal = { ...session.principal };
     if (req.method === 'GET' && !getWrites) Object.defineProperty(ambientPrincipal, '_ambient_get', { value: true });
+    fabric.authorize(ambientPrincipal, ['operator', 'approver', 'custodian', 'security', 'auditor', 'policy_admin', 'workload']);
     return ambientPrincipal;
   }
   // Break-glass authentication for /v1/audit/seal: resolve the credential
