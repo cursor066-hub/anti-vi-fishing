@@ -119,16 +119,20 @@ export class Store {
       // verifier must agree or it accepts rows the fabric refuses
       // (w33-seal O-3).
       if (pl?.type === 'AUDIT_SEALED' || pl?.type === 'AUDIT_SEAL_CARRY') {
+        // Carried deaths pin at the carried event's own orig_seq — the
+        // same position the fabric fold enforces — not the carrying
+        // row's seq, or standalone verification would accept rows signed
+        // inside the carried death window (w38-fixverify F-4).
         for (const rv of Array.isArray(meta?.revocations_carryover) ? meta.revocations_carryover : [])
           if (typeof rv?.reference === 'string' && rv.reference.startsWith('key:'))
-            dead.set(rv.reference.slice(4), Math.min(dead.get(rv.reference.slice(4)) ?? Infinity, row.seq));
+            dead.set(rv.reference.slice(4), Math.min(dead.get(rv.reference.slice(4)) ?? Infinity, typeof rv.orig_seq === 'number' ? rv.orig_seq : row.seq));
         // A doomed audit-class KEY_ROTATED rides lifecycle_carryover now —
         // its predecessor-death pin must unfold exactly like the fold's
         // replay, or the verifiers accept rows signed past a carried
         // rotation (w34 seal parity).
         for (const lc of Array.isArray(meta?.lifecycle_carryover) ? meta.lifecycle_carryover : [])
           if (lc?.type === 'KEY_ROTATED' && lc?.metadata?.key_class === 'audit' && typeof lc.metadata.previous_key_id === 'string')
-            dead.set(lc.metadata.previous_key_id, Math.min(dead.get(lc.metadata.previous_key_id) ?? Infinity, row.seq));
+            dead.set(lc.metadata.previous_key_id, Math.min(dead.get(lc.metadata.previous_key_id) ?? Infinity, typeof lc.orig_seq === 'number' ? lc.orig_seq : row.seq));
       }
     }
     return dead;

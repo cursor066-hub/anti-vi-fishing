@@ -45,7 +45,12 @@ try {
     for (const f of custody)
       try { requireThat((statSync(join(directory, f)).mode & 0o077) === 0, 'INV-503-CONFIG', `${f} must not be readable by group or other users`, 503); } catch (e) { if (e.code === 'ENOENT') continue; throw e; }
     const fabric = new Fabric(loadConfiguration(directory), directory), origin = option('origin', `http://127.0.0.1:${port}`);
-    const app = createServer(fabric, { port, origin, trustProxy: args.includes('--trust-proxy'), proxySecret: option('proxy-secret', null) }); await app.listen();
+    // The proxy secret never rides argv: /proc/<pid>/cmdline is world-
+    // readable, so a --proxy-secret value would leak to every local user
+    // and reopen the X-Forwarded-For forgery surface it exists to close
+    // (w38-http HIGH-2). PROXY_SECRET comes from the environment
+    // (systemd EnvironmentFile); --proxy-secret stays only for dev.
+    const app = createServer(fabric, { port, origin, trustProxy: args.includes('--trust-proxy'), proxySecret: process.env.PROXY_SECRET ?? option('proxy-secret', null) }); await app.listen();
     console.log(`Invariant Fabric engineering console: ${origin} (loopback only; no production guarantee)`);
     let closing = false;
     const close = async () => { if (closing) return; closing = true; await app.close(); fabric.close(); process.exitCode = 0; };

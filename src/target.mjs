@@ -46,12 +46,14 @@ export class SimulatedTarget {
       this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=30000; PRAGMA secure_delete=ON;');
       const version = this.db.prepare('PRAGMA user_version').get().user_version;
       requireThat(version <= 1, 'INV-503-STORAGE', 'Database schema is newer than this application', 503);
+      // The data_access disclosure log lives in the ledger store — every
+      // reconstructionCheck touchDb is store.db; a shadow table here was
+      // dead schema (w38-runtime L-3). Existing files may still carry the
+      // empty table — it is simply unused.
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS resources(tenant TEXT, id TEXT, version INTEGER, value TEXT, PRIMARY KEY(tenant,id));
         CREATE TABLE IF NOT EXISTS transactions(tenant TEXT,id TEXT,value TEXT,PRIMARY KEY(tenant,id));
         CREATE TABLE IF NOT EXISTS dataset_rows(tenant TEXT, dataset TEXT, row_id TEXT, data TEXT, PRIMARY KEY(tenant,dataset,row_id));
-        CREATE TABLE IF NOT EXISTS data_access(tenant TEXT, subject TEXT, dataset TEXT, row_id TEXT, column_name TEXT, at INTEGER);
-        CREATE INDEX IF NOT EXISTS data_access_ix ON data_access(tenant,subject,dataset,at);
         CREATE TABLE IF NOT EXISTS secrets_registry(tenant TEXT, secret_id TEXT, version INTEGER, value TEXT, PRIMARY KEY(tenant,secret_id));
         CREATE TABLE IF NOT EXISTS grants(tenant TEXT, grant_id TEXT, value TEXT, PRIMARY KEY(tenant,grant_id));
         CREATE INDEX IF NOT EXISTS grants_subject ON grants(tenant);
@@ -254,20 +256,25 @@ export class SimulatedTarget {
   }
   // One undecryptable grant row must not wedge every authorize() call — a
   // corrupt row can only ever HIDE a grant (anchoring is the authority), so
-  // it is skipped and counted, never fatal (w17-fixverify).
+  // it is skipped and counted, never fatal (w17-fixverify). The count is
+  // evidence the operator must see: it resets per scan and surfaces on the
+  // grant listing, or a tamper could silently make grants disappear
+  // (w38-runtime L-1).
   grants(tenant, subject_id, now) {
-    const out = [];
+    const out = []; let corrupt = 0;
     for (const r of this.db.prepare('SELECT grant_id, value FROM grants WHERE tenant=?').all(tenant)) {
-      let g; try { g = this._dec(r.value, tenant, AAD('target', 'grant', tenant, r.grant_id)); } catch { this._corruptGrantRows = (this._corruptGrantRows ?? 0) + 1; continue; }
+      let g; try { g = this._dec(r.value, tenant, AAD('target', 'grant', tenant, r.grant_id)); } catch { corrupt++; continue; }
       if (g.subject_id === subject_id && g.expires_at > now && !g.revoked) out.push(g);
     }
+    this._corruptGrantRows = corrupt;
     return out;
   }
   allGrants(tenant) {
-    const out = [];
+    const out = []; let corrupt = 0;
     for (const r of this.db.prepare('SELECT grant_id, value FROM grants WHERE tenant=?').all(tenant)) {
-      try { out.push(this._dec(r.value, tenant, AAD('target', 'grant', tenant, r.grant_id))); } catch { this._corruptGrantRows = (this._corruptGrantRows ?? 0) + 1; }
+      try { out.push(this._dec(r.value, tenant, AAD('target', 'grant', tenant, r.grant_id))); } catch { corrupt++; }
     }
+    this._corruptGrantRows = corrupt;
     return out;
   }
   revokeGrant(tenant, grant_id) {

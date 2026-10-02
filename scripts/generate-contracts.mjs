@@ -62,6 +62,7 @@ function operation(path, method, description, role, request = null, status = 200
     { name: 'offset', in: 'query', required: false, schema: qintSchema(0, 1e6) });
   if (path === '/v1/grants' && method === 'get') params.push({ name: 'subject', in: 'query', required: false, schema: type.id });
   if (path === '/v1/action-capsules/{id}/approval-challenge' && method === 'get') params.push({ name: 'signer_id', in: 'query', required: false, schema: type.id });
+  if (path === '/v1/keys/{id}/attest' && method === 'get') params.push({ name: 'nonce', in: 'query', required: false, schema: { type: 'string', maxLength: 128, description: 'Caller-supplied challenge bound into the signed attestation — without it the artifact is freely replayable' } });
   if (params.length) op.parameters = params;
   paths[path] ??= {}; paths[path][method] = op;
   if (PUBLIC_PATHS.has(path)) op.security = [];

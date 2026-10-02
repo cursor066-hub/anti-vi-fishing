@@ -18,8 +18,8 @@
       "bytes": 9993
     },
     "src/cli.mjs": {
-      "lines": 85,
-      "bytes": 7186
+      "lines": 90,
+      "bytes": 7568
     },
     "src/connectors.mjs": {
       "lines": 188,
@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 6182,
-      "bytes": 487171
+      "lines": 6333,
+      "bytes": 496813
     },
     "src/issuerd.mjs": {
       "lines": 797,
@@ -62,8 +62,8 @@
       "bytes": 48125
     },
     "src/runtime.mjs": {
-      "lines": 247,
-      "bytes": 21725
+      "lines": 251,
+      "bytes": 22007
     },
     "src/schema.mjs": {
       "lines": 94,
@@ -74,20 +74,20 @@
       "bytes": 13696
     },
     "src/server.mjs": {
-      "lines": 388,
-      "bytes": 39912
+      "lines": 433,
+      "bytes": 43247
     },
     "src/shamir.mjs": {
       "lines": 91,
       "bytes": 3876
     },
     "src/store.mjs": {
-      "lines": 914,
-      "bytes": 67275
+      "lines": 918,
+      "bytes": 67654
     },
     "src/target.mjs": {
-      "lines": 426,
-      "bytes": 31879
+      "lines": 433,
+      "bytes": 32119
     },
     "web/app.js": {
       "lines": 251,
@@ -114,8 +114,8 @@
       "bytes": 10449
     },
     "scripts/generate-contracts.mjs": {
-      "lines": 103,
-      "bytes": 18345
+      "lines": 104,
+      "bytes": 18635
     },
     "scripts/generate-vectors.mjs": {
       "lines": 143,
@@ -382,12 +382,12 @@
       "bytes": 6024
     },
     "tests/w27.test.mjs": {
-      "lines": 145,
-      "bytes": 9076
+      "lines": 148,
+      "bytes": 9239
     },
     "tests/w28.test.mjs": {
-      "lines": 385,
-      "bytes": 26239
+      "lines": 388,
+      "bytes": 26474
     },
     "tests/w29.test.mjs": {
       "lines": 313,
@@ -402,12 +402,12 @@
       "bytes": 26665
     },
     "tests/w32.test.mjs": {
-      "lines": 331,
-      "bytes": 22815
+      "lines": 361,
+      "bytes": 24684
     },
     "tests/w33.test.mjs": {
-      "lines": 303,
-      "bytes": 21249
+      "lines": 305,
+      "bytes": 21394
     },
     "tests/w34.test.mjs": {
       "lines": 175,
@@ -420,6 +420,10 @@
     "tests/w37.test.mjs": {
       "lines": 210,
       "bytes": 12762
+    },
+    "tests/w38.test.mjs": {
+      "lines": 285,
+      "bytes": 18208
     },
     "tests/w5-mutations.test.mjs": {
       "lines": 194,
@@ -490,6 +494,6 @@
       "bytes": 6499
     }
   },
-  "total_files": 122,
-  "total_lines": 29801
+  "total_files": 123,
+  "total_lines": 30341
 }

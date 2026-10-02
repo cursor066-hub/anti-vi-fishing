@@ -160,7 +160,11 @@ export class RuntimeGate {
         const dataset = this.f.target.state(t, cap.resource).material_fields;
         requireThat(dataset.classification === cap.classification && dataset.jurisdiction === cap.jurisdiction, 'INV-409-STATE', 'Dataset classification or jurisdiction changed', 409);
         // DAT-009: cumulative overlap/reconstruction check BEFORE release.
-        recon = reconstructionCheck(this.f.store.db, this.f.target.db, { tenant: t, subject: cap.subject_id, dataset: cap.resource, rows: input.row_ids, columns: input.columns, now, policy: r.reconstruction, access: this.f._auditIndex(t).dataAccess });
+        // Worst-case coverage after a seal: events the cut could not
+        // re-verify count as disclosed — the same floor the execute/
+        // composite/egress paths already consume (w38-runtime F-1).
+        const ridx = this.f._auditIndex(t);
+        recon = reconstructionCheck(this.f.store.db, this.f.target.db, { tenant: t, subject: cap.subject_id, dataset: cap.resource, rows: input.row_ids, columns: input.columns, now, policy: r.reconstruction, access: ridx.dataAccess, droppedEvents: ridx.sealDroppedEvents ?? 0 });
         requireThat(recon.allowed, 'INV-429-BUDGET', `Reconstruction limit reached (${recon.coverage_percent}% of dataset rows touched)`, 429, { row_count: recon.row_count, column_count: recon.column_count, coverage_percent: recon.coverage_percent });
         // The plan rebinds to the authorising capability — the request's
         // own fields are not the grant (w20-datagate F8).

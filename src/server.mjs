@@ -41,7 +41,7 @@ export const ROUTE_METHODS = new Map(Object.entries({
   '/v1/secure-perception/fallback': 'POST', '/v1/advisory': 'POST',
 }).map(([k, v]) => [k, v.split(',')]));
 
-export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin = `http://127.0.0.1:${port}`, tenantSessionCap = 250, trustProxy = false, proxySecret = null } = {}) {
+export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin = `http://127.0.0.1:${port}`, tenantSessionCap = 250, trustProxy = false, proxySecret = null, connectionCap = 2048 } = {}) {
   // The session cookie gets Secure on every origin EXCEPT plaintext
   // loopback — a TLS-terminating upstream proxy serving http internally
   // still hands the cookie to browsers over https (w22-http F4). The
@@ -54,7 +54,7 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
   // process could rotate X-Forwarded-For to sidestep every rate bucket
   // (w10-fixverify F-2). The proxy must authenticate its XFF claims with the
   // X-Fabric-Proxy header matching proxySecret.
-  requireThat(!trustProxy || typeof proxySecret === 'string' && proxySecret.length >= 16, 'INV-503-CONFIG', '--trust-proxy requires a --proxy-secret of at least 16 characters', 503);
+  requireThat(!trustProxy || typeof proxySecret === 'string' && proxySecret.length >= 16, 'INV-503-CONFIG', '--trust-proxy requires PROXY_SECRET in the environment (never argv — /proc/<pid>/cmdline is world-readable) of at least 16 characters', 503);
   const web = fileURLToPath(new URL('../web/', import.meta.url));
   const sessions = new Map(), rate = new Map();
   const metrics = { requests: 0, errors: 0, unauthorised: 0, rejections: {}, tenants: {} };
@@ -159,6 +159,13 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
     requireThat(parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Object.keys(parsed).length === 0, 'INV-400-SCHEMA', 'Operation takes no request body', 400);
   }
   const server = http.createServer({ maxHeaderSize: 16384 }, async (req, res) => {
+    // Over-cap sockets get exactly one request and only for a health probe
+    // — the check must run before any byte of a response is produced
+    // (w38-http LOW).
+    if (req.socket.overCap && req.url !== '/healthz' && req.url !== '/readyz') {
+      try { req.socket.destroy(); } catch { /* already gone */ }
+      return;
+    }
     metrics.requests++; const requestId = randomBytes(12).toString('hex');
     let requestPrincipal = null;
     // Per-tenant mirrors are counted once the principal resolves — the
@@ -228,10 +235,28 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
         requireThat(sessions.size < 1000, 'INV-503-CAPACITY', 'Session capacity reached', 503);
         // Per-tenant ceiling too: the global cap alone lets one spoofed
         // flood lock every other tenant out (w7-console F1).
-        requireThat([...sessions.values()].filter(s => s.principal.tenant_id === requestPrincipal.tenant_id).length < tenantSessionCap, 'INV-503-CAPACITY', 'Tenant session capacity reached', 503);
+        if (!([...sessions.values()].filter(s => s.principal.tenant_id === requestPrincipal.tenant_id).length < tenantSessionCap)) {
+          try { fabric.store.audit(requestPrincipal.tenant_id, 'CONSOLE_SESSION_DENIED', requestPrincipal.subject_id, 'console', { reason: 'tenant_session_cap' }, fabric.clock()); } catch { /* best-effort */ }
+          requireThat(false, 'INV-503-CAPACITY', 'Tenant session capacity reached', 503);
+        }
+        // A credential family may not fill the tenant's slice: sessions
+        // minted from the same token are capped far below the tenant cap
+        // and the family's oldest is evicted, so one credential churning
+        // logins locks only itself out (w38-http M-2).
+        const loginTokenHash = hashBytes(input.token), family = [...sessions.entries()].filter(([, s]) => s.token_hash === loginTokenHash);
+        if (family.length >= 32) {
+          let oldest = null;
+          for (const [key, s] of family) if (oldest === null || s.expires < oldest.s.expires) oldest = { key, s };
+          if (oldest) sessions.delete(oldest.key);
+        }
         const sid = randomBytes(32).toString('base64url'), csrf = randomBytes(32).toString('base64url');
         const expires = Math.min(fabric.clock() + 900000, result.expires);
-        sessions.set(hashBytes(sid), { principal: requestPrincipal, csrf, expires, token_hash: hashBytes(input.token) });
+        sessions.set(hashBytes(sid), { principal: requestPrincipal, csrf, expires, token_hash: loginTokenHash });
+        // Console session lifecycle lands on the signed chain — mint/deny/
+        // logout are security events an incident review must reconstruct.
+        // Best-effort: a wedged ledger must not brick operator login
+        // (w38-http LOW).
+        try { fabric.store.audit(requestPrincipal.tenant_id, 'CONSOLE_SESSION_MINTED', requestPrincipal.subject_id, 'console', { expires }, fabric.clock()); } catch { /* ledger evidence is best-effort for console sessions */ }
         res.setHeader('Set-Cookie', `if_session=${sid}; HttpOnly; SameSite=Strict; Path=/; Max-Age=900${cookieSecure ? '; Secure' : ''}`);
         // expires_in is the REAL clipped lifetime, not the 900s ceiling — a
         // client scheduling a refresh off the literal must not hold a dead
@@ -255,9 +280,14 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
         // credential family is still the honest answer — the token itself
         // identifies which sessions must die (w25-issuerd logout residual).
         const doomed = sid ? sessions.get(hashBytes(sid))?.token_hash : callerTokenHash;
+        // Validate the body BEFORE any state change — a malformed request
+        // must not terminate sessions on its way to a 400 (w38-http LOW).
+        await noBody(req);
         let terminated = 0;
         if (doomed && doomed === callerTokenHash) for (const [key, session] of sessions) if (session.token_hash === doomed) { sessions.delete(key); terminated++; }
-        res.setHeader('Set-Cookie', 'if_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'); await noBody(req); return send(200, { logged_out: terminated > 0, sessions_terminated: terminated });
+        res.setHeader('Set-Cookie', 'if_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');
+        try { fabric.store.audit(p.tenant_id, 'CONSOLE_SESSION_LOGGED_OUT', p.subject_id, 'console', { sessions_terminated: terminated }, fabric.clock()); } catch { /* best-effort */ }
+        return send(200, { logged_out: terminated > 0, sessions_terminated: terminated });
       }
       if (path === '/v1/me' && req.method === 'GET') { const meRoles = fabric.identity(p)?.roles; return send(200, { ...p, roles: Array.isArray(meRoles) ? meRoles : [], device_id: fabric.identity(p).device_id, profile: 'engineering', secure_perception: 'dev-attested-software', perception_components: (Array.isArray(meRoles) && meRoles.some(r => ['operator', 'approver', 'custodian', 'security'].includes(r))) ? Object.keys(fabric.perceptionComponents[p.tenant_id] ?? {}) : [] }); }
       if (path === '/v1/schemas' && req.method === 'GET') return send(200, Object.values(SCHEMAS).map(s => ({ ...s, digest: digest(s) })));
@@ -265,7 +295,7 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       if (path === '/v1/action-capsules' && req.method === 'GET') {
         fabric.authorize(p, ['operator', 'approver', 'custodian', 'security', 'policy_admin', 'auditor']);
         const limit = qint(url.searchParams.get('limit'), 'limit', 50, 1, 100), offset = qint(url.searchParams.get('offset'), 'offset', 0, 0, 1000000);
-        return send(200, { items: fabric.store.list(p.tenant_id, 'capsule', limit, offset).map(c => fabric.capsuleView(c)), limit, offset });
+        return send(200, { items: fabric.store.list(p.tenant_id, 'capsule', limit, offset).map(c => fabric.capsuleView(c, p.tenant_id)), limit, offset });
       }
       if (path === '/v1/action-capsules' && req.method === 'POST') { fabric.authorize(p, ['operator', 'workload', 'policy_admin']); const input = await body(req); fields(input, ['input', 'signature']); return send(201, fabric.capsuleView(fabric.propose(p, input.input, req.headers['idempotency-key'], input.signature))); }
       let m;
@@ -292,7 +322,7 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
         return send(200, fabric.outcomeView(p.tenant_id, out, m[1]));
       }
       if ((m = /^\/gate\/v1\/outcomes\/([A-Za-z0-9-]+)$/.exec(path)) && req.method === 'POST') return send(200, fabric.outcomeView(p.tenant_id, fabric.reconcile(p, m[1]), m[1]));
-      if ((m = /^\/v1\/resources\/([A-Za-z0-9_.:-]+)$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['operator', 'policy_admin']); requireThat(fabric.target.exists(p.tenant_id, m[1]), 'INV-404-NOT-FOUND', 'Resource not found', 404); const state = fabric.target.state(p.tenant_id, m[1]); if (Array.isArray(state.material_fields.rows)) throw new InvariantError('INV-403-SCOPE', 'Use a data capability for dataset access', 403); return send(200, state); }
+      if ((m = /^\/v1\/resources\/([A-Za-z0-9_.:-]+)$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['operator', 'policy_admin']); requireThat(fabric.target.exists(p.tenant_id, m[1]), 'INV-404-NOT-FOUND', 'Resource not found', 404); const state = fabric.target.state(p.tenant_id, m[1]); if (Array.isArray(state.material_fields.rows)) throw new InvariantError('INV-403-SCOPE', 'Use a data capability for dataset access', 403); return send(200, fabric.resourceStateView(state)); }
       if (path === '/v1/capabilities' && req.method === 'POST') { fabric.authorize(p, ['operator', 'workload']); return send(201, fabric.runtime.issue(p, object(await body(req)))); }
       if (path === '/gate/v1/runtime' && req.method === 'POST') return send(200, fabric.runtime.consume(p, object(await body(req))));
       if (path === '/v1/revocations' && req.method === 'POST') return send(201, fabric.revoke(p, object(await body(req))));
@@ -329,18 +359,23 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       if (path === '/v1/ceremonies' && req.method === 'GET') { fabric.authorize(p, ['security', 'custodian', 'policy_admin']); return send(200, { items: fabric.store.list(p.tenant_id, 'ceremony', 100, 0).map(c => ({ ceremony_id: c.ceremony_id, status: fabric.ceremonyStatus(p.tenant_id, c), row_status: c.status, purpose: c.purpose })) }); }
       if (path === '/v1/ceremonies' && req.method === 'POST') return send(201, fabric.createCeremony(p, object(await body(req))));
       if ((m = /^\/v1\/ceremonies\/([A-Za-z0-9_.:-]+)\/(acknowledge|split|reconstruct|abort)$/.exec(path)) && req.method === 'POST') {
-        const input = await body(req);
-        if (m[2] === 'acknowledge') return send(200, fabric.acknowledgeCeremony(p, object(input)));
-        if (m[2] === 'abort') { object(input); return send(200, fabric.abortCeremony(p, m[1])); }
-        if (m[2] === 'split') { fabric.authorize(p, ['security', 'custodian']); fields(input, ['secret']); return send(200, fabric.splitCeremonySecret(p, m[1], input.secret)); }
-        fabric.authorize(p, ['security', 'custodian']); fields(input, ['shares']); return send(200, fabric.reconstructCeremony(p, m[1], input.shares));
+        // Authorize before parsing the body — a body-shape 400 must not
+        // leak parse semantics to a caller who would 403 anyway
+        // (w38-http LOW ordering parity with the noBody routes).
+        if (m[2] === 'acknowledge') { fabric.authorize(p, ['custodian']); return send(200, fabric.acknowledgeCeremony(p, object(await body(req)))); }
+        if (m[2] === 'abort') { fabric.authorize(p, ['security', 'custodian']); const input = await body(req); fields(input, []); return send(200, fabric.abortCeremony(p, m[1])); }
+        if (m[2] === 'split') { fabric.authorize(p, ['security', 'custodian']); const input = await body(req); fields(input, ['secret']); return send(200, fabric.splitCeremonySecret(p, m[1], input.secret)); }
+        fabric.authorize(p, ['security', 'custodian']); const input = await body(req); fields(input, ['shares']); return send(200, fabric.reconstructCeremony(p, m[1], input.shares));
       }
       if (path === '/v1/keys' && req.method === 'GET') { fabric.authorize(p, ['security', 'policy_admin']); return send(200, { keys: fabric.vault.list().filter(k => fabric.ownsVaultKey(p.tenant_id, k.key_id)).map(({ wrapped, ...k }) => k), firmware: fabric.vault.firmware }); }
       if (path === '/v1/keys/rotate-prepare' && req.method === 'POST') { fabric.authorize(p, ['security', 'custodian']); const input = await body(req); fields(input, ['key_class'], ['suite']); return send(201, fabric.prepareRotation(p, input.key_class, input.suite)); }
-      if (path === '/v1/config-drift/reassert' && req.method === 'POST') { await noBody(req); return send(200, fabric.reassertConfig(p)); }
-      if (path === '/v1/policy/reanchor' && req.method === 'POST') { await noBody(req); return send(200, fabric.reanchorPolicy(p)); }
-      if (path === '/v1/clock/recover' && req.method === 'POST') { await noBody(req); return send(200, fabric.recoverClock(p)); }
-      if (path === '/v1/audit/seal' && req.method === 'POST') { await noBody(req); return send(200, fabric.sealAuditChain(p)); }
+      // Authorize before body validation on the seal-family routes too —
+      // an unauthorized caller must see 403, not a body-shape 400
+      // (w38-http LOW ordering parity).
+      if (path === '/v1/config-drift/reassert' && req.method === 'POST') { fabric.authorize(p, ['security']); await noBody(req); return send(200, fabric.reassertConfig(p)); }
+      if (path === '/v1/policy/reanchor' && req.method === 'POST') { fabric.authorize(p, ['security']); await noBody(req); return send(200, fabric.reanchorPolicy(p)); }
+      if (path === '/v1/clock/recover' && req.method === 'POST') { fabric.authorize(p, ['security', 'policy_admin']); await noBody(req); return send(200, fabric.recoverClock(p)); }
+      if (path === '/v1/audit/seal' && req.method === 'POST') { requireThat(Object.values(fabric.tenant(p.tenant_id).identities).find(v => v.subject_id === p.subject_id)?.roles?.includes('security'), 'INV-403-ROLE', 'Role denied for security', 403); await noBody(req); return send(200, fabric.sealAuditChain(p)); }
       if (path === '/v1/config-drift' && req.method === 'GET') return send(200, fabric.configDriftStatus(p));
       // A caller-supplied nonce binds the artifact to the verifier's
       // challenge — without it the endpoint mints freely-replayable
@@ -382,6 +417,16 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
   // without a completed request line never reach the rate limiter, so an
   // unbounded accept path is a raw fd-exhaustion vector (w22-http F5).
   let openConnections = 0;
-  server.on('connection', socket => { if (++openConnections > 2048) { socket.destroy(); return; } socket.on('close', () => openConnections--); });
+  server.on('connection', socket => {
+    // The connection cap must not blind the health probes: an over-cap
+    // socket is allowed exactly one request — the handler kills it unless
+    // the request line is a health probe (w38-http LOW).
+    if (++openConnections > connectionCap) {
+      socket.overCap = true;
+      socket.setTimeout(5000, () => socket.destroy());
+    }
+    socket.on('close', () => openConnections--);
+  });
+
   return { server, sessions, metrics, listen: () => new Promise(resolve => server.listen(port, host, resolve)), close: () => new Promise((resolve, reject) => { server.closeAllConnections(); server.close(e => e ? reject(e) : resolve()); }) };
 }

@@ -2541,6 +2541,16 @@
               "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
               "maxLength": 128
             }
+          },
+          {
+            "name": "nonce",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "description": "Caller-supplied challenge bound into the signed attestation — without it the artifact is freely replayable"
+            }
           }
         ]
       }
