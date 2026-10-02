@@ -107,11 +107,19 @@ export class Store {
   // index; standalone verification lacked it (w28-crypto F2).
   _auditKeyDeaths(tenant) {
     const dead = new Map();
-    for (const row of this.db.prepare("SELECT seq,envelope FROM audit WHERE tenant=? AND (envelope LIKE '%\"type\":\"AUTHORITY_REVOKED\"%' OR envelope LIKE '%\"type\":\"KEY_ROTATED\"%')").all(tenant)) {
+    for (const row of this.db.prepare("SELECT seq,envelope FROM audit WHERE tenant=? AND (envelope LIKE '%\"type\":\"AUTHORITY_REVOKED\"%' OR envelope LIKE '%\"type\":\"KEY_ROTATED\"%' OR envelope LIKE '%\"type\":\"AUDIT_SEALED\"%' OR envelope LIKE '%\"type\":\"AUDIT_SEAL_CARRY\"%')").all(tenant)) {
       let env; try { env = JSON.parse(row.envelope); } catch { continue; }
       const pl = env?.payload, meta = pl?.metadata;
       if (pl?.type === 'AUTHORITY_REVOKED' && meta?.kind === 'key' && typeof meta.id === 'string') dead.set(meta.id, row.seq);
       if (pl?.type === 'KEY_ROTATED' && meta?.key_class === 'audit' && typeof meta?.previous_key_id === 'string') dead.set(meta.previous_key_id, row.seq);
+      // A seal's revocations_carryover carries 'key:<kid>' refs — the live
+      // fold kills that key at the carrying row's seq, so the offline/page
+      // verifier must agree or it accepts rows the fabric refuses
+      // (w33-seal O-3).
+      if ((pl?.type === 'AUDIT_SEALED' || pl?.type === 'AUDIT_SEAL_CARRY') && Array.isArray(meta?.revocations_carryover))
+        for (const rv of meta.revocations_carryover)
+          if (typeof rv?.reference === 'string' && rv.reference.startsWith('key:'))
+            dead.set(rv.reference.slice(4), Math.min(dead.get(rv.reference.slice(4)) ?? Infinity, row.seq));
     }
     return dead;
   }
@@ -863,6 +871,13 @@ export function verifyAudit(bundle, pinnedKeys, priorCheckpoint = null) {
     const meta = entry.metadata;
     if (entry.type === 'AUTHORITY_REVOKED' && meta?.kind === 'key' && typeof meta.id === 'string') deadAt.set(meta.id, entry.sequence);
     if (entry.type === 'KEY_ROTATED' && meta?.key_class === 'audit' && typeof meta?.previous_key_id === 'string') deadAt.set(meta.previous_key_id, entry.sequence);
+    // Sealed carryover unfolds the same as _auditKeyDeaths — a 'key:' ref
+    // carried by AUDIT_SEALED/AUDIT_SEAL_CARRY kills the key at the carrying
+    // row (w33-export F2 parity).
+    if ((entry.type === 'AUDIT_SEALED' || entry.type === 'AUDIT_SEAL_CARRY') && Array.isArray(meta?.revocations_carryover))
+      for (const rv of meta.revocations_carryover)
+        if (typeof rv?.reference === 'string' && rv.reference.startsWith('key:'))
+          deadAt.set(rv.reference.slice(4), Math.min(deadAt.get(rv.reference.slice(4)) ?? Infinity, entry.sequence));
     signedSeqs.push([entry.sequence, item.envelope?.protected?.key_id]);
     previous = item.hash; time = entry.time;
     if (prior && sequence === prior.size) requireThat(ctEqual(previous, prior.head), 'INV-409-FORK', 'Witness checkpoint disagrees', 409);

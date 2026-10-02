@@ -54,25 +54,24 @@ test('w32 seal F1: a grafted replayed envelope is not carried into AUDIT_SEALED'
   assert.equal(carried.length, 1, 'the honest spend carries exactly once — the grafted duplicate is dropped');
 });
 
-// seal F-2/F-4 + store F1 + fixverify F-1/F-4: planted mirror rows merge only
-// under a chain witness for the same (capability, subject) — and sane values.
-test('w32 seal F2/F4: planted usage mirror rows are not carried without a chain witness', t => {
+// seal F-2/F-4 + store F1 + fixverify F-1/F-4 + w33-seal F-2/F-5/F-6:
+// mirror tables are never admitted into the signed carryover — a pair
+// witness still let planted cost/request_id/row_ids ride it, so mirrors were
+// dropped entirely. Only doomed-verified event content is re-attested.
+test('w32 seal F2/F4 + w33: no usage/data_access mirror row ever carries into a signed seal', t => {
   const h = fixture(t, ['acme']);
   const cap = h.f.runtime.issue(h.p(), runtimeInput({ max_cost: 1000 }));
   const req = runtimeRequest(cap);
   h.f.runtime.consume(h.p(), req);
   const capId = cap.payload.capability_id, subj = h.p().subject_id;
-  // (a) phantom capability+subject — no chain witness anywhere.
+  // Planted mirror rows on a fully witnessed pair — every honest-looking
+  // shape is still unprovable and must be dropped.
   h.f.store.db.prepare('INSERT INTO usage VALUES(?,?,?,?,?,?,?)').run('acme', 'phantom', 'res', h.now(), 999, 'phantom-cap', 'phantom-req');
-  // (b) witnessed pair, absurd value — negative cost.
   h.f.store.db.prepare('INSERT INTO usage VALUES(?,?,?,?,?,?,?)').run('acme', subj, cap.payload.resource, h.now(), -5, capId, 'neg-req');
-  // (c) witnessed pair, future timestamp.
-  h.f.store.db.prepare('INSERT INTO usage VALUES(?,?,?,?,?,?,?)').run('acme', subj, cap.payload.resource, h.now() + 999999999, 1, capId, 'future-req');
-  // (d) witnessed pair, sane values — an honest mirror row does carry.
+  h.f.store.db.prepare('INSERT INTO usage VALUES(?,?,?,?,?,?,?)').run('acme', subj, cap.payload.resource, h.now(), 999999999, capId, 'inflated-req');
   h.f.store.db.prepare('INSERT INTO usage VALUES(?,?,?,?,?,?,?)').run('acme', subj, cap.payload.resource, h.now(), 1, capId, 'mirror-req');
-  // Same bound on the data_access mirror: an unwitnessed (subject,dataset)
-  // pair can never be carried.
   h.f.store.db.prepare('INSERT INTO data_access VALUES(?,?,?,?,?,?)').run('acme', 'phantom-sub', 'phantom-ds', 'row-x', 'id', h.now());
+  h.f.store.db.prepare('INSERT INTO data_access VALUES(?,?,?,?,?,?)').run('acme', subj, cap.payload.resource, 'row-poison', 'ssn', h.now());
   // Doom the span that contains this capability's anchors.
   corruptAt(h, seqOf(h, '%CAPABILITY_ISSUED%'));
   assert.equal(h.f.sealAuditChain(h.p('security')).sealed, true);
@@ -80,9 +79,11 @@ test('w32 seal F2/F4: planted usage mirror rows are not carried without a chain 
   const reqs = meta.spend_carryover.map(u => u.request_id);
   assert.ok(!reqs.includes('phantom-req'), 'unwitnessed spend not carried');
   assert.ok(!reqs.includes('neg-req'), 'negative-cost spend not carried');
-  assert.ok(!reqs.includes('future-req'), 'future spend not carried');
-  assert.ok(reqs.includes('mirror-req'), 'witnessed honest mirror spend carried');
+  assert.ok(!reqs.includes('inflated-req'), 'inflated-cost spend not carried');
+  assert.ok(!reqs.includes('mirror-req'), 'even a perfectly honest-looking mirror row is never signed');
+  assert.ok(reqs.includes(req.request_id), 'the doomed-verified RUNTIME_ALLOWED event still carries');
   assert.ok(!meta.access_carryover.some(a => a.subject === 'phantom-sub'), 'unwitnessed access not carried');
+  assert.ok(!meta.access_carryover.some(a => (a.row_ids ?? []).includes('row-poison')), 'planted access row not carried');
 });
 
 // seal F-5: a doomed AUTHORITY_REVOKED is carried into AUDIT_SEALED and

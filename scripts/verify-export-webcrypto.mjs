@@ -81,9 +81,24 @@ async function main() {
   // slide by that the node verifier rejects (w23-supply F2).
   const prior = prior0 ?? (bundle.prior_checkpoint ? await verify(bundle.prior_checkpoint, keys, 'checkpoint') : null);
   let head = '0'.repeat(64), n = 0, time = 0;
+  // Signer-death window, mirroring store.mjs _auditKeyDeaths: a key revoked
+  // or rotated out ON THE CHAIN cannot attest rows sequenced after its death
+  // (w33-export F2 — the independent verifier must reject what node rejects).
+  const deadAt = new Map();
+  const kill = (kid, seq) => { if (typeof kid === 'string') deadAt.set(kid, Math.min(deadAt.get(kid) ?? Infinity, seq)); };
   for (const row of bundle.entries) {
     const e = await verify(row.envelope, keys, 'audit');
-    check(e.tenant_id === checkpoint.tenant_id && e.sequence === ++n && e.previous === head && e.time >= time && row.hash === await hash(e), 'Broken continuity'); head = row.hash; time = e.time;
+    check(e.tenant_id === checkpoint.tenant_id && e.sequence === ++n && e.previous === head && e.time >= time && row.hash === await hash(e), 'Broken continuity');
+    // Inclusive boundary, same as the fold: the death row itself may be
+    // self-signed, so the row's own death events apply only to later seqs.
+    const kid = row.envelope?.protected?.key_id;
+    check(!(kid !== undefined && deadAt.has(kid) && n > deadAt.get(kid)), 'Audit row signed by a key past its ledger death');
+    const meta = e.metadata;
+    if (e.type === 'AUTHORITY_REVOKED' && meta?.kind === 'key') kill(meta.id, n);
+    if (e.type === 'KEY_ROTATED' && meta?.key_class === 'audit') kill(meta.previous_key_id, n);
+    if ((e.type === 'AUDIT_SEALED' || e.type === 'AUDIT_SEAL_CARRY') && Array.isArray(meta?.revocations_carryover))
+      for (const rv of meta.revocations_carryover) if (typeof rv?.reference === 'string' && rv.reference.startsWith('key:')) kill(rv.reference.slice(4), n);
+    head = row.hash; time = e.time;
     if (prior && n === prior.size) check(head === prior.head, 'Witness fork');
   }
   check(checkpoint.size === n && checkpoint.head === head && (!prior || (prior.tenant_id === checkpoint.tenant_id && n >= prior.size)), 'Checkpoint mismatch');

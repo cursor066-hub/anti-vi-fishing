@@ -32,7 +32,7 @@ const components = {
   CeremonySplit: object({ secret: { type: 'string', minLength: 1, maxLength: 8192 } }),
   CeremonyReconstruct: object({ shares: { type: 'array', items: Str, minItems: 2, maxItems: 16 } }),
   RotatePrepare: object({ key_class: type.text, suite: { enum: ['Ed25519', 'ES256'] } }, ['key_class']),
-  ProofVerify: object({ proof: { type: 'object' } })
+  ProofVerify: object({ proof: { type: 'object' }, pin: object({ root: type.hash, size: type.positive }) }, ['proof'])
 };
 const variants = [];
 for (const s of Object.values(SCHEMAS)) {
@@ -83,7 +83,7 @@ for (const row of [
  ['/v1/connectors','get','Read simulator connector limitations','operator, security, policy_admin, auditor'], ['/v1/connectors/status','get','Issuer and target connector status incl. drift','operator, security, policy_admin, auditor'], ['/v1/connectors/{id}/drift-check','post','Live manifest drift check against issuer endpoint','security, policy_admin'],
  ['/v1/policies/simulate','post','Compare exact candidate without activation','policy_admin, security','Policy'], ['/v1/policy/history','get','Staged and historical policy versions','operator, security, auditor, policy_admin'], ['/v1/policy/reanchor','post','Re-anchor a diverged active policy under a signed remediation event','security','Empty'],
  ['/v1/audit-exports','post','Export audited purpose-bound integrity metadata','auditor, security','AuditRequest'],
- ['/v1/audit/entries','get','Paginated audit view (cursor + limit 1–5000)','operator, security, auditor, policy_admin'], ['/v1/audit/proofs/{sequence}','get','RFC 6962 inclusion proof','operator, security, auditor'], ['/v1/audit/consistency','get','Consistency proof between tree sizes','operator, security, auditor'], ['/v1/audit/verify-proof','post','Verify a supplied inclusion proof against the live tree','operator, security, auditor','ProofVerify'], ['/v1/audit/seal','post','Seal a poisoned audit tail: drops unverifiable rows under a signed AUDIT_SEALED event','security'],
+ ['/v1/audit/entries','get','Paginated audit view (cursor + limit 1–5000)','operator, security, auditor, policy_admin'], ['/v1/audit/proofs/{sequence}','get','RFC 6962 inclusion proof','operator, security, auditor'], ['/v1/audit/consistency','get','Consistency proof between tree sizes','operator, security, auditor'], ['/v1/audit/verify-proof','post','Verify a supplied inclusion proof (optional external pin {root,size})','operator, security, auditor','ProofVerify'], ['/v1/audit/seal','post','Seal a poisoned audit tail: drops unverifiable rows under a signed AUDIT_SEALED event','security'],
  ['/v1/subjects','get','Identity inventory','operator, security, auditor, policy_admin'], ['/v1/grants','get','Active JIT grants','operator, security, auditor'],
  ['/v1/retention/hold','post','Set or release evidence legal hold','security','RetentionHold'], ['/v1/retention/sweep','post','Apply conservative logical retention','security','Empty'], ['/v1/metrics','get','Read process-wide counters without target payloads','security'],
  ['/v1/ceremonies','get','List key ceremonies','security, custodian, policy_admin'], ['/v1/ceremonies','post','Plan a threshold ceremony','security, custodian','CeremonyCreate',201],

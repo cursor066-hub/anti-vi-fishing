@@ -1876,7 +1876,7 @@
     "/v1/audit/verify-proof": {
       "post": {
         "operationId": "post_v1_audit_verify_proof",
-        "summary": "Verify a supplied inclusion proof against the live tree",
+        "summary": "Verify a supplied inclusion proof (optional external pin {root,size})",
         "description": "Roles: operator, security, auditor. Engineering profile; all target mutations are simulated.",
         "tags": [
           "Control"
@@ -3638,6 +3638,25 @@
         "properties": {
           "proof": {
             "type": "object"
+          },
+          "pin": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "root",
+              "size"
+            ],
+            "properties": {
+              "root": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "size": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000000000000
+              }
+            }
           }
         }
       },

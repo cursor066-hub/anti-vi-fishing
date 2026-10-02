@@ -160,10 +160,21 @@ test('UX-007: the controlled-workspace fallback succeeds end-to-end when policy 
 test('AUD-009: security evidence continues while optional analytics is disabled', async t => {
   const h = await httpFixture(t);
   // Product analytics is off by design; the required security evidence (the
-  // signed audit chain) is unaffected.
+  // signed audit chain) is unaffected. The separation is structural, not a
+  // flag: no analytics state may live inside the authority tables —
+  // a future pipeline sneaking analytics columns into the signed store
+  // breaks this assertion (w33-ledger F8).
   const metrics = await h.request('/v1/metrics', { token: h.setup.credentials.acme.security });
   assert.equal(metrics.status, 200);
   assert.equal(metrics.data.analytics_enabled, false);
+  for (const [key, value] of Object.entries(metrics.data))
+    assert.ok(!/analytic/i.test(key) || value === false, `analytics key ${key} carries state in the metrics surface`);
+  const schema = h.f.store.db.prepare("SELECT name, sql FROM sqlite_master WHERE type IN ('table','view')").all();
+  for (const row of schema) {
+    assert.ok(!/analytic/i.test(row.name), `analytics table ${row.name} cohabits the authority store`);
+    for (const col of (row.sql.match(/\b\w+\b/g) ?? []))
+      assert.ok(!/analytic/i.test(col), `analytics column ${col} inside ${row.name}`);
+  }
   const audit = await h.request('/v1/audit/entries?limit=5', { token: h.setup.credentials.acme.auditor });
   assert.equal(audit.status, 200);
   assert.ok(audit.data.entries.length >= 1);

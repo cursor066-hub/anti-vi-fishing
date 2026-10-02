@@ -7,7 +7,6 @@ import { parseStrict, canonical, hashBytes, digest } from './canonical.mjs';
 import { fields, text, identifier, integer } from './schema.mjs';
 import { SCHEMAS } from './schema.mjs';
 import { requireThat, InvariantError } from './errors.mjs';
-import { merkleRoot } from './merkle.mjs';
 
 // Known route paths and their legal methods, for 405 classification of a
 // wrong-method request on a real path. {param} templates match one segment.
@@ -320,7 +319,13 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       if ((m = /^\/v1\/audit\/proofs\/(\d+)$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'auditor']); return send(200, fabric.auditProof(p, Number(m[1]))); }
       if (path === '/v1/audit/consistency' && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'auditor']); const first = qint(url.searchParams.get('first'), 'first', 1, 1, 1e12); return send(200, fabric.auditConsistency(p, first)); }
       if (path === '/v1/audit/entries' && req.method === 'GET') { const cursor = qint(url.searchParams.get('cursor'), 'cursor', 0, 0, 1e12), limit = qint(url.searchParams.get('limit'), 'limit', 1000, 1, 5000); return send(200, fabric.auditPageScoped(p, { after: cursor, limit, view: url.searchParams.get('view') ?? undefined })); }
-      if (path === '/v1/audit/verify-proof' && req.method === 'POST') { fabric.authorize(p, ['operator', 'security', 'auditor']); const i = await body(req); fields(i, ['proof']); const hashes = fabric.store.auditHashes(p.tenant_id); return send(200, { valid: fabric.verifyAuditProof(p.tenant_id, i.proof, { root: merkleRoot(hashes), size: hashes.length }) }); }
+      // The proof verifies against its OWN claimed (root,size) — pinning the
+      // live DB would be circular under file-write (the answer would only mean
+      // "consistent with current clay") and was also deterministically stale:
+      // auditProof appends its own access row before returning, so a re-pinned
+      // check always forked (w33-export F3). An optional caller-supplied `pin`
+      // binds the proof to an externally witnessed checkpoint instead.
+      if (path === '/v1/audit/verify-proof' && req.method === 'POST') { fabric.authorize(p, ['operator', 'security', 'auditor']); const i = await body(req); fields(i, ['proof'], ['pin']); let pinned = null; if (i.pin !== undefined) { fields(i.pin, ['root', 'size']); text(i.pin.root, 'pin.root', 128); integer(i.pin.size, 'pin.size', 1); pinned = { root: i.pin.root, size: i.pin.size }; } return send(200, { valid: fabric.verifyAuditProof(p.tenant_id, i.proof, pinned) }); }
       if (path === '/v1/ceremonies' && req.method === 'GET') { fabric.authorize(p, ['security', 'custodian', 'policy_admin']); return send(200, { items: fabric.store.list(p.tenant_id, 'ceremony', 100, 0).map(c => ({ ceremony_id: c.ceremony_id, status: fabric.ceremonyStatus(p.tenant_id, c), row_status: c.status, purpose: c.purpose })) }); }
       if (path === '/v1/ceremonies' && req.method === 'POST') return send(201, fabric.createCeremony(p, object(await body(req))));
       if ((m = /^\/v1\/ceremonies\/([A-Za-z0-9_.:-]+)\/(acknowledge|split|reconstruct|abort)$/.exec(path)) && req.method === 'POST') {

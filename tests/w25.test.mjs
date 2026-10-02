@@ -67,7 +67,11 @@ test('w25 W25-01b: replaying an older signed head wedges the consumed index', t 
 // F-3: cutting a span that anchored revocations must reconcile the revocation
 // floor rows — the un-revocation is attested on the seal, never silent.
 // Corrupting the revocation row itself puts it INSIDE the cut span.
-test('w25 F-3: sealing over an AUTHORITY_REVOKED span drops the orphaned floor row', t => {
+// F-3 (revised by w33-seal F-1): a floor row whose anchoring event is cut or
+// corrupted is NEVER deleted — the seal carries the ref forward marked
+// floor_derived, so the revocation keeps enforcing. Deleting it was a silent
+// un-revocation of real authority.
+test('w25 F-3: sealing over an AUTHORITY_REVOKED span carries the orphaned floor row forward', t => {
   const h = fixture(t, ['acme']);
   h.ready();
   h.f.revoke(h.p('security'), { kind: 'device', id: 'custodian-1-device', reason: 'rotate out' });
@@ -81,12 +85,12 @@ test('w25 F-3: sealing over an AUTHORITY_REVOKED span drops the orphaned floor r
   // every signature and pins the cut at the corrupted row.
   const sealed = h.f.sealAuditChain(h.p('security'));
   assert.equal(sealed.sealed, true);
-  assert.equal(h.f.revoked('acme', 'device', 'custodian-1-device'), false, 'sealed-away revocation lifts — honestly, on the chain');
-  assert.equal(h.f.store.get('acme', 'revocation', 'device:custodian-1-device') ?? undefined, undefined, 'orphaned floor row is dropped');
+  assert.equal(h.f.revoked('acme', 'device', 'custodian-1-device'), true, 'a revocation its anchor cannot prove stays revoked — fail closed');
+  assert.ok(h.f.store.get('acme', 'revocation', 'device:custodian-1-device'), 'orphaned floor row is kept, not dropped');
   const sealRow = h.f.store.db.prepare("SELECT envelope FROM audit WHERE tenant='acme' ORDER BY seq DESC LIMIT 1").get();
   const pl = JSON.parse(sealRow.envelope).payload;
   assert.equal(pl.type, 'AUDIT_SEALED');
-  assert.ok((pl.metadata.unrevoked_refs ?? []).includes('device:custodian-1-device'), 'the un-revocation is named in the signed seal record');
+  assert.ok((pl.metadata.revocations_carryover ?? []).some(r => r.reference === 'device:custodian-1-device' && r.floor_derived === true), 'the floor-derived carry is named in the signed seal record');
 });
 
 // W25-02: a composite parent cert's anchored binding is ledger-proven — a

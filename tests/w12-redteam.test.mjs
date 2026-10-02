@@ -15,14 +15,16 @@ import { digest } from '../src/canonical.mjs';
 import { signed, verifySigned, generateKey } from '../src/crypto.mjs';
 
 // R1: deleting the mutable revocation row cannot un-quarantine a device —
-// revocation is anchored on the signed AUTHORITY_REVOKED chain event.
+// revocation is anchored on the signed AUTHORITY_REVOKED chain event, and
+// (w33-export F1) the signed head attests the revocation floor count, so
+// deleting the floor row convicts loudly instead of silently un-revoking.
 test('w12 R1: a deleted revocation row cannot resurrect a quarantined device', t => {
   const h = fixture(t);
   h.f.revoke(h.p('security'), { kind: 'device', id: 'operator-device', reason: 'lost' });
   h.f.store.db.prepare("DELETE FROM records WHERE kind='revocation'").run();
   assert.equal(h.f.store.list('acme', 'revocation', 10).length, 0, 'row is gone');
-  assert.equal(h.f.revoked('acme', 'device', 'operator-device'), true, 'chain still attests the revocation');
-  assert.throws(() => h.proposed(), hasCode('INV-403-QUARANTINE'));
+  assert.throws(() => h.f.revoked('acme', 'device', 'operator-device'), hasCode('INV-409-INTEGRITY'), 'floor-row deletion convicts at the next fold — louder than a silent re-derivation');
+  assert.throws(() => h.proposed(), err => ['INV-403-QUARANTINE', 'INV-409-INTEGRITY'].includes(err?.code), 'the device stays unusable either way');
 });
 
 // R2: an in-place payload edit on an attached evidence row dies at digest

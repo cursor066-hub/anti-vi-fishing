@@ -62,6 +62,16 @@ test('RUN-008: adversarial request load neither evicts policy nor crashes the ga
   assert.equal(digest(h.f.policy('acme')), before);
   const cap = h.f.runtime.issue(h.p(), runtimeInput());
   assert.equal(h.f.runtime.consume(h.p(), runtimeRequest(cap)).decision, 'ALLOW');
+  // The gate rate-limits its own decision interface: rate_per_second=20 for
+  // this policy — the 21st consume inside one second is refused INV-429-RATE.
+  const cap2 = h.f.runtime.issue(h.p(), runtimeInput({ max_cost: 10000 }));
+  let lastErr = null;
+  for (let i = 0; i < 21; i++) {
+    try { h.f.runtime.consume(h.p(), runtimeRequest(cap2)); } catch (e) { lastErr = e; }
+  }
+  assert.ok(lastErr?.code === 'INV-429-RATE', `expected INV-429-RATE, got ${lastErr?.code}`);
+  h.advance(1001);
+  assert.equal(h.f.runtime.consume(h.p(), runtimeRequest(cap2)).decision, 'ALLOW', 'the window resets — the limiter never wedges honest traffic');
 });
 
 test('DAT-007: no reusable database credential exists anywhere in configuration or seeded state', t => {
@@ -170,14 +180,15 @@ test('NFR-SEC-006: crypto agility is configurable and both suites sign/verify', 
 });
 
 test('NFR-PERF-004: the integrated evaluation path sustains >=100 decisions/second in-process', t => {
-  const h = fixture(t); const r = h.ready().record;
-  const record = h.f.getCapsule(h.p(), r.capsule.capsule_id);
-  // Run the real evaluation path (policy + graph + audit write) and measure.
+  const h = fixture(t); const r = h.proposed();
+  // Measure the INTEGRATED path the requirement names: evaluate() runs the
+  // full policy+graph decision AND writes its POLICY_EVALUATED record +
+  // audit event each call — not evaluation(), the pure unaudited variant.
   const iterations = 200, started = process.hrtime.bigint();
-  for (let i = 0; i < iterations; i++) h.f.evaluation('acme', record, h.now());
+  for (let i = 0; i < iterations; i++) h.f.evaluate(h.p(), r.capsule.capsule_id);
   const seconds = Number(process.hrtime.bigint() - started) / 1e9;
   const ops = iterations / seconds;
-  assert.ok(ops >= 100, `in-process evaluation throughput ${ops.toFixed(0)}/s < 100/s`);
+  assert.ok(ops >= 100, `in-process audited evaluation throughput ${ops.toFixed(0)}/s < 100/s`);
   // The committed benchmark artifact must corroborate the same claim.
   const bench = JSON.parse(readFileSync('reports/benchmark.json', 'utf8'));
   assert.equal(bench.asserted_targets.integrated_evaluations_per_second_at_least, true);

@@ -29,7 +29,9 @@ external review.
 | w26 | Secure-perception 2nd pass | session-bound releases (public-ECDH forgery refused), per-release anchored policy re-verify, private-half shredding on first touch, 64-session cap, /v1/me narrowing |
 | w27 | Fix-verification, chain-head watermark, ledger 8th pass, datagate 5th pass, policy 3rd pass | signed head envelopes verified before monotone compare, durable two-file rollback detection, lock owner-token + honest INV-503-GATE + stale cleanup, 256/hour mint cap, composite sibling egress overlay, jit.grant row/dataset validation |
 | w28–w30 | Fix-verification, store/crash-consistency, crypto/vault, HTTP/console, ledger 9th pass, datagate 6th pass, lifecycle/execute, policy 4th pass, issuerd/console, secure-perception | wipe-gate against silent re-genesis (vault injection exempt), chain-derived supersession (`_supersededMap`), fail-closed null-kid anchors, suite-floor on attestations, replay probes ahead of crypto, `_coversLiveSuites`, issuerd log-lock/empty-log guards |
-| w31 | Fix-verification, ledger/docs 10th pass, runtime-gate 3rd pass, coverage/attestation 2nd pass | in progress — findings land with fixes + regression tests |
+| w31 | Fix-verification, ledger/docs 10th pass, runtime-gate 3rd pass, coverage/attestation 2nd pass | seal carryover: doomed-span spend/access/issuance re-attested inside signed AUDIT_SEALED; consume requires anchored issuance; constructor tolerates kline chains; single live identity per subject; anchored enumeration/binding/sweep over coverage |
+| w32 | Fix-verification of w31, deep carryover audit, composite/outcome, store 5th pass | mirror-witness carryover bound, doomed AUTHORITY_REVOKED carried (seal can never un-revoke), wedge-integrity sweep gates wedge_cleared, sealed span graft/replay rejection, durable-watermark repair, target.db wipe residue, atomic dek+record deletes, wedged-child release denial, child-outcome folding |
+| w33 | Seal/carryover 2nd pass, ledger/docs 11th pass, fix-verification, export/merkle | head-carried residue claims (checkpoint + revocation count convict unguarded-row deletion), incremental memoized merkle for proof/consistency endpoints, verify-proof de-circularised (proof's own claim + optional external pin), webcrypto signer-death window, three-verifier carryover 'key:' unfold parity |
 
 ## Method
 
@@ -37,9 +39,9 @@ external review.
   the repository, and returned severity-tagged findings with reproduction.
 - Findings were re-verified against the live tree before any fix; stale or
   already-fixed findings were closed with the commit that pre-dated them.
-- Every accepted finding landed with a dedicated regression test — see
-  `tests/w5-*` … `tests/w17-*.test.mjs` — so a repeated auditor can
-  check each repair independently.
+- Every accepted finding landed with a dedicated regression test — one
+  `tests/w<N>-*.test.mjs` file per wave (w5 through the current wave) —
+  so a repeated auditor can check each repair independently.
 - Fix-verification auditors specifically hunt for defects *inside* the
   fixes of the same wave, closing the self-review loop.
 
