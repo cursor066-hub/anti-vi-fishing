@@ -34,16 +34,16 @@
       "bytes": 6582
     },
     "src/datagate.mjs": {
-      "lines": 155,
-      "bytes": 11000
+      "lines": 161,
+      "bytes": 11554
     },
     "src/errors.mjs": {
       "lines": 10,
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 5706,
-      "bytes": 447727
+      "lines": 5775,
+      "bytes": 453518
     },
     "src/issuerd.mjs": {
       "lines": 797,
@@ -409,6 +409,10 @@
       "lines": 293,
       "bytes": 20352
     },
+    "tests/w34.test.mjs": {
+      "lines": 175,
+      "bytes": 10119
+    },
     "tests/w5-mutations.test.mjs": {
       "lines": 194,
       "bytes": 13645
@@ -478,6 +482,6 @@
       "bytes": 6499
     }
   },
-  "total_files": 119,
-  "total_lines": 28634
+  "total_files": 120,
+  "total_lines": 28884
 }

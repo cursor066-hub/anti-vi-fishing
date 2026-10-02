@@ -111,7 +111,7 @@ export function watermark(rows, ctx) {
 // DAT-009: cumulative reconstruction control. Counts distinct rows and
 // columns a subject has touched per dataset inside the window; crossing the
 // configured coverage threshold produces a budget denial plus an audit signal.
-export function reconstructionCheck(touchDb, catalogDb, { tenant, subject, dataset, rows, columns, now, policy, record = true, access = null }) {
+export function reconstructionCheck(touchDb, catalogDb, { tenant, subject, dataset, rows, columns, now, policy, record = true, access = null, droppedEvents = 0 }) {
   // Touch records live on the fabric store's transaction so a rolled-back
   // consume cannot leave phantom access rows (cross-DB atomicity, M2).
   // Counts are computed PROSPECTIVELY before writing: a denied attempt
@@ -139,10 +139,16 @@ export function reconstructionCheck(touchDb, catalogDb, { tenant, subject, datas
     : new Set(touchDb.prepare('SELECT DISTINCT row_id FROM data_access WHERE tenant=? AND dataset=? AND at>?').all(tenant, dataset, now - window).map(x => x.row_id));
   for (const r of rows) datasetTouched.add(r);
   const datasetCoverage = totalRows ? Math.floor((datasetTouched.size * 100) / totalRows) : 0;
+  // Seal-drop accounting: a seal that destroyed rows it could not re-verify
+  // leaves the ledger unable to re-derive the erased disclosure — every
+  // dropped event might have been a full-dataset access. Worst-case coverage
+  // keeps the configured budget honest instead of under-reporting what the
+  // chain can no longer prove (w34-composite MEDIUM-1).
+  const sealDropped = droppedEvents > 0;
   const limits = policy ?? { max_distinct_rows: 100000, max_distinct_columns: 100000, max_coverage_percent: 100 };
   const maxDatasetCoverage = limits.max_dataset_coverage_percent ?? limits.max_coverage_percent;
-  if (rowCount > limits.max_distinct_rows || colCount > limits.max_distinct_columns || coveragePercent > limits.max_coverage_percent || datasetCoverage > maxDatasetCoverage) {
-    return { allowed: false, code: 'INV-429-BUDGET', row_count: rowCount, column_count: colCount, coverage_percent: coveragePercent, dataset_coverage_percent: datasetCoverage };
+  if (rowCount > limits.max_distinct_rows || colCount > limits.max_distinct_columns || coveragePercent > limits.max_coverage_percent || datasetCoverage > maxDatasetCoverage || sealDropped) {
+    return { allowed: false, code: 'INV-429-BUDGET', row_count: rowCount, column_count: colCount, coverage_percent: sealDropped ? 100 : coveragePercent, dataset_coverage_percent: sealDropped ? 100 : datasetCoverage, seal_dropped_events: droppedEvents };
   }
   // record=false gives a read-only pre-flight: the export admission check
   // must not write touch rows before egress actually commits (w10-datagate F3).
@@ -150,5 +156,5 @@ export function reconstructionCheck(touchDb, catalogDb, { tenant, subject, datas
     const ins = touchDb.prepare('INSERT INTO data_access VALUES(?,?,?,?,?,?)');
     for (const row of rows) for (const c of columns) ins.run(tenant, subject, dataset, row, c, now);
   }
-  return { allowed: true, row_count: rowCount, column_count: colCount, coverage_percent: coveragePercent, dataset_coverage_percent: datasetCoverage };
+  return { allowed: true, row_count: rowCount, column_count: colCount, coverage_percent: sealDropped ? 100 : coveragePercent, dataset_coverage_percent: sealDropped ? 100 : datasetCoverage };
 }

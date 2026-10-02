@@ -1531,7 +1531,8 @@ export class Fabric {
       // CAPABILITY_ISSUED anchor is cut is named in capabilities_cut —
       // consume() requires the issuance anchor, so it can never ride a
       // provable envelope it no longer has.
-      const carrySpend = [], carryAccess = [], capsCut = [], carryRevoked = [];
+      const carrySpend = [], carryAccess = [], capsCut = [], carryRevoked = [], carryLifecycle = [], droppedEvents = [];
+      let droppedEventsOverflow = 0;
       // Carry dedup: a doomed event and a doomed seal re-attesting it can
       // coexist in one span — a (capability,request) spend, an access row
       // and a revocation each count once (w33-seal).
@@ -1539,6 +1540,12 @@ export class Fabric {
       const addSpend = u => { const k = `${u.capability}:${u.request_id}`; if (!spendKeys.has(k)) { spendKeys.add(k); carrySpend.push(u); } };
       const addAccess = a => { const k = `${a.subject}|${a.dataset}|${a.at}|${a.certificate_id}|${JSON.stringify(a.row_ids)}`; if (!accessKeys.has(k)) { accessKeys.add(k); carryAccess.push(a); } };
       const addRevoked = rv => { if (typeof rv?.reference !== 'string' || revokedKeys.has(rv.reference)) return; revokedKeys.add(rv.reference); carryRevoked.push(rv); };
+      // Lifecycle entries dedup the same way: an event a prior seal already
+      // re-attested is re-carried exactly once — array projections (denials,
+      // coverage replay, policy anchors) would otherwise double-count
+      // (w34-composite CRITICAL-1).
+      const lifecycleKeys = new Set();
+      const addLifecycle = lc => { const k = `${lc.type}|${lc.reference}|${lc.time}|${digest(lc.metadata ?? {})}`; if (!lifecycleKeys.has(k)) { lifecycleKeys.add(k); carryLifecycle.push(lc); } };
       let doomedSnapshotSeen = false;
       const doomed = this.store.db.prepare('SELECT seq, hash, envelope FROM audit WHERE tenant=? AND seq>=? ORDER BY seq').all(t, firstBad);
       // Doomed rows are carried only under the same acceptance rules the
@@ -1550,15 +1557,21 @@ export class Fabric {
       // never smuggle spend or a revocation drop into the signed
       // AUDIT_SEALED carryover (w32-seal F-1/F-3).
       for (const r of doomed) {
-        let pl = null;
+        let pl = null, unverifiedType = null;
         try {
           const env = JSON.parse(r.envelope), kid = env?.protected?.key_id, deadAt = kid !== undefined ? keyDeadAt.get(kid) : undefined;
+          unverifiedType = typeof env?.payload?.type === 'string' ? env.payload.type : null;
           if (ctEqual(digest(env.payload), r.hash) && env.payload.sequence === r.seq
             && !(deadAt !== undefined && deadAt < r.seq)
             && (typeof env.payload.time !== 'number' || env.payload.time <= Math.max(consumeNow, prevPlTime) + 60_000)
             && verifySigned(env, keys, 'audit').tenant_id === t) pl = env.payload;
         } catch { /* unverifiable rows are why the seal runs */ }
-        if (!pl) continue;
+        // A doomed row that fails re-verification can never be re-attested —
+        // but the seal must NAME what it destroyed: removed hashes alone tell
+        // nobody *what* authority died, so a laundered replay would be
+        // invisible (w34-composite CRITICAL-1). Entries carry seq+hash plus
+        // the envelope's own (unverified) type claim as a hint.
+        if (!pl) { droppedEvents.push({ seq: r.seq, hash: r.hash, ...(unverifiedType ? { type_hint: unverifiedType } : {}) }); continue; }
         const meta = pl.metadata ?? {};
         if (pl.type === 'RUNTIME_ALLOWED') addSpend({ capability: pl.reference, subject: pl.actor, resource: meta.resource ?? null, request_id: meta.request_id ?? null, cost: typeof meta.cost === 'number' && meta.cost >= 0 ? meta.cost : 0, at: pl.time });
         else if (pl.type === 'DATA_ACCESSED') addAccess({ subject: pl.reference, dataset: meta.dataset, row_ids: meta.row_ids ?? [], columns: meta.columns ?? [], at: meta.at ?? pl.time, certificate_id: meta.certificate_id ?? null, request_id: meta.request_id ?? null, wedged: meta.wedged === true, gate_denied: meta.gate_denied === true });
@@ -1567,11 +1580,23 @@ export class Fabric {
         // seal must not silently un-revoke what it cannot disprove —
         // including the sealing caller's own revocation (w32-seal F-5).
         else if (pl.type === 'AUTHORITY_REVOKED' && typeof pl.reference === 'string') addRevoked({ reference: pl.reference, kind: meta.kind ?? null, id: meta.id ?? null, at: pl.time });
-        else if (pl.type === 'CONFIG_SNAPSHOT' || pl.type === 'CONFIG_REASSERTED') doomedSnapshotSeen = true;
+        // CONFIG_SNAPSHOT/REASSERTED feed doomedSnapshotSeen (the repoint
+        // rule) AND the lifecycle carry — the fold's configSnapshot baseline
+        // must survive the cut too.
+        else if (pl.type === 'CONFIG_SNAPSHOT' || pl.type === 'CONFIG_REASSERTED') { doomedSnapshotSeen = true; addLifecycle({ type: pl.type, reference: pl.reference ?? null, actor: pl.actor ?? null, time: pl.time ?? null, metadata: meta }); }
         // A second seal cutting below a prior seal (or its carry pages)
         // must carry the carryover forward — the authority a seal already
         // re-attested can never be silently dropped by the next one.
-        else if (pl.type === 'AUDIT_SEALED' || pl.type === 'AUDIT_SEAL_CARRY') { for (const u of meta.spend_carryover ?? []) addSpend(u); for (const a of meta.access_carryover ?? []) addAccess(a); for (const c of meta.capabilities_cut ?? []) capsCut.push(c); for (const rv of meta.revocations_carryover ?? []) addRevoked(rv); }
+        else if (pl.type === 'AUDIT_SEALED' || pl.type === 'AUDIT_SEAL_CARRY') { for (const u of meta.spend_carryover ?? []) addSpend(u); for (const a of meta.access_carryover ?? []) addAccess(a); for (const c of meta.capabilities_cut ?? []) capsCut.push(c); for (const rv of meta.revocations_carryover ?? []) addRevoked(rv); for (const lc of meta.lifecycle_carryover ?? []) addLifecycle(lc); for (const de of meta.dropped_events ?? []) droppedEvents.push(de); droppedEventsOverflow += Math.max(0, (meta.carryover_totals?.dropped_events ?? (Array.isArray(meta.dropped_events) ? meta.dropped_events.length : 0)) - (Array.isArray(meta.dropped_events) ? meta.dropped_events.length : 0)); }
+        // Every other verifiable doomed event — proposals, evidence,
+        // approvals, certificate issuance, reservations, dispatches,
+        // outcomes, releases, compensations, cancels, grants, rotations,
+        // policy anchors, coverage, ceremonies, denials — is re-attested as
+        // a lifecycle carry entry so the rebuilt fold keeps enforcing the
+        // destroyed anchors (spent certs stay spent, cancelled stay dead,
+        // composite children stay bound). Without this the seal was a
+        // laundering oracle (w34-composite CRITICAL-1).
+        else addLifecycle({ type: pl.type, reference: pl.reference ?? null, actor: pl.actor ?? null, time: pl.time ?? null, metadata: meta });
       }
       // Mirror tables are attacker-writable and add NOTHING provable: every
       // honest usage/data_access row duplicates a doomed-verified
@@ -1714,9 +1739,9 @@ export class Fabric {
       // seal's own seq.
       const CARRY_PAGE = 512;
       const carryPages = [];
-      for (let off = CARRY_PAGE; off < Math.max(carrySpend.length, carryAccess.length, carryRevoked.length, capsCut.length); off += CARRY_PAGE)
-        carryPages.push({ spend_carryover: carrySpend.slice(off, off + CARRY_PAGE), access_carryover: carryAccess.slice(off, off + CARRY_PAGE), revocations_carryover: carryRevoked.slice(off, off + CARRY_PAGE), capabilities_cut: capsCut.slice(off, off + CARRY_PAGE) });
-      this.store.audit(t, 'AUDIT_SEALED', p.subject_id, 'audit', { sealed_at_seq: firstBad, removed_count: removed.length, removed_head: removed[0] ?? null, removed_tail: removed.at(-1) ?? null, spend_carryover: carrySpend.slice(0, CARRY_PAGE), access_carryover: carryAccess.slice(0, CARRY_PAGE), capabilities_cut: capsCut.slice(0, CARRY_PAGE), revocations_carryover: carryRevoked.slice(0, CARRY_PAGE), carryover_pages: carryPages.length, carryover_totals: { spend: carrySpend.length, access: carryAccess.length, revocations: carryRevoked.length, capabilities: capsCut.length, mirrors_dropped: droppedMirrorCount }, dropped_mirrors: droppedMirrors }, now);
+      for (let off = CARRY_PAGE; off < Math.max(carrySpend.length, carryAccess.length, carryRevoked.length, capsCut.length, carryLifecycle.length); off += CARRY_PAGE)
+        carryPages.push({ spend_carryover: carrySpend.slice(off, off + CARRY_PAGE), access_carryover: carryAccess.slice(off, off + CARRY_PAGE), revocations_carryover: carryRevoked.slice(off, off + CARRY_PAGE), capabilities_cut: capsCut.slice(off, off + CARRY_PAGE), lifecycle_carryover: carryLifecycle.slice(off, off + CARRY_PAGE) });
+      this.store.audit(t, 'AUDIT_SEALED', p.subject_id, 'audit', { sealed_at_seq: firstBad, removed_count: removed.length, removed_head: removed[0] ?? null, removed_tail: removed.at(-1) ?? null, spend_carryover: carrySpend.slice(0, CARRY_PAGE), access_carryover: carryAccess.slice(0, CARRY_PAGE), capabilities_cut: capsCut.slice(0, CARRY_PAGE), revocations_carryover: carryRevoked.slice(0, CARRY_PAGE), lifecycle_carryover: carryLifecycle.slice(0, CARRY_PAGE), carryover_pages: carryPages.length, carryover_totals: { spend: carrySpend.length, access: carryAccess.length, revocations: carryRevoked.length, capabilities: capsCut.length, lifecycle: carryLifecycle.length, mirrors_dropped: droppedMirrorCount, dropped_events: droppedEvents.length + droppedEventsOverflow }, dropped_mirrors: droppedMirrors, dropped_events: droppedEvents.slice(0, CARRY_PAGE) }, now);
       for (let i = 0; i < carryPages.length; i++)
         this.store.audit(t, 'AUDIT_SEAL_CARRY', p.subject_id, 'audit', { seal_seq: firstBad, page: i + 1, ...carryPages[i] }, now);
       }
@@ -2097,12 +2122,18 @@ export class Fabric {
     // The served row must equal the chain's own attested verdict: a stale
     // post-cancel row or a ciphertext transplant of a superseded verdict
     // is tamper evidence, never a quiet serve (w24-lifecycle W24-6).
-    const anchoredStatus = this._auditIndex(t).outcomes.get(pl.certificate_id);
-    if (anchoredStatus !== undefined) {
-      requireThat(pl.status === anchoredStatus, 'INV-409-INTEGRITY', 'Outcome status contradicts the anchored verdict', 409);
-      const anchoredDigest = this._auditIndex(t).outcomeDigests.get(pl.certificate_id);
-      if (anchoredDigest) requireThat(digest(envelope) === anchoredDigest, 'INV-409-INTEGRITY', 'Outcome row diverges from the anchored verdict digest', 409);
-    }
+    const oidx = this._auditIndex(t);
+    // Seal carryover now re-anchors every verifiable EXECUTION_OUTCOME — a
+    // served outcome with NO chain anchor at all is unverifiable evidence,
+    // not a missing fold: treat it as tamper, never as "no anchor to
+    // compare" (w34-composite MEDIUM-2). Composite children anchor through
+    // the parent's child_outcomes explode (any status counts — a stored
+    // mid-flight row is attested while its parent named it).
+    const anchoredStatus = oidx.outcomes.get(pl.certificate_id) ?? oidx.childOutcomeAnchors?.get(pl.certificate_id);
+    requireThat(anchoredStatus !== undefined, 'INV-409-INTEGRITY', 'Outcome claims a verdict the signed ledger never attested', 409);
+    requireThat(pl.status === anchoredStatus, 'INV-409-INTEGRITY', 'Outcome status contradicts the anchored verdict', 409);
+    const anchoredDigest = oidx.outcomeDigests.get(pl.certificate_id);
+    if (anchoredDigest) requireThat(digest(envelope) === anchoredDigest, 'INV-409-INTEGRITY', 'Outcome row diverges from the anchored verdict digest', 409);
     return envelope;
   }
   // Mutable lifecycle flags are caches derived from the anchored folds —
@@ -2367,9 +2398,208 @@ export class Fabric {
   // or deleted records row cannot mint authority without forging a signed,
   // hash-chained ledger entry. The index is incremental over audit sequence:
   // rows deleted mid-table cannot un-anchor what the chain already attested.
+  // One fold case per anchored event type, shared by the live fold and the
+  // seal carryover replay: a carried lifecycle entry is a seal-attested
+  // re-anchor of an event the cut span destroyed — replaying it through the
+  // same projection keeps reservations, outcomes, cancels, parent bindings
+  // and every other anchored fact enforceable after remediation
+  // (w34-composite CRITICAL-1).
+  #foldApply(idx, pl, seq, t) {
+    const meta = pl.metadata ?? {};
+    switch (pl.type) {
+      case 'AUTHORITY_REVOKED': idx.revoked.add(pl.reference);
+        if (meta.record_digest) idx.revocationDigests.set(pl.reference, meta.record_digest);
+        // The revocation row itself may still be signed by the dying
+        // key — the window closes only for LATER seqs.
+        if (typeof pl.reference === 'string' && pl.reference.startsWith('key:')) idx.keyDeadAt.set(pl.reference.slice(4), Math.min(idx.keyDeadAt.get(pl.reference.slice(4)) ?? Infinity, seq));
+        break;
+      case 'KEY_ROTATED':
+        if (meta.key_class === 'audit' && meta.previous_key_id) idx.keyDeadAt.set(meta.previous_key_id, Math.min(idx.keyDeadAt.get(meta.previous_key_id) ?? Infinity, seq));
+        // The newest anchored succession per class is the only authority
+        // a key-binding repoint may follow — 'key-rotation' records are
+        // forgeable hints, never the selector (w16-fixverify F3/F13).
+        if (typeof meta.key_class === 'string' && typeof pl.reference === 'string') idx.rotations.set(meta.key_class, { new_key_id: pl.reference, previous_key_id: meta.previous_key_id ?? null, at: pl.time });
+        // Every anchored key is chain-bound to this tenant (ownership
+        // for ledger-significant ops), and each predecessor maps to its
+        // successor for O(1) steering — no records scan, no full-chain
+        // re-verify per signing call (w17-redteam C3, w17-idx F6).
+        if (typeof pl.reference === 'string') idx.rotationKeys.add(pl.reference);
+        if (typeof meta.previous_key_id === 'string') idx.rotationKeys.add(meta.previous_key_id);
+        if (typeof meta.key_class === 'string' && typeof meta.previous_key_id === 'string' && typeof pl.reference === 'string') idx.rotationsByPrev.set(`${meta.key_class}:${meta.previous_key_id}`, pl.reference);
+        // Anchored ceremony spend: a mutable rotation_consumed row flag
+        // can neither erase nor fake a spend the ledger recorded
+        // (w18-fixverify F13).
+        // Anchored ceremony spend maps to the capsule that consumed it —
+        // a mutable rotation_consumed row flag can neither erase nor fake
+        // a spend the ledger recorded, and never wedges a live rotation
+        // (w18-fixverify F13, w20-ceremony residual). Pre-capsule anchors
+        // carry null and fail closed.
+        if (typeof meta.ceremony_id === 'string') idx.ceremonyRotationConsumed.set(meta.ceremony_id, meta.capsule_id ?? null);
+        break;
+      case 'ROTATION_PREPARED': if (typeof pl.reference === 'string') idx.rotationKeys.add(pl.reference); break;
+      case 'EVIDENCE_ATTACHED': { const l = idx.attached.get(pl.reference) ?? []; l.push(meta.evidence_id); idx.attached.set(pl.reference, l); idx.evidenceIds.add(meta.evidence_id); if (meta.expires_at !== undefined) { const el = (idx.evidenceExpiry ??= new Map()).get(pl.reference) ?? []; el.push({ evidence_id: meta.evidence_id, expires_at: meta.expires_at }); idx.evidenceExpiry.set(pl.reference, el); } break; }
+      case 'CAPSULE_PROPOSED': idx.proposedAt.set(pl.reference, pl.time); if (meta.nonce) idx.proposedNonce.add(meta.nonce); if (meta.capsule_digest) idx.proposedDigest.set(pl.reference, meta.capsule_digest); if (meta.idem_key) idx.proposedIdem.set(meta.idem_key, { request: meta.idem_request, capsule_id: pl.reference }); if (typeof meta.expires_at === 'number') (idx.proposedExpiry ??= new Map()).set(pl.reference, meta.expires_at); break;
+      // Anchored approval/evidence lifetimes: a capsule row rolled back
+      // to a pre-approval image cannot hide a lapsed vote or envelope
+      // from the resurrection veto (w24-fixverify W24-07).
+      case 'EXACT_ACTION_APPROVED': { const l = (idx.approvalExpiry ??= new Map()).get(pl.reference) ?? []; l.push({ signer_id: meta.signer_id ?? null, expires_at: meta.expires_at ?? null }); idx.approvalExpiry.set(pl.reference, l); break; }
+      case 'CERTIFICATE_ISSUED': idx.issued.add(pl.reference); if (meta.certificate_id) { idx.issuedCert.set(pl.reference, meta.certificate_id); idx.issuedCerts.add(meta.certificate_id); if (meta.certificate_digest) (idx.issuedCertDigests ??= new Map()).set(meta.certificate_id, meta.certificate_digest); } if (Array.isArray(meta.children)) idx.parentChildren.set(pl.reference, meta.children); break;
+      case 'JIT_GRANT_ISSUED': idx.grants.set(meta.grant_id, meta.scope_digest ?? meta.grant_digest); if (meta.grant_id) idx.grantMeta.set(meta.grant_id, { expires_at: meta.expires_at, at: pl.time }); break;
+      case 'CAPABILITY_ISSUED': (idx.capabilities ??= new Set()).add(pl.reference); (idx.capabilityMeta ??= new Map()).set(pl.reference, { expires_at: meta.expires_at ?? null }); break;
+      case 'POLICY_GENESIS': case 'POLICY_ACTIVATED': case 'EMERGENCY_POLICY_ACTIVATED': if (meta.policy_digest) idx.policyAnchors.push({ staged: false, digest: meta.policy_digest }); break;
+      case 'POLICY_STAGED': if (meta.policy_digest) idx.policyAnchors.push({ staged: true, digest: meta.policy_digest, activate_at: meta.activate_at ?? null }); break;
+      case 'POLICY_SIMULATED': if (meta.candidate_digest) idx.simulated.push({ candidate_digest: meta.candidate_digest, baseline_digest: meta.baseline_digest ?? null, at: pl.time }); break;
+      case 'CONNECTOR_DRIFT': idx.issuerDrift.add(pl.reference); break;
+      case 'CONNECTOR_REVALIDATED': idx.issuerDrift.delete(pl.reference); break;
+      case 'CONFIG_DRIFT': case 'CONFIG_REASSERTED': if (meta.config_digest) idx.configSnapshot = meta.config_digest; break;
+      case 'CONFIG_SNAPSHOT': if (meta.config_digest) idx.configSnapshot = meta.config_digest; break;
+      case 'POLICY_EVALUATED': if (meta.decision_digest) idx.decisions.set(pl.reference, meta.decision_digest); if (meta.decision) (idx.decisionStatus ??= new Map()).set(pl.reference, meta.decision); break;
+      // Per-capability and per-subject indexes keep consume() checks
+      // bounded — a linear pass over the whole runtime history per
+      // request was a quadratic wall-clock sink (w17-idx F8).
+      case 'RUNTIME_ALLOWED': { const u = { capability: pl.reference, subject: pl.actor, resource: meta.resource ?? null, request_id: meta.request_id ?? null, cost: typeof meta.cost === 'number' ? meta.cost : 0, at: pl.time }; idx.runtimeUse.push(u); const cl = idx.runtimeUseByCap.get(u.capability) ?? []; cl.push(u); idx.runtimeUseByCap.set(u.capability, cl); const sl = idx.runtimeUseBySubject.get(u.subject) ?? []; sl.push(u); idx.runtimeUseBySubject.set(u.subject, sl); break; }
+      case 'PERCEPTION_SESSION': if (meta.nonce) idx.perceptionNonce.add(meta.nonce); if (meta.channel_digest) idx.perceptionSessions.set(pl.reference, { creator: meta.creator ?? null, expires_at: meta.expires_at ?? null, channel_digest: meta.channel_digest, component: meta.component ?? null, signing_key_id: meta.signing_key_id ?? null, assurance: meta.assurance ?? null, firmware: meta.firmware ?? null, minted_at: pl.time }); break;
+      case 'DATA_ACCESSED': idx.dataAccess.push({ subject: pl.reference, dataset: meta.dataset, row_ids: meta.row_ids ?? [], columns: meta.columns ?? [], at: meta.at ?? pl.time, certificate_id: meta.certificate_id ?? null, wedged: meta.wedged === true, gate_denied: meta.gate_denied === true }); break;
+      // The reservation's anchored time bounds the crash-gap window an
+      // honest EXECUTION_DISPATCHED can lose — an unanchored journal far
+      // outside it is tamper evidence, never a settleable FAILED
+      // (w23-fixverify F-a).
+      case 'EXECUTION_RESERVED': idx.reserved.add(pl.reference); (idx.reservedAt ??= new Map()).set(pl.reference, pl.time); (idx.reservedMeta ??= new Map()).set(pl.reference, meta.composite_child_of ?? null); break;
+      // A released reservation frees the cert's one spend slot — the
+      // journal-less child returns to free authority exactly once
+      // (w22 F2).
+      case 'EXECUTION_RELEASED': idx.reserved.delete(pl.reference); idx.reservedAt?.delete(pl.reference); idx.reservedMeta?.delete(pl.reference); (idx.released ??= new Set()).add(pl.reference); break;
+      case 'EXECUTION_COMPENSATED': (idx.compensated ??= new Set()).add(pl.reference); break;
+      case 'RETENTION_DELETED': (idx.tombstones ??= new Map()).set(pl.reference, { key_id: meta.key_id ?? null, kind: meta.kind ?? null }); break;
+      case 'EXECUTION_DISPATCHED': if (meta.journal_digest) idx.dispatched.set(pl.reference, meta.journal_digest); (idx.dispatchedMeta ??= new Map()).set(pl.reference, meta.composite_child_of ?? null); break;
+      // Outcome status AND envelope digest both fold — a served row that
+      // diverges from the anchored verdict (post-cancel stale row,
+      // ciphertext transplant of a superseded verdict) is tamper
+      // evidence, never a quiet serve (w24-lifecycle W24-6).
+      case 'EXECUTION_OUTCOME': idx.outcomes.set(pl.reference, meta.status); if (meta.outcome_digest) (idx.outcomeDigests ??= new Map()).set(pl.reference, meta.outcome_digest);
+        // A composite parent's outcome event also settles its children:
+        // child outcome rows land in the same signed verdict, so the
+        // fold must mark each child cert spent too — otherwise a row
+        // delete lets a settled child replay (w32-composite F-4).
+        // EVERY named child anchors under childOutcomeAnchors (non-terminal
+        // labels included): a mid-flight child's stored outcome row is
+        // chain-attested even while UNCERTAIN — without it the strict
+        // anchor check could not tell a legit mid-flight row from a
+        // planted verdict (w34-composite MEDIUM-2).
+        if (meta.child_outcomes && typeof meta.child_outcomes === 'object')
+          for (const [childCapsule, childStatus] of Object.entries(meta.child_outcomes)) {
+            const childCert = idx.issuedCert.get(childCapsule);
+            if (childCert !== undefined) {
+              (idx.childOutcomeAnchors ??= new Map()).set(childCert, childStatus);
+              if (['VERIFIED', 'FAILED', 'COMPENSATED'].includes(childStatus)) idx.outcomes.set(childCert, childStatus);
+            }
+          }
+        break;
+      case 'ACTION_CANCELLED': (idx.cancelled ??= new Set()).add(pl.reference); if (meta.certificate_id && idx.issuedCert.get(pl.reference) === meta.certificate_id) idx.outcomes.set(meta.certificate_id, 'CANCELLED'); break;
+      // Dry-run marker is anchored too — a mutable last_at a row-writer
+      // can backdate would let every call mint a new EXECUTION_DRY_RUN
+      // anchor (w24-lifecycle W24-3).
+      case 'EXECUTION_DRY_RUN': (idx.dryRunAt ??= new Map()).set(pl.reference, pl.time); break;
+      case 'RUNTIME_DENIED': { const d = { request_id: pl.reference, actor: pl.actor, code: meta.code ?? null, capability_id: meta.capability_id ?? null, at: pl.time }; idx.denials.push(d); const rl = idx.denialsByReq.get(d.request_id) ?? []; rl.push(d); idx.denialsByReq.set(d.request_id, rl); break; }
+      case 'COVERAGE_DECLARED':
+        // Identity-anchored declarations carry meta.identity_digest; a
+        // legacy anchor's meta.digest covered the WHOLE row (status
+        // included) — keep them in separate slots so a current row can
+        // verify against its own digest only while untouched
+        // (w21-fixverify M-4).
+        if (meta.identity_digest ?? meta.digest) {
+          idx.coverageAnchors.set(pl.reference, meta.identity_digest ?? null);
+          if (!meta.identity_digest && meta.digest) (idx.coverageAnchorsLegacy ??= new Map()).set(pl.reference, meta.digest);
+        }
+        // Re-declaration starts a new epoch: the replay below must seed
+        // from the declaration in force at the answer time, not collapse
+        // every era into the latest row (w21-fixverify H-1).
+        (idx.coverageDeclarations ??= []).push({ path_id: pl.reference, status: meta.status, at: pl.time, evidence_at: meta.status === 'UNCOVERED' ? null : pl.time, max_age_ms: meta.max_age_ms ?? null, seq: seq });
+        (idx.coverageDeclared ??= new Map()).set(pl.reference, { status: meta.status, at: pl.time, evidence_at: meta.status === 'UNCOVERED' ? null : pl.time, max_age_ms: meta.max_age_ms ?? null, seq: seq });
+        break;
+      case 'COVERAGE_TRANSITION': (idx.coverageTransitions ??= []).push({ path_id: pl.reference, to: meta.to, cause: meta.cause, at: meta.at ?? pl.time, evidence_at: meta.evidence_at ?? null, seq: seq }); break;
+      // Validations are replay events too: refreshing an already-ENFORCED
+      // path emits no transition, so the anchored replay must apply the
+      // validation's own evidence_at refresh (w20-fixverify regression).
+      case 'COVERAGE_TECHNICAL_VALIDATION': (idx.coverageValidations ??= []).push({ path_id: pl.reference, evidence_id: meta.evidence_id ?? null, issuer: meta.issuer, at: pl.time, seq: seq, validation: true }); break;
+      case 'CEREMONY_PLANNED': if (meta.digest) idx.ceremonyPlanned.set(pl.reference, meta.digest); break;
+      case 'CEREMONY_SHARES_COMMITTED': idx.ceremonyCommitted.set(pl.reference, { at: pl.time, commitments_digest: meta.commitments_digest ?? null }); break;
+      // Only a chain-recorded acknowledgement attests that the consent
+      // flow ran — the mutable ceremony row's ack list is a cache, never
+      // the quorum's authority (w17-fixverify H1).
+      case 'CEREMONY_ACKNOWLEDGED': if (meta.custodian === pl.actor) { const s = idx.ceremonyAcks.get(pl.reference) ?? new Map(); s.set(pl.actor, { artifact_digest: meta.artifact_digest ?? null, key_id: meta.key_id ?? null }); idx.ceremonyAcks.set(pl.reference, s); } break;
+      case 'CEREMONY_ABORTED': idx.ceremonyAborted ??= new Set(); idx.ceremonyAborted.add(pl.reference); break;
+      // Anchored lifecycle, not row status: flipping the mutable
+      // ceremony row can never resurrect an aborted ceremony, replay a
+      // completed reconstruction, or re-open a committed deal
+      // (w18-fixverify F2).
+      case 'CEREMONY_RECONSTRUCTED': idx.ceremonyCompleted ??= new Set(); idx.ceremonyCompleted.add(pl.reference); break;
+      // 'All custodians notified' attests through the chain — the
+      // mutable notices array can be padded or truncated at will
+      // (w18-fixverify F15).
+      case 'RECOVERY_NOTICE_ISSUED': if (meta.custodian) { const ns = idx.ceremonyNotices.get(pl.reference) ?? new Set(); ns.add(meta.custodian); idx.ceremonyNotices.set(pl.reference, ns); } break;
+      // The clock-recovery wedge persists on the chain itself — a restart
+      // must not forget that a tenant's chain could not be verified, and
+      // only a signed seal/clear lifts it (w25-clock F-5).
+      case 'CLOCK_RECOVERED': idx.clockUnverifiable = Array.isArray(meta.unverifiable_tenants) && meta.unverifiable_tenants.includes(t); break;
+      case 'AUDIT_SEALED': case 'AUDIT_WEDGE_CLEARED': case 'AUDIT_SEAL_CARRY': {
+        if (pl.type === 'AUDIT_SEAL_CARRY') {
+          // A carryover page replays only when it names the seal it
+          // belongs to — honest pages land immediately after their
+          // AUDIT_SEALED row inside one transaction; a stray or
+          // mis-pointed page is fold tampering, not data (w33-seal F-4).
+          requireThat(meta.seal_seq === idx.lastSealSeq, 'INV-409-INTEGRITY', 'Audit carryover page references no live seal', 409);
+        } else {
+          idx.clockUnverifiable = false;
+          if (pl.type === 'AUDIT_SEALED') idx.lastSealSeq = seq;
+        }
+        // A seal (and its overflow pages) re-attests the cut span's
+        // surviving spend and disclosure authority (w31-runtime F-1):
+        // replay it into the same indexes a live event would feed, or
+        // remediation silently resets budgets, un-consumes request ids
+        // and erases reconstruction history.
+        for (const u of Array.isArray(meta.spend_carryover) ? meta.spend_carryover : []) {
+          const x = { capability: u.capability, subject: u.subject, resource: u.resource ?? null, request_id: u.request_id ?? null, cost: typeof u.cost === 'number' ? u.cost : 0, at: u.at };
+          idx.runtimeUse.push(x);
+          if (idx.runtimeUseByCap) { const cl = idx.runtimeUseByCap.get(x.capability) ?? []; cl.push(x); idx.runtimeUseByCap.set(x.capability, cl); }
+          if (idx.runtimeUseBySubject) { const sl = idx.runtimeUseBySubject.get(x.subject) ?? []; sl.push(x); idx.runtimeUseBySubject.set(x.subject, sl); }
+        }
+        for (const a of Array.isArray(meta.access_carryover) ? meta.access_carryover : []) idx.dataAccess.push(a);
+        // A seal must not silently un-revoke what it carried: replay
+        // each carried revocation into the live revoked set (and the
+        // dead-key window for key revocations) at the carrying row's own
+        // seq (w32-seal F-5). Orphaned floor rows arrive as
+        // floor_derived entries — same enforcement (w33-seal F-1).
+        for (const rv of Array.isArray(meta.revocations_carryover) ? meta.revocations_carryover : []) {
+          if (typeof rv?.reference !== 'string') continue;
+          idx.revoked.add(rv.reference);
+          if (rv.reference.startsWith('key:')) idx.keyDeadAt.set(rv.reference.slice(4), Math.min(idx.keyDeadAt.get(rv.reference.slice(4)) ?? Infinity, seq));
+        }
+        // Every other verifiable doomed event re-anchors here: reservations,
+        // outcomes, cancels, certificate issuance, the parent↔child binding,
+        // policy anchors, coverage, ceremonies — replayed through THIS same
+        // fold so a seal can never launder a spent or bound certificate into
+        // a fresh spend (w34-composite CRITICAL-1). Entries carry the
+        // seal-attested {type, reference, actor, time, metadata} slice; the
+        // writer already excluded the dedicated-array types above.
+        for (const c of Array.isArray(meta.lifecycle_carryover) ? meta.lifecycle_carryover : [])
+          if (typeof c?.type === 'string' && !['AUDIT_SEALED', 'AUDIT_SEAL_CARRY', 'AUDIT_WEDGE_CLEARED'].includes(c.type))
+            this.#foldApply(idx, { type: c.type, reference: c.reference ?? null, actor: c.actor ?? null, time: c.time ?? null, metadata: c.metadata ?? {}, tenant_id: t }, seq, t);
+        // Doomed rows that failed re-verification could not be carried — the
+        // seal names them in dropped_events. The count is honest evidence the
+        // ledger cannot re-derive, so reconstruction budgeting treats it as
+        // worst-case coverage rather than under-reporting erased disclosure
+        // (w34-composite MEDIUM-1).
+        idx.sealDroppedEvents = (idx.sealDroppedEvents ?? 0)
+          + (typeof meta.carryover_totals?.dropped_events === 'number' ? meta.carryover_totals.dropped_events : (Array.isArray(meta.dropped_events) ? meta.dropped_events.length : 0));
+        break;
+      }
+    }
+  }
+
   _auditIndex(t) {
     let idx = this.#auditIdx.get(t);
-    if (!idx) { idx = { maxSeq: 0, building: false, revoked: new Set(), attached: new Map(), evidenceIds: new Set(), proposedNonce: new Set(), proposedAt: new Map(), proposedDigest: new Map(), proposedIdem: new Map(), issued: new Set(), issuedCert: new Map(), issuedCerts: new Set(), grants: new Map(), grantMeta: new Map(), rotations: new Map(), rotationsByPrev: new Map(), rotationKeys: new Set(), policyAnchors: [], dataAccess: [], perceptionNonce: new Set(), reserved: new Set(), reservedAt: new Map(), reservedMeta: new Map(), dispatched: new Map(), dispatchedMeta: new Map(), outcomes: new Map(), outcomeDigests: new Map(), cancelled: new Set(), dryRunAt: new Map(), keyDeadAt: new Map(), parentChildren: new Map(), simulated: [], issuerDrift: new Set(), tenantDrifted: false, configSnapshot: null, decisions: new Map(), runtimeUse: [], runtimeUseByCap: new Map(), runtimeUseBySubject: new Map(), revocationDigests: new Map(), denials: [], denialsByReq: new Map(), ceremonyAcks: new Map(), ceremonyPlanned: new Map(), ceremonyCommitted: new Map(), ceremonyAborted: new Set(), ceremonyCompleted: new Set(), ceremonyNotices: new Map(), ceremonyRotationConsumed: new Map(), coverageAnchors: new Map(), coverageDeclared: new Map(), coverageTransitions: [], coverageValidations: [], perceptionSessions: new Map(), capabilities: new Set() }; this.#auditIdx.set(t, idx); }
+    if (!idx) { idx = { maxSeq: 0, building: false, revoked: new Set(), attached: new Map(), evidenceIds: new Set(), proposedNonce: new Set(), proposedAt: new Map(), proposedDigest: new Map(), proposedIdem: new Map(), issued: new Set(), issuedCert: new Map(), issuedCerts: new Set(), grants: new Map(), grantMeta: new Map(), rotations: new Map(), rotationsByPrev: new Map(), rotationKeys: new Set(), policyAnchors: [], dataAccess: [], perceptionNonce: new Set(), reserved: new Set(), reservedAt: new Map(), reservedMeta: new Map(), dispatched: new Map(), dispatchedMeta: new Map(), outcomes: new Map(), outcomeDigests: new Map(), childOutcomeAnchors: new Map(), cancelled: new Set(), dryRunAt: new Map(), keyDeadAt: new Map(), parentChildren: new Map(), simulated: [], issuerDrift: new Set(), tenantDrifted: false, configSnapshot: null, decisions: new Map(), runtimeUse: [], runtimeUseByCap: new Map(), runtimeUseBySubject: new Map(), revocationDigests: new Map(), denials: [], denialsByReq: new Map(), ceremonyAcks: new Map(), ceremonyPlanned: new Map(), ceremonyCommitted: new Map(), ceremonyAborted: new Set(), ceremonyCompleted: new Set(), ceremonyNotices: new Map(), ceremonyRotationConsumed: new Map(), coverageAnchors: new Map(), coverageDeclared: new Map(), coverageTransitions: [], coverageValidations: [], perceptionSessions: new Map(), capabilities: new Set() }; this.#auditIdx.set(t, idx); }
     // One prepared statement per index for the head probe — evaluation
     // touches the index dozens of times and a fresh prepare per call was
     // most of that cost. Semantics unchanged: the query still re-reads
@@ -2505,171 +2735,7 @@ export class Fabric {
       // fail wedge the index; remediation is the seal runbook.
       requireThat(typeof pl.time !== 'number' || pl.time <= Math.max(consumeNow, prevPlTime) + 60_000, 'INV-409-INTEGRITY', 'Audit row claims an impossible future timestamp', 409);
       prevPlTime = Math.max(prevPlTime, typeof pl.time === 'number' ? pl.time : prevPlTime);
-      const meta = pl.metadata ?? {};
-      switch (pl.type) {
-        case 'AUTHORITY_REVOKED': idx.revoked.add(pl.reference);
-          if (meta.record_digest) idx.revocationDigests.set(pl.reference, meta.record_digest);
-          // The revocation row itself may still be signed by the dying
-          // key — the window closes only for LATER seqs.
-          if (typeof pl.reference === 'string' && pl.reference.startsWith('key:')) idx.keyDeadAt.set(pl.reference.slice(4), Math.min(idx.keyDeadAt.get(pl.reference.slice(4)) ?? Infinity, e.sequence));
-          break;
-        case 'KEY_ROTATED':
-          if (meta.key_class === 'audit' && meta.previous_key_id) idx.keyDeadAt.set(meta.previous_key_id, Math.min(idx.keyDeadAt.get(meta.previous_key_id) ?? Infinity, e.sequence));
-          // The newest anchored succession per class is the only authority
-          // a key-binding repoint may follow — 'key-rotation' records are
-          // forgeable hints, never the selector (w16-fixverify F3/F13).
-          if (typeof meta.key_class === 'string' && typeof pl.reference === 'string') idx.rotations.set(meta.key_class, { new_key_id: pl.reference, previous_key_id: meta.previous_key_id ?? null, at: pl.time });
-          // Every anchored key is chain-bound to this tenant (ownership
-          // for ledger-significant ops), and each predecessor maps to its
-          // successor for O(1) steering — no records scan, no full-chain
-          // re-verify per signing call (w17-redteam C3, w17-idx F6).
-          if (typeof pl.reference === 'string') idx.rotationKeys.add(pl.reference);
-          if (typeof meta.previous_key_id === 'string') idx.rotationKeys.add(meta.previous_key_id);
-          if (typeof meta.key_class === 'string' && typeof meta.previous_key_id === 'string' && typeof pl.reference === 'string') idx.rotationsByPrev.set(`${meta.key_class}:${meta.previous_key_id}`, pl.reference);
-          // Anchored ceremony spend: a mutable rotation_consumed row flag
-          // can neither erase nor fake a spend the ledger recorded
-          // (w18-fixverify F13).
-          // Anchored ceremony spend maps to the capsule that consumed it —
-          // a mutable rotation_consumed row flag can neither erase nor fake
-          // a spend the ledger recorded, and never wedges a live rotation
-          // (w18-fixverify F13, w20-ceremony residual). Pre-capsule anchors
-          // carry null and fail closed.
-          if (typeof meta.ceremony_id === 'string') idx.ceremonyRotationConsumed.set(meta.ceremony_id, meta.capsule_id ?? null);
-          break;
-        case 'ROTATION_PREPARED': if (typeof pl.reference === 'string') idx.rotationKeys.add(pl.reference); break;
-        case 'EVIDENCE_ATTACHED': { const l = idx.attached.get(pl.reference) ?? []; l.push(meta.evidence_id); idx.attached.set(pl.reference, l); idx.evidenceIds.add(meta.evidence_id); if (meta.expires_at !== undefined) { const el = (idx.evidenceExpiry ??= new Map()).get(pl.reference) ?? []; el.push({ evidence_id: meta.evidence_id, expires_at: meta.expires_at }); idx.evidenceExpiry.set(pl.reference, el); } break; }
-        case 'CAPSULE_PROPOSED': idx.proposedAt.set(pl.reference, pl.time); if (meta.nonce) idx.proposedNonce.add(meta.nonce); if (meta.capsule_digest) idx.proposedDigest.set(pl.reference, meta.capsule_digest); if (meta.idem_key) idx.proposedIdem.set(meta.idem_key, { request: meta.idem_request, capsule_id: pl.reference }); if (typeof meta.expires_at === 'number') (idx.proposedExpiry ??= new Map()).set(pl.reference, meta.expires_at); break;
-        // Anchored approval/evidence lifetimes: a capsule row rolled back
-        // to a pre-approval image cannot hide a lapsed vote or envelope
-        // from the resurrection veto (w24-fixverify W24-07).
-        case 'EXACT_ACTION_APPROVED': { const l = (idx.approvalExpiry ??= new Map()).get(pl.reference) ?? []; l.push({ signer_id: meta.signer_id ?? null, expires_at: meta.expires_at ?? null }); idx.approvalExpiry.set(pl.reference, l); break; }
-        case 'CERTIFICATE_ISSUED': idx.issued.add(pl.reference); if (meta.certificate_id) { idx.issuedCert.set(pl.reference, meta.certificate_id); idx.issuedCerts.add(meta.certificate_id); if (meta.certificate_digest) (idx.issuedCertDigests ??= new Map()).set(meta.certificate_id, meta.certificate_digest); } if (Array.isArray(meta.children)) idx.parentChildren.set(pl.reference, meta.children); break;
-        case 'JIT_GRANT_ISSUED': idx.grants.set(meta.grant_id, meta.scope_digest ?? meta.grant_digest); if (meta.grant_id) idx.grantMeta.set(meta.grant_id, { expires_at: meta.expires_at, at: pl.time }); break;
-        case 'CAPABILITY_ISSUED': (idx.capabilities ??= new Set()).add(pl.reference); (idx.capabilityMeta ??= new Map()).set(pl.reference, { expires_at: meta.expires_at ?? null }); break;
-        case 'POLICY_GENESIS': case 'POLICY_ACTIVATED': case 'EMERGENCY_POLICY_ACTIVATED': if (meta.policy_digest) idx.policyAnchors.push({ staged: false, digest: meta.policy_digest }); break;
-        case 'POLICY_STAGED': if (meta.policy_digest) idx.policyAnchors.push({ staged: true, digest: meta.policy_digest, activate_at: meta.activate_at ?? null }); break;
-        case 'POLICY_SIMULATED': if (meta.candidate_digest) idx.simulated.push({ candidate_digest: meta.candidate_digest, baseline_digest: meta.baseline_digest ?? null, at: pl.time }); break;
-        case 'CONNECTOR_DRIFT': idx.issuerDrift.add(pl.reference); break;
-        case 'CONNECTOR_REVALIDATED': idx.issuerDrift.delete(pl.reference); break;
-        case 'CONFIG_DRIFT': case 'CONFIG_REASSERTED': if (meta.config_digest) idx.configSnapshot = meta.config_digest; break;
-        case 'CONFIG_SNAPSHOT': if (meta.config_digest) idx.configSnapshot = meta.config_digest; break;
-        case 'POLICY_EVALUATED': if (meta.decision_digest) idx.decisions.set(pl.reference, meta.decision_digest); if (meta.decision) (idx.decisionStatus ??= new Map()).set(pl.reference, meta.decision); break;
-        // Per-capability and per-subject indexes keep consume() checks
-        // bounded — a linear pass over the whole runtime history per
-        // request was a quadratic wall-clock sink (w17-idx F8).
-        case 'RUNTIME_ALLOWED': { const u = { capability: pl.reference, subject: pl.actor, resource: meta.resource ?? null, request_id: meta.request_id ?? null, cost: typeof meta.cost === 'number' ? meta.cost : 0, at: pl.time }; idx.runtimeUse.push(u); const cl = idx.runtimeUseByCap.get(u.capability) ?? []; cl.push(u); idx.runtimeUseByCap.set(u.capability, cl); const sl = idx.runtimeUseBySubject.get(u.subject) ?? []; sl.push(u); idx.runtimeUseBySubject.set(u.subject, sl); break; }
-        case 'PERCEPTION_SESSION': if (meta.nonce) idx.perceptionNonce.add(meta.nonce); if (meta.channel_digest) idx.perceptionSessions.set(pl.reference, { creator: meta.creator ?? null, expires_at: meta.expires_at ?? null, channel_digest: meta.channel_digest, component: meta.component ?? null, signing_key_id: meta.signing_key_id ?? null, assurance: meta.assurance ?? null, firmware: meta.firmware ?? null, minted_at: pl.time }); break;
-        case 'DATA_ACCESSED': idx.dataAccess.push({ subject: pl.reference, dataset: meta.dataset, row_ids: meta.row_ids ?? [], columns: meta.columns ?? [], at: meta.at ?? pl.time, certificate_id: meta.certificate_id ?? null, wedged: meta.wedged === true, gate_denied: meta.gate_denied === true }); break;
-        // The reservation's anchored time bounds the crash-gap window an
-        // honest EXECUTION_DISPATCHED can lose — an unanchored journal far
-        // outside it is tamper evidence, never a settleable FAILED
-        // (w23-fixverify F-a).
-        case 'EXECUTION_RESERVED': idx.reserved.add(pl.reference); (idx.reservedAt ??= new Map()).set(pl.reference, pl.time); (idx.reservedMeta ??= new Map()).set(pl.reference, meta.composite_child_of ?? null); break;
-        // A released reservation frees the cert's one spend slot — the
-        // journal-less child returns to free authority exactly once
-        // (w22 F2).
-        case 'EXECUTION_RELEASED': idx.reserved.delete(pl.reference); idx.reservedAt?.delete(pl.reference); idx.reservedMeta?.delete(pl.reference); (idx.released ??= new Set()).add(pl.reference); break;
-        case 'EXECUTION_COMPENSATED': (idx.compensated ??= new Set()).add(pl.reference); break;
-        case 'RETENTION_DELETED': (idx.tombstones ??= new Map()).set(pl.reference, { key_id: meta.key_id ?? null, kind: meta.kind ?? null }); break;
-        case 'EXECUTION_DISPATCHED': if (meta.journal_digest) idx.dispatched.set(pl.reference, meta.journal_digest); (idx.dispatchedMeta ??= new Map()).set(pl.reference, meta.composite_child_of ?? null); break;
-        // Outcome status AND envelope digest both fold — a served row that
-        // diverges from the anchored verdict (post-cancel stale row,
-        // ciphertext transplant of a superseded verdict) is tamper
-        // evidence, never a quiet serve (w24-lifecycle W24-6).
-        case 'EXECUTION_OUTCOME': idx.outcomes.set(pl.reference, meta.status); if (meta.outcome_digest) (idx.outcomeDigests ??= new Map()).set(pl.reference, meta.outcome_digest);
-          // A composite parent's outcome event also settles its children:
-          // child outcome rows land in the same signed verdict, so the
-          // fold must mark each child cert spent too — otherwise a row
-          // delete lets a settled child replay (w32-composite F-4).
-          if (meta.child_outcomes && typeof meta.child_outcomes === 'object')
-            for (const [childCapsule, childStatus] of Object.entries(meta.child_outcomes)) {
-              const childCert = idx.issuedCert.get(childCapsule);
-              if (childCert !== undefined && ['VERIFIED', 'FAILED', 'COMPENSATED'].includes(childStatus)) idx.outcomes.set(childCert, childStatus);
-            }
-          break;
-        case 'ACTION_CANCELLED': (idx.cancelled ??= new Set()).add(pl.reference); if (meta.certificate_id && idx.issuedCert.get(pl.reference) === meta.certificate_id) idx.outcomes.set(meta.certificate_id, 'CANCELLED'); break;
-        // Dry-run marker is anchored too — a mutable last_at a row-writer
-        // can backdate would let every call mint a new EXECUTION_DRY_RUN
-        // anchor (w24-lifecycle W24-3).
-        case 'EXECUTION_DRY_RUN': (idx.dryRunAt ??= new Map()).set(pl.reference, pl.time); break;
-        case 'RUNTIME_DENIED': { const d = { request_id: pl.reference, actor: pl.actor, code: meta.code ?? null, capability_id: meta.capability_id ?? null, at: pl.time }; idx.denials.push(d); const rl = idx.denialsByReq.get(d.request_id) ?? []; rl.push(d); idx.denialsByReq.set(d.request_id, rl); break; }
-        case 'COVERAGE_DECLARED':
-          // Identity-anchored declarations carry meta.identity_digest; a
-          // legacy anchor's meta.digest covered the WHOLE row (status
-          // included) — keep them in separate slots so a current row can
-          // verify against its own digest only while untouched
-          // (w21-fixverify M-4).
-          if (meta.identity_digest ?? meta.digest) {
-            idx.coverageAnchors.set(pl.reference, meta.identity_digest ?? null);
-            if (!meta.identity_digest && meta.digest) (idx.coverageAnchorsLegacy ??= new Map()).set(pl.reference, meta.digest);
-          }
-          // Re-declaration starts a new epoch: the replay below must seed
-          // from the declaration in force at the answer time, not collapse
-          // every era into the latest row (w21-fixverify H-1).
-          (idx.coverageDeclarations ??= []).push({ path_id: pl.reference, status: meta.status, at: pl.time, evidence_at: meta.status === 'UNCOVERED' ? null : pl.time, max_age_ms: meta.max_age_ms ?? null, seq: e.sequence });
-          (idx.coverageDeclared ??= new Map()).set(pl.reference, { status: meta.status, at: pl.time, evidence_at: meta.status === 'UNCOVERED' ? null : pl.time, max_age_ms: meta.max_age_ms ?? null, seq: e.sequence });
-          break;
-        case 'COVERAGE_TRANSITION': (idx.coverageTransitions ??= []).push({ path_id: pl.reference, to: meta.to, cause: meta.cause, at: meta.at ?? pl.time, evidence_at: meta.evidence_at ?? null, seq: e.sequence }); break;
-        // Validations are replay events too: refreshing an already-ENFORCED
-        // path emits no transition, so the anchored replay must apply the
-        // validation's own evidence_at refresh (w20-fixverify regression).
-        case 'COVERAGE_TECHNICAL_VALIDATION': (idx.coverageValidations ??= []).push({ path_id: pl.reference, evidence_id: meta.evidence_id ?? null, issuer: meta.issuer, at: pl.time, seq: e.sequence, validation: true }); break;
-        case 'CEREMONY_PLANNED': if (meta.digest) idx.ceremonyPlanned.set(pl.reference, meta.digest); break;
-        case 'CEREMONY_SHARES_COMMITTED': idx.ceremonyCommitted.set(pl.reference, { at: pl.time, commitments_digest: meta.commitments_digest ?? null }); break;
-        // Only a chain-recorded acknowledgement attests that the consent
-        // flow ran — the mutable ceremony row's ack list is a cache, never
-        // the quorum's authority (w17-fixverify H1).
-        case 'CEREMONY_ACKNOWLEDGED': if (meta.custodian === pl.actor) { const s = idx.ceremonyAcks.get(pl.reference) ?? new Map(); s.set(pl.actor, { artifact_digest: meta.artifact_digest ?? null, key_id: meta.key_id ?? null }); idx.ceremonyAcks.set(pl.reference, s); } break;
-        case 'CEREMONY_ABORTED': idx.ceremonyAborted ??= new Set(); idx.ceremonyAborted.add(pl.reference); break;
-        // Anchored lifecycle, not row status: flipping the mutable
-        // ceremony row can never resurrect an aborted ceremony, replay a
-        // completed reconstruction, or re-open a committed deal
-        // (w18-fixverify F2).
-        case 'CEREMONY_RECONSTRUCTED': idx.ceremonyCompleted ??= new Set(); idx.ceremonyCompleted.add(pl.reference); break;
-        // 'All custodians notified' attests through the chain — the
-        // mutable notices array can be padded or truncated at will
-        // (w18-fixverify F15).
-        case 'RECOVERY_NOTICE_ISSUED': if (meta.custodian) { const ns = idx.ceremonyNotices.get(pl.reference) ?? new Set(); ns.add(meta.custodian); idx.ceremonyNotices.set(pl.reference, ns); } break;
-        // The clock-recovery wedge persists on the chain itself — a restart
-        // must not forget that a tenant's chain could not be verified, and
-        // only a signed seal/clear lifts it (w25-clock F-5).
-        case 'CLOCK_RECOVERED': idx.clockUnverifiable = Array.isArray(meta.unverifiable_tenants) && meta.unverifiable_tenants.includes(t); break;
-        case 'AUDIT_SEALED': case 'AUDIT_WEDGE_CLEARED': case 'AUDIT_SEAL_CARRY': {
-          if (pl.type === 'AUDIT_SEAL_CARRY') {
-            // A carryover page replays only when it names the seal it
-            // belongs to — honest pages land immediately after their
-            // AUDIT_SEALED row inside one transaction; a stray or
-            // mis-pointed page is fold tampering, not data (w33-seal F-4).
-            requireThat(meta.seal_seq === idx.lastSealSeq, 'INV-409-INTEGRITY', 'Audit carryover page references no live seal', 409);
-          } else {
-            idx.clockUnverifiable = false;
-            if (pl.type === 'AUDIT_SEALED') idx.lastSealSeq = e.sequence;
-          }
-          // A seal (and its overflow pages) re-attests the cut span's
-          // surviving spend and disclosure authority (w31-runtime F-1):
-          // replay it into the same indexes a live event would feed, or
-          // remediation silently resets budgets, un-consumes request ids
-          // and erases reconstruction history.
-          for (const u of Array.isArray(meta.spend_carryover) ? meta.spend_carryover : []) {
-            const x = { capability: u.capability, subject: u.subject, resource: u.resource ?? null, request_id: u.request_id ?? null, cost: typeof u.cost === 'number' ? u.cost : 0, at: u.at };
-            idx.runtimeUse.push(x);
-            if (idx.runtimeUseByCap) { const cl = idx.runtimeUseByCap.get(x.capability) ?? []; cl.push(x); idx.runtimeUseByCap.set(x.capability, cl); }
-            if (idx.runtimeUseBySubject) { const sl = idx.runtimeUseBySubject.get(x.subject) ?? []; sl.push(x); idx.runtimeUseBySubject.set(x.subject, sl); }
-          }
-          for (const a of Array.isArray(meta.access_carryover) ? meta.access_carryover : []) idx.dataAccess.push(a);
-          // A seal must not silently un-revoke what it carried: replay
-          // each carried revocation into the live revoked set (and the
-          // dead-key window for key revocations) at the carrying row's own
-          // seq (w32-seal F-5). Orphaned floor rows arrive as
-          // floor_derived entries — same enforcement (w33-seal F-1).
-          for (const rv of Array.isArray(meta.revocations_carryover) ? meta.revocations_carryover : []) {
-            if (typeof rv?.reference !== 'string') continue;
-            idx.revoked.add(rv.reference);
-            if (rv.reference.startsWith('key:')) idx.keyDeadAt.set(rv.reference.slice(4), Math.min(idx.keyDeadAt.get(rv.reference.slice(4)) ?? Infinity, e.sequence));
-          }
-          break;
-        }
-      }
+      this.#foldApply(idx, pl, e.sequence, t);
         idx.maxSeq = Math.max(idx.maxSeq, e.sequence ?? 0);
       }
       // Stamp the LAST CONSUMED seq, not the page head — a tenant over the
@@ -3535,7 +3601,8 @@ export class Fabric {
       // The check is read-only; the touch rows land at finish with egress.
       if (record.capsule.action.type === 'data.export') {
         const req = record.capsule.requested_state;
-        const recon = reconstructionCheck(this.store.db, this.target.db, { tenant: t, subject: record.capsule.actor.subject_id, dataset: req.dataset, rows: req.row_ids, columns: req.columns, now, policy: this.policy(t).runtime.reconstruction, record: false, access: this._auditIndex(t).dataAccess });
+        const ridx2 = this._auditIndex(t);
+        const recon = reconstructionCheck(this.store.db, this.target.db, { tenant: t, subject: record.capsule.actor.subject_id, dataset: req.dataset, rows: req.row_ids, columns: req.columns, now, policy: this.policy(t).runtime.reconstruction, record: false, access: ridx2.dataAccess, droppedEvents: ridx2.sealDroppedEvents ?? 0 });
         requireThat(recon.allowed, 'INV-429-BUDGET', 'Reconstruction limit reached', 429, { coverage_percent: recon.coverage_percent, dataset_coverage_percent: recon.dataset_coverage_percent });
       }
       if (dryRun || this.policy(t).mode === 'shadow') {
@@ -3691,7 +3758,8 @@ export class Fabric {
           // same reservation-time rule as a standalone export (w10-datagate F3).
           if (child.capsule.action.type === 'data.export') {
             const req = child.capsule.requested_state;
-            const recon = reconstructionCheck(this.store.db, this.target.db, { tenant: t, subject: child.capsule.actor.subject_id, dataset: req.dataset, rows: req.row_ids, columns: req.columns, now: childNow, policy: this.policy(t).runtime.reconstruction, record: false, access: [...this._auditIndex(t).dataAccess, ...siblingAccess] });
+            const cidx2 = this._auditIndex(t);
+            const recon = reconstructionCheck(this.store.db, this.target.db, { tenant: t, subject: child.capsule.actor.subject_id, dataset: req.dataset, rows: req.row_ids, columns: req.columns, now: childNow, policy: this.policy(t).runtime.reconstruction, record: false, access: [...cidx2.dataAccess, ...siblingAccess], droppedEvents: cidx2.sealDroppedEvents ?? 0 });
             requireThat(recon.allowed, 'INV-429-BUDGET', 'Reconstruction limit reached', 429, { coverage_percent: recon.coverage_percent, dataset_coverage_percent: recon.dataset_coverage_percent });
             siblingAccess.push({ subject: child.capsule.actor.subject_id, dataset: req.dataset, row_ids: req.row_ids, columns: req.columns, at: childNow, certificate_id: childCert.certificate_id });
           }
@@ -4165,7 +4233,8 @@ export class Fabric {
     // settle the billing obligation: when reconcile later settles the
     // child VERIFIED, the real charge still lands (w28-fixverify F6).
     const alreadyCharged = this._auditIndex(t).dataAccess.some(a => a.certificate_id === cert.certificate_id && a.wedged !== true && a.gate_denied !== true);
-    const recon = reconstructionCheck(this.store.db, this.target.db, { tenant: t, subject, dataset: requested.dataset, rows: requested.row_ids, columns: requested.columns, now, policy: this.policy(t).runtime.reconstruction, record: !alreadyCharged, access: this._auditIndex(t).dataAccess });
+    const ridx = this._auditIndex(t);
+    const recon = reconstructionCheck(this.store.db, this.target.db, { tenant: t, subject, dataset: requested.dataset, rows: requested.row_ids, columns: requested.columns, now, policy: this.policy(t).runtime.reconstruction, record: !alreadyCharged, access: ridx.dataAccess, droppedEvents: ridx.sealDroppedEvents ?? 0 });
     const weight = this.policy(t).runtime.sensitivity_weights[dataset.classification] ?? 1;
     const cost = requested.row_ids.length * requested.columns.length * weight;
     // A squatted mirror row cannot even fail the insert — upsert folds the
