@@ -112,7 +112,7 @@ export class Store {
       const pl = env?.payload, meta = pl?.metadata;
       // Earliest death wins — a second death event must never extend a
       // key's life (w34-fixverify L-3).
-      if (pl?.type === 'AUTHORITY_REVOKED' && meta?.kind === 'key' && typeof meta.id === 'string') dead.set(meta.id, Math.min(dead.get(meta.id) ?? Infinity, row.seq));
+      if (pl?.type === 'AUTHORITY_REVOKED' && typeof pl.reference === 'string' && pl.reference.startsWith('key:')) dead.set(pl.reference.slice(4), Math.min(dead.get(pl.reference.slice(4)) ?? Infinity, row.seq));
       if (pl?.type === 'KEY_ROTATED' && meta?.key_class === 'audit' && typeof meta?.previous_key_id === 'string') dead.set(meta.previous_key_id, Math.min(dead.get(meta.previous_key_id) ?? Infinity, row.seq));
       // A seal's revocations_carryover carries 'key:<kid>' refs — the live
       // fold kills that key at the carrying row's seq, so the offline/page
@@ -881,7 +881,7 @@ export function verifyAudit(bundle, pinnedKeys, priorCheckpoint = null) {
     const meta = entry.metadata;
     // Earliest death wins — last-write-wins would let a later duplicate
     // death extend the signing window (w34-fixverify L-3).
-    if (entry.type === 'AUTHORITY_REVOKED' && meta?.kind === 'key' && typeof meta.id === 'string') deadAt.set(meta.id, Math.min(deadAt.get(meta.id) ?? Infinity, entry.sequence));
+    if (entry.type === 'AUTHORITY_REVOKED' && typeof entry.reference === 'string' && entry.reference.startsWith('key:')) deadAt.set(entry.reference.slice(4), Math.min(deadAt.get(entry.reference.slice(4)) ?? Infinity, entry.sequence));
     if (entry.type === 'KEY_ROTATED' && meta?.key_class === 'audit' && typeof meta?.previous_key_id === 'string') deadAt.set(meta.previous_key_id, Math.min(deadAt.get(meta.previous_key_id) ?? Infinity, entry.sequence));
     // Sealed carryover unfolds the same as _auditKeyDeaths — a 'key:' ref
     // carried by AUDIT_SEALED/AUDIT_SEAL_CARRY kills the key at the carrying

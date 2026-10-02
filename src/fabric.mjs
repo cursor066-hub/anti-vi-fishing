@@ -873,6 +873,25 @@ export class Fabric {
     if (this._bumpHeadWatermark(tenant, adopted, { force: true })) this.#headWm.set(tenant, adopted);
     return adopted;
   }
+  // A head's checkpoint attestation binds CONTENT, not mere presence: a
+  // planted 'audit-checkpoint' row inflates the floor count and satisfies a
+  // get()!==null check while carrying attacker-chosen bytes — every claimed
+  // checkpoint must still verify as a signed checkpoint envelope under the
+  // tenant's audit keys (w36-fixverify L-3).
+  _checkpointAttested(tenant, size) {
+    let cp; try { cp = this.store.get(tenant, 'audit-checkpoint', `cp-${size}`); } catch { return false; }
+    if (!cp) return false;
+    try { const pl = verifySigned(cp, this.auditPublicKeys(tenant), 'checkpoint'); return pl.tenant_id === tenant && pl.size === size; }
+    catch { return false; }
+  }
+  _verifiedCheckpointCount(tenant) {
+    let n = 0;
+    for (const id of this.store.ids(tenant, 'audit-checkpoint', 1_000_000)) {
+      try { if (verifySigned(this.store.get(tenant, 'audit-checkpoint', id), this.auditPublicKeys(tenant), 'checkpoint').tenant_id === tenant) n++; }
+      catch { /* a planted or undecryptable row is not a verified checkpoint */ }
+    }
+    return n;
+  }
   persistVault() {
     mkdirSync(this.directory, { recursive: true, mode: 0o700 });
     // Write order: keystore first, master.key last — the master file is the
@@ -1135,7 +1154,11 @@ export class Fabric {
     for (const row of this.store.db.prepare("SELECT seq,envelope FROM audit WHERE tenant=? AND seq>? AND (envelope LIKE '%\"type\":\"AUTHORITY_REVOKED\"%' OR envelope LIKE '%\"type\":\"KEY_ROTATED\"%' OR envelope LIKE '%\"type\":\"AUDIT_SEALED\"%' OR envelope LIKE '%\"type\":\"AUDIT_SEAL_CARRY\"%')").all(tenant, cached.throughSeq)) {
       let env; try { env = JSON.parse(row.envelope); } catch { continue; }
       const pl = env?.payload, meta = pl?.metadata;
-      if (pl?.type === 'AUTHORITY_REVOKED' && meta?.kind === 'key' && typeof meta.id === 'string') cached.dead.set(meta.id, Math.min(cached.dead.get(meta.id) ?? Infinity, row.seq));
+      // Death extraction uses the same shape the fold uses — revoke()
+      // writes reference:'key:<kid>', not meta.kind/meta.id; reading the
+      // never-emitted shape left signer deaths invisible to the head-flush
+      // window while the fold enforced them (w36-seal F-C).
+      if (pl?.type === 'AUTHORITY_REVOKED' && typeof pl.reference === 'string' && pl.reference.startsWith('key:')) cached.dead.set(pl.reference.slice(4), Math.min(cached.dead.get(pl.reference.slice(4)) ?? Infinity, row.seq));
       if (pl?.type === 'KEY_ROTATED' && meta?.key_class === 'audit' && typeof meta?.previous_key_id === 'string') cached.dead.set(meta.previous_key_id, Math.min(cached.dead.get(meta.previous_key_id) ?? Infinity, row.seq));
       // Carryover deaths unfold exactly like _auditKeyDeaths and the fold:
       // a 'key:' revocation carried by a seal, and a doomed audit-class
@@ -1440,6 +1463,15 @@ export class Fabric {
     // is already on-chain cannot truncate the ledger that attests it
     // (w16-fixverify F10).
     const keyDeadAt = new Map(), revokedSeen = new Set(), auditSuccessions = new Map();
+    // Seal-residue bookkeeping for the F-H recount below: surviving seals'
+    // attested page counts and per-class carry totals, and the surviving
+    // pages bound to each seal seq.
+    const sealClaims = new Map(), carrySeen = new Map();
+    // Surviving anchors bind floor-row content too: a revocation floor row
+    // whose AUTHORITY_REVOKED anchor survives below the cut must prove its
+    // stored bytes against that anchor's record_digest — not land in
+    // floor_derived, and not pass with planted content (w36-fixverify L-2).
+    const revDigests = new Map();
     // The scan must enforce the same acceptance rules as the fold — a row
     // that verifies here but violates the fold's future-time bound would be
     // reported "already verifies" while _auditIndex wedges: signed poison
@@ -1463,32 +1495,82 @@ export class Fabric {
       const meta = env.payload.metadata ?? {};
       if (env.payload.type === 'AUTHORITY_REVOKED') {
         revokedSeen.add(env.payload.reference);
+        if (typeof meta.record_digest === 'string' && typeof env.payload.reference === 'string') revDigests.set(env.payload.reference, meta.record_digest);
         if (typeof env.payload.reference === 'string' && env.payload.reference.startsWith('key:')) keyDeadAt.set(env.payload.reference.slice(4), Math.min(keyDeadAt.get(env.payload.reference.slice(4)) ?? Infinity, r.seq));
       }
       // Revocations a surviving seal/carrier row re-attested count as seen
       // — a carried revocation enforces the same gate on the caller that a
       // raw AUTHORITY_REVOKED does (w33-seal O-1).
+      // Surviving seals unfold BOTH carry classes into the death window
+      // the same way the fold does: a 'key:' carried revocation and a
+      // carried audit-class KEY_ROTATED each pin their key's death at the
+      // carrying row — without them the prescan accepts rows the fold
+      // would refuse (w36-seal F-B).
       if ((env.payload.type === 'AUDIT_SEALED' || env.payload.type === 'AUDIT_SEAL_CARRY')) {
         for (const rv of Array.isArray(meta.revocations_carryover) ? meta.revocations_carryover : [])
-          if (typeof rv?.reference === 'string') revokedSeen.add(rv.reference);
+          if (typeof rv?.reference === 'string') {
+            revokedSeen.add(rv.reference);
+            if (rv.reference.startsWith('key:')) keyDeadAt.set(rv.reference.slice(4), Math.min(keyDeadAt.get(rv.reference.slice(4)) ?? Infinity, r.seq));
+          }
+        for (const lc of Array.isArray(meta.lifecycle_carryover) ? meta.lifecycle_carryover : [])
+          if (lc?.type === 'KEY_ROTATED' && lc?.metadata?.key_class === 'audit' && typeof lc.metadata.previous_key_id === 'string')
+            keyDeadAt.set(lc.metadata.previous_key_id, Math.min(keyDeadAt.get(lc.metadata.previous_key_id) ?? Infinity, r.seq));
+      }
+      // Seal-residue bookkeeping: every surviving seal attests a page
+      // count and per-class carry totals; pages bind by seal_seq. An
+      // amputated page is destroyed attested authority — refuse every
+      // remediation path instead of healing the shortfall (w36-seal F-H).
+      if (env.payload.type === 'AUDIT_SEALED') sealClaims.set(r.seq, { pages: typeof meta.carryover_pages === 'number' ? meta.carryover_pages : 0, totals: meta.carryover_totals ?? null, sums: { spend: Array.isArray(meta.spend_carryover) ? meta.spend_carryover.length : 0, access: Array.isArray(meta.access_carryover) ? meta.access_carryover.length : 0, revocations: Array.isArray(meta.revocations_carryover) ? meta.revocations_carryover.length : 0, capabilities: Array.isArray(meta.capabilities_cut) ? meta.capabilities_cut.length : 0, lifecycle: Array.isArray(meta.lifecycle_carryover) ? meta.lifecycle_carryover.length : 0 } });
+      if (env.payload.type === 'AUDIT_SEAL_CARRY' && typeof meta.seal_seq === 'number') {
+        const pg = carrySeen.get(meta.seal_seq) ?? { count: 0, sums: { spend: 0, access: 0, revocations: 0, capabilities: 0, lifecycle: 0 } };
+        pg.count++;
+        pg.sums.spend += (Array.isArray(meta.spend_carryover) ? meta.spend_carryover.length : 0); pg.sums.access += (Array.isArray(meta.access_carryover) ? meta.access_carryover.length : 0); pg.sums.revocations += (Array.isArray(meta.revocations_carryover) ? meta.revocations_carryover.length : 0); pg.sums.capabilities += (Array.isArray(meta.capabilities_cut) ? meta.capabilities_cut.length : 0); pg.sums.lifecycle += (Array.isArray(meta.lifecycle_carryover) ? meta.lifecycle_carryover.length : 0);
+        carrySeen.set(meta.seal_seq, pg);
       }
       if (env.payload.type === 'KEY_ROTATED' && meta.key_class === 'audit' && meta.previous_key_id) {
         keyDeadAt.set(meta.previous_key_id, Math.min(keyDeadAt.get(meta.previous_key_id) ?? Infinity, r.seq));
         auditSuccessions.set(env.payload.reference, meta.previous_key_id); // newest last, keyed by new key
       }
     }
+    // Seal-residue enforcement runs on every path — cut or re-anchor. A
+    // page doomed AND verifiable is re-carried by the cut (its content is
+    // not lost), so it counts toward the seal's claim; a page destroyed
+    // outright can never be honestly re-attested (w36-seal F-H).
+    const checkSealResidue = () => {
+      for (const [sealSeq, claim] of sealClaims) {
+        const seen = carrySeen.get(sealSeq) ?? { count: 0, sums: { spend: 0, access: 0, revocations: 0, capabilities: 0, lifecycle: 0 } };
+        requireThat(seen.count === claim.pages, 'INV-409-INTEGRITY', `Audit seal at seq ${sealSeq} attests ${claim.pages} carryover page(s) but only ${seen.count} survive — restore the amputated carry before remediating`, 409);
+        if (claim.totals) for (const cls of ['spend', 'access', 'revocations', 'capabilities', 'lifecycle'])
+          requireThat(claim.sums[cls] + seen.sums[cls] === claim.totals[cls], 'INV-409-INTEGRITY', `Audit seal at seq ${sealSeq} attests ${claim.totals[cls]} carried ${cls} entr(ies) but only ${claim.sums[cls] + seen.sums[cls]} survive — restore the amputated carry before remediating`, 409);
+      }
+      // A surviving page bound to a seal row that does not exist at all is
+      // destruction of the seal itself. A page bound to a DOOMED seal
+      // (seal_seq >= firstBad, when a cut is running) is legitimate — its
+      // seal's content is being re-carried by this very remediation.
+      for (const [sealSeq] of carrySeen)
+        requireThat(sealClaims.has(sealSeq) || (firstBad !== null && sealSeq >= firstBad), 'INV-409-INTEGRITY', 'Audit carryover page references a seal row that does not exist', 409);
+    };
     // The revoked-caller refusal binds BOTH paths — a subject whose own
     // revocation is on-chain must not clear the wedge on the early return
     // any more than it may cut the chain (w21-fixverify H-3).
     const callerRefs = [`subject:${p.subject_id}`, `key:${iid}`, ...(this.tenant(t).identities[iid]?.device_id ? [`device:${this.tenant(t).identities[iid].device_id}`] : [])];
     requireThat(!callerRefs.some(ref => revokedSeen.has(ref)), 'INV-403-QUARANTINE', 'A revoked identity cannot seal the audit chain', 403);
+    // The signed head is consulted on BOTH paths: a cut that mints a fresh
+    // head over regressed residue launders the destruction the head
+    // attested (w36-fixverify HIGH-1).
+    const head = this._chainHead(t);
     if (firstBad === null) {
+      // Carryover pages a surviving seal attested must still all exist — a
+      // missing page is destroyed attested authority, not a re-anchor
+      // opportunity (w36-seal F-H). Refuse before the head reconciliation
+      // can attest a healed chain over the amputation.
+      checkSealResidue();
       // The ledger itself verifies but the signed watermark may not cover
       // the tip (deleted or replayed chain-heads.json — w25-clock F-4,
       // w25-fixverify W25-01). Re-anchor the verified tip under a signed
       // AUDIT_HEAD_REANCHORED event — the append's own flush writes the
       // fresh head envelope.
-      const tip = rows.at(-1), head = this._chainHead(t);
+      const tip = rows.at(-1);
       let headReanchored = false, abandonedHead = null;
       // A genuinely-signed head attesting rows that no longer exist is
       // DELETION residue, not a stale watermark: repairing it under the
@@ -1501,8 +1583,8 @@ export class Fabric {
       // honestly re-minted.
       if (head && head !== 'corrupt' && tip && (head.seq > tip.seq || (head.seq === tip.seq && !ctEqual(head.hash, tip.hash)))) {
         requireThat(!(head.revocations !== undefined && this.store.ids(t, 'revocation', 1_000_000).length < head.revocations), 'INV-409-INTEGRITY', 'Signed head attests a revocation floor that regressed — restore the deleted rows before re-anchoring', 409);
-        requireThat(!(head.checkpoints !== undefined && this.store.ids(t, 'audit-checkpoint', 1_000_000).length < head.checkpoints), 'INV-409-INTEGRITY', 'Signed head attests audit checkpoints that regressed — restore them before re-anchoring', 409);
-        if (head.checkpoint) requireThat(this.store.get(t, 'audit-checkpoint', `cp-${head.checkpoint}`) !== null, 'INV-409-INTEGRITY', 'Signed head attests an audit checkpoint that no longer exists', 409);
+        requireThat(!(head.checkpoints !== undefined && this._verifiedCheckpointCount(t) < head.checkpoints), 'INV-409-INTEGRITY', 'Signed head attests audit checkpoints that regressed — restore them before re-anchoring', 409);
+        if (head.checkpoint) requireThat(this._checkpointAttested(t, head.checkpoint), 'INV-409-INTEGRITY', 'Signed head attests an audit checkpoint that no longer verifies', 409);
         abandonedHead = { abandoned_head_seq: head.seq, abandoned_head_hash: head.hash };
       } else if (!tip && head && head !== 'corrupt' && head.seq > 0)
         // The whole attested chain is gone — there is nothing honest to
@@ -1643,11 +1725,17 @@ export class Fabric {
       // last verified prefix row and the first doomed one) attest rows
       // that were destroyed before the seal ran (w34-runtime F-2).
       const deletedGaps = [];
-      let gapFrom = prevPlSeq;
+      let gapFrom = prevPlSeq, deletedGapsTotal = 0;
       for (const { pl } of doomedVerified) {
-        if (pl.sequence > gapFrom + 1 && deletedGaps.length < 64) deletedGaps.push([gapFrom + 1, pl.sequence - 1]);
+        if (pl.sequence > gapFrom + 1) { deletedGapsTotal++; if (deletedGaps.length < 64) deletedGaps.push([gapFrom + 1, pl.sequence - 1]); }
         gapFrom = Math.max(gapFrom, pl.sequence);
       }
+      // The tail beyond the last verifiable doomed payload is attested
+      // destruction too: rows deleted BEFORE the seal ran leave no doomed
+      // envelope to count — bound the gaps by the pre-DELETE stored tip so
+      // a trailing amputation names itself (w36-fixverify L-1).
+      const preDeleteMax = this.store.db.prepare('SELECT COALESCE(MAX(seq),0) m FROM audit WHERE tenant=?').get(t).m;
+      if (preDeleteMax > gapFrom) { deletedGapsTotal++; if (deletedGaps.length < 64) deletedGaps.push([gapFrom + 1, preDeleteMax]); }
       for (const { pl } of doomedVerified) {
         const meta = pl.metadata ?? {};
         if (pl.type === 'RUNTIME_ALLOWED') addSpend({ capability: pl.reference, subject: pl.actor, resource: meta.resource ?? null, request_id: meta.request_id ?? null, cost: typeof meta.cost === 'number' && meta.cost >= 0 ? meta.cost : 0, at: pl.time });
@@ -1656,15 +1744,26 @@ export class Fabric {
         // A verifiable doomed revocation is CARRIED, never rescinded: the
         // seal must not silently un-revoke what it cannot disprove —
         // including the sealing caller's own revocation (w32-seal F-5).
-        else if (pl.type === 'AUTHORITY_REVOKED' && typeof pl.reference === 'string') { addRevoked({ reference: pl.reference, kind: meta.kind ?? null, id: meta.id ?? null, at: pl.time }); if (typeof meta.record_digest === 'string') doomedRevDigests.set(pl.reference, meta.record_digest); }
+        else if (pl.type === 'AUTHORITY_REVOKED' && typeof pl.reference === 'string') { addRevoked({ reference: pl.reference, kind: meta.kind ?? null, id: meta.id ?? null, at: pl.time, orig_seq: pl.sequence }); if (typeof meta.record_digest === 'string') doomedRevDigests.set(pl.reference, meta.record_digest); }
         // CONFIG_SNAPSHOT/REASSERTED feed doomedSnapshotSeen (the repoint
         // rule) AND the lifecycle carry — the fold's configSnapshot baseline
         // must survive the cut too.
-        else if (pl.type === 'CONFIG_SNAPSHOT' || pl.type === 'CONFIG_REASSERTED') { doomedSnapshotSeen = true; addLifecycle({ type: pl.type, reference: pl.reference ?? null, actor: pl.actor ?? null, time: pl.time ?? null, metadata: meta }); }
+        else if (pl.type === 'CONFIG_SNAPSHOT' || pl.type === 'CONFIG_REASSERTED') { doomedSnapshotSeen = true; addLifecycle({ type: pl.type, reference: pl.reference ?? null, actor: pl.actor ?? null, time: pl.time ?? null, orig_seq: pl.sequence, metadata: meta }); }
         // A second seal cutting below a prior seal (or its carry pages)
         // must carry the carryover forward — the authority a seal already
         // re-attested can never be silently dropped by the next one.
-        else if (pl.type === 'AUDIT_SEALED' || pl.type === 'AUDIT_SEAL_CARRY') { for (const u of meta.spend_carryover ?? []) addSpend(u); for (const a of meta.access_carryover ?? []) addAccess(a); for (const c of meta.capabilities_cut ?? []) addCap(c); for (const rv of meta.revocations_carryover ?? []) addRevoked(rv); for (const lc of meta.lifecycle_carryover ?? []) addLifecycle(lc); for (const de of meta.dropped_events ?? []) droppedEvents.push(de); droppedEventsOverflow += Math.max(0, (meta.carryover_totals?.dropped_events ?? (Array.isArray(meta.dropped_events) ? meta.dropped_events.length : 0)) - (Array.isArray(meta.dropped_events) ? meta.dropped_events.length : 0)); }
+        else if (pl.type === 'AUDIT_SEALED' || pl.type === 'AUDIT_SEAL_CARRY') {
+          // A doomed carry page bound to a SURVIVING seal keeps that seal's
+          // attestation honest — its content re-carries into this seal, so
+          // the residue recount below still finds it (w36-seal F-H).
+          if (pl.type === 'AUDIT_SEAL_CARRY' && typeof meta.seal_seq === 'number' && sealClaims.has(meta.seal_seq)) {
+            const pg = carrySeen.get(meta.seal_seq) ?? { count: 0, sums: { spend: 0, access: 0, revocations: 0, capabilities: 0, lifecycle: 0 } };
+            pg.count++;
+            pg.sums.spend += (Array.isArray(meta.spend_carryover) ? meta.spend_carryover.length : 0); pg.sums.access += (Array.isArray(meta.access_carryover) ? meta.access_carryover.length : 0); pg.sums.revocations += (Array.isArray(meta.revocations_carryover) ? meta.revocations_carryover.length : 0); pg.sums.capabilities += (Array.isArray(meta.capabilities_cut) ? meta.capabilities_cut.length : 0); pg.sums.lifecycle += (Array.isArray(meta.lifecycle_carryover) ? meta.lifecycle_carryover.length : 0);
+            carrySeen.set(meta.seal_seq, pg);
+          }
+          for (const u of meta.spend_carryover ?? []) addSpend(u); for (const a of meta.access_carryover ?? []) addAccess(a); for (const c of meta.capabilities_cut ?? []) addCap(c); for (const rv of meta.revocations_carryover ?? []) addRevoked(rv); for (const lc of meta.lifecycle_carryover ?? []) addLifecycle(lc); for (const de of meta.dropped_events ?? []) droppedEvents.push(de); droppedEventsOverflow += Math.max(0, (meta.carryover_totals?.dropped_events ?? (Array.isArray(meta.dropped_events) ? meta.dropped_events.length : 0)) - (Array.isArray(meta.dropped_events) ? meta.dropped_events.length : 0));
+        }
         // Every other verifiable doomed event — proposals, evidence,
         // approvals, certificate issuance, reservations, dispatches,
         // outcomes, releases, compensations, cancels, grants, rotations,
@@ -1673,8 +1772,13 @@ export class Fabric {
         // destroyed anchors (spent certs stay spent, cancelled stay dead,
         // composite children stay bound). Without this the seal was a
         // laundering oracle (w34-composite CRITICAL-1).
-        else addLifecycle({ type: pl.type, reference: pl.reference ?? null, actor: pl.actor ?? null, time: pl.time ?? null, metadata: meta });
+        else addLifecycle({ type: pl.type, reference: pl.reference ?? null, actor: pl.actor ?? null, time: pl.time ?? null, orig_seq: pl.sequence, metadata: meta });
       }
+      // Every surviving seal's attested carry residue must survive the cut
+      // intact-or-re-carried: a page destroyed outright is unrecoverable
+      // attested authority, and re-anchoring over it launders the
+      // amputation (w36-seal F-H).
+      checkSealResidue();
       // Mirror tables are attacker-writable and add NOTHING provable: every
       // honest usage/data_access row duplicates a doomed-verified
       // RUNTIME_ALLOWED/DATA_ACCESSED event already carried above, and any
@@ -1712,7 +1816,20 @@ export class Fabric {
       const metaMac = v => createHmac('sha256', this.vault.masterKey).update(canonical(v)).digest('base64url');
       const plantedFloor = [], floorDerived = [];
       for (const floorId of this.store.ids(t, 'revocation', 1_000_000)) {
-        if (survivingRevoked.has(floorId)) continue;
+        // A ref attested by a SURVIVING anchor or surviving seal carryover
+        // is enforced already — never re-carried, never floor_derived. But
+        // the row's stored bytes still bind that anchor's record_digest:
+        // skipping the row must not skip the planted-content check
+        // (w36-fixverify L-2).
+        if (survivingRevoked.has(floorId)) {
+          const survivingDigest = revDigests.get(floorId);
+          if (survivingDigest !== undefined) {
+            let matches = false;
+            try { matches = ctEqual(metaMac(this.store.get(t, 'revocation', floorId)), survivingDigest); } catch { /* undecryptable planted content */ }
+            if (!matches) plantedFloor.push(floorId);
+          }
+          continue;
+        }
         const anchoredDigest = doomedRevDigests.get(floorId);
         if (anchoredDigest !== undefined) {
           let matches = false;
@@ -1720,8 +1837,32 @@ export class Fabric {
           if (!matches) plantedFloor.push(floorId);
           continue; // already carried from its verifiable event
         }
-        addRevoked({ reference: floorId, kind: null, id: null, at: now, floor_derived: true });
-        floorDerived.push(floorId);
+        // Only name floor-derived what actually lacks verifiable evidence —
+        // a ref already carried by a verifiable doomed anchor (or a prior
+        // seal's signed carryover) must not be labelled orphaned
+        // (w36-fixverify L-2).
+        if (!revokedKeys.has(floorId)) {
+          addRevoked({ reference: floorId, kind: null, id: null, at: now, floor_derived: true });
+          floorDerived.push(floorId);
+        }
+      }
+      // The planted-floor check is asymmetric by necessity — it sees only
+      // floor rows that EXIST. A floor row DELETED while its verifiable
+      // anchor still condemned the ref must be named too: enforced, but
+      // invisible in revocations() and unreachable by re-anchor
+      // (w36-fixverify M-1).
+      const murderedFloor = [];
+      for (const rv of carryRevoked) {
+        if (rv.floor_derived === true) continue;
+        let floorRow; try { floorRow = this.store.get(t, 'revocation', rv.reference); } catch { floorRow = 'unreadable'; }
+        if (floorRow === null) murderedFloor.push(rv.reference);
+      }
+      // A ref whose SURVIVING anchor still condemns it while its floor row
+      // was deleted is murdered all the same — the anchor was never cut,
+      // so carryRevoked never saw it (w36-fixverify M-1).
+      for (const ref of survivingRevoked) {
+        let floorRow; try { floorRow = this.store.get(t, 'revocation', ref); } catch { floorRow = 'unreadable'; }
+        if (floorRow === null) murderedFloor.push(ref);
       }
       // Mirror rows are never carried — but their residue is NAMED, never
       // silently ignored: a corrupted anchor erases the spend/disclosure
@@ -1761,6 +1902,14 @@ export class Fabric {
       // hits the vault-flag divergence (w33-fixverify F-4).
       for (const rv of carryRevoked)
         if (rv.reference.startsWith('key:')) keyDeadAt.set(rv.reference.slice(4), Math.min(keyDeadAt.get(rv.reference.slice(4)) ?? Infinity, firstBad));
+      // A doomed audit-class KEY_ROTATED riding lifecycle carryover kills
+      // its predecessor exactly like foldApply replays it — leaving it out
+      // of the death window lets the seal sign its own carry pages under a
+      // key this very seal condemns: dead-signed pages that wedge the fold
+      // permanently (w36-seal F-B).
+      for (const lc of carryLifecycle)
+        if (lc?.type === 'KEY_ROTATED' && lc?.metadata?.key_class === 'audit' && typeof lc.metadata.previous_key_id === 'string')
+          keyDeadAt.set(lc.metadata.previous_key_id, Math.min(keyDeadAt.get(lc.metadata.previous_key_id) ?? Infinity, firstBad));
       // Install the pending-carry tolerance BEFORE the delete/repoint
       // section — the repoint block re-folds mid-seal (ceremonyDesignated,
       // the CONFIG_SNAPSHOT audit write's signer resolution) and without
@@ -1768,7 +1917,7 @@ export class Fabric {
       // assembling (w33-fixverify F-3). Cleared in the finally below on
       // every path.
       this.#sealCarry.set(t, new Set(carryRevoked.map(r => r.reference)));
-      let removed = [];
+      let removed = [], sealSeq = firstBad, abandonedHead = null;
       try {
       // Doom is payload-defined (w34-runtime F-2): the cut covers every
       // stored row at/past firstBad AND any verified-doomed row whose
@@ -1786,6 +1935,30 @@ export class Fabric {
         CREATE TRIGGER audit_seq_guard BEFORE INSERT ON audit
           WHEN NEW.seq <> (SELECT COALESCE(MAX(seq),0)+1 FROM audit WHERE tenant=NEW.tenant)
           BEGIN SELECT RAISE(ABORT, 'audit sequence must extend the head'); END;`);
+      // The signed head's residue claims bind the cut path too — the
+      // no-cut branch refuses when floor/checkpoint attestations regressed
+      // because the residue can never be honestly re-minted; minting a
+      // FRESH head over the same regression on the cut path was the w35
+      // hole (w36-fixverify HIGH-1).
+      if (head && head !== 'corrupt') {
+        requireThat(!(head.revocations !== undefined && this.store.ids(t, 'revocation', 1_000_000).length < head.revocations), 'INV-409-INTEGRITY', 'Signed head attests a revocation floor that regressed — restore the deleted rows before sealing', 409);
+        requireThat(!(head.checkpoints !== undefined && this._verifiedCheckpointCount(t) < head.checkpoints), 'INV-409-INTEGRITY', 'Signed head attests audit checkpoints that regressed — restore them before sealing', 409);
+        if (head.checkpoint) requireThat(this._checkpointAttested(t, head.checkpoint), 'INV-409-INTEGRITY', 'Signed head attests an audit checkpoint that no longer verifies', 409);
+      }
+      // A head attesting doomed-or-deleted rows is abandoned, not
+      // contradicted — attest it on the seal record exactly like the
+      // re-anchor path does, so the tail's disappearance is on the signed
+      // ledger instead of silently overwritten by the fresh head
+      // (w36-fixverify HIGH-1).
+      const postTip = this.store.db.prepare('SELECT seq,hash FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1').get(t);
+      // Every attested row may be gone (postTip undefined): the seal still
+      // re-anchors — from genesis — but the head it leaves behind is named
+      // on the signed record, exactly like a partial cut (w36-fixverify
+      // HIGH-1). Residue claims that can never be honestly re-minted
+      // (revocation floor, checkpoints) already refused above.
+      abandonedHead = head && head !== 'corrupt' && (!postTip || head.seq > postTip.seq || (head.seq === postTip.seq && !ctEqual(head.hash, postTip.hash)))
+        ? { abandoned_head_seq: head.seq, abandoned_head_hash: head.hash }
+        : null;
       // The seal row itself must survive the signing window it just
       // enforced: when the consumed prefix killed the configured audit key,
       // repoint onto the newest chain-attested successor before sealing —
@@ -1858,9 +2031,15 @@ export class Fabric {
       const carryPages = [];
       for (let off = CARRY_PAGE; off < Math.max(carrySpend.length, carryAccess.length, carryRevoked.length, capsCut.length, carryLifecycle.length); off += CARRY_PAGE)
         carryPages.push({ spend_carryover: carrySpend.slice(off, off + CARRY_PAGE), access_carryover: carryAccess.slice(off, off + CARRY_PAGE), revocations_carryover: carryRevoked.slice(off, off + CARRY_PAGE), capabilities_cut: capsCut.slice(off, off + CARRY_PAGE), lifecycle_carryover: carryLifecycle.slice(off, off + CARRY_PAGE) });
-      this.store.audit(t, 'AUDIT_SEALED', p.subject_id, 'audit', { sealed_at_seq: firstBad, removed_count: removed.length, removed_head: removed[0] ?? null, removed_tail: removed.at(-1) ?? null, spend_carryover: carrySpend.slice(0, CARRY_PAGE), access_carryover: carryAccess.slice(0, CARRY_PAGE), capabilities_cut: capsCut.slice(0, CARRY_PAGE), revocations_carryover: carryRevoked.slice(0, CARRY_PAGE), lifecycle_carryover: carryLifecycle.slice(0, CARRY_PAGE), carryover_pages: carryPages.length, carryover_totals: { spend: carrySpend.length, access: carryAccess.length, revocations: carryRevoked.length, capabilities: capsCut.length, lifecycle: carryLifecycle.length, mirrors_dropped: droppedMirrorCount, dropped_events: droppedEvents.length + droppedEventsOverflow, divergent_stored: divergentStored }, dropped_mirrors: droppedMirrors, dropped_events: droppedEvents.slice(0, CARRY_PAGE), deleted_gaps: deletedGaps.slice(0, 64), planted_floor_refs: plantedFloor.slice(0, 512), floor_derived: floorDerived.slice(0, 512) }, now);
+      // The pages must bind the seal's ACTUAL assigned sequence, not the
+      // nominal firstBad: the repoint's interposed CONFIG_SNAPSHOT takes
+      // firstBad itself, sliding the seal to firstBad+1 and leaving every
+      // page unbound at the fold's seal_seq check — a seal that permanently
+      // wedges the chain it just repaired (w36-seal F-A).
+      const sealWrite = this.store.audit(t, 'AUDIT_SEALED', p.subject_id, 'audit', { sealed_at_seq: firstBad, removed_count: removed.length, removed_head: removed[0] ?? null, removed_tail: removed.at(-1) ?? null, spend_carryover: carrySpend.slice(0, CARRY_PAGE), access_carryover: carryAccess.slice(0, CARRY_PAGE), capabilities_cut: capsCut.slice(0, CARRY_PAGE), revocations_carryover: carryRevoked.slice(0, CARRY_PAGE), lifecycle_carryover: carryLifecycle.slice(0, CARRY_PAGE), carryover_pages: carryPages.length, carryover_totals: { spend: carrySpend.length, access: carryAccess.length, revocations: carryRevoked.length, capabilities: capsCut.length, lifecycle: carryLifecycle.length, mirrors_dropped: droppedMirrorCount, dropped_events: droppedEvents.length + droppedEventsOverflow, divergent_stored: divergentStored, deleted_gaps_total: deletedGapsTotal }, dropped_mirrors: droppedMirrors, dropped_events: droppedEvents.slice(0, CARRY_PAGE), deleted_gaps: deletedGaps.slice(0, 64), planted_floor_refs: plantedFloor.slice(0, 512), floor_derived: floorDerived.slice(0, 512), murdered_floor_refs: murderedFloor.slice(0, 512), ...(abandonedHead ?? {}) }, now);
+      sealSeq = sealWrite?.envelope?.payload?.sequence ?? firstBad;
       for (let i = 0; i < carryPages.length; i++)
-        this.store.audit(t, 'AUDIT_SEAL_CARRY', p.subject_id, 'audit', { seal_seq: firstBad, page: i + 1, ...carryPages[i] }, now);
+        this.store.audit(t, 'AUDIT_SEAL_CARRY', p.subject_id, 'audit', { seal_seq: sealSeq, page: i + 1, ...carryPages[i] }, now);
       }
       finally { this.#sealCarry.delete(t); }
       this.#auditIdx?.delete(t);
@@ -1870,7 +2049,7 @@ export class Fabric {
       // record, every planted row convicted by digest, and the carryover
       // totals — never a bare sealed:true over attacker-chosen claims
       // (w34-fixverify H-2/L-4, w34-runtime F-3).
-      return { sealed: true, sealed_at_seq: firstBad, removed_count: removed.length, carryover_totals: { spend: carrySpend.length, access: carryAccess.length, revocations: carryRevoked.length, capabilities: capsCut.length, lifecycle: carryLifecycle.length, mirrors_dropped: droppedMirrorCount, dropped_events: droppedEvents.length + droppedEventsOverflow, divergent_stored: divergentStored }, floor_derived: floorDerived.slice(0, 512), planted_floor_refs: plantedFloor.slice(0, 512), deleted_gaps: deletedGaps.slice(0, 64) };
+      return { sealed: true, sealed_at_seq: firstBad, seal_seq: sealSeq, removed_count: removed.length, carryover_totals: { spend: carrySpend.length, access: carryAccess.length, revocations: carryRevoked.length, capabilities: capsCut.length, lifecycle: carryLifecycle.length, mirrors_dropped: droppedMirrorCount, dropped_events: droppedEvents.length + droppedEventsOverflow, divergent_stored: divergentStored, deleted_gaps_total: deletedGapsTotal }, floor_derived: floorDerived.slice(0, 512), planted_floor_refs: plantedFloor.slice(0, 512), murdered_floor_refs: murderedFloor.slice(0, 512), deleted_gaps: deletedGaps.slice(0, 64), ...(abandonedHead ?? {}) };
       });
       // The seal committed through store.tx — the repoint's ledger binding
       // is durable, so post-commit faults can no longer claim the ledger
@@ -2536,7 +2715,11 @@ export class Fabric {
         if (typeof pl.reference === 'string' && pl.reference.startsWith('key:')) idx.keyDeadAt.set(pl.reference.slice(4), Math.min(idx.keyDeadAt.get(pl.reference.slice(4)) ?? Infinity, seq));
         break;
       case 'KEY_ROTATED':
-        if (meta.key_class === 'audit' && meta.previous_key_id) idx.keyDeadAt.set(meta.previous_key_id, Math.min(idx.keyDeadAt.get(meta.previous_key_id) ?? Infinity, seq));
+        // A carried rotation pins its predecessor's death at the event's
+        // OWN chain position (orig_seq), not the carrying page's — the
+        // seal re-attests where the death actually happened
+        // (w36-seal F-D).
+        if (meta.key_class === 'audit' && meta.previous_key_id) idx.keyDeadAt.set(meta.previous_key_id, Math.min(idx.keyDeadAt.get(meta.previous_key_id) ?? Infinity, typeof pl.orig_seq === 'number' ? pl.orig_seq : seq));
         // The newest anchored succession per class is the only authority
         // a key-binding repoint may follow — 'key-rotation' records are
         // forgeable hints, never the selector (w16-fixverify F3/F13).
@@ -2699,7 +2882,7 @@ export class Fabric {
           // apart so revoke() can offer a re-anchor path and the report
           // can label them honestly (w34-fixverify M-3).
           if (rv.floor_derived === true) (idx.revokedFloor ??= new Set()).add(rv.reference);
-          if (rv.reference.startsWith('key:')) idx.keyDeadAt.set(rv.reference.slice(4), Math.min(idx.keyDeadAt.get(rv.reference.slice(4)) ?? Infinity, seq));
+          if (rv.reference.startsWith('key:')) idx.keyDeadAt.set(rv.reference.slice(4), Math.min(idx.keyDeadAt.get(rv.reference.slice(4)) ?? Infinity, typeof rv.orig_seq === 'number' ? rv.orig_seq : seq));
         }
         // Every other verifiable doomed event re-anchors here: reservations,
         // outcomes, cancels, certificate issuance, the parent↔child binding,
@@ -2710,7 +2893,11 @@ export class Fabric {
         // writer already excluded the dedicated-array types above.
         for (const c of Array.isArray(meta.lifecycle_carryover) ? meta.lifecycle_carryover : [])
           if (typeof c?.type === 'string' && !['AUDIT_SEALED', 'AUDIT_SEAL_CARRY', 'AUDIT_WEDGE_CLEARED'].includes(c.type))
-            this.#foldApply(idx, { type: c.type, reference: c.reference ?? null, actor: c.actor ?? null, time: c.time ?? null, metadata: c.metadata ?? {}, tenant_id: t }, seq, t);
+            // orig_seq keeps the carried event's own chain position: a
+            // doomed KEY_ROTATED's death check must be judged at the seq
+            // it actually happened, not the carrying page's seq
+            // (w36-seal F-D).
+            this.#foldApply(idx, { type: c.type, reference: c.reference ?? null, actor: c.actor ?? null, time: c.time ?? null, orig_seq: typeof c.orig_seq === 'number' ? c.orig_seq : null, metadata: c.metadata ?? {}, tenant_id: t }, seq, t);
         // Doomed rows that failed re-verification could not be carried — the
         // seal names them in dropped_events. The count is honest evidence the
         // ledger cannot re-derive, so reconstruction budgeting treats it as
@@ -2795,18 +2982,52 @@ export class Fabric {
         // rewind that deletes those rows to bury their anchors convicts —
         // replayed heads cannot un-claim what they signed for
         // (w33-export F1/F6).
-        if (committedHead.checkpoint) requireThat(this.store.get(t, 'audit-checkpoint', `cp-${committedHead.checkpoint}`) !== null, 'INV-409-INTEGRITY', 'Signed head attests an audit checkpoint that no longer exists', 409);
+        if (committedHead.checkpoint) requireThat(this._checkpointAttested(t, committedHead.checkpoint), 'INV-409-INTEGRITY', 'Signed head attests an audit checkpoint that no longer verifies', 409);
         // Older checkpoints are witnesses too: the head also binds their
         // COUNT, so deleting a prior export's cp row convicts under any
-        // surviving head (w34-fixverify L-1). Heads minted before the
-        // field existed legitimately lack it — absent means unclaimed.
-        if (committedHead.checkpoints !== undefined) requireThat(this.store.ids(t, 'audit-checkpoint', 1_000_000).length >= committedHead.checkpoints, 'INV-409-INTEGRITY', 'Audit checkpoint floor regressed below the signed head', 409);
+        // surviving head (w34-fixverify L-1). Only rows that still verify
+        // as signed checkpoints count — a planted 'audit-checkpoint'
+        // record row must not inflate the floor (w36-fixverify L-3).
+        // Heads minted before the field existed legitimately lack it —
+        // absent means unclaimed.
+        if (committedHead.checkpoints !== undefined) requireThat(this._verifiedCheckpointCount(t) >= committedHead.checkpoints, 'INV-409-INTEGRITY', 'Audit checkpoint floor regressed below the signed head', 409);
         if (committedHead.revocations !== undefined) requireThat(this.store.ids(t, 'revocation', 1_000_000).length >= committedHead.revocations, 'INV-409-INTEGRITY', 'Revocation floor regressed below the signed head', 409);
       }
       if (committedHead && committedHead.seq === maxSeq && committedHead.seq > 0) {
         idx.tipQ ??= this.store.db.prepare('SELECT hash FROM audit WHERE tenant=? AND seq=?');
         const tipRow = idx.tipQ.get(t, committedHead.seq);
         requireThat(tipRow && ctEqual(tipRow.hash, committedHead.hash), 'INV-409-INTEGRITY', 'Audit head row diverges from the signed watermark', 409);
+      }
+      // A seal's attested carry residue must still all EXIST — a deleted
+      // AUDIT_SEAL_CARRY page never re-folds, so the fold's own replay
+      // bookkeeping cannot see the amputation; the recount is derived
+      // from the table itself (w36-seal F-H). Seal rows and their pages
+      // are rare — the per-window cadence of this block covers it.
+      {
+        const claims = new Map(), seen = new Map();
+        for (const r of this.store.db.prepare("SELECT seq,envelope FROM audit WHERE tenant=? AND (envelope LIKE '%\"type\":\"AUDIT_SEALED\"%' OR envelope LIKE '%\"type\":\"AUDIT_SEAL_CARRY\"%')").all(t)) {
+          let env; try { env = JSON.parse(r.envelope); } catch { continue; }
+          const pl = env?.payload, m = pl?.metadata ?? {};
+          if (pl?.type === 'AUDIT_SEALED') claims.set(r.seq, { pages: typeof m.carryover_pages === 'number' ? m.carryover_pages : 0, totals: m.carryover_totals ?? null, sums: { spend: Array.isArray(m.spend_carryover) ? m.spend_carryover.length : 0, access: Array.isArray(m.access_carryover) ? m.access_carryover.length : 0, revocations: Array.isArray(m.revocations_carryover) ? m.revocations_carryover.length : 0, capabilities: Array.isArray(m.capabilities_cut) ? m.capabilities_cut.length : 0, lifecycle: Array.isArray(m.lifecycle_carryover) ? m.lifecycle_carryover.length : 0 } });
+          else if (pl?.type === 'AUDIT_SEAL_CARRY' && typeof m.seal_seq === 'number') {
+            const pg = seen.get(m.seal_seq) ?? { count: 0, sums: { spend: 0, access: 0, revocations: 0, capabilities: 0, lifecycle: 0 } };
+            pg.count++;
+            pg.sums.spend += Array.isArray(m.spend_carryover) ? m.spend_carryover.length : 0;
+            pg.sums.access += Array.isArray(m.access_carryover) ? m.access_carryover.length : 0;
+            pg.sums.revocations += Array.isArray(m.revocations_carryover) ? m.revocations_carryover.length : 0;
+            pg.sums.capabilities += Array.isArray(m.capabilities_cut) ? m.capabilities_cut.length : 0;
+            pg.sums.lifecycle += Array.isArray(m.lifecycle_carryover) ? m.lifecycle_carryover.length : 0;
+            seen.set(m.seal_seq, pg);
+          }
+        }
+        for (const [sealSeq, claim] of claims) {
+          const pg = seen.get(sealSeq) ?? { count: 0, sums: { spend: 0, access: 0, revocations: 0, capabilities: 0, lifecycle: 0 } };
+          requireThat(pg.count === claim.pages, 'INV-409-INTEGRITY', `Audit seal at seq ${sealSeq} attests ${claim.pages} carryover page(s) but only ${pg.count} survive — restore the amputated carry`, 409);
+          if (claim.totals) for (const cls of ['spend', 'access', 'revocations', 'capabilities', 'lifecycle'])
+            requireThat((claim.sums[cls] + pg.sums[cls]) === claim.totals[cls], 'INV-409-INTEGRITY', `Audit seal at seq ${sealSeq} attests ${claim.totals[cls]} carried ${cls} entr(ies) but only ${claim.sums[cls] + pg.sums[cls]} survive — restore the amputated carry`, 409);
+        }
+        for (const [sealSeq] of seen)
+          requireThat(claims.has(sealSeq), 'INV-409-INTEGRITY', 'Audit carryover page references a seal row that does not exist', 409);
       }
       this._probeMemo?.set(t, true);
       }
@@ -2850,7 +3071,17 @@ export class Fabric {
     const consumeNow = this.clock();
     let prevPlTime = idx.prevPlTime ?? 0;
     try {
-      for (const e of this.store.auditPage(t, { after: idx.maxSeq, limit: 2_000_000 }).entries) {
+      // The page surface classifies dead-signed rows INV-409-AUDIT-TAMPER;
+      // under the fold the same rows carry the INTEGRITY verdict
+      // (w14 W13-01) — translate only the signing-window case at the
+      // fold's read boundary; row-integrity failures keep TAMPER.
+      let pageEntries;
+      try { pageEntries = this.store.auditPage(t, { after: idx.maxSeq, limit: 2_000_000 }).entries; }
+      catch (err) {
+        if (err && err.code === 'INV-409-AUDIT-TAMPER' && /past its ledger death/.test(err.message || '')) throw new InvariantError('INV-409-INTEGRITY', err.message, 409);
+        throw err;
+      }
+      for (const e of pageEntries) {
       // Signing-window enforcement (w13-supply W13-01): a revoked or
       // rotated-out key keeps verifying entries signed during its
       // authority but can never mint an entry appended AFTER its on-chain
@@ -4758,7 +4989,16 @@ export class Fabric {
       // by a fresh signed revocation so the floor regains real evidence
       // (w34-fixverify M-3).
       const revRef = `${input.kind}:${input.id}`, revIdx = this._auditIndex(t);
-      requireThat(!this.revoked(t, input.kind, input.id) || (revIdx.revokedFloor?.has(revRef) && !revIdx.revocationDigests.has(revRef)), 'INV-409-STATE', 'Authority already revoked', 409);
+      // ...or a ref whose signed anchor survives while its floor row was
+      // deleted outright: the digest condemns a revocation that no stored
+      // row enforces — re-anchoring re-mints the floor instead of leaving
+      // the murder silent (w36-fixverify M-1). An unreadable planted row
+      // heals the same way — the fresh put overwrites it under the new
+      // digest.
+      let revFloorRow; try { revFloorRow = this.store.get(t, 'revocation', revRef); } catch { revFloorRow = 'unreadable'; }
+      const reanchorable = (revIdx.revokedFloor?.has(revRef) && !revIdx.revocationDigests.has(revRef))
+        || (revIdx.revocationDigests.has(revRef) && (revFloorRow === null || revFloorRow === 'unreadable'));
+      requireThat(!this.revoked(t, input.kind, input.id) || reanchorable, 'INV-409-STATE', 'Authority already revoked', 409);
       // The bound execution or audit signer cannot be revoked without a
       // quorum-designated pending successor covering its purposes — the
       // recovery rotation needs certificates and outcome signatures to keep
@@ -4827,6 +5067,16 @@ export class Fabric {
     // cannot and an insider with row-write but no vault still fails it.
     const metaMac = v => createHmac('sha256', this.vault.masterKey).update(canonical(v)).digest('base64url');
     const items = this.store.list(p.tenant_id, 'revocation', 10000).filter(i => idx.revoked.has(`${i.kind}:${i.id}`)).map(i => ({ ...i, anchored: idx.revocationDigests.has(`${i.kind}:${i.id}`) && ctEqual(idx.revocationDigests.get(`${i.kind}:${i.id}`), metaMac(i)) ? true : (idx.revokedFloor?.has(`${i.kind}:${i.id}`) ? 'floor-derived' : 'identity-only') }));
+    // Enforced-but-floorless refs: the signed chain condemns a revocation
+    // whose mutable row was deleted — a murdered floor row must still
+    // surface in the report or the enforced state is invisible to the
+    // operator who would re-anchor it (w36-fixverify M-1).
+    const floorSeen = new Set(items.map(i => `${i.kind}:${i.id}`));
+    for (const ref of idx.revoked) {
+      const sep = ref.indexOf(':');
+      if (sep <= 0 || floorSeen.has(ref)) continue;
+      items.push({ kind: ref.slice(0, sep), id: ref.slice(sep + 1), revoked_at: null, actor: null, reason_digest: null, anchored: 'anchorless-carried' });
+    }
     return { quarantine: items.filter(i => ['subject', 'device'].includes(i.kind)).filter(i => !kind || i.kind === kind), items: kind ? items.filter(i => i.kind === kind) : items };
   }
   listGrants(p, subject = null) {

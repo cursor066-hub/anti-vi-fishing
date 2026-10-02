@@ -237,7 +237,7 @@ test('w33 export F2: webcrypto verifier rejects a posthumously-signed bundle', a
   const row = payload => ({ hash: digest(payload), envelope: h.f.vault.envelope(auditKid, 'audit', payload) });
   // A revocation that kills the audit key, then a row signed by that same key
   // one sequence later — every envelope verifies; the death window must not.
-  const r1 = row({ tenant_id: 'acme', sequence: 1, previous: '0'.repeat(64), type: 'AUTHORITY_REVOKED', actor: 'mallory', reference: null, time: 1, metadata: { kind: 'key', id: auditKid } });
+  const r1 = row({ tenant_id: 'acme', sequence: 1, previous: '0'.repeat(64), type: 'AUTHORITY_REVOKED', actor: 'mallory', reference: `key:${auditKid}`, time: 1, metadata: {} }); // canonical key-death encoding (w37 F-C)
   const r2 = row({ tenant_id: 'acme', sequence: 2, previous: r1.hash, type: 'AUDIT_ACCESSED', actor: 'mallory', reference: 'tenant-log', time: 2, metadata: {} });
   const bundle = { format: 'IF-AUDIT-1', prior_checkpoint: null, checkpoint: h.f.vault.envelope(auditKid, 'checkpoint', { tenant_id: 'acme', size: 2, head: r2.hash, tree_head: merkleRoot([r1.hash, r2.hash]) }), entries: [r1, r2] };
   const dir = mkdtempSync(join(tmpdir(), 'w33-exp-'));

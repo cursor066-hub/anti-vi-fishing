@@ -101,7 +101,7 @@ test('w35 F-2b: stored-seq rewrite below the cut cannot strand a doomed row', t 
   corruptAt(h, resSeq);
   const r = h.f.sealAuditChain(h.p('security'));
   assert.equal(r.sealed, true);
-  assert.equal(r.divergent_stored >= 1 || r.carryover_totals.divergent_stored >= 1, true);
+  assert.equal(r.carryover_totals.divergent_stored >= 1, true);
   assert.doesNotThrow(() => h.f._auditIndex('acme'), 'no stranded divergent row re-wedges the fold');
 });
 

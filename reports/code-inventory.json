@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 5914,
-      "bytes": 465788
+      "lines": 6164,
+      "bytes": 486006
     },
     "src/issuerd.mjs": {
       "lines": 797,
@@ -83,7 +83,7 @@
     },
     "src/store.mjs": {
       "lines": 914,
-      "bytes": 67175
+      "bytes": 67275
     },
     "src/target.mjs": {
       "lines": 426,
@@ -155,7 +155,7 @@
     },
     "scripts/verify-export-webcrypto.mjs": {
       "lines": 114,
-      "bytes": 8979
+      "bytes": 9037
     },
     "scripts/verify-export.mjs": {
       "lines": 11,
@@ -322,8 +322,8 @@
       "bytes": 13873
     },
     "tests/w21-crypto.test.mjs": {
-      "lines": 183,
-      "bytes": 11329
+      "lines": 187,
+      "bytes": 11592
     },
     "tests/w21-issuerd.test.mjs": {
       "lines": 238,
@@ -407,7 +407,7 @@
     },
     "tests/w33.test.mjs": {
       "lines": 303,
-      "bytes": 21221
+      "bytes": 21249
     },
     "tests/w34.test.mjs": {
       "lines": 175,
@@ -415,7 +415,11 @@
     },
     "tests/w35.test.mjs": {
       "lines": 262,
-      "bytes": 15869
+      "bytes": 15842
+    },
+    "tests/w37.test.mjs": {
+      "lines": 210,
+      "bytes": 12762
     },
     "tests/w5-mutations.test.mjs": {
       "lines": 194,
@@ -486,6 +490,6 @@
       "bytes": 6499
     }
   },
-  "total_files": 121,
-  "total_lines": 29319
+  "total_files": 122,
+  "total_lines": 29783
 }
