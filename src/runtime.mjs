@@ -113,6 +113,12 @@ export class RuntimeGate {
         }
       }
       requireThat(this.f.store.get(t, 'capability', cap.capability_id), 'INV-401-CAPABILITY', 'Unknown capability', 401);
+      // Issuance must be anchored the same way certificates are: a
+      // capability minted inside a span a later seal cuts keeps its signed
+      // envelope but loses its provable birth — without the anchor check it
+      // stays spendable while its issuance is unprovable (w31-runtime F-1).
+      const idx = this.f._auditIndex(t);
+      requireThat(idx.capabilities?.has(cap.capability_id) === true, 'INV-401-CAPABILITY', 'Capability has no ledger-anchored issuance', 401);
       for (const key of ['device_id', 'resource', 'destination', 'action', 'purpose']) requireThat(input[key] === cap[key], 'INV-403-SCOPE', 'Capability binding mismatch', 403);
       requireThat(input.columns.every(c => cap.columns.includes(c)) && input.row_ids.every(id => cap.row_ids.includes(id)), 'INV-403-SCOPE', 'Data scope denied', 403);
       requireThat(input.action !== 'data.read' || (input.columns.length > 0 && input.row_ids.length > 0), 'INV-400-SCHEMA', 'Data request requires explicit selection');
@@ -121,7 +127,6 @@ export class RuntimeGate {
       // can otherwise replay a request, refill a budget, or clear the
       // fan-out set (w13-fixverify M1). The usage INSERT below stays as an
       // observability mirror only.
-      const idx = this.f._auditIndex(t);
       // The fold keeps per-capability and per-subject indexes — scanning
       // the whole runtime history per request was a quadratic sink
       // (w17-idx F8). Fall back to the flat list only on a stale index
@@ -131,8 +136,12 @@ export class RuntimeGate {
       const exists = byCap.some(u => u.request_id === input.request_id);
       requireThat(!exists, 'INV-409-REPLAY', 'Runtime request already consumed', 409);
       const r = cap.runtime_policy, cost = cap.action === 'data.read' ? input.row_ids.length * input.columns.length * r.sensitivity_weights[cap.classification] : 1;
+      // A classification the policy never priced must fault as a schema
+      // defect — NaN cost is never a budget condition (w31-runtime F-5).
+      requireThat(Number.isFinite(cost), 'INV-400-SCHEMA', `Classification '${cap.classification}' has no configured sensitivity weight`, 400);
       const used = byCap.reduce((n, u) => n + (u.cost ?? 0), 0);
-      requireThat(used + cost <= (constrained ? Math.floor(cap.max_cost / 2) : cap.max_cost), 'INV-429-BUDGET', 'Capability volume exhausted', 429);
+      const effectiveMax = constrained ? Math.floor(cap.max_cost / 2) : cap.max_cost;
+      requireThat(used + cost <= effectiveMax, 'INV-429-BUDGET', 'Capability volume exhausted', 429);
       // No caller-provided byte counts: charge observed requested information units.
       for (const window of r.windows) {
         // The rolling budget is deliberately per (subject, resource): a
@@ -190,7 +199,10 @@ export class RuntimeGate {
       // as the export path's certificate_id binding (w20-datagate F6).
       if (cap.action === 'data.read') this.f.store.audit(t, 'DATA_ACCESSED', cap.subject_id, cap.subject_id, { dataset: cap.resource, row_ids: input.row_ids, columns: input.columns, at: now, capability_id: cap.capability_id, request_id: input.request_id }, now);
       this.f.store.audit(t, 'RUNTIME_ALLOWED', principal.subject_id, cap.capability_id, { cost, resource: cap.resource, selection_digest: digest({ columns: input.columns, rows: input.row_ids }), request_id: input.request_id, watermarked: cap.action === 'data.read' }, now);
-      return { decision: 'ALLOW', cost, remaining_capability_cost: cap.max_cost - used - cost, rows, watermarks, reconstruction: recon && { row_count: recon.row_count, coverage_percent: recon.coverage_percent }, attribution: { tenant_id: t, subject_id: principal.subject_id, request_id: input.request_id }, simulation: true, limitation: cap.action === 'service.connect' ? 'Software decision only; no packet or socket enforcement is provided.' : 'Reads the isolated synthetic dataset only.' };
+      // Report the headroom the gate actually enforces — under 'constrained'
+      // staleness the billed ceiling is half the cap, not the full max_cost
+      // (w31-runtime F-3).
+      return { decision: 'ALLOW', cost, remaining_capability_cost: effectiveMax - used - cost, rows, watermarks, reconstruction: recon && { row_count: recon.row_count, coverage_percent: recon.coverage_percent }, attribution: { tenant_id: t, subject_id: principal.subject_id, request_id: input.request_id }, simulation: true, limitation: cap.action === 'service.connect' ? 'Software decision only; no packet or socket enforcement is provided.' : 'Reads the isolated synthetic dataset only.' };
       });
     } catch (e) {
       if (e instanceof InvariantError) this.recordContainment(principal, input, e);

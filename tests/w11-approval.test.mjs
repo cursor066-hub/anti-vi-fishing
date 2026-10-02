@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { fixture, hasCode, setTenant } from './helpers.mjs';
+import { Fabric } from '../src/fabric.mjs';
 import { signAcknowledgement } from '../src/ceremony.mjs';
 import { generateKey, signed } from '../src/crypto.mjs';
 import { validatePolicy } from '../src/policy.mjs';
@@ -93,11 +94,14 @@ test('w11 F4: quorum counts the signing key domain, not a sibling identity', t =
   const ids = h.f.tenant('acme').identities;
   const [c1key] = Object.entries(ids).find(([, v]) => v.subject_id === 'custodian-1');
   const [c2key] = Object.entries(ids).find(([, v]) => v.subject_id === 'custodian-2');
-  // After creation (which verified distinct domains), both signing keys end
-  // up in acme-SHARED and custodian-1 picks up a second registered identity
-  // carrying a distinct domain label — e.g. mid-rollover. Frozen config:
-  // legitimate edits take the sanctioned clone-and-swap path.
-  const key = generateKey();
+  // A second live identity for the same subject is refused outright
+  // (w31-runtime F-4) — the deployment can never reach the ambiguous
+  // sibling-registration state this test used to model. Direct
+  // construction keeps the fixture alive for the domain check below.
+  const key = generateKey(), dup = clone(h.setup.config);
+  dup.tenants.acme.identities[key.key_id] = { public_key: key.public_key, subject_id: 'custodian-1', identity_class: 'workforce', roles: ['custodian'], device_id: 'custodian-1-device', failure_domain: 'acme-DOMAIN-B', hardware_backed: false, health_expires_at: h.now() + 86400000, grants: { resources: [], actions: [], destinations: [], columns: [], row_ids: [] } };
+  dup.tenants.acme.genesis_signatures = ['custodian-3', 'custodian-4', 'custodian-5'].map(s => signed(dup.tenants.acme.genesis_policy, h.setup.custodianKeys.acme[s], 'root-policy'));
+  assert.throws(() => new Fabric(dup, h.directory, () => h.now()), hasCode('INV-503-CONFIG'));
   // Post-F13/F14 the edit rides a config reload — and a reload replays
   // genesis, so the mutation must arrive as a self-consistent signed
   // config: the colliding domains are real, and genesis is re-anchored by
@@ -106,7 +110,6 @@ test('w11 F4: quorum counts the signing key domain, not a sibling identity', t =
     const tn = cfg.tenants.acme;
     tn.identities[c1key].failure_domain = 'acme-SHARED';
     tn.identities[c2key].failure_domain = 'acme-SHARED';
-    tn.identities[key.key_id] = { public_key: key.public_key, subject_id: 'custodian-1', identity_class: 'workforce', roles: ['custodian'], device_id: 'custodian-1-device', failure_domain: 'acme-DOMAIN-B', hardware_backed: false, health_expires_at: h.now() + 86400000, grants: { resources: [], actions: [], destinations: [], columns: [], row_ids: [] } };
     tn.genesis_signatures = ['custodian-3', 'custodian-4', 'custodian-5'].map(s => signed(tn.genesis_policy, h.setup.custodianKeys.acme[s], 'root-policy'));
   });
   ack(h, ceremony, 'custodian-1'); // signed by c1key — the SHARED domain

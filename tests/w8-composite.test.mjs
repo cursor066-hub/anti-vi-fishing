@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { fixture, hasCode } from './helpers.mjs';
+import { fixture, hasCode, coverageIdentity } from './helpers.mjs';
 import { digest } from '../src/canonical.mjs';
 import { signed } from '../src/crypto.mjs';
 import { createIssuerServer, loadIssuers, writeIssuer } from '../src/issuerd.mjs';
@@ -127,7 +127,7 @@ test('w8 F5: reconcile verifies a time-embedded journal entry after the clock mo
 });
 
 const coverageValidationEnvelope = (h, path, issuer = 'security-ops') => {
-  const payload = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: digest(path), kind: 'technical_validation', content_digest: digest({ probe: 'ok' }), acquired_at: h.now(), expires_at: h.now() + 60000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'manual probe', retention_until: h.now() + 120000, issuer_version: '1.0.0', claims: { capsule_digest: digest(path) } };
+  const payload = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: coverageIdentity(path), kind: 'technical_validation', content_digest: digest({ probe: 'ok' }), acquired_at: h.now(), expires_at: h.now() + 60000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'manual probe', retention_until: h.now() + 120000, issuer_version: '1.0.0', claims: { capsule_digest: coverageIdentity(path) } };
   return signed(payload, h.setup.issuerKeys.acme[issuer], 'evidence');
 };
 

@@ -10,7 +10,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID, randomBytes } from 'node:crypto';
-import { fixture, hasCode, stageConstitution } from './helpers.mjs';
+import { fixture, hasCode, stageConstitution , coverageIdentity } from './helpers.mjs';
 import { createIssuerServer, writeIssuer, loadIssuers } from '../src/issuerd.mjs';
 import { ISSUER_RULES, issuerRecords } from '../src/bootstrap.mjs';
 import { signed, generateKey } from '../src/crypto.mjs';
@@ -99,7 +99,7 @@ test('w30 issuerd F3: empty log under a live head watermark refuses boot', async
 // attachEvidence — tenant binding, acquisition freshness, and ledger-real
 // dependencies (w30-issuerd F4).
 function validationEnvelope(h, path, issuer, overrides = {}) {
-  const payload = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: digest(path), kind: 'technical_validation', content_digest: digest({ probe: 'ok' }), acquired_at: h.now(), expires_at: h.now() + 60000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'manual probe', retention_until: h.now() + 120000, issuer_version: '1.0.0', claims: { capsule_digest: digest(path) }, ...overrides };
+  const payload = { evidence_id: randomUUID(), tenant_id: 'acme', capsule_digest: coverageIdentity(path), kind: 'technical_validation', content_digest: digest({ probe: 'ok' }), acquired_at: h.now(), expires_at: h.now() + 60000, confidence: 100, advisory: false, claim: 'supports', dependencies: [], provenance: 'manual probe', retention_until: h.now() + 120000, issuer_version: '1.0.0', claims: { capsule_digest: coverageIdentity(path) }, ...overrides };
   return { envelope: signed(payload, h.setup.issuerKeys.acme[issuer], 'evidence'), payload };
 }
 test('w30 issuerd F4: technicalValidation enforces tenant/freshness/dependency gates', t => {

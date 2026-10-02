@@ -113,6 +113,10 @@ export function validatePolicy(p) {
   // NET-005/006: quarantine remediation may only target allowlisted services.
   uniqueStrings(r.remediation_services, 'remediation services', 8);
   fields(r.sensitivity_weights, ['internal', 'confidential', 'restricted']); for (const [k, v] of Object.entries(r.sensitivity_weights)) integer(v, k, 1, 1000);
+  // Every consumable classification must price — a classification without a
+  // sensitivity weight mints permanently un-spendable NaN-cost capabilities
+  // (w31-runtime F-5).
+  for (const c of r.classifications) integer(r.sensitivity_weights[c], `sensitivity weight for ${c}`, 1, 1000);
   fields(r.reconstruction, ['window_ms', 'max_distinct_rows', 'max_distinct_columns', 'max_coverage_percent'], ['max_dataset_coverage_percent']);
   integer(r.reconstruction.window_ms, 'reconstruction window', 1000, 2592000000); integer(r.reconstruction.max_distinct_rows, 'rows', 1, 1000000); integer(r.reconstruction.max_distinct_columns, 'columns', 1, 1000); integer(r.reconstruction.max_coverage_percent, 'coverage percent', 1, 100);
   if (r.reconstruction.max_dataset_coverage_percent !== undefined) integer(r.reconstruction.max_dataset_coverage_percent, 'dataset coverage percent', 1, 100);

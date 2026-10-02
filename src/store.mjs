@@ -420,7 +420,7 @@ export class Store {
         // savepoint, contention mid-rollback) — the original error still
         // surfaces, the anchors still restore, or the detector stays
         // pinned to a phantom floor for the process's life (w23 W23-06).
-        if (savepoint) { try { this.db.exec(`ROLLBACK TO ${sp}; RELEASE ${sp}`); } catch (rb) { e.rollback_error = rb?.message ?? String(rb); } }
+        if (savepoint) { try { this.db.exec(`ROLLBACK TO ${sp}; RELEASE ${sp}`); } catch (rb) { if (e instanceof Error) e.rollback_error = rb?.message ?? String(rb); } }
         anchorsRollback();
         throw e;
       }
@@ -441,7 +441,13 @@ export class Store {
       this.checkpoint();
       return result;
     } catch (e) {
-      if (this.db.isTransaction) this.db.exec('ROLLBACK');
+      // The outer ROLLBACK itself may fault (contention mid-rollback, an
+      // already-dead connection): the original error still surfaces and the
+      // anchors still restore — an unguarded ROLLBACK throws PAST both and
+      // leaves isTransaction true, silently absorbing every later write
+      // into the doomed scope (w31-fixverify F6). The annotation must not
+      // assume the thrown value is an Error either.
+      if (this.db.isTransaction) { try { this.db.exec('ROLLBACK'); } catch (rb) { if (e instanceof Error) e.rollback_error = rb?.message ?? String(rb); } }
       anchorsRollback();
       // A lost busy-timeout race must surface as a fabric error, not a raw
       // SQLITE_BUSY leaking internals (concurrency-audit H2).

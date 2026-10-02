@@ -10,6 +10,9 @@ import { signAcknowledgement } from '../src/ceremony.mjs';
 import { digest, clone } from '../src/canonical.mjs';
 
 export const BASE_TIME = 1788648000000;
+// The chain-anchored identity tuple a technical_validation envelope binds
+// (w31-coverage F3) — mirrors the identity_digest in COVERAGE_DECLARED.
+export const coverageIdentity = path => digest({ path_id: path.path_id, action_type: path.action_type, target: path.target, environment: path.environment, connector_version: path.connector_version, owner: path.owner, path_class: path.path_class, ...(path.connector_key_id !== undefined ? { connector_key_id: path.connector_key_id } : {}), configuration_digest: path.configuration_digest, max_age_ms: path.max_age_ms });
 export function fixture(t, tenants = ['acme', 'globex']) {
   let time = BASE_TIME;
   const directory = mkdtempSync(join(tmpdir(), 'if-test-')), setup = createConfiguration(tenants, time);
@@ -88,8 +91,12 @@ export function fixture(t, tenants = ['acme', 'globex']) {
     // Flush vault state first — keys generated at runtime must survive the
     // reopen or the new instance loses their bindings (w6-fix F5).
     f.persistVault();
+    // Construct the successor BEFORE closing the incumbent — a refused
+    // config must leave a live fabric behind, not a closed store the
+    // teardown then double-closes (w31-runtime F-4 tests refuse configs).
+    const next = new Fabric(cfg, directory, () => time);
     f.close();
-    f = new Fabric(cfg, directory, () => time);
+    f = next;
     api.f = f;
     // Re-attest only the tenants whose snapshot actually drifted.
     for (const tn of Object.keys(cfg.tenants))

@@ -213,7 +213,11 @@ test('w28-crypto F1: propose receipts store a redacted reference and resolve the
   assert.equal(receipt.capsule, undefined, 'receipt retains NO plaintext capsule');
   assert.deepEqual(h.f.propose(principal, input, 'idem-w28-1', intent), a, 'replay resolves the live record');
   h.f.store.shred('acme', 'capsule', a.capsule.capsule_id);
-  assert.throws(() => h.f.propose(principal, input, 'idem-w28-1', intent), hasCode('INV-404-NOT-FOUND'), 'replay after shredding cannot re-serve plaintext');
+  // Capsules carry no retention anchor — a shredded anchored row is
+  // indistinguishable from a file-writer's delete, so the honest answer is
+  // the tamper class, and the refusal still proves no plaintext re-serves
+  // (w31-fixverify F5).
+  assert.throws(() => h.f.propose(principal, input, 'idem-w28-1', intent), hasCode('INV-409-INTEGRITY'), 'replay after shredding cannot re-serve plaintext');
 });
 
 test('w28-crypto F2: dead-signed audit rows are rejected by export, page and verifyAudit', t => {

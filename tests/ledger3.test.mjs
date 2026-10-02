@@ -381,7 +381,19 @@ test('AIG-010: the AI advisory plane has a versioned regression suite that is ex
 
 test('NFR-OPS-004: customer-visible incidents carry a detection→containment→recovery→root-cause template', () => {
   const rb = readFileSync('docs/RUNBOOKS.md', 'utf8');
-  for (const phase of ['detect', 'contain', 'recover', 'root cause', 'corrective']) assert.ok(rb.toLowerCase().includes(phase), `incident template missing phase: ${phase}`);
+  // Anchor on the document structure: an incident section must exist as a
+  // real heading, and inside ITS body the response phases must appear in
+  // lifecycle order — scattered word hits anywhere in the file would not
+  // prove the template exists (ledger w31).
+  const sections = [...rb.matchAll(/^##+\s+(.+)$/gm)].map((m, i, all) => ({ title: m[1].toLowerCase(), body: rb.slice(m.index + m[0].length, all[i + 1]?.index ?? rb.length).toLowerCase() }));
+  const incident = sections.filter(s => /incident|breach|compromis/.test(s.title));
+  assert.ok(incident.length >= 1, 'no dedicated incident runbook section');
+  const phases = ['detect', 'contain', 'recover', 'root cause', 'corrective'];
+  const covered = incident.filter(s => {
+    const present = phases.map(p => s.body.indexOf(p)).filter(i => i >= 0);
+    return present.length >= 4 && present.every((v, i) => i === 0 || v > present[i - 1]);
+  });
+  assert.ok(covered.length >= 1, 'no incident section carries the response lifecycle (detection→containment→recovery→root cause→corrective) in order');
 });
 
 test('NFR-OPS-005: staged rollout and rollback are drilled in the simulation suite', () => {

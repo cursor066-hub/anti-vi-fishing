@@ -201,10 +201,12 @@ test('w25 F-5: a wedged tenant stays refused across a fabric restart', t => {
   const rec = h.f.recoverClock(h.p('security'));
   assert.ok(rec.unverifiable_tenants.includes('globex'), 'wedged tenant named in the recovery record');
   assert.equal(h.f._clockRecoveryUnverifiable.has('globex'), true);
-  // A fresh fabric open over the same directory must refuse: the in-memory
-  // flag is gone, but globex's chain still cannot fold — the constructor
-  // honestly refuses rather than silently clearing (the wedged rows refuse
-  // their own boot write). The original fabric stays open for teardown.
-  assert.throws(() => new Fabric(h.setup.config, h.directory, () => T0 + 100000), e => /^INV-409/.test(e.code), 'a still-wedged tenant refuses the whole open');
+  // A fresh fabric open over the same directory TOLERATES the wedge — the
+  // bootstrap snapshot/drift appends cannot sign on a poisoned chain, but
+  // construction must survive or sealAuditChain itself is unreachable
+  // (w31-runtime F-2). The tenant's fold still refuses on demand.
+  const g = new Fabric(h.setup.config, h.directory, () => T0 + 100000);
+  t.after(() => g.close());
+  assert.throws(() => g._auditIndex('globex'), e => /^INV-409/.test(e.code), 'the wedge itself is still live');
   assert.throws(() => h.f._auditIndex('globex'), e => /^INV-409/.test(e.code), 'the wedge itself is still live');
 });

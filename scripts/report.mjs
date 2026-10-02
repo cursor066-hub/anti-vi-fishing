@@ -1,7 +1,17 @@
-// Regenerates every committed report artifact from LIVE data so a stale
+// Regenerates the committed report artifacts from LIVE data so a stale
 // claim can never ship under green CI (release-audit H1, docs-audit M9,
 // partial-audit C1). Runs the real suites — this is a generation step, so
 // it takes about a minute. CI diffs its outputs against the committed tree.
+// Regenerated here: reports/tests.tap + final-regression.tap,
+// test-summary.json + final-regression-summary.json, verification-node /
+// -python / -webcrypto.json, production-gate.json, source-check.json,
+// artifact-audit.json, code-inventory.json, sbom.cdx.json,
+// verification-summary.json, VERIFICATION.md. NOT regenerated — upstream
+// inputs this script consumes or volatile evidence owned elsewhere:
+// benchmark.json (scripts/benchmark.mjs), simulation-results.json
+// (scripts/simulate.mjs), sample-audit/checkpoint/pinned-trust.json
+// (scripts/checkpoint.mjs + the pinned verifier fixtures), and any file in
+// scripts/stale-excludes.txt (w31-ledger F8).
 import { spawnSync } from 'node:child_process';
 import { writeFileSync, readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
 import { join } from 'node:path';

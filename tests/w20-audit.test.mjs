@@ -109,25 +109,13 @@ test('w20-datagate F6: DATA_ACCESSED binds capability_id and request_id', t => {
 });
 
 // ─── W20-1: one custodian can never double-count failure domains ────────────
-test('w20-ceremony W20-1: a planted second-key envelope cannot smuggle a second domain', t => {
+test('w20-ceremony W20-1: a second live enrollment for one custodian is refused', t => {
   const h = fixture(t);
   const keyB = secondIdentityKey(h, 'custodian-1');
-  addIdentity(h, 'custodian-1', keyB);
-  const pending = h.f.prepareRotation(h.p('security'), 'execution');
-  h.f.createCeremony(h.p('security'), {
-    ceremony_id: 'cer-dom-smuggle', purpose: 'key.rotate', threshold: 2,
-    custodians: CUST2, valid_until: h.now() + 3600000, min_delay_ms: 120000,
-    rotation: { key_class: 'execution', new_key_id: pending.key_id },
-  });
-  const ceremony = h.f.store.must('acme', 'ceremony', 'cer-dom-smuggle');
-  h.f.acknowledgeCeremony(h.p('custodian-1'), signAcknowledgement(ceremony, 'custodian-1', h.setup.custodianKeys.acme['custodian-1'], h.now()));
-  flipCeremony(h, 'cer-dom-smuggle', r => r.acknowledgements.push(signAcknowledgement(r, 'custodian-1', keyB, h.now())));
-  const q = h.f.custodianQuorum('acme', h.f.store.must('acme', 'ceremony', 'cer-dom-smuggle'));
-  assert.equal(q.live, 1, 'live counts distinct custodians — one custodian is one consent');
-  assert.equal(h.f.ceremonyDesignated('acme', pending.key_id, 'execution'), false, 'designation refuses the one-custodian quorum');
-  assert.throws(() => h.f.execute(h.p(), certifyRotate(h, pending, 'cer-dom-smuggle')), hasCode('INV-409-STATE'),
-    'the execute bond refuses the smuggled quorum');
-  assert.notEqual(h.f.keys('acme').execution.key_id, pending.key_id, 'execution signer never repoints');
+  // The smuggle surface is closed by configuration: two live identities
+  // may never share a subject_id, so no sibling key can exist to double a
+  // custodian's domain (w31-runtime F-4).
+  assert.throws(() => addIdentity(h, 'custodian-1', keyB), hasCode('INV-503-CONFIG'));
 });
 
 // ─── W20-2: artifact_digest flips are dead — consent epoch is anchored ──────
@@ -170,15 +158,13 @@ test('w20-ceremony W20-2c: a flipped row cannot wedge honest post-commit consent
 });
 
 // ─── W20-3: health checks bind the signing device ───────────────────────────
-test('w20-ceremony W20-3: an ack signed on a health-expired second device refuses', t => {
+test('w20-ceremony W20-3: an expired-health sibling device cannot enroll under the custodian subject', t => {
   const h = fixture(t);
   const keyB = secondIdentityKey(h, 'custodian-1');
-  addIdentity(h, 'custodian-1', keyB, { health: h.now() - 1 });
-  h.f.createCeremony(h.p('security'), { ceremony_id: 'cer-health', purpose: 'recovery', threshold: 2, custodians: CUST2, valid_until: h.now() + 3600000, min_delay_ms: 120000 });
-  const ceremony = h.f.store.must('acme', 'ceremony', 'cer-health');
-  assert.throws(() => h.f.acknowledgeCeremony(h.p('custodian-1'), signAcknowledgement(ceremony, 'custodian-1', keyB, h.now())),
-    hasCode('INV-403-HEALTH'), 'the signing enrolment\'s device carries the health gate, not the first-found identity');
-  assert.equal(h.f.store.must('acme', 'ceremony', 'cer-health').acknowledgements.length, 0, 'no ack was accepted');
+  // The sibling-enrollment dodge is closed outright — one subject maps to
+  // one live identity, so no second device can share the custodian's
+  // subject to dodge the health gate (w31-runtime F-4).
+  assert.throws(() => addIdentity(h, 'custodian-1', keyB, { health: h.now() - 1 }), hasCode('INV-503-CONFIG'));
 });
 
 // ─── W20-4: non-custodians and dead custodians cannot be planned ────────────

@@ -848,10 +848,25 @@ test('IDN-009 R2-32: service credentials are short-lived capabilities, not stand
 
 test('KEY-004 R2-33: key generation uses CSPRNG and is non-deterministic', t => {
   const h = fixture(t);
-  const a = h.f.vault.generate('backup-manifest');
-  const b = h.f.vault.generate('backup-manifest');
-  assert.notEqual(a.public_key, b.public_key);
-  assert.equal(a.suite, 'Ed25519');
+  // A counter or seeded RNG would still pass a two-sample inequality —
+  // the honest bar is a batch of pairwise-distinct keys that are each a
+  // REAL Ed25519 pair: a generated key must sign and verify under its own
+  // public half, which no fabricated string can (ledger w31).
+  const keys = Array.from({ length: 8 }, () => h.f.vault.generate('backup-manifest'));
+  assert.equal(new Set(keys.map(k => k.public_key)).size, keys.length, 'generated public keys must be pairwise distinct');
+  assert.equal(new Set(keys.map(k => k.key_id)).size, keys.length, 'generated key ids must be pairwise distinct');
+  const payload = { probe: randomBytes(8).toString('hex') };
+  for (const k of keys) {
+    assert.equal(k.suite, 'Ed25519');
+    const envelope = h.f.vault.envelope(k.key_id, 'backup-manifest', payload);
+    assert.equal(verifySigned(envelope, { [k.key_id]: { public_key: k.public_key, suite: 'Ed25519' } }, 'backup-manifest').probe, payload.probe);
+  }
+  // CSPRNG provenance: generation must ride node:crypto primitives —
+  // Math.random in the crypto module would invalidate the claim.
+  const cryptoSource = readFileSync('src/crypto.mjs', 'utf8');
+  assert.match(cryptoSource, /from 'node:crypto'/);
+  assert.match(cryptoSource, /generateKeyPairSync/);
+  assert.doesNotMatch(cryptoSource, /Math\.random/);
 });
 
 test('KEY-007 R2-34: a purpose-bound key cannot sign outside its purpose', t => {

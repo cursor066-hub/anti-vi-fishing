@@ -73,26 +73,36 @@ for (const file of files.filter(f => CODE_EXT.test(f) && existsSync(f))) {
   if (check.status !== 0) { console.error(check.stderr); failed = true; }
 }
 
-// Secrets, code-injection sinks and unfinished markers are forbidden in any
-// committed code — tests and scripts get the same scrutiny as src/ (H4).
-const ANYWHERE = [
+// Secrets, code-injection sinks and unfinished markers are forbidden in
+// committed files — not only .mjs/.ts code: a .py/.sh helper, a workflow
+// .yml or an .html asset can shelter the same sink (w31-ledger F7). Sink
+// rules target extensions whose content can EXECUTE or RENDER — prose docs
+// legitimately quote the patterns when documenting this gate. Marker rules
+// run on every tracked text file: an unfinished marker anywhere (docs
+// included) is dishonest. vectors/keys.json stays the declared fixture
+// exemption.
+const SINK_EXT = /\.(mjs|js|cjs|ts|jsx|tsx|py|sh|bash|zsh|ps1|yml|yaml|html|htm|json)$/;
+const SINK_RULES = [
   ['dynamic eval', new RegExp(`\\beval\\s*\\(|new\\s+Function\\s*\\(|eval\\s*\\/\\*\\*\\/\\s*\\(|\\bFunction\\s*\\(|Reflect\\.apply\\s*\\(\\s*eval|node:${'v'}m`)],
   ['string-timed code', /\bset(?:Timeout|Interval)\s*\(\s*['"`]/],
   ['embedded private key', /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
-  ['cloud credential pattern', /\bAKIA[0-9A-Z]{16}\b/],
-  // The marker words are split so this scanner does not flag its own source.
+  ['cloud credential pattern', /\bAKIA[0-9A-Z]{16}\b/]
+];
+// The marker words are split so this scanner does not flag its own source.
+const MARKER_RULES = [
   ['unfinished code marker', new RegExp(`\\b(?:${'TO' + 'DO'}|${'FIX' + 'ME'})\\b`)]
 ];
 // DOM-injection sinks only matter in code that renders — production sources
-// and the console. Tests legitimately contain these strings inside regexes
-// that assert their absence.
+// and the console, INCLUDING static .html assets whose markup could carry a
+// live sink (w31-ledger F7). Tests legitimately contain these strings
+// inside regexes that assert their absence.
 const RENDER_ONLY = [
   ['DOM injection', /\.(?:innerHTML|outerHTML)\s*(?:=|\+=)|insertAdjacentHTML|document\.write\s*\(/]
 ];
-for (const file of files) {
-  if (!existsSync(file)) continue;
+for (const file of textFiles) {
+  if (file === 'vectors/keys.json' || !existsSync(file) || isBinary(file)) continue;
   const s = readFileSync(file, 'utf8');
-  const rules = (file.startsWith('src/') || file.startsWith('web/')) ? [...ANYWHERE, ...RENDER_ONLY] : ANYWHERE;
+  const rules = [...(SINK_EXT.test(file) ? SINK_RULES : []), ...((file.startsWith('src/') || file.startsWith('web/')) ? RENDER_ONLY : []), ...MARKER_RULES];
   for (const [name, regex] of rules) if (regex.test(s)) { console.error(`${file}: ${name}`); failed = true; }
 }
 

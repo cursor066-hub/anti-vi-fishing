@@ -24,7 +24,12 @@ export class SimulatedTarget {
     catch (e) { throw new InvariantError('INV-409-INTEGRITY', 'Stored ciphertext does not authenticate', 409); }
   }
   constructor(path, tenantKeys, { aadDedup } = {}) {
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 }); this.db = new DatabaseSync(path); chmodSync(path, 0o600); this.keys = tenantKeys;
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    // A hostile or foreign file must surface inside the ledger taxonomy
+    // from the first touch — a raw ERR_SQLITE_ERROR here is a tamper no
+    // INV-* alert can see (w31-fixverify F2, mirrors the store gate).
+    try { this.db = new DatabaseSync(path); } catch (e) { throw new InvariantError('INV-503-STORAGE', 'Target ledger file is unreadable or not a database', 503, { cause: e }); }
+    chmodSync(path, 0o600); this.keys = tenantKeys;
     // Shared with the ledger store — the same ciphertext must never mint
     // canonical bindings on both sides of a cross-DB graft (w19-aad W19-1).
     this._aadDedup = aadDedup ?? new Map();
@@ -59,9 +64,14 @@ export class SimulatedTarget {
       if (e instanceof InvariantError) throw e;
       if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
       if (/readonly|not authorized/i.test(e?.message ?? '')) throw new InvariantError('INV-503-STORAGE', 'Target database file is not writable', 503);
+      // A swapped-in foreign or truncated sqlite file must classify inside
+      // the taxonomy, not escape as a raw sqlite error (w31-fixverify F2).
+      if (e?.errcode !== undefined || e?.code === 'ERR_SQLITE_ERROR' || /not a database|malformed|no such column|no such table/i.test(e?.message ?? '')) throw new InvariantError('INV-503-STORAGE', 'Target schema is unrecognised — refusing to interpret a foreign or corrupt database', 503, { cause: e });
       throw e;
     }
-    this._migrateAad();
+    // Migration faults get the same classification — a foreign schema's
+    // missing column must not leak a raw sqlite error (w31-fixverify F2).
+    try { this._migrateAad(); } catch (e) { if (e instanceof InvariantError) throw e; throw new InvariantError('INV-503-STORAGE', 'Target schema is unrecognised — refusing to interpret a foreign or corrupt database', 503, { cause: e }); }
   }
   // One-shot migration out of the legacy slash-form AAD space — same shape
   // as the ledger store's migration: each row that only authenticates

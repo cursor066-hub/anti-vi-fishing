@@ -9,7 +9,7 @@ Every cryptographic use in the engineering profile, the approved profile it maps
 | Capsule intent envelopes (`capsule-intent`) | EdDSA over IF-CJSON-1 | `Ed25519` | RFC 8032 | `ES256` already implemented; promote via `allowed_suites` per key |
 | Evidence envelopes (`evidence`) | EdDSA over IF-CJSON-1 | `Ed25519` | RFC 8032 | Same-suite rollover first; cross-suite only after dual-verification window |
 | Action approvals (`action-approval`) | EdDSA over IF-CJSON-1 | `Ed25519` | RFC 8032 | Challenge-bound; rotate custodian key + suite together |
-| Ceremony acknowledgements (`ceremony-ack`) | EdDSA over IF-CJSON-1 | `Ed25519` | RFC 8032 | Tied to custodian key lifecycle |
+| Ceremony acknowledgements (`ceremony-acknowledgement`) | EdDSA over IF-CJSON-1 | `Ed25519` | RFC 8032 | Tied to custodian key lifecycle |
 | Key attestations (`key-attestation`) | EdDSA over IF-CJSON-1 | `Ed25519` | RFC 8032 | Re-attest under successor suite before deprecation deadline |
 | Component attestations (`component-attestation`) | EdDSA over IF-CJSON-1 | `Ed25519` | RFC 8032 | Firmware allowlist + suite rotation are orthogonal gates |
 | Certificates, capabilities, grants, audit envelopes | EdDSA over IF-CJSON-1 | `Ed25519` | RFC 8032 | `ES256` selectable through `allowed_suites` |

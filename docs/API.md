@@ -28,13 +28,14 @@ The approval challenge includes capsule/evidence/policy digests, signer key ID a
 | INV-401-AUTH / SIGNATURE / CERTIFICATE / CAPABILITY / EVIDENCE / ATTESTATION / CONNECTOR / TAMPER | Re-establish valid identity or authority; never bypass. |
 | INV-403-SCOPE / ROLE / HEALTH / QUARANTINE / SEPARATION / CSRF / ORIGIN / ACTOR | Scope, identity, health, separation-of-duties or containment rejection. |
 | INV-404-NOT-FOUND · INV-405-METHOD | No such resource / method on this route. |
-| INV-409-STATE / REPLAY / IDEMPOTENCY / CONFLICT / FORK / AUDIT / AUDIT-TAMPER / MERKLE | State, replay, or integrity mismatch; re-canonicalise and re-review. |
+| INV-409-STATE / REPLAY / IDEMPOTENCY / CONFLICT / FORK / AUDIT / AUDIT-TAMPER / MERKLE / INTEGRITY | State, replay, or integrity mismatch; re-canonicalise and re-review. |
 | INV-412-EVIDENCE | No current ALLOW; resolve deterministic gaps. |
 | INV-413-BODY / CONNECTOR · INV-415-CONTENT | Payload/connector payload too large or wrong content type. |
-| INV-429-BUDGET / RATE / FANOUT / CAPACITY | Bounded budget/rate/capacity rejection; wait or review narrower authority. |
-| INV-451-POLICY | Policy-gated denial (fail-mode closed). |
+| INV-429-BUDGET / RATE / FANOUT / CAPACITY / QUOTA | Bounded budget/rate/capacity rejection; wait or review narrower authority. |
+| INV-451-POLICY / INTEGRITY | Policy-gated denial (fail-mode closed). |
+| INV-410-CONNECTOR | Connector past end-of-support; migrate to the declared successor. |
 | INV-500-INTERNAL / STORE / CLI · INV-502-CONNECTOR · INV-504-CONNECTOR | Internal/store failure or connector transport fault. |
-| INV-503-TIME / STORAGE / CONFIG / RELEASE / LEDGER / GATE / CAPACITY / CONNECTOR / EVIDENCE-SOURCE | Local infrastructure/trust condition prevents safe operation. |
+| INV-503-TIME / STORAGE / CONFIG / RELEASE / LEDGER / GATE / CAPACITY / CONNECTOR / EVIDENCE-SOURCE / INTEGRITY | Local infrastructure/trust condition prevents safe operation. |
 
 Secure Perception is never unavailable-silent: sessions return INV-401-ATTESTATION or INV-503-RELEASE, and a denied perception path forces the labelled fallback endpoint — there is no separate hardware-failure code in this software profile. |
 
@@ -46,7 +47,7 @@ Policy DENY, DEFER and ESCROW are decision objects, not automatically HTTP 451/4
 
 The HTTP body limit is 1 MiB; JSON nesting is bounded, object keys are ASCII and safe-integer quantities only are accepted. Evidence is bounded at 32 items per action. List pagination is limit/offset — max 100 on `/v1/action-capsules`, max 200 on `/v1/certificates`. Policy simulation scans at most 500 recent actions. Retention stops conservatively if it cannot establish all references within its batch bound. Audit entries are cursor-paginated (`GET /v1/audit/entries?cursor=&limit=`, max 5000/page); the signed export bundle remains in-memory.
 
-Request targets must be origin-form canonical paths — absolute-form targets, backslashes, and literal or percent-encoded dot-segments are rejected rather than normalized. Query strings are closed: only the parameters declared per route may appear, at most once each, and integer parameters accept canonical decimal grammar only (no hex, exponents, whitespace or leading zeros; an optional leading `-` is grammatical but then fails the declared non-negative minimum). A `Content-Type` of exactly `application/json` is required for bodies — parameters such as `;charset=` are not accepted. A documented path with the wrong method returns `INV-405-METHOD` (405), never a bare 404.
+Request targets must be origin-form canonical paths — absolute-form targets, backslashes, and literal or percent-encoded dot-segments are rejected rather than normalized. Query strings are closed: only the parameters declared per route may appear, at most once each, and integer parameters accept canonical decimal grammar only (no hex, exponents, whitespace or leading zeros; an optional leading `-` is grammatical but then fails the declared non-negative minimum). A `Content-Type` of `application/json` is required for bodies — standard parameters such as `;charset=utf-8` are accepted (`application/json` followed by `; k=v` parameter pairs), while a different media type or `Content-Encoding` is rejected. A documented path with the wrong method returns `INV-405-METHOD` (405), never a bare 404.
 
 There are no external URL fetch, plaintext-key extraction, raw SQL, universal administrator bypass, real bank connector, root-key enrollment, arbitrary capability widening, or production-enable API. Distributed revocation, cross-actor composition choreography, crypto migration beyond suite-gating and several long-term SRS features remain in the explicit gap register.
 
