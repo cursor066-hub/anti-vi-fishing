@@ -49,18 +49,28 @@ test('w33 seal F1: a corrupted revocation anchor stays revoked via floor-derived
   assert.doesNotThrow(() => h.f._auditIndex('acme'));
 });
 
-// w33-seal F-1b: a chain-revoked security subject corrupts its own
-// AUTHORITY_REVOKED row — the seal gate must still see the revocation through
-// the surviving floor and refuse them.
-test('w33 seal F1b: a revoked caller cannot self-seal a corrupted revocation away', t => {
+// w33-seal F-1b revised by w34-fixverify H-2 / w34-runtime F-3: a
+// chain-revoked subject who corrupts its own AUTHORITY_REVOKED row leaves
+// only a floor-derived carry — unverifiable authority. The carry still
+// ENFORCES the revocation in idx.revoked (they can never clear themselves)
+// but no longer bricks the caller: gating the sealer on an unverifiable
+// claim let a single planted `records` row aim INV-403 at whichever
+// operator runs the repair. The seal succeeds, names the ref under
+// floor_derived, and the next privileged call still refuses the condemned.
+test('w33 seal F1b: a corrupted revocation carries floor-derived, still enforces, never bricks the sealer', t => {
   const h = fixture(t, ['acme']);
   h.f.revoke(h.p('security'), { kind: 'subject', id: 'security', reason: 'condemned' });
   // While the revocation verifies the caller is refused outright.
   assert.throws(() => h.f.sealAuditChain(h.p('security')), hasCode('INV-403-QUARANTINE'));
-  // Corrupting their own anchor must not unlock the gate: the orphaned floor
-  // row carries the ref and the caller check binds the carryover set.
+  // Corrupting their own anchor: the orphaned floor carries the ref, the
+  // seal completes and names it, and the revocation keeps enforcing —
+  // the condemned actor can run the repair but not erase the verdict.
   corruptAt(h, seqOf(h, '%AUTHORITY_REVOKED%'));
-  assert.throws(() => h.f.sealAuditChain(h.p('security')), hasCode('INV-403-QUARANTINE'), 'a condemned operator cannot erase the ledger condemning them');
+  const seal = h.f.sealAuditChain(h.p('security'));
+  assert.equal(seal.sealed, true, 'an unverifiable floor claim cannot brick the seal');
+  assert.ok(seal.floor_derived.includes('subject:security'), 'the planted/unverifiable ref is named in the result');
+  assert.equal(h.f.revoked('acme', 'subject', 'security'), true, 'floor-derived carry still enforces the revocation');
+  assert.throws(() => h.f.revoke(h.p('security'), { kind: 'key', id: 'k-any' }), hasCode('INV-403-QUARANTINE'), 'the condemned actor stays condemned after sealing');
 });
 
 // w33-seal F-2: a planted mirror request_id cannot burn a victim's genuine

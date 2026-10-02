@@ -96,8 +96,13 @@ async function main() {
     const meta = e.metadata;
     if (e.type === 'AUTHORITY_REVOKED' && meta?.kind === 'key') kill(meta.id, n);
     if (e.type === 'KEY_ROTATED' && meta?.key_class === 'audit') kill(meta.previous_key_id, n);
-    if ((e.type === 'AUDIT_SEALED' || e.type === 'AUDIT_SEAL_CARRY') && Array.isArray(meta?.revocations_carryover))
-      for (const rv of meta.revocations_carryover) if (typeof rv?.reference === 'string' && rv.reference.startsWith('key:')) kill(rv.reference.slice(4), n);
+    if (e.type === 'AUDIT_SEALED' || e.type === 'AUDIT_SEAL_CARRY') {
+      for (const rv of Array.isArray(meta?.revocations_carryover) ? meta.revocations_carryover : []) if (typeof rv?.reference === 'string' && rv.reference.startsWith('key:')) kill(rv.reference.slice(4), n);
+      // Carried audit-class rotations pin the predecessor's death at the
+      // carrying row — lifecycle_carryover parity with the fold's replay
+      // (w34).
+      for (const lc of Array.isArray(meta?.lifecycle_carryover) ? meta.lifecycle_carryover : []) if (lc?.type === 'KEY_ROTATED' && lc?.metadata?.key_class === 'audit') kill(lc.metadata.previous_key_id, n);
+    }
     head = row.hash; time = e.time;
     if (prior && n === prior.size) check(head === prior.head, 'Witness fork');
   }
