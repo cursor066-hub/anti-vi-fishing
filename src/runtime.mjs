@@ -217,11 +217,11 @@ export class RuntimeGate {
       // A squatted usage row is replay evidence, not a 500: the conflict
       // resolves only when the planted row is byte-identical to the honest
       // charge — any other shape screams INV-409-REPLAY (w22 F8).
-      this.f.store.db.prepare('INSERT INTO usage VALUES(?,?,?,?,?,?,?) ON CONFLICT(tenant,capability,request) DO NOTHING').run(t, cap.subject_id, cap.resource, now, cost, cap.capability_id, input.request_id);
+      this.f.store._stmt('INSERT INTO usage VALUES(?,?,?,?,?,?,?) ON CONFLICT(tenant,capability,request) DO NOTHING').run(t, cap.subject_id, cap.resource, now, cost, cap.capability_id, input.request_id);
       // cost crosses the driver as TEXT — the JS-number affinity path
       // throws a driver-level RangeError for BIGINTs past 2^53, bypassing
       // the INV-409-REPLAY probe that names this tamper (w43-runtime M2).
-      const plantedUsage = this.f.store.db.prepare('SELECT subject,resource,at,CAST(cost AS TEXT) AS cost FROM usage WHERE tenant=? AND capability=? AND request=?').get(t, cap.capability_id, input.request_id);
+      const plantedUsage = this.f.store._stmt('SELECT subject,resource,at,CAST(cost AS TEXT) AS cost FROM usage WHERE tenant=? AND capability=? AND request=?').get(t, cap.capability_id, input.request_id);
       requireThat(plantedUsage && plantedUsage.subject === cap.subject_id && plantedUsage.resource === cap.resource && plantedUsage.at === now && plantedUsage.cost === String(cost), 'INV-409-REPLAY', 'Usage row already exists with conflicting billing fields', 409);
       // The disclosure is attested on the signed chain — the data_access
       // table is only a mirror of this event (w11-redteam R9).
@@ -296,7 +296,11 @@ export class RuntimeGate {
         capability_id: provenCapId, unverified_capability_id: provenCapId === null ? (input.capability?.payload?.capability_id ?? null) : null,
         resource: input.resource ?? null,
         destination: input.destination ?? null, action: input.action ?? null, code: e.code,
-        request_id: input.request_id, dropped_requests: 1, prior_row_unreadable: suppressedRow,
+        // The row's request_id must match the anchored reference verbatim —
+        // 'unknown' on the anchor vs undefined on the row made every
+        // request_id-less denial read as anchored_denials_missing forever
+        // (w47-runtime F2).
+        request_id: input.request_id ?? 'unknown', dropped_requests: 1, prior_row_unreadable: suppressedRow,
       }, now);
       // The denial anchors on the signed chain too — the containment report
       // cross-checks each mutable row against RUNTIME_DENIED events instead

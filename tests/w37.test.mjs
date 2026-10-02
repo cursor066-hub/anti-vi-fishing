@@ -68,16 +68,24 @@ test('w37 F-D: a carried KEY_ROTATED pins the death at its own seq, not the page
   assert.equal(idx.keyDeadAt.get(auditKid), rotSeq, 'carried rotation death must pin at the original chain position');
 });
 
-test('w37 F-B: carried key death without a designated successor refuses instead of dead-signing', t => {
+test('w37 F-B: a doomed-but-carried rotation repoints to its own attested successor, never dead-signs', t => {
   const h = fixture(t);
   const auditKid = h.f.tenant('acme').keys.audit.key_id;
-  const pending = h.f.prepareRotation(h.p('security'), 'audit'); // prepared, never designated
+  const pending = h.f.prepareRotation(h.p('security'), 'audit');
   h.f.store.audit('acme', 'KEY_ROTATED', 'security', pending.key_id, { key_class: 'audit', previous_key_id: auditKid, revoke_old: false }, h.now());
   dropAuditGuards(h);
   corruptAt(h, seqOf(h, '%KEY_ROTATED%') - 1);
-  assert.throws(() => h.f.sealAuditChain(h.p('security')), e => e?.code === 'INV-503-CONFIG');
-  // The aborted seal left no self-wedging dead-signed carry behind.
-  assert.equal(chainRows(h).some(x => x.env.payload.type === 'AUDIT_SEALED'), false);
+  // The doomed rotation row is itself a verified chain designation — the
+  // seal's carry re-attests its successor, so the repoint sees pending and
+  // signs every carry page under it, never the condemned key (w47-seal F-3).
+  const r = h.f.sealAuditChain(h.p('security'));
+  assert.equal(r.sealed, true);
+  const rows = chainRows(h);
+  const seal = rows.find(x => x.env.payload.type === 'AUDIT_SEALED');
+  assert.equal(seal.env.protected.key_id, pending.key_id, 'the seal row signs under the carried successor');
+  for (const p of rows.filter(x => x.env.payload.type === 'AUDIT_SEAL_CARRY'))
+    assert.equal(p.env.protected.key_id, pending.key_id, 'carry pages sign under the successor, not the dead key');
+  assert.doesNotThrow(() => h.f._auditIndex('acme'), 'sealed chain must fold cleanly');
 });
 
 test('w37 F-H: deleting a carry page refuses remediation on every path', t => {

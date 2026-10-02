@@ -510,7 +510,17 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
       const limits = { ip: [600, 60000], read: [240, 60000], issue: [120, 60000], probe: [30, 60000] };
       const [cap, window] = limits[scope] ?? limits.probe;
       let b = buckets.get(key); if (!b || now >= b.reset) { b = { left: cap, reset: now + window }; buckets.set(key, b); }
-      if (buckets.size > 10000) for (const [k, v] of buckets) if (now >= v.reset) buckets.delete(k);
+      // The expiry sweep is amortized, not whole-map: a >10k-key map
+      // scanned per request is a quadratic CPU flood on non-loopback
+      // binds (w47-http MED-LOW). Map iteration is insertion-ordered —
+      // sweeping a bounded slice per call expires what it can, and the
+      // hard ceiling below bounds the map absolutely (a map that large is
+      // itself the flood; evicted entries just reset their allowance).
+      if (buckets.size > 10000) {
+        let swept = 0;
+        for (const [k, v] of buckets) { if (now >= v.reset) buckets.delete(k); if (++swept >= 256) break; }
+        while (buckets.size > 50000) buckets.delete(buckets.keys().next().value);
+      }
       return b;
     };
     const take = (scope) => { const b = bucketFor(scope); requireThat(b.left > 0, 'INV-429-RATE', 'Rate limit exceeded', 429); b.left--; };
@@ -742,8 +752,14 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
         const lat = issuer.metrics.latencies, sorted = [...lat].sort((a, b) => a - b);
         // Latencies are floats — emit an integer so the response can never
         // fail canonicalisation (w9-deploy F1).
-        return send(200, { status: 'ok', issuer: issuer.issuer, version: issuer.version, records: Object.keys(issuer.records).length, uptime_ms: process.uptime() * 1000 | 0, metrics: { requests: issuer.metrics.requests, errors: issuer.metrics.errors, issued: issuer.metrics.issued, refused: issuer.metrics.refused, p50_ms: sorted.length ? Math.round(sorted[Math.floor(sorted.length / 2)]) : 0 }, token_expires_at: issuer.token_expires_at ?? null });
+        // uptime_ms must stay an integer without the int32 `|0` overflow
+        // — Math.floor keeps canonical form past ~24.8 days (w47-http LOW).
+        return send(200, { status: 'ok', issuer: issuer.issuer, version: issuer.version, records: Object.keys(issuer.records).length, uptime_ms: Math.floor(process.uptime() * 1000), metrics: { requests: issuer.metrics.requests, errors: issuer.metrics.errors, issued: issuer.metrics.issued, refused: issuer.metrics.refused, p50_ms: sorted.length ? Math.round(sorted[Math.floor(sorted.length / 2)]) : 0 }, token_expires_at: issuer.token_expires_at ?? null });
       }
+      // Unauthenticated unknown-path probes must consume probe budget and
+      // land in the issuance log — a silent 404 fallthrough is a free recon
+      // surface below the daemon's own provenance bar (w47-http LOW).
+      if (!anyBearer('read') && !anyBearer('issue')) { take('probe'); issuanceLog({ issuer: 'unknown', refused: true, unauthenticated: true, route: 'unknown', code: 'INV-404-NOT-FOUND' }); }
       throw new InvariantError('INV-404-NOT-FOUND', 'Resource not found', 404);
     } catch (e) {
       // Serialize-first send plus this guard: a mid-response failure
@@ -762,7 +778,14 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
   // Same connection ceiling as the gate — a flood of half-open sockets
   // must not exhaust the issuer daemon's file descriptors (w28-http F-03).
   let openConnections = 0;
-  server.on('connection', socket => { if (++openConnections > 2048) { socket.destroy(); return; } socket.on('close', () => openConnections--); });
+  server.on('connection', socket => {
+    // The close handler must attach BEFORE the cap decision: a destroyed
+    // over-cap socket still closes, and skipping the decrement wedged the
+    // counter above 2048 permanently — total liveness death until restart
+    // (w47-http HIGH).
+    socket.on('close', () => openConnections--);
+    if (++openConnections > 2048) { socket.destroy(); return; }
+  });
   return { server, issuers, listen: () => new Promise(r => server.listen(port, host, r)), close: () => new Promise((r, j) => { server.closeAllConnections(); server.close(e => { releaseLock(); return e ? j(e) : r(); }); }) };
 }
 

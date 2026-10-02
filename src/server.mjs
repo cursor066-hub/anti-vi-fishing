@@ -270,7 +270,7 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       const rawTarget = req.url, rawPath = rawTarget.split('?')[0];
       requireThat(rawTarget.startsWith('/') && rawPath === path, 'INV-400-SCHEMA', 'Request target must be an origin-form canonical path', 400);
       if (path === '/healthz' && req.method === 'GET') return send(200, { status: 'ok', profile: 'engineering', production_ready: false });
-      if (path === '/readyz' && req.method === 'GET') { fabric.store.db.prepare('SELECT 1').get(); return send(200, { status: 'ready', profile: 'engineering', real_targets: false }); }
+      if (path === '/readyz' && req.method === 'GET') { fabric.store._stmt('SELECT 1').get(); return send(200, { status: 'ready', profile: 'engineering', real_targets: false }); }
       const assets = { '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/style.css': ['style.css', 'text/css; charset=utf-8'] };
       // Query-parameter validation runs AFTER authentication: the
       // allow-list is a per-route contract map, and a pre-auth 400-vs-401

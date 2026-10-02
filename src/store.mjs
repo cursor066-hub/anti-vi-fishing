@@ -26,6 +26,15 @@ const legacyDekAad = (tenant, kind, id) => `${tenant}/${kind}/${id}/dek`;
   // raw-writer transplant a sealed receipt into a records row (w18-crypto F1).
 const idemAad = (tenant, scope, key) => canonical({ idempotency: true, tenant, scope, key });
 
+// Every RAISE() text this schema's own triggers may legitimately produce —
+// an errcode-1 abort outside this set is a planted trigger firing on our
+// write path (w47-fixverify M-1).
+const KNOWN_GUARD_ABORTS = new Set([
+  'append-only audit', 'audit sequence must extend the head', 'append-only nonces',
+  'append-only idempotency', 'append-only data_access', 'append-only usage',
+  'usage is monotone', 'clock is monotone', 'aad migration marker is evidence',
+]);
+
 
 export class Store {
   constructor(path, tenantKeys, auditSigners, { aadDedup } = {}) {
@@ -59,7 +68,7 @@ export class Store {
       // reachable in the WAL. Truncating at open bounds that residue to uptime.
       // (Physical slack on disk sectors is out of scope — see SECURITY.md.)
       this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
-      const version = this.db.prepare('PRAGMA user_version').get().user_version;
+      const version = this._stmt('PRAGMA user_version').get().user_version;
       requireThat(version <= 1, 'INV-503-STORAGE', 'Database schema is newer than this application', 503);
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS records (tenant TEXT NOT NULL, kind TEXT NOT NULL, id TEXT NOT NULL,
@@ -122,7 +131,7 @@ export class Store {
     // reads the LAST — must always be a candidate: canonical writers
     // never mint dups, so any dup at root or $.payload is adversarial
     // evidence the JS parse must see (w45-fv HIGH).
-    for (const row of this.db.prepare("SELECT seq,envelope FROM audit WHERE tenant=? AND json_valid(envelope) AND (json_extract(envelope,'$.payload.type') IN ('AUTHORITY_REVOKED','KEY_ROTATED','AUDIT_SEALED','AUDIT_SEAL_CARRY') OR EXISTS (SELECT 1 FROM json_each(envelope,'$') GROUP BY \"key\" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload') GROUP BY \"key\" HAVING COUNT(*)>1))").all(tenant)) {
+    for (const row of this._stmt("SELECT seq,envelope FROM audit WHERE tenant=? AND json_valid(envelope) AND (json_extract(envelope,'$.payload.type') IN ('AUTHORITY_REVOKED','KEY_ROTATED','AUDIT_SEALED','AUDIT_SEAL_CARRY') OR EXISTS (SELECT 1 FROM json_each(envelope,'$') GROUP BY \"key\" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload') GROUP BY \"key\" HAVING COUNT(*)>1))").all(tenant)) {
       let env; try { env = JSON.parse(row.envelope); } catch { continue; }
       const pl = env?.payload, meta = pl?.metadata;
       // Earliest death wins — a second death event must never extend a
@@ -202,13 +211,19 @@ export class Store {
       // sanctioned post-attest cleanup drops and recreates this guard
       // verbatim; an attacker's delete now aborts in-band.
       ['aad_marker_keep', "CREATE TRIGGER aad_marker_keep BEFORE DELETE ON meta_kv WHEN OLD.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END", 'aad migration marker is evidence'],
+      // INSERT OR REPLACE fires the delete guard on conflict, but a bare
+      // UPDATE rewrites the marker with no guard at all — cover the
+      // update arm identically (w47-fixverify HIGH-1). No code path ever
+      // UPDATEs the marker row; only the sanctioned drop+delete+recreate
+      // sequence may touch it.
+      ['aad_marker_keep_upd', "CREATE TRIGGER aad_marker_keep_upd BEFORE UPDATE ON meta_kv WHEN OLD.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END", 'aad migration marker is evidence'],
     ];
     const norm = s => (s ?? '').replace(/\s+/g, ' ').trim();
     for (const [name, sql] of guards) this.db.exec(`CREATE TRIGGER IF NOT EXISTS ${sql.slice('CREATE TRIGGER '.length)}`);
     // Text check: the STORED body must equal our literal — feature tests
     // (WHEN present, RAISE literal) are evadable by WHERE-gated bodies
     // (w21-store F-1).
-    const triggers = new Map(this.db.prepare("SELECT name, sql FROM sqlite_master WHERE type='trigger'").all().map(x => [x.name, x.sql ?? '']));
+    const triggers = new Map(this._stmt("SELECT name, sql FROM sqlite_master WHERE type='trigger'").all().map(x => [x.name, x.sql ?? '']));
     for (const [name, sql] of guards)
       if (norm(triggers.get(name)) !== norm(sql)) throw new InvariantError('INV-503-STORAGE', `integrity trigger missing or tampered: ${name}`, 503);
     // Enumeration, not just existence: a file-writer can plant EXTRA
@@ -217,7 +232,7 @@ export class Store {
     // write that fires the payload). Anything not in the known guard set
     // is removed at open — quoted, never interpolated (w28-store F1).
     const knownTriggers = new Set(guards.map(([name]) => name));
-    for (const stray of this.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger'").all().map(r => r.name).filter(n => !knownTriggers.has(n))) {
+    for (const stray of this._stmt("SELECT name FROM sqlite_master WHERE type='trigger'").all().map(r => r.name).filter(n => !knownTriggers.has(n))) {
       this.db.exec(`DROP TRIGGER "${String(stray).replace(/"/g, '""')}"`);
       (this._strayTriggers ??= []).push(stray);
     }
@@ -244,27 +259,28 @@ export class Store {
       return ok;
     };
     const pt = `__integrity_probe__:${randomBytes(8).toString('hex')}`;
-    const insAudit = seq => this.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run(pt, seq, 'x', 'x', '{}');
-    requireThat(probe(() => { insAudit(1); this.db.prepare('UPDATE audit SET hash=? WHERE tenant=?').run('y', pt); }, 'append-only audit'), 'INV-503-STORAGE', 'Audit append-only UPDATE trigger not enforced', 503);
-    requireThat(probe(() => { insAudit(1); this.db.prepare('DELETE FROM audit WHERE tenant=?').run(pt); }, 'append-only audit'), 'INV-503-STORAGE', 'Audit append-only DELETE trigger not enforced', 503);
+    const insAudit = seq => this._stmt('INSERT INTO audit VALUES(?,?,?,?,?)').run(pt, seq, 'x', 'x', '{}');
+    requireThat(probe(() => { insAudit(1); this._stmt('UPDATE audit SET hash=? WHERE tenant=?').run('y', pt); }, 'append-only audit'), 'INV-503-STORAGE', 'Audit append-only UPDATE trigger not enforced', 503);
+    requireThat(probe(() => { insAudit(1); this._stmt('DELETE FROM audit WHERE tenant=?').run(pt); }, 'append-only audit'), 'INV-503-STORAGE', 'Audit append-only DELETE trigger not enforced', 503);
     requireThat(probe(() => insAudit(7), 'audit sequence must extend the head'), 'INV-503-STORAGE', 'Audit sequence guard not enforced', 503);
     for (const [table, msg] of [['nonces', 'append-only nonces'], ['idempotency', 'append-only idempotency'], ['data_access', 'append-only data_access']]) {
-      const ins = { nonces: () => this.db.prepare('INSERT INTO nonces VALUES(?,?,?)').run(pt, 'n', 'c'),
-        idempotency: () => this.db.prepare('INSERT INTO idempotency VALUES(?,?,?,?,?)').run(pt, 's', 'k', 'h', 'r'),
-        data_access: () => this.db.prepare('INSERT INTO data_access VALUES(?,?,?,?,?,?)').run(pt, 's', 'd', 'r', 'c', 0) }[table];
+      const ins = { nonces: () => this._stmt('INSERT INTO nonces VALUES(?,?,?)').run(pt, 'n', 'c'),
+        idempotency: () => this._stmt('INSERT INTO idempotency VALUES(?,?,?,?,?)').run(pt, 's', 'k', 'h', 'r'),
+        data_access: () => this._stmt('INSERT INTO data_access VALUES(?,?,?,?,?,?)').run(pt, 's', 'd', 'r', 'c', 0) }[table];
       const col = { nonces: 'capsule', idempotency: 'result', data_access: 'subject' }[table];
-      requireThat(probe(() => { ins(); this.db.prepare(`UPDATE ${table} SET ${col}=? WHERE tenant=?`).run('y', pt); }, msg), 'INV-503-STORAGE', `${table} append-only UPDATE trigger not enforced`, 503);
-      requireThat(probe(() => { ins(); this.db.prepare(`DELETE FROM ${table} WHERE tenant=?`).run(pt); }, msg), 'INV-503-STORAGE', `${table} append-only DELETE trigger not enforced`, 503);
+      requireThat(probe(() => { ins(); this._stmt(`UPDATE ${table} SET ${col}=? WHERE tenant=?`).run('y', pt); }, msg), 'INV-503-STORAGE', `${table} append-only UPDATE trigger not enforced`, 503);
+      requireThat(probe(() => { ins(); this._stmt(`DELETE FROM ${table} WHERE tenant=?`).run(pt); }, msg), 'INV-503-STORAGE', `${table} append-only DELETE trigger not enforced`, 503);
     }
-    requireThat(probe(() => { this.db.prepare('INSERT INTO usage VALUES(?,?,?,?,?,?,?)').run(pt, 's', 'r', 0, 0, 'c', 'q'); this.db.prepare('DELETE FROM usage WHERE tenant=?').run(pt); }, 'append-only usage'), 'INV-503-STORAGE', 'usage append-only DELETE trigger not enforced', 503);
-    requireThat(probe(() => { this.db.prepare('INSERT INTO usage VALUES(?,?,?,?,?,?,?)').run(pt, 's', 'r', 100, 5, 'c', 'q'); this.db.prepare('UPDATE usage SET cost=? WHERE tenant=?').run(4, pt); }, 'usage is monotone'), 'INV-503-STORAGE', 'usage monotone UPDATE trigger not enforced', 503);
+    requireThat(probe(() => { this._stmt('INSERT INTO usage VALUES(?,?,?,?,?,?,?)').run(pt, 's', 'r', 0, 0, 'c', 'q'); this._stmt('DELETE FROM usage WHERE tenant=?').run(pt); }, 'append-only usage'), 'INV-503-STORAGE', 'usage append-only DELETE trigger not enforced', 503);
+    requireThat(probe(() => { this._stmt('INSERT INTO usage VALUES(?,?,?,?,?,?,?)').run(pt, 's', 'r', 100, 5, 'c', 'q'); this._stmt('UPDATE usage SET cost=? WHERE tenant=?').run(4, pt); }, 'usage is monotone'), 'INV-503-STORAGE', 'usage monotone UPDATE trigger not enforced', 503);
     // INSERT OR IGNORE seeds when absent without firing the delete guard on
     // an existing row; `last=last-1` is a backward write on any live value.
-    requireThat(probe(() => { this.db.prepare('INSERT OR IGNORE INTO clock VALUES(1,100)').run(); this.db.prepare('DELETE FROM clock WHERE id=1').run(); }, 'clock is monotone'), 'INV-503-STORAGE', 'clock delete trigger not enforced', 503);
+    requireThat(probe(() => { this._stmt('INSERT OR IGNORE INTO clock VALUES(1,100)').run(); this._stmt('DELETE FROM clock WHERE id=1').run(); }, 'clock is monotone'), 'INV-503-STORAGE', 'clock delete trigger not enforced', 503);
     // The marker guard fires only on the evidence key — other meta_kv rows
     // (fold_floor) must stay writable, and a WHEN-less body that aborts
     // every delete would wedge them (w46-store M-2).
-    requireThat(probe(() => { this.db.prepare("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', '{}')").run(pt); this.db.prepare("DELETE FROM meta_kv WHERE tenant=? AND key='aad_migration'").run(pt); }, 'aad migration marker is evidence'), 'INV-503-STORAGE', 'aad_migration marker delete trigger not enforced', 503);
+    requireThat(probe(() => { this._stmt("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', '{}')").run(pt); this._stmt("DELETE FROM meta_kv WHERE tenant=? AND key='aad_migration'").run(pt); }, 'aad migration marker is evidence'), 'INV-503-STORAGE', 'aad_migration marker delete trigger not enforced', 503);
+    requireThat(probe(() => { this._stmt("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', '{}')").run(pt); this._stmt("UPDATE meta_kv SET value='{}' WHERE tenant=? AND key='aad_migration'").run(pt); }, 'aad migration marker is evidence'), 'INV-503-STORAGE', 'aad_migration marker update trigger not enforced', 503);
     // The probes above journal WAL frames even though they roll back —
     // truncate so boot-time verification leaves no residual pages behind
     // (w19-aad W19-3 measures post-migration WAL size).
@@ -286,7 +302,7 @@ export class Store {
     this._chainFloor = 0; this._lastRecoveredAt = null;
     let floorSeeded = false;
     try {
-    for (const row of this.db.prepare('SELECT tenant,envelope FROM audit ORDER BY rowid DESC LIMIT 64').all()) {
+    for (const row of this._stmt('SELECT tenant,envelope FROM audit ORDER BY rowid DESC LIMIT 64').all()) {
       try {
         const env = JSON.parse(row.envelope);
         const signer = this._signer(row.tenant), pub = signer.keys ? signer.keys() : { [signer.key_id]: { public_key: signer.public_key } };
@@ -295,8 +311,8 @@ export class Store {
         if (typeof t === 'number' && Number.isFinite(t)) { this._chainFloor = t; floorSeeded = true; break; }
       } catch { /* forged or unverifiable tail row — keep walking back */ }
     }
-    requireThat(floorSeeded || this.db.prepare('SELECT COUNT(*) n FROM audit').get().n === 0, 'INV-409-AUDIT-TAMPER', 'Audit tail carries no verifiable entry — ledger tamper', 409);
-    for (const row of this.db.prepare("SELECT tenant,envelope FROM audit WHERE json_valid(envelope) AND (json_extract(envelope,'$.payload.type')='CLOCK_RECOVERED' OR EXISTS (SELECT 1 FROM json_each(envelope,'$') GROUP BY \"key\" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload') GROUP BY \"key\" HAVING COUNT(*)>1)) ORDER BY rowid DESC LIMIT 512").all()) {
+    requireThat(floorSeeded || this._stmt('SELECT COUNT(*) n FROM audit').get().n === 0, 'INV-409-AUDIT-TAMPER', 'Audit tail carries no verifiable entry — ledger tamper', 409);
+    for (const row of this._stmt("SELECT tenant,envelope FROM audit WHERE json_valid(envelope) AND (json_extract(envelope,'$.payload.type')='CLOCK_RECOVERED' OR EXISTS (SELECT 1 FROM json_each(envelope,'$') GROUP BY \"key\" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload') GROUP BY \"key\" HAVING COUNT(*)>1)) ORDER BY rowid DESC LIMIT 512").all()) {
       try {
         const env = JSON.parse(row.envelope);
         if (env?.payload?.type !== 'CLOCK_RECOVERED') continue;
@@ -311,7 +327,7 @@ export class Store {
     // clock() below). An ABSENT clock row is legitimate — the row is only
     // materialised by the first transaction, and the delete trigger makes
     // a file-writer's removal impossible anyway.
-    const seedRow = this.db.prepare('SELECT last FROM clock WHERE id=1').get();
+    const seedRow = this._stmt('SELECT last FROM clock WHERE id=1').get();
     requireThat(!seedRow || seedRow.last >= this._chainFloor || (this._lastRecoveredAt !== null && seedRow.last >= this._lastRecoveredAt), 'INV-409-AUDIT-TAMPER', 'Clock floor rewound below attested chain time', 409);
     } catch (e) {
       // A wrong-shape table answers the probes with raw sqlite errors — a
@@ -360,7 +376,7 @@ export class Store {
       // Each row is isolated: a ciphertext that fails BOTH AAD forms was
       // already unreadable — it must stay sealed and keep failing on read,
       // never wedge the open for every other tenant.
-      for (const r of this.db.prepare('SELECT tenant,kind,id,wrapped FROM deks').all()) {
+      for (const r of this._stmt('SELECT tenant,kind,id,wrapped FROM deks').all()) {
         try { decrypt(r.wrapped, master(r.tenant), dekAad(r.tenant, r.kind, r.id)); continue; } catch { /* legacy-sealed or corrupt */ }
         const prior = seen.get(r.wrapped);
         // Cross-DB collision: reverting through the donor's prepared
@@ -372,14 +388,14 @@ export class Store {
         if (slashy(r.tenant, r.kind, r.id)) { seen.set(r.wrapped, {}); mark(r.tenant, 'ambiguous'); continue; }
         try {
           const bare = decrypt(r.wrapped, master(r.tenant), legacyDekAad(r.tenant, r.kind, r.id));
-          const upd = this.db.prepare('UPDATE deks SET wrapped=? WHERE tenant=? AND kind=? AND id=?'), orig = r.wrapped;
+          const upd = this._stmt('UPDATE deks SET wrapped=? WHERE tenant=? AND kind=? AND id=?'), orig = r.wrapped;
           seen.set(orig, { db: this.db, revert: () => { upd.run(orig, r.tenant, r.kind, r.id); this._shredded = true; }, unmark: () => unmark(r.tenant) });
           upd.run(encrypt(bare, master(r.tenant), dekAad(r.tenant, r.kind, r.id)), r.tenant, r.kind, r.id);
           mark(r.tenant, 'migrated');
         } catch { mark(r.tenant, 'skipped'); }
       }
-      const recs = this.db.prepare('SELECT tenant,kind,id,value FROM records').all();
-      const dekRow = this.db.prepare('SELECT wrapped FROM deks WHERE tenant=? AND kind=? AND id=?');
+      const recs = this._stmt('SELECT tenant,kind,id,value FROM records').all();
+      const dekRow = this._stmt('SELECT wrapped FROM deks WHERE tenant=? AND kind=? AND id=?');
       for (const r of recs) {
         try {
           const d = dekRow.get(r.tenant, r.kind, r.id);
@@ -401,20 +417,20 @@ export class Store {
           const d = dekRow.get(r.tenant, r.kind, r.id);
           const key = d ? Buffer.from(decrypt(d.wrapped, master(r.tenant), dekAad(r.tenant, r.kind, r.id)), 'base64url') : master(r.tenant);
           const plain = decrypt(r.value, key, legacyAad(r.tenant, r.kind, r.id));
-          const upd = this.db.prepare('UPDATE records SET value=? WHERE tenant=? AND kind=? AND id=?'), orig = r.value;
+          const upd = this._stmt('UPDATE records SET value=? WHERE tenant=? AND kind=? AND id=?'), orig = r.value;
           seen.set(orig, { db: this.db, revert: () => { upd.run(orig, r.tenant, r.kind, r.id); this._shredded = true; }, unmark: () => unmark(r.tenant) });
           upd.run(encrypt(plain, key, recAad(r.tenant, r.kind, r.id)), r.tenant, r.kind, r.id);
           mark(r.tenant, 'migrated');
         } catch { mark(r.tenant, 'skipped'); }
       }
-      for (const r of this.db.prepare('SELECT tenant,scope,key,result FROM idempotency').all()) {
+      for (const r of this._stmt('SELECT tenant,scope,key,result FROM idempotency').all()) {
         try { decrypt(r.result, master(r.tenant), idemAad(r.tenant, r.scope, r.key)); continue; } catch { /* legacy-sealed or corrupt */ }
         const prior = seen.get(r.result);
         if (prior) { if (prior.db === this.db) { prior.revert?.(); prior.unmark?.(); } mark(r.tenant, 'transplants'); continue; }
         if (slashy(r.tenant, r.scope, r.key)) { seen.set(r.result, {}); mark(r.tenant, 'ambiguous'); continue; }
         try {
           const plain = decrypt(r.result, master(r.tenant), `${r.tenant}/idempotency/${r.scope}/${r.key}`);
-          const upd = this.db.prepare('UPDATE idempotency SET result=? WHERE tenant=? AND scope=? AND key=?'), orig = r.result;
+          const upd = this._stmt('UPDATE idempotency SET result=? WHERE tenant=? AND scope=? AND key=?'), orig = r.result;
           seen.set(orig, { db: this.db, revert: () => { upd.run(orig, r.tenant, r.scope, r.key); this._shredded = true; }, unmark: () => unmark(r.tenant) });
           upd.run(encrypt(plain, master(r.tenant), idemAad(r.tenant, r.scope, r.key)), r.tenant, r.scope, r.key);
           mark(r.tenant, 'migrated');
@@ -427,7 +443,7 @@ export class Store {
       // (w43-store F-4).
       for (const [mtenant, ms] of stats)
         if (ms.migrated + ms.transplants + ms.ambiguous + ms.skipped > 0)
-          this._schemaGuard(() => this.db.prepare("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', ?)").run(mtenant, JSON.stringify(ms)));
+          this._schemaGuard(() => this._stmt("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', ?)").run(mtenant, JSON.stringify(ms)));
       this.db.exec('COMMIT');
       // Legacy ciphertext physically lingers in the WAL until a checkpoint
       // — truncate now so the dead form cannot be revived (w19-aad W19-3).
@@ -465,7 +481,7 @@ export class Store {
         // only the rollback itself is gated on the savepoint existing
         // (w30-store F3).
         this.db.exec(`SAVEPOINT ${sp}`); savepoint = true;
-        const result = fn();
+        const result = this._schemaGuard(fn);
         if (result && typeof result.then === 'function') throw new Error('Transactions must be synchronous');
         this.db.exec(`RELEASE ${sp}`);
         anchorsPop();
@@ -482,7 +498,7 @@ export class Store {
     }
     try {
       this.db.exec('BEGIN IMMEDIATE');
-      const result = fn();
+      const result = this._schemaGuard(fn);
       if (result && typeof result.then === 'function') throw new Error('Transactions must be synchronous');
       this.db.exec('COMMIT');
       anchorsPop();
@@ -523,12 +539,25 @@ export class Store {
   }
   dek(tenant, kind, id) {
     this._addr(tenant, kind, id);
-    const row = this.db.prepare('SELECT wrapped FROM deks WHERE tenant=? AND kind=? AND id=?').get(tenant, kind, id);
+    const row = this._schemaGuard(() => this._stmt('SELECT wrapped FROM deks WHERE tenant=? AND kind=? AND id=?').get(tenant, kind, id));
     if (!row) return null;
+    // Unwrapped-key memo keyed on the wrapped ciphertext: a grafted wrap
+    // misses and re-derives through decrypt, so substitution still reads
+    // as tamper (w47-perf). The buffer is copied on handout — callers get
+    // key material they cannot mutate into the memo.
+    const dk = `${tenant}|${kind}|${id}|${hashBytes(row.wrapped)}`;
+    const dmem = this._dekMemo ??= new Map();
+    const dhit = dmem.get(dk);
+    if (dhit !== undefined) return Buffer.from(dhit);
     // A wrapped DEK that fails to authenticate is storage-layer tamper
     // evidence in the ledger taxonomy — never a raw crypto TypeError
     // (w43-store F-3, same doctrine as readValue's ciphertext path).
-    try { return Buffer.from(decrypt(row.wrapped, this.key(tenant), dekAad(tenant, kind, id)), 'base64url'); }
+    try {
+      const dek = Buffer.from(decrypt(row.wrapped, this.key(tenant), dekAad(tenant, kind, id)), 'base64url');
+      if (dmem.size >= 1024) dmem.delete(dmem.keys().next().value);
+      dmem.set(dk, dek);
+      return Buffer.from(dek);
+    }
     catch { throw new InvariantError('INV-503-STORAGE', 'Wrapped data key does not authenticate', 503); }
   }
   // Non-string addressing coerces at the SQL layer (TEXT affinity makes
@@ -539,10 +568,25 @@ export class Store {
   }
   get(tenant, kind, id) {
     this._addr(tenant, kind, id);
-    const row = this.db.prepare('SELECT value FROM records WHERE tenant=? AND kind=? AND id=?').get(tenant, kind, id);
+    const row = this._schemaGuard(() => this._stmt('SELECT value FROM records WHERE tenant=? AND kind=? AND id=?').get(tenant, kind, id));
     if (!row) return null;
+    // Plaintext memo keyed on the row's own ciphertext AND its wrapped
+    // DEK: an unchanged pair serves an identical decrypted object without
+    // re-running GCM, while a grafted ciphertext or a murdered/grafted DEK
+    // changes the key and forces the honest decrypt path — including the
+    // INV-409 a dangling ciphertext earns (w47-perf). Callers may mutate
+    // the returned object, so every hit returns a private clone and the
+    // memo copy is never handed out.
+    const dekRow = this._schemaGuard(() => this._stmt('SELECT wrapped FROM deks WHERE tenant=? AND kind=? AND id=?').get(tenant, kind, id));
+    const mk = `${tenant}|${kind}|${id}|${hashBytes(row.value)}|${hashBytes(dekRow?.wrapped ?? '-')}`;
+    const mem = this._plainMemo ??= new Map();
+    const hit = mem.get(mk);
+    if (hit !== undefined) return structuredClone(hit);
     // Records written before per-record DEKs fall back to the tenant key.
-    return this.readValue(tenant, kind, id, row.value);
+    const plain = this.readValue(tenant, kind, id, row.value);
+    if (mem.size >= 1024) mem.delete(mem.keys().next().value);
+    mem.set(mk, structuredClone(plain));
+    return plain;
   }
   must(tenant, kind, id) {
     const row = this.get(tenant, kind, id); requireThat(row, 'INV-404-NOT-FOUND', 'Resource not found', 404); return row;
@@ -554,16 +598,18 @@ export class Store {
     // An overwrite supersedes the previous ciphertext and wrapped DEK — arm
     // the WAL checkpoint so the old material is truncated at commit instead
     // of lingering in the log until a shred (DEK-audit F3).
-    if (this.db.prepare('SELECT 1 FROM records WHERE tenant=? AND kind=? AND id=?').get(tenant, kind, id)
-      || this.db.prepare('SELECT 1 FROM deks WHERE tenant=? AND kind=? AND id=?').get(tenant, kind, id)) this._shredded = true;
+    if (this._schemaGuard(() => this._stmt('SELECT 1 FROM records WHERE tenant=? AND kind=? AND id=?').get(tenant, kind, id))
+      || this._schemaGuard(() => this._stmt('SELECT 1 FROM deks WHERE tenant=? AND kind=? AND id=?').get(tenant, kind, id))) this._shredded = true;
     const dek = randomBytes(32);
     // The record+DEK pair must land atomically — a bare-autocommit crash
     // between them leaves a ciphertext with no key that then reads as
-    // INV-409 'tamper' instead of a crash artifact (w28-store F8).
-    const pair = () => {
-      this.db.prepare('INSERT INTO records VALUES(?,?,?,?,?) ON CONFLICT(tenant,kind,id) DO UPDATE SET value=excluded.value').run(tenant, kind, id, encrypt(value, dek, recAad(tenant, kind, id)), at);
-      this.db.prepare('INSERT INTO deks VALUES(?,?,?,?) ON CONFLICT(tenant,kind,id) DO UPDATE SET wrapped=excluded.wrapped').run(tenant, kind, id, encrypt(dek.toString('base64url'), this.key(tenant), dekAad(tenant, kind, id)));
-    };
+    // INV-409 'tamper' instead of a crash artifact (w28-store F8). A dropped
+    // table or planted trigger on the write is tamper evidence, not raw
+    // sqlite noise (w47-fixverify M-1).
+    const pair = () => this._schemaGuard(() => {
+      this._stmt('INSERT INTO records VALUES(?,?,?,?,?) ON CONFLICT(tenant,kind,id) DO UPDATE SET value=excluded.value').run(tenant, kind, id, encrypt(value, dek, recAad(tenant, kind, id)), at);
+      this._stmt('INSERT INTO deks VALUES(?,?,?,?) ON CONFLICT(tenant,kind,id) DO UPDATE SET wrapped=excluded.wrapped').run(tenant, kind, id, encrypt(dek.toString('base64url'), this.key(tenant), dekAad(tenant, kind, id)));
+    });
     if (this.db.isTransaction) pair(); else this.tx(pair);
     if (!this.db.isTransaction) this.checkpoint();
     // Record-table dirt: memoized readers (grantsFor/policy) key on this
@@ -576,13 +622,13 @@ export class Store {
     requireThat(!this.get(tenant, kind, id), 'INV-409-CONFLICT', 'Record already exists', 409); this.put(tenant, kind, id, value, at);
   }
   list(tenant, kind, limit = 500, offset = 0) {
-    return this._schemaGuard(() => this.db.prepare('SELECT id,value FROM records WHERE tenant=? AND kind=? ORDER BY created DESC,id LIMIT ? OFFSET ?').all(tenant, kind, limit, offset))
+    return this._schemaGuard(() => this._stmt('SELECT id,value FROM records WHERE tenant=? AND kind=? ORDER BY created DESC,id LIMIT ? OFFSET ?').all(tenant, kind, limit, offset))
       .map(row => this.readValue(tenant, kind, row.id, row.value));
   }
   // Id-only enumeration: sweeps must not let one undecryptable row wedge the
   // whole pass (store-audit MED-3) — callers isolate failures per id.
   ids(tenant, kind, limit = 500, offset = 0) {
-    return this._schemaGuard(() => this.db.prepare('SELECT id FROM records WHERE tenant=? AND kind=? ORDER BY created DESC,id LIMIT ? OFFSET ?').all(tenant, kind, limit, offset).map(r => r.id));
+    return this._schemaGuard(() => this._stmt('SELECT id FROM records WHERE tenant=? AND kind=? ORDER BY created DESC,id LIMIT ? OFFSET ?').all(tenant, kind, limit, offset).map(r => r.id));
   }
   remove(tenant, kind, id) {
     this._addr(tenant, kind, id);
@@ -591,8 +637,8 @@ export class Store {
     // between them leaves a dekless row that wedges the revocation floor
     // probe as fake tamper evidence (w32-store F5).
     const pair = () => {
-      this.db.prepare('DELETE FROM deks WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id);
-      this.db.prepare('DELETE FROM records WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id);
+      this._stmt('DELETE FROM deks WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id);
+      this._stmt('DELETE FROM records WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id);
     };
     if (this.db.isTransaction) pair(); else this.tx(pair);
     if (!this.db.isTransaction) this.checkpoint(); // non-tx paths must not leave the DEK in the WAL (store-audit LOW)
@@ -617,8 +663,8 @@ export class Store {
     // and stay honest in the retention report.
     // The pair deletes atomically when no caller tx is open — a crash
     // between them leaves dekless residue, not a verdict (w32-store F5).
-    const pair = () => this.db.prepare('DELETE FROM deks WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id).changes
-      + this.db.prepare('DELETE FROM records WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id).changes;
+    const pair = () => this._stmt('DELETE FROM deks WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id).changes
+      + this._stmt('DELETE FROM records WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id).changes;
     const changes = this.db.isTransaction ? pair() : this.tx(pair);
     this._shredded = this._shredded || changes > 0;
     this._dirtSeq = (this._dirtSeq ?? 0) + 1;
@@ -635,7 +681,7 @@ export class Store {
     // busy=1 — a committed write must still report success, with the shred
     // flag left armed for the next commit to retry (w8-fixverify F2).
     try {
-      const r = this.db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+      const r = this._stmt('PRAGMA wal_checkpoint(TRUNCATE)').get();
       if (!r.busy && r.checkpointed >= r.log) this._shredded = false;
     } catch { /* contention: flag stays armed */ }
   }
@@ -646,7 +692,7 @@ export class Store {
   // saw. Called only on the would-fail path so the common write costs no
   // extra scan (w23 W23-03).
   _refreshChainAnchors() {
-    const newest = this.db.prepare('SELECT tenant,envelope FROM audit ORDER BY rowid DESC LIMIT 1').get();
+    const newest = this._stmt('SELECT tenant,envelope FROM audit ORDER BY rowid DESC LIMIT 1').get();
     if (newest && newest.envelope !== this._anchorScanned) {
       this._anchorScanned = newest.envelope;
       try {
@@ -656,7 +702,7 @@ export class Store {
         if (typeof env?.payload?.time === 'number' && Number.isFinite(env.payload.time) && env.payload.time > (this._chainFloor ?? 0)) this._chainFloor = env.payload.time;
       } catch { /* unverifiable head — floor holds its last attested value */ }
     }
-    for (const row of this.db.prepare("SELECT tenant,envelope FROM audit WHERE json_valid(envelope) AND (json_extract(envelope,'$.payload.type')='CLOCK_RECOVERED' OR EXISTS (SELECT 1 FROM json_each(envelope,'$') GROUP BY \"key\" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload') GROUP BY \"key\" HAVING COUNT(*)>1)) ORDER BY rowid DESC LIMIT 512").all()) {
+    for (const row of this._stmt("SELECT tenant,envelope FROM audit WHERE json_valid(envelope) AND (json_extract(envelope,'$.payload.type')='CLOCK_RECOVERED' OR EXISTS (SELECT 1 FROM json_each(envelope,'$') GROUP BY \"key\" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload') GROUP BY \"key\" HAVING COUNT(*)>1)) ORDER BY rowid DESC LIMIT 512").all()) {
       try {
         const env = JSON.parse(row.envelope);
         if (env?.payload?.type !== 'CLOCK_RECOVERED') continue;
@@ -670,7 +716,7 @@ export class Store {
   }
   clock(now, { recovery = false, recoveryPath = false } = {}) {
     requireThat(Number.isSafeInteger(now) && now > 0, 'INV-503-TIME', 'Clock unavailable', 503);
-    const row = this.db.prepare('SELECT last FROM clock WHERE id=1').get();
+    const row = this._stmt('SELECT last FROM clock WHERE id=1').get();
     // recoveryPath: remediation ops (the veto's prescribed revokes) must
     // run during a halted clock — they may not advance the row forward nor
     // rewind it: the detector stays at its honest high-water mark while the
@@ -699,11 +745,25 @@ export class Store {
     // regression detector, not the time source — expiry is evaluated
     // against host time either way, and an over-high `last` would wedge
     // the gate permanently after an honest rewind (VM snapshot restore).
-    this.db.prepare('INSERT INTO clock VALUES(1,?) ON CONFLICT(id) DO UPDATE SET last=excluded.last').run(now);
+    this._stmt('INSERT INTO clock VALUES(1,?) ON CONFLICT(id) DO UPDATE SET last=excluded.last').run(now);
     return now;
   }
   auditHeadSeq(tenant) {
-    return this._schemaGuard(() => this.db.prepare('SELECT COALESCE(MAX(seq),0) s FROM audit WHERE tenant=?').get(tenant).s);
+    return this._schemaGuard(() => this._stmt('SELECT COALESCE(MAX(seq),0) s FROM audit WHERE tenant=?').get(tenant).s);
+  }
+  // Prepared-statement memo: statement compilation is the dominant sqlite
+  // cost on the hot path, and node:sqlite transparently recompiles a
+  // cached statement after schema drift — a genuinely dropped table still
+  // throws the same 'no such table' a fresh prepare would, so the INV
+  // taxonomy classifies identically (w47-perf).
+  _stmt(sql) {
+    const mem = this._stmts ??= new Map();
+    let st = mem.get(sql);
+    if (!st) {
+      if (mem.size >= 256) mem.delete(mem.keys().next().value);
+      mem.set(sql, st = this.db.prepare(sql));
+    }
+    return st;
   }
   // A dropped or rewritten table is integrity evidence inside the INV
   // taxonomy, never bare sqlite noise escaping to callers (w44-store M-2).
@@ -712,6 +772,14 @@ export class Store {
     catch (e) {
       if (/no such table|no such column|not a database|malformed/i.test(e?.message ?? ''))
         throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e });
+      // Trigger-raised aborts arrive as SQLITE_CONSTRAINT_TRIGGER
+      // (errcode 1811): a RAISE() whose text is none of this schema's own
+      // guard messages is a planted trigger's payload on our write path —
+      // our tables only refuse a write through the guards above, so any
+      // foreign abort on them is tamper evidence, not raw sqlite
+      // internals (w47-fixverify M-1).
+      if (e?.errcode === 1811 && !KNOWN_GUARD_ABORTS.has(e?.message ?? ''))
+        throw new InvariantError('INV-409-INTEGRITY', 'Ledger write refused by a foreign trigger — tamper evidence', 409, { cause: e });
       throw e;
     }
   }
@@ -722,7 +790,7 @@ export class Store {
     // in-band recovery (w28-store F2). Inside a tx the caller's boundary
     // already covers the pair.
     if (!this.db.isTransaction) return this.tx(() => this.audit(tenant, type, actor, reference, metadata, now));
-    const last = this._schemaGuard(() => this.db.prepare('SELECT seq,hash,envelope FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1').get(tenant));
+    const last = this._schemaGuard(() => this._stmt('SELECT seq,hash,envelope FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1').get(tenant));
     // The chain's `time` is a monotone logical clock: verifyAudit requires
     // non-decreasing entry times, so an accepted host rewind must not write
     // a regressed value into the chain (it would break verification
@@ -757,7 +825,7 @@ export class Store {
     // its explaining CLOCK_RECOVERED right here — refusing would wedge
     // the repair path on the state it exists to fix (w23 W23-04).
     const recoveredBefore = type === 'CLOCK_RECOVERED' ? (entry.metadata?.recovered_at ?? this._lastRecoveredAt) : this._lastRecoveredAt;
-    const crow = this._schemaGuard(() => this.db.prepare('SELECT last FROM clock WHERE id=1').get());
+    const crow = this._schemaGuard(() => this._stmt('SELECT last FROM clock WHERE id=1').get());
     requireThat(!crow || crow.last >= floorBefore || (recoveredBefore !== null && crow.last >= recoveredBefore), 'INV-409-AUDIT-TAMPER', 'Clock floor rewound below attested chain time', 409);
     // Hash what is actually attested: the signer may add a bound marker (the
     // recovery_signing annotation when a pending successor signs after a
@@ -792,7 +860,7 @@ export class Store {
     const hash = digest(envelope.payload);
     const envText = canonical(envelope);
     try {
-      this.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run(tenant, entry.sequence, entry.previous, hash, envText);
+      this._stmt('INSERT INTO audit VALUES(?,?,?,?,?)').run(tenant, entry.sequence, entry.previous, hash, envText);
     } catch (e) {
       // A peer instance appending between our head-read and this insert
       // trips the seq guard — that is a retryable conflict, not tamper
@@ -813,7 +881,7 @@ export class Store {
     // survives tail-cuts (it is not a chained row), and a fresh open can
     // attest any head/watermark pair that claims less than it
     // (w44-fixverify F-2).
-    this._schemaGuard(() => this.db.prepare("INSERT INTO meta_kv VALUES(?,'fold_floor',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, `${entry.sequence}:${hash}`));
+    this._schemaGuard(() => this._stmt("INSERT INTO meta_kv VALUES(?,'fold_floor',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, `${entry.sequence}:${hash}`));
     // Post-commit ordering: only a landed entry may move the anchors and
     // ratchet the detector (w23 W23-05). Our own head is the newest
     // verifiable row — mark it scanned so a later refresh skips it.
@@ -833,7 +901,7 @@ export class Store {
     // honest high-water during a halted or recovered span; the legality
     // assert runs on the pre-write row so the ratchet itself can never
     // launder a rewind.
-    this.db.prepare('INSERT INTO clock VALUES(1,?) ON CONFLICT(id) DO UPDATE SET last=MAX(clock.last, excluded.last)').run(now);
+    this._stmt('INSERT INTO clock VALUES(1,?) ON CONFLICT(id) DO UPDATE SET last=MAX(clock.last, excluded.last)').run(now);
     // End-of-chain commitment: the fabric moves its signed head watermark
     // post-commit — a truncated tail can never drag the watermark back
     // with it (w24-fixverify W24-01).
@@ -858,7 +926,7 @@ export class Store {
   // byte-for-byte (w43-perf).
   selfRowEnv(tenant, seq) { return this._selfRows?.get(tenant)?.get(seq); }
   auditHashes(tenant) {
-    return this._schemaGuard(() => this.db.prepare('SELECT hash FROM audit WHERE tenant=? ORDER BY seq').all(tenant).map(r => r.hash));
+    return this._schemaGuard(() => this._stmt('SELECT hash FROM audit WHERE tenant=? ORDER BY seq').all(tenant).map(r => r.hash));
   }
   auditPage(tenant, { after = 0, limit = 1000 } = {}) {
     // Cursor hygiene: limit=0 would crash on rows.at(-1), a negative limit
@@ -868,13 +936,13 @@ export class Store {
     // the internal index fold legitimately pages through the entire chain
     // (w23 W23-08).
     requireThat(Number.isSafeInteger(after) && after >= 0 && Number.isSafeInteger(limit) && limit >= 1, 'INV-400-SCHEMA', 'Invalid audit cursor or limit', 400);
-    const rows = this._schemaGuard(() => this.db.prepare('SELECT seq,hash,envelope FROM audit WHERE tenant=? AND seq>? ORDER BY seq LIMIT ?').all(tenant, after, limit));
+    const rows = this._schemaGuard(() => this._stmt('SELECT seq,hash,envelope FROM audit WHERE tenant=? AND seq>? ORDER BY seq LIMIT ?').all(tenant, after, limit));
     const signer = this._signer(tenant), public_keys = signer.keys ? signer.keys() : { [signer.key_id]: { public_key: signer.public_key } };
     // Serving the log is a security surface: re-verify each row's stored
     // hash against its signed payload and check chain continuity back to the
     // row preceding the page — an injected or rewritten row cannot pass
     // (store-audit MED-5).
-    const anchor = after ? this._schemaGuard(() => this.db.prepare('SELECT hash FROM audit WHERE tenant=? AND seq=?').get(tenant, after)) : null;
+    const anchor = after ? this._schemaGuard(() => this._stmt('SELECT hash FROM audit WHERE tenant=? AND seq=?').get(tenant, after)) : null;
     // Death map spans the WHOLE chain, not just the page — a page reader
     // must catch a row signed after its key's earlier revocation
     // (w28-crypto F2).
@@ -920,7 +988,7 @@ export class Store {
     // for attacker JSON.
     let previous = '0'.repeat(64);
     const deadAt = this._auditKeyDeaths(tenant);
-    const rows = this._schemaGuard(() => this.db.prepare('SELECT seq,hash,envelope FROM audit WHERE tenant=? ORDER BY seq').all(tenant)).map(r => {
+    const rows = this._schemaGuard(() => this._stmt('SELECT seq,hash,envelope FROM audit WHERE tenant=? ORDER BY seq').all(tenant)).map(r => {
       let envelope;
       try { envelope = JSON.parse(r.envelope); }
       catch { throw new InvariantError('INV-409-AUDIT-TAMPER', 'Audit row failed integrity verification', 409); }
@@ -946,7 +1014,7 @@ export class Store {
     // A file-level attacker can still delete the stored witness too — a truly
     // pinned anchor requires an external copy of a checkpoint, which
     // verifyAudit(priorCheckpoint) accepts; this closes the common case.
-    const priorRow = this._schemaGuard(() => this.db.prepare("SELECT id,value FROM records WHERE tenant=? AND kind='audit-checkpoint' ORDER BY created DESC LIMIT 1").get(tenant));
+    const priorRow = this._schemaGuard(() => this._stmt("SELECT id,value FROM records WHERE tenant=? AND kind='audit-checkpoint' ORDER BY created DESC LIMIT 1").get(tenant));
     const prior_checkpoint = priorRow ? this.readValue(tenant, 'audit-checkpoint', priorRow.id, priorRow.value) : null;
     if (now !== null) this.put(tenant, 'audit-checkpoint', `cp-${checkpoint.payload.size}`, checkpoint, now);
     return { format: 'IF-AUDIT-1', public_keys, prior_checkpoint, checkpoint, entries: rows };
@@ -956,7 +1024,7 @@ export class Store {
     // outside one rather than silently depending on the caller (L4).
     requireThat(this.db.isTransaction, 'INV-500-STORE', 'idempotent() must run inside store.tx()', 500);
     requireThat(typeof key === 'string' && /^[A-Za-z0-9_-]{8,128}$/.test(key), 'INV-400-SCHEMA', 'An 8–128 character Idempotency-Key is required');
-    const row = this.db.prepare('SELECT hash,result FROM idempotency WHERE tenant=? AND scope=? AND key=?').get(tenant, scope, key);
+    const row = this._stmt('SELECT hash,result FROM idempotency WHERE tenant=? AND scope=? AND key=?').get(tenant, scope, key);
     if (row) {
       requireThat(ctEqual(row.hash, requestHash), 'INV-409-IDEMPOTENCY', 'Idempotency key reused for a different request', 409);
       // A corrupt or transplanted receipt surfaces in the ledger taxonomy,
@@ -970,7 +1038,7 @@ export class Store {
     // The receipt may carry a redacted projection — callers that want the
     // stored value minimal (shredder-safe) pass project/resolve; without
     // them the full result is receipt+response as before (w28-crypto F1).
-    this.db.prepare('INSERT INTO idempotency VALUES(?,?,?,?,?)').run(tenant, scope, key, requestHash, encrypt(project ? project(result) : result, this.key(tenant), idemAad(tenant, scope, key)));
+    this._stmt('INSERT INTO idempotency VALUES(?,?,?,?,?)').run(tenant, scope, key, requestHash, encrypt(project ? project(result) : result, this.key(tenant), idemAad(tenant, scope, key)));
     return result;
   }
 }

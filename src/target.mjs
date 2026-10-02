@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { dirname } from 'node:path';
 import { mkdirSync, chmodSync } from 'node:fs';
-import { digest, clone, canonical } from './canonical.mjs';
+import { digest, clone, canonical, hashBytes } from './canonical.mjs';
 import { encrypt, decrypt } from './crypto.mjs';
 import { buildPlan, verifyPlan, executePlan } from './datagate.mjs';
 import { requireThat, InvariantError } from './errors.mjs';
@@ -19,10 +19,25 @@ import { randomBytes } from 'node:crypto';
 const AAD = (...parts) => canonical(parts);
 export class SimulatedTarget {
   _dec(value, tenant, tuple) {
+    // Plaintext memo keyed on (tuple AAD, ciphertext): an unchanged row
+    // serves an identical object without re-running GCM, a grafted or
+    // transplanted value changes the key and re-derives through the
+    // authenticating decrypt — every miss still classifies inside the
+    // INV-409 taxonomy exactly like before (w47-perf). Hits hand out a
+    // private clone; the memo copy is never exposed to callers.
+    const mk = `${tenant}|${tuple}|${hashBytes(value)}`;
+    const mem = this._decMemo ??= new Map();
+    const hit = mem.get(mk);
+    if (hit !== undefined) return structuredClone(hit);
     // A corrupted ciphertext is tamper evidence, not a code crash — every
     // decrypt failure classifies in the ledger taxonomy (w21-store F-7).
-    try { return decrypt(value, this.key(tenant), tuple); }
-    catch (e) { throw new InvariantError('INV-409-INTEGRITY', 'Stored ciphertext does not authenticate', 409); }
+    const plain = (() => {
+      try { return decrypt(value, this.key(tenant), tuple); }
+      catch (e) { throw new InvariantError('INV-409-INTEGRITY', 'Stored ciphertext does not authenticate', 409); }
+    })();
+    if (mem.size >= 1024) mem.delete(mem.keys().next().value);
+    mem.set(mk, structuredClone(plain));
+    return plain;
   }
   constructor(path, tenantKeys, { aadDedup } = {}) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -45,7 +60,7 @@ export class SimulatedTarget {
       // The marker must be READ before it is re-stamped — stamping alone
       // silently adopts any foreign file (w29-fixverify F9).
       this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=30000; PRAGMA secure_delete=ON;');
-      const version = this.db.prepare('PRAGMA user_version').get().user_version;
+      const version = this._stmt('PRAGMA user_version').get().user_version;
       requireThat(version <= 1, 'INV-503-STORAGE', 'Database schema is newer than this application', 503);
       // The data_access disclosure log lives in the ledger store — every
       // reconstructionCheck touchDb is store.db; a shadow table here was
@@ -82,27 +97,40 @@ export class SimulatedTarget {
     // the ledger store's guard). The sanctioned post-attest cleanup drops
     // and recreates this guard verbatim.
     try {
+      // INSERT OR REPLACE fires the delete guard on conflict, but a bare
+      // UPDATE rewrites the marker unguarded — both arms carry the same
+      // abort (w47-fixverify HIGH-1, parity with the ledger store).
       const expected = "CREATE TRIGGER aad_marker_keep BEFORE DELETE ON meta_kv WHEN OLD.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END";
+      const expectedUpd = "CREATE TRIGGER aad_marker_keep_upd BEFORE UPDATE ON meta_kv WHEN OLD.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END";
       this.db.exec(`CREATE TRIGGER IF NOT EXISTS ${expected.slice('CREATE TRIGGER '.length)}`);
+      this.db.exec(`CREATE TRIGGER IF NOT EXISTS ${expectedUpd.slice('CREATE TRIGGER '.length)}`);
       const norm = s => (s ?? '').replace(/\s+/g, ' ').trim();
-      const stored = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='aad_marker_keep'").get()?.sql;
-      requireThat(norm(stored) === norm(expected), 'INV-503-STORAGE', 'integrity trigger missing or tampered: aad_marker_keep', 503);
-      for (const stray of this.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger'").all().map(r => r.name).filter(n => n !== 'aad_marker_keep'))
+      const stored = new Map(this._stmt("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name IN ('aad_marker_keep','aad_marker_keep_upd')").all().map(r => [r.name, r.sql ?? '']));
+      requireThat(norm(stored.get('aad_marker_keep')) === norm(expected), 'INV-503-STORAGE', 'integrity trigger missing or tampered: aad_marker_keep', 503);
+      requireThat(norm(stored.get('aad_marker_keep_upd')) === norm(expectedUpd), 'INV-503-STORAGE', 'integrity trigger missing or tampered: aad_marker_keep_upd', 503);
+      for (const stray of this._stmt("SELECT name FROM sqlite_master WHERE type='trigger'").all().map(r => r.name).filter(n => !['aad_marker_keep', 'aad_marker_keep_upd'].includes(n)))
         this.db.exec(`DROP TRIGGER "${String(stray).replace(/"/g, '""')}"`);
       const pt = `__integrity_probe__:${randomBytes(8).toString('hex')}`;
-      this.db.exec('SAVEPOINT integrity_probe');
-      let ok = false;
-      try {
-        this.db.prepare("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', '{}')").run(pt);
-        this.db.prepare("DELETE FROM meta_kv WHERE tenant=? AND key='aad_migration'").run(pt);
-      } catch (e) {
-        if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw e;
-        if (e?.message === 'aad migration marker is evidence') ok = true;
-        else throw new InvariantError('INV-503-STORAGE', `Integrity probe fault: ${e?.message ?? e}`, 503);
-      } finally {
-        this.db.exec('ROLLBACK TO integrity_probe'); this.db.exec('RELEASE integrity_probe');
-      }
-      requireThat(ok, 'INV-503-STORAGE', 'aad_migration marker delete trigger not enforced', 503);
+      const probeOk = (run) => {
+        this.db.exec('SAVEPOINT integrity_probe');
+        let ok = false;
+        try { run(); } catch (e) {
+          if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw e;
+          if (e?.message === 'aad migration marker is evidence') ok = true;
+          else throw new InvariantError('INV-503-STORAGE', `Integrity probe fault: ${e?.message ?? e}`, 503);
+        } finally {
+          this.db.exec('ROLLBACK TO integrity_probe'); this.db.exec('RELEASE integrity_probe');
+        }
+        return ok;
+      };
+      requireThat(probeOk(() => {
+        this._stmt("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', '{}')").run(pt);
+        this._stmt("DELETE FROM meta_kv WHERE tenant=? AND key='aad_migration'").run(pt);
+      }), 'INV-503-STORAGE', 'aad_migration marker delete trigger not enforced', 503);
+      requireThat(probeOk(() => {
+        this._stmt("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', '{}')").run(pt);
+        this._stmt("UPDATE meta_kv SET value='{}' WHERE tenant=? AND key='aad_migration'").run(pt);
+      }), 'INV-503-STORAGE', 'aad_migration marker update trigger not enforced', 503);
       try { this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); } catch { /* contention: next armed write retries */ }
     } catch (e) {
       if (e instanceof InvariantError) throw e;
@@ -142,7 +170,7 @@ export class SimulatedTarget {
           : table === 'secrets_registry' ? 'tenant=? AND secret_id=?'
           : table === 'grants' ? 'tenant=? AND grant_id=?'
           : 'tenant=? AND id=?';
-        for (const r of this.db.prepare(`SELECT * FROM ${table}`).all()) {
+        for (const r of this._stmt(`SELECT * FROM ${table}`).all()) {
           const [tuple, legacy] = aads(r);
           try { decrypt(r[col], this.key(r.tenant), tuple); continue; } catch { /* legacy-sealed or corrupt */ }
           const prior = seen.get(r[col]);
@@ -155,7 +183,7 @@ export class SimulatedTarget {
           if (slashy(r.tenant, r.id, r.dataset, r.row_id, r.secret_id, r.grant_id)) { seen.set(r[col], {}); mark(r.tenant, 'ambiguous'); continue; }
           try {
             const plain = decrypt(r[col], this.key(r.tenant), legacy);
-            const upd = this.db.prepare(`UPDATE ${table} SET ${col}=? WHERE ${where}`), orig = r[col];
+            const upd = this._stmt(`UPDATE ${table} SET ${col}=? WHERE ${where}`), orig = r[col];
             // A same-DB revert supersedes THIS connection's ciphertext —
             // re-arm its WAL-truncate flag or the donor's legacy bytes
             // linger until an unrelated write (w21-store F-9).
@@ -170,7 +198,7 @@ export class SimulatedTarget {
       // attestation still surfaces them at the next open (w43-store F-4).
       for (const [mtenant, ms] of stats)
         if (ms.migrated + ms.transplants + ms.ambiguous + ms.skipped > 0)
-          this._schemaGuard(() => this.db.prepare("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', ?)").run(mtenant, JSON.stringify(ms)));
+          this._schemaGuard(() => this._stmt("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', ?)").run(mtenant, JSON.stringify(ms)));
       this.db.exec('COMMIT');
       // Truncate post-migration so dead legacy ciphertext does not linger
       // in the WAL (w19-aad W19-3).
@@ -185,6 +213,18 @@ export class SimulatedTarget {
     }
   }
   close() { this.db.close(); }
+  // Prepared-statement memo: node:sqlite recompiles a cached statement
+  // after schema drift, and a dropped table still throws the same error a
+  // fresh prepare would — identical INV classification (w47-perf).
+  _stmt(sql) {
+    const mem = this._stmts ??= new Map();
+    let st = mem.get(sql);
+    if (!st) {
+      if (mem.size >= 256) mem.delete(mem.keys().next().value);
+      mem.set(sql, st = this.db.prepare(sql));
+    }
+    return st;
+  }
   tx(fn) {
     // Same contract as Store.tx: a nested call nests via SAVEPOINT so a
     // callee's failure cannot half-commit inside the outer transaction,
@@ -218,15 +258,15 @@ export class SimulatedTarget {
   // makes the call a silent no-op — only disarm the delete flag when the
   // log actually folded, so a later armed write retries (w22-fixverify F4).
   _checkpointDeleted() {
-    const r = this.db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+    const r = this._stmt('PRAGMA wal_checkpoint(TRUNCATE)').get();
     if (r && !r.busy && (r.checkpointed ?? 0) >= (r.log ?? 0)) this._deleted = false;
   }
   key(tenant) { requireThat(Object.hasOwn(this.keys, tenant), 'INV-404-NOT-FOUND', 'Resource not found', 404); return Buffer.from(this.keys[tenant], 'base64url'); }
   exists(tenant, id) {
-    return this.db.prepare('SELECT 1 FROM resources WHERE tenant=? AND id=?').get(tenant, id) !== undefined;
+    return this._stmt('SELECT 1 FROM resources WHERE tenant=? AND id=?').get(tenant, id) !== undefined;
   }
   _readResource(tenant, id) {
-    const row = this.db.prepare('SELECT version,value FROM resources WHERE tenant=? AND id=?').get(tenant, id);
+    const row = this._stmt('SELECT version,value FROM resources WHERE tenant=? AND id=?').get(tenant, id);
     return row ? { version: row.version, value: this._dec(row.value, tenant, AAD('target', 'resource', tenant, id)) } : { version: 0, value: null };
   }
   state(tenant, id) {
@@ -236,13 +276,13 @@ export class SimulatedTarget {
     // payload merely contains a 'columns' key (e.g. a JIT grant) must not
     // start projecting rows — the stored record and its digest would drift
     // apart (w5 F-6 post-read).
-    if (material_fields.columns && material_fields.rows === undefined && this.db.prepare('SELECT 1 FROM dataset_rows WHERE tenant=? AND dataset=? LIMIT 1').get(tenant, id)) {
+    if (material_fields.columns && material_fields.rows === undefined && this._stmt('SELECT 1 FROM dataset_rows WHERE tenant=? AND dataset=? LIMIT 1').get(tenant, id)) {
       material_fields.rows = this.datasetRows(tenant, id);
     }
     return { version: res.version, digest: digest(material_fields), material_fields };
   }
   datasetRows(tenant, dataset) {
-    return this.db.prepare('SELECT row_id, data FROM dataset_rows WHERE tenant=? AND dataset=? ORDER BY row_id').all(tenant, dataset)
+    return this._stmt('SELECT row_id, data FROM dataset_rows WHERE tenant=? AND dataset=? ORDER BY row_id').all(tenant, dataset)
       // Registry columns win the spread — a stored 'id'/'version' member
       // must not shadow the row's identity or counter (w9-schema F-7).
       .map(r => ({ ...this._dec(r.data, tenant, AAD('target', 'dataset', tenant, dataset, r.row_id)), id: r.row_id }));
@@ -256,24 +296,24 @@ export class SimulatedTarget {
     return this.tx(() => {
       const state = this._readResource(tenant, id);
       this._deleted = true; // upsert supersedes ciphertext — truncate at commit (w8-fixverify F3)
-      this.db.prepare('INSERT INTO resources VALUES(?,?,?,?) ON CONFLICT(tenant,id) DO UPDATE SET version=excluded.version,value=excluded.value').run(tenant, id, state.version + 1, encrypt(meta, this.key(tenant), AAD('target', 'resource', tenant, id)));
+      this._stmt('INSERT INTO resources VALUES(?,?,?,?) ON CONFLICT(tenant,id) DO UPDATE SET version=excluded.version,value=excluded.value').run(tenant, id, state.version + 1, encrypt(meta, this.key(tenant), AAD('target', 'resource', tenant, id)));
       if (Array.isArray(rows)) {
-        this.db.prepare('DELETE FROM dataset_rows WHERE tenant=? AND dataset=?').run(tenant, id);
+        this._stmt('DELETE FROM dataset_rows WHERE tenant=? AND dataset=?').run(tenant, id);
         for (const row of rows) {
           const { id: row_id, ...data } = row;
-          this.db.prepare('INSERT INTO dataset_rows VALUES(?,?,?,?)').run(tenant, id, row_id, encrypt(data, this.key(tenant), AAD('target', 'dataset', tenant, id, row_id)));
+          this._stmt('INSERT INTO dataset_rows VALUES(?,?,?,?)').run(tenant, id, row_id, encrypt(data, this.key(tenant), AAD('target', 'dataset', tenant, id, row_id)));
         }
       }
     });
   }
   seedSecret(tenant, secret_id, fields) {
     return this.tx(() => {
-      const state = this.db.prepare('SELECT version FROM secrets_registry WHERE tenant=? AND secret_id=?').get(tenant, secret_id);
+      const state = this._stmt('SELECT version FROM secrets_registry WHERE tenant=? AND secret_id=?').get(tenant, secret_id);
       this._writeSecret(tenant, secret_id, (state?.version ?? 0) + 1, fields);
     });
   }
   secret(tenant, secret_id) {
-    const row = this.db.prepare('SELECT version,value FROM secrets_registry WHERE tenant=? AND secret_id=?').get(tenant, secret_id);
+    const row = this._stmt('SELECT version,value FROM secrets_registry WHERE tenant=? AND secret_id=?').get(tenant, secret_id);
     return row ? { ...this._dec(row.value, tenant, AAD('target', 'secret', tenant, secret_id)), version: row.version } : null;
   }
   // For secret.use the DECISIVE record is the registry row — that is the state
@@ -285,11 +325,11 @@ export class SimulatedTarget {
   }
   _writeSecret(tenant, secret_id, version, fields) {
     this._deleted = true; // secret upsert supersedes ciphertext (w8-fixverify F3)
-    this.db.prepare('INSERT INTO secrets_registry VALUES(?,?,?,?) ON CONFLICT(tenant,secret_id) DO UPDATE SET version=excluded.version,value=excluded.value').run(tenant, secret_id, version, encrypt(fields, this.key(tenant), AAD('target', 'secret', tenant, secret_id)));
+    this._stmt('INSERT INTO secrets_registry VALUES(?,?,?,?) ON CONFLICT(tenant,secret_id) DO UPDATE SET version=excluded.version,value=excluded.value').run(tenant, secret_id, version, encrypt(fields, this.key(tenant), AAD('target', 'secret', tenant, secret_id)));
   }
   grant(tenant, grant_id, value) {
     this._deleted = true; // grant upsert supersedes ciphertext (w8-fixverify F3)
-    this.db.prepare('INSERT INTO grants VALUES(?,?,?) ON CONFLICT(tenant,grant_id) DO UPDATE SET value=excluded.value').run(tenant, grant_id, encrypt(value, this.key(tenant), AAD('target', 'grant', tenant, grant_id)));
+    this._stmt('INSERT INTO grants VALUES(?,?,?) ON CONFLICT(tenant,grant_id) DO UPDATE SET value=excluded.value').run(tenant, grant_id, encrypt(value, this.key(tenant), AAD('target', 'grant', tenant, grant_id)));
     this._dirtSeq = (this._dirtSeq ?? 0) + 1; // grants-table dirt invalidates grantsFor memos (w45-perf)
     // Bare callers arm the flag but never reach tx()'s post-commit
     // checkpoint — truncate on the autocommit path too, like the store
@@ -309,21 +349,40 @@ export class SimulatedTarget {
     catch (e) {
       if (/no such table|no such column|not a database|malformed/i.test(e?.message ?? ''))
         throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e });
+      // A trigger-raised abort (SQLITE_CONSTRAINT_TRIGGER, errcode 1811)
+      // whose text is none of this schema's own guard messages is a
+      // planted trigger's payload — tamper evidence, not raw sqlite
+      // internals (w47-fixverify M-1).
+      if (e?.errcode === 1811 && e?.message !== 'aad migration marker is evidence')
+        throw new InvariantError('INV-409-INTEGRITY', 'Ledger access refused by a foreign trigger — tamper evidence', 409, { cause: e });
       throw e;
     }
   }
   grants(tenant, subject_id, now) {
     const out = []; let corrupt = 0;
-    for (const r of this._schemaGuard(() => this.db.prepare('SELECT grant_id, value FROM grants WHERE tenant=?').all(tenant))) {
+    for (const r of this._schemaGuard(() => this._stmt('SELECT grant_id, value FROM grants WHERE tenant=?').all(tenant))) {
       let g; try { g = this._dec(r.value, tenant, AAD('target', 'grant', tenant, r.grant_id)); } catch { corrupt++; continue; }
       if (g.subject_id === subject_id && g.expires_at > now && !g.revoked) out.push(g);
     }
     this._corruptGrantRows = corrupt;
     return out;
   }
+  // The honoured-grants projection without the clock filter: callers that
+  // memoize on content (grantsFor) need expiry applied against their own
+  // effective time after the fetch, not baked into the row read
+  // (w47-perf).
+  grantRows(tenant, subject_id) {
+    const out = []; let corrupt = 0;
+    for (const r of this._schemaGuard(() => this._stmt('SELECT grant_id, value FROM grants WHERE tenant=?').all(tenant))) {
+      let g; try { g = this._dec(r.value, tenant, AAD('target', 'grant', tenant, r.grant_id)); } catch { corrupt++; continue; }
+      if (g.subject_id === subject_id) out.push(g);
+    }
+    this._corruptGrantRows = corrupt;
+    return out;
+  }
   allGrants(tenant) {
     const out = []; let corrupt = 0;
-    for (const r of this.db.prepare('SELECT grant_id, value FROM grants WHERE tenant=?').all(tenant)) {
+    for (const r of this._schemaGuard(() => this._stmt('SELECT grant_id, value FROM grants WHERE tenant=?').all(tenant))) {
       try { out.push(this._dec(r.value, tenant, AAD('target', 'grant', tenant, r.grant_id))); } catch { corrupt++; }
     }
     this._corruptGrantRows = corrupt;
@@ -335,18 +394,18 @@ export class SimulatedTarget {
     // pre-revocation value (w21-store F-4), and tx() truncates the WAL
     // residue at commit (w21-store F-5).
     return this.tx(() => {
-      const row = this.db.prepare('SELECT value FROM grants WHERE tenant=? AND grant_id=?').get(tenant, grant_id);
+      const row = this._stmt('SELECT value FROM grants WHERE tenant=? AND grant_id=?').get(tenant, grant_id);
       requireThat(row, 'INV-404-NOT-FOUND', 'Grant not found', 404);
       const value = this._dec(row.value, tenant, AAD('target', 'grant', tenant, grant_id));
       value.revoked = true;
       this._deleted = true; // revoke supersedes ciphertext (w8-fixverify F3)
-      this.db.prepare('UPDATE grants SET value=? WHERE tenant=? AND grant_id=?').run(encrypt(value, this.key(tenant), AAD('target', 'grant', tenant, grant_id)), tenant, grant_id);
+      this._stmt('UPDATE grants SET value=? WHERE tenant=? AND grant_id=?').run(encrypt(value, this.key(tenant), AAD('target', 'grant', tenant, grant_id)), tenant, grant_id);
       this._dirtSeq = (this._dirtSeq ?? 0) + 1;
       return value;
     });
   }
   outcome(tenant, id) {
-    const row = this.db.prepare('SELECT value FROM transactions WHERE tenant=? AND id=?').get(tenant, id);
+    const row = this._stmt('SELECT value FROM transactions WHERE tenant=? AND id=?').get(tenant, id);
     return row ? this._dec(row.value, tenant, AAD('target', 'transaction', tenant, id)) : null;
   }
   // Verified dataset read: caller scope is compiled into a QueryPlan, rebound
@@ -414,7 +473,7 @@ export class SimulatedTarget {
       }
       if (fault === 'before-commit') throw new Error('Simulated target transaction failure');
       if (type === 'secret.use') this._writeSecret(tenant, requested.secret_id, state.version + 1, next);
-      else if (type !== 'data.export') { this._deleted = true; this.db.prepare('INSERT INTO resources VALUES(?,?,?,?) ON CONFLICT(tenant,id) DO UPDATE SET version=excluded.version,value=excluded.value').run(tenant, id, state.version + 1, encrypt(next, this.key(tenant), AAD('target', 'resource', tenant, id))); }
+      else if (type !== 'data.export') { this._deleted = true; this._stmt('INSERT INTO resources VALUES(?,?,?,?) ON CONFLICT(tenant,id) DO UPDATE SET version=excluded.version,value=excluded.value').run(tenant, id, state.version + 1, encrypt(next, this.key(tenant), AAD('target', 'resource', tenant, id))); }
       // An export's observed_state would persist the WHOLE dataset —
       // including columns the requester may not see — into the durable
       // journal for no validation benefit: the digest alone proves the
@@ -426,7 +485,7 @@ export class SimulatedTarget {
         : type === 'secret.use' ? { withheld: true, material_digest: digest(next) }
         : next;
       outcome = { target_transaction_id: transactionId, capsule_digest: digest(capsule), authorised_requested_digest: digest(requested), observed_state_digest: digest(next), observed_state: journalState, output, output_row_ids, status: 'VERIFIED', execution_time: now, simulation: true };
-      this.db.prepare('INSERT INTO transactions VALUES(?,?,?)').run(tenant, transactionId, encrypt(outcome, this.key(tenant), AAD('target', 'transaction', tenant, transactionId)));
+      this._stmt('INSERT INTO transactions VALUES(?,?,?)').run(tenant, transactionId, encrypt(outcome, this.key(tenant), AAD('target', 'transaction', tenant, transactionId)));
       this.db.exec('COMMIT');
       // Same commit-boundary truncation as tx() — durable on success, armed
       // for a later retry when the log is contended (w8-fixverify F2/F3).
@@ -470,12 +529,12 @@ export class SimulatedTarget {
       const expected = capsule.current_state.version + 1;
       if (state.version !== expected) return { compensated: false, reason: 'STALE_COMPENSATION', note: `Registry moved past the compensated write (version ${state.version}, expected ${expected}); a separately authorised remedy action is required.` };
       this._deleted = true; // restoration supersedes ciphertext (w8-fixverify F3)
-      this.db.prepare('UPDATE resources SET version=?, value=? WHERE tenant=? AND id=?').run(state.version + 1, encrypt({ ...priorState, compensated_at: now, compensation_of: digest(capsule) }, this.key(tenant), AAD('target', 'resource', tenant, id)), tenant, id);
+      this._stmt('UPDATE resources SET version=?, value=? WHERE tenant=? AND id=?').run(state.version + 1, encrypt({ ...priorState, compensated_at: now, compensation_of: digest(capsule) }, this.key(tenant), AAD('target', 'resource', tenant, id)), tenant, id);
       // The unwind is journaled like a dispatch: a crash between this commit
       // and the parent's outcome write stays reconstructible — the chain
       // anchors EXECUTION_COMPENSATED only against this durable row
       // (w22 F4).
-      if (certId) this.db.prepare('INSERT INTO transactions VALUES(?,?,?)').run(tenant, `comp:${certId}`, encrypt({ target_transaction_id: `comp:${certId}`, capsule_digest: digest(capsule), compensated_at: now, restored_version: state.version + 1, status: 'COMPENSATED', simulation: true }, this.key(tenant), AAD('target', 'transaction', tenant, `comp:${certId}`)));
+      if (certId) this._stmt('INSERT INTO transactions VALUES(?,?,?)').run(tenant, `comp:${certId}`, encrypt({ target_transaction_id: `comp:${certId}`, capsule_digest: digest(capsule), compensated_at: now, restored_version: state.version + 1, status: 'COMPENSATED', simulation: true }, this.key(tenant), AAD('target', 'transaction', tenant, `comp:${certId}`)));
       return { compensated: true, restored_version: state.version + 1 };
     });
   }
