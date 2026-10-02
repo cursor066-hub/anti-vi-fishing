@@ -91,7 +91,9 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
   // evidence with no CSRF binding, so those paths take the POST check too
   // (w41-http F4). Bearer callers stay exempt: the header is never sent
   // ambiently.
-  const GET_AUDIT_WRITING = new Set(['/v1/audit/entries', '/v1/audit/consistency', '/v1/containment']);
+  // GET /v1/coverage demotes expired evidence through coverageTransition —
+  // a real chain write — so it belongs here too (w45-http M-1a).
+  const GET_AUDIT_WRITING = new Set(['/v1/audit/entries', '/v1/audit/consistency', '/v1/containment', '/v1/coverage']);
   function auth(req, getWrites = false) {
     const authorization = req.headers.authorization;
     if (authorization) { requireThat(/^Bearer [A-Za-z0-9_-]{43}$/.test(authorization), 'INV-401-AUTH', 'Authentication required', 401); return authenticateToken(authorization.slice(7)).principal; }
@@ -105,7 +107,15 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
     // char-length gate and throws inside timingSafeEqual — surfacing an
     // INV-500 where the contract promises INV-403 (w17-console F1).
     if (req.method !== 'GET' || getWrites) requireThat(typeof req.headers['x-csrf-token'] === 'string' && Buffer.byteLength(req.headers['x-csrf-token']) === session.csrf.length && timingSafeEqual(Buffer.from(req.headers['x-csrf-token']), Buffer.from(session.csrf)) && req.headers.origin === origin, 'INV-403-CSRF', 'Request origin or CSRF token rejected', 403);
-    fabric.authorize(session.principal, ['operator', 'approver', 'custodian', 'security', 'auditor', 'policy_admin', 'workload']); return session.principal;
+    fabric.authorize(session.principal, ['operator', 'approver', 'custodian', 'security', 'auditor', 'policy_admin', 'workload']);
+    // An ambient cookie GET is not consented evidence — a forged
+    // <img>-class request must never mint AUTHORIZATION_DENIED rows
+    // against the victim, so denial auditing is suppressed on the
+    // principal this request resolves to (w45-http M-1b). Marker is
+    // non-enumerable: it never leaks into response bodies or spreads.
+    const ambientPrincipal = { ...session.principal };
+    if (req.method === 'GET' && !getWrites) Object.defineProperty(ambientPrincipal, '_ambient_get', { value: true });
+    return ambientPrincipal;
   }
   // Break-glass authentication for /v1/audit/seal: resolve the credential
   // against the frozen auth tables only. The chain-derived revocation and
@@ -287,7 +297,12 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
         // (w6-fix F9).
         requestPrincipal = result.principal; bumpTenant();
         for (const [key, session] of sessions) if (session.expires <= fabric.clock()) sessions.delete(key);
-        requireThat(sessions.size < 1000, 'INV-503-CAPACITY', 'Session capacity reached', 503);
+        if (!(sessions.size < 1000)) {
+          // The tenant-cap sibling names its refusal — the global cap must
+          // too, or a login flood leaves no signed evidence (w45-http L-2).
+          try { fabric.store.audit(requestPrincipal.tenant_id, 'CONSOLE_SESSION_DENIED', requestPrincipal.subject_id, 'console', { reason: 'global_session_cap' }, fabric.clock()); } catch { /* best-effort */ }
+          requireThat(false, 'INV-503-CAPACITY', 'Session capacity reached', 503);
+        }
         // Per-tenant ceiling too: the global cap alone lets one spoofed
         // flood lock every other tenant out (w7-console F1).
         if (!([...sessions.values()].filter(s => s.principal.tenant_id === requestPrincipal.tenant_id).length < tenantSessionCap)) {
@@ -409,7 +424,10 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       if (path === '/v1/coverage' && req.method === 'GET') return send(200, fabric.coverage(p));
       if (path === '/v1/coverage' && req.method === 'POST') { fabric.authorize(p, ['security']); return send(201, fabric.declareCoverage(p, await body(req))); }
       if (path === '/v1/coverage/history' && req.method === 'GET') return send(200, fabric.coverageAt(p, qint(url.searchParams.get('at'), 'at', fabric.clock(), 0, 1e14)));
-      if ((m = /^\/v1\/coverage\/([A-Za-z0-9-]+)\/technical-validation$/.exec(path)) && req.method === 'POST') { fabric.authorize(p, ['security']); return send(200, fabric.technicalValidation(p, m[1], await body(req))); }
+      // The path-id alphabet is the identifier alphabet declarePath admits —
+      // ':'/'.'/'_' ids are legal coverage paths, so the route must reach
+      // them or a declared obligation can never close (w45-http HIGH).
+      if ((m = /^\/v1\/coverage\/([A-Za-z0-9_.:-]+)\/technical-validation$/.exec(path)) && req.method === 'POST') { fabric.authorize(p, ['security']); return send(200, fabric.technicalValidation(p, m[1], await body(req))); }
       if (path === '/v1/connectors' && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'policy_admin', 'auditor']); return send(200, fabric.target.manifest()); }
       if (path === '/v1/policies/simulate' && req.method === 'POST') { fabric.authorize(p, ['policy_admin', 'security']); return send(200, fabric.simulate(p, object(await body(req)))); }
       if (path === '/v1/audit-exports' && req.method === 'POST') { fabric.authorize(p, ['auditor', 'security']); const input = await body(req); fields(input, ['purpose']); return send(200, fabric.exportAudit(p, input.purpose)); }

@@ -386,7 +386,12 @@ test('w44-store H-1b: an Infinity-valued marker parses as evidence, never wedges
   try {
     // The marker is digest-only evidence — its content is never trusted
     // enough to reach canonical(), so an Infinity payload cannot wedge
-    // the open path.
+    // the open path. The delete alone is not the pass condition: the
+    // digest must land on a VERIFIED AAD_MIGRATION row first (w45-ledger
+    // MEDIUM-2 — an unattested delete is the laundering hole).
+    const rows = f2.store.db.prepare("SELECT envelope FROM audit WHERE json_valid(envelope) AND json_extract(envelope,'$.payload.type')='AAD_MIGRATION'").all();
+    assert.equal(rows.length, 1, 'marker digest attested on the migration row');
+    assert.equal(JSON.parse(rows[0].envelope).payload.metadata?.recovered_marker, true);
     assert.equal(f2.store.db.prepare("SELECT COUNT(*) n FROM meta_kv WHERE key='aad_migration'").get().n, 0);
   } finally { f2.close(); }
 });

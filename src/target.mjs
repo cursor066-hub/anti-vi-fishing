@@ -267,9 +267,19 @@ export class SimulatedTarget {
   // evidence the operator must see: it resets per scan and surfaces on the
   // grant listing, or a tamper could silently make grants disappear
   // (w38-runtime L-1).
+  // A dropped or rewritten table is integrity evidence inside the INV
+  // taxonomy, never bare sqlite noise escaping to callers (w45-fv M).
+  _schemaGuard(run) {
+    try { return run(); }
+    catch (e) {
+      if (/no such table|no such column|not a database|malformed/i.test(e?.message ?? ''))
+        throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e });
+      throw e;
+    }
+  }
   grants(tenant, subject_id, now) {
     const out = []; let corrupt = 0;
-    for (const r of this.db.prepare('SELECT grant_id, value FROM grants WHERE tenant=?').all(tenant)) {
+    for (const r of this._schemaGuard(() => this.db.prepare('SELECT grant_id, value FROM grants WHERE tenant=?').all(tenant))) {
       let g; try { g = this._dec(r.value, tenant, AAD('target', 'grant', tenant, r.grant_id)); } catch { corrupt++; continue; }
       if (g.subject_id === subject_id && g.expires_at > now && !g.revoked) out.push(g);
     }

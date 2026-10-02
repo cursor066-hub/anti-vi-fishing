@@ -112,8 +112,12 @@ export class Store {
     // ('\u0074ype') folds identically yet vanishes from a LIKE scan, so
     // every fold-free death/rotation/seal sweep keys on the PARSED type
     // (json_valid guards malformed rows the LIKE would have skipped —
-    // the fold convicts those rows separately) (w44-store H-3).
-    for (const row of this.db.prepare("SELECT seq,envelope FROM audit WHERE tenant=? AND json_valid(envelope) AND json_extract(envelope,'$.payload.type') IN ('AUTHORITY_REVOKED','KEY_ROTATED','AUDIT_SEALED','AUDIT_SEAL_CARRY')").all(tenant)) {
+    // the fold convicts those rows separately) (w44-store H-3). And a
+    // dup-key decoy — sqlite reads the FIRST dup member where JSON.parse
+    // reads the LAST — must always be a candidate: canonical writers
+    // never mint dups, so any dup at root or $.payload is adversarial
+    // evidence the JS parse must see (w45-fv HIGH).
+    for (const row of this.db.prepare("SELECT seq,envelope FROM audit WHERE tenant=? AND json_valid(envelope) AND (json_extract(envelope,'$.payload.type') IN ('AUTHORITY_REVOKED','KEY_ROTATED','AUDIT_SEALED','AUDIT_SEAL_CARRY') OR EXISTS (SELECT 1 FROM json_each(envelope,'$') GROUP BY \"key\" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload') GROUP BY \"key\" HAVING COUNT(*)>1))").all(tenant)) {
       let env; try { env = JSON.parse(row.envelope); } catch { continue; }
       const pl = env?.payload, meta = pl?.metadata;
       // Earliest death wins — a second death event must never extend a
@@ -277,7 +281,7 @@ export class Store {
       } catch { /* forged or unverifiable tail row — keep walking back */ }
     }
     requireThat(floorSeeded || this.db.prepare('SELECT COUNT(*) n FROM audit').get().n === 0, 'INV-409-AUDIT-TAMPER', 'Audit tail carries no verifiable entry — ledger tamper', 409);
-    for (const row of this.db.prepare("SELECT tenant,envelope FROM audit WHERE json_valid(envelope) AND json_extract(envelope,'$.payload.type')='CLOCK_RECOVERED' ORDER BY rowid DESC LIMIT 512").all()) {
+    for (const row of this.db.prepare("SELECT tenant,envelope FROM audit WHERE json_valid(envelope) AND (json_extract(envelope,'$.payload.type')='CLOCK_RECOVERED' OR EXISTS (SELECT 1 FROM json_each(envelope,'$') GROUP BY \"key\" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload') GROUP BY \"key\" HAVING COUNT(*)>1)) ORDER BY rowid DESC LIMIT 512").all()) {
       try {
         const env = JSON.parse(row.envelope);
         if (env?.payload?.type !== 'CLOCK_RECOVERED') continue;
@@ -631,7 +635,7 @@ export class Store {
         if (typeof env?.payload?.time === 'number' && Number.isFinite(env.payload.time) && env.payload.time > (this._chainFloor ?? 0)) this._chainFloor = env.payload.time;
       } catch { /* unverifiable head — floor holds its last attested value */ }
     }
-    for (const row of this.db.prepare("SELECT tenant,envelope FROM audit WHERE json_valid(envelope) AND json_extract(envelope,'$.payload.type')='CLOCK_RECOVERED' ORDER BY rowid DESC LIMIT 512").all()) {
+    for (const row of this.db.prepare("SELECT tenant,envelope FROM audit WHERE json_valid(envelope) AND (json_extract(envelope,'$.payload.type')='CLOCK_RECOVERED' OR EXISTS (SELECT 1 FROM json_each(envelope,'$') GROUP BY \"key\" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload') GROUP BY \"key\" HAVING COUNT(*)>1)) ORDER BY rowid DESC LIMIT 512").all()) {
       try {
         const env = JSON.parse(row.envelope);
         if (env?.payload?.type !== 'CLOCK_RECOVERED') continue;

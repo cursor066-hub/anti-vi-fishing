@@ -1,5 +1,5 @@
 import { createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify, randomBytes, createHmac } from 'node:crypto';
-import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync, renameSync, rmSync, openSync, closeSync, fsyncSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync, renameSync, rmSync, openSync, closeSync, fsyncSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { canonical, digest } from './canonical.mjs';
 import { encrypt, decrypt, SUITES, verifySuite, signSuite, verifySigned, ctEqual } from './crypto.mjs';
@@ -16,6 +16,14 @@ const stateMac = (masterKey, state) => createHmac('sha256', masterKey).update(ca
 // This is NOT a real HSM: the attestation says so (KEY-003 honest profile).
 
 export { SUITES };
+// Tighten to owner-only only when the current mode actually leaks —
+// read-only mounts (k8s secret topology) answer chmod with EROFS even on
+// files already at 0400, so a compliant file must never pay the syscall
+// (w45-ledger HIGH-2).
+export const tightenOwnerOnly = (path, name = path) => {
+  if ((statSync(path).mode & 0o077) === 0) return;
+  try { chmodSync(path, 0o600); } catch (e) { throw new InvariantError('INV-503-CONFIG', `${name} permissions cannot be tightened to owner-only`, 503, { cause: e }); }
+};
 export const FIRMWARE = 'if-softhsm-1.0.0';
 export const STORE_FORMAT = 'IF-SOFTHSM-STORE-1';
 
@@ -173,7 +181,7 @@ export class KeyVault {
     // The vault file is private material at rest — tighten before
     // reading, never after: permissive bits healed post-read still
     // leaked the window (w44-store L-1, same ordering as _openVault).
-    try { chmodSync(path, 0o600); } catch (e) { throw new InvariantError('INV-503-CONFIG', 'keystore.json permissions cannot be tightened to owner-only', 503, { cause: e }); }
+    tightenOwnerOnly(path, 'keystore.json');
     // A hostile or truncated vault file must classify inside the INV
     // taxonomy like every other store corruption — never a raw
     // SyntaxError off the boot path (w30-store F2).
@@ -206,7 +214,7 @@ export class KeyVault {
     if (existsSync(storePath) && existsSync(masterPath)) {
       // Tighten before reading — the daemon path (KeyVault.open/load) must
       // heal perms here, not rely on the Fabric sweep (w44-store L-1).
-      try { chmodSync(masterPath, 0o600); } catch (e) { throw new InvariantError('INV-503-CONFIG', 'master.key permissions cannot be tightened to owner-only', 503, { cause: e }); }
+      tightenOwnerOnly(masterPath, 'master.key');
       // A corrupt master file is a config failure with an INV code, not a
       // raw parser exception escaping the taxonomy (w11-fixverify R4).
       const master = (() => { try { return JSON.parse(readFileSync(masterPath, 'utf8')); } catch { throw new InvariantError('INV-503-CONFIG', 'master.key is unreadable or corrupt', 503); } })();

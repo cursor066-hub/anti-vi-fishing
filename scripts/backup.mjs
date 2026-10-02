@@ -9,7 +9,7 @@ import { mkdirSync, writeFileSync, readFileSync, chmodSync, createReadStream, ex
 import { createHash } from 'node:crypto';
 import { join, basename } from 'node:path';
 import { signed } from '../src/crypto.mjs';
-import { KeyVault } from '../src/keystore.mjs';
+import { KeyVault, tightenOwnerOnly } from '../src/keystore.mjs';
 
 const args = process.argv.slice(2);
 // A flag never satisfies an option's value — `--dir --out` must be a usage
@@ -47,8 +47,10 @@ let signManifest = null;
 const masterPath = join(dir, 'master.key'), storePath = join(dir, 'keystore.json');
 if (existsSync(masterPath) && existsSync(storePath)) {
   // Private material reads tighten first — the backup path never relies on
-  // the daemon's own heal (w44-store L-1).
-  chmodSync(masterPath, 0o600); chmodSync(storePath, 0o600);
+  // the daemon's own heal (w44-store L-1). Stat-gated so read-only mounts
+  // and foreign-owned compliant files don't wedge on EROFS/EPERM
+  // (w45-ledger HIGH-2).
+  tightenOwnerOnly(masterPath, 'master.key'); tightenOwnerOnly(storePath, 'keystore.json');
   const vault = KeyVault.load(storePath, JSON.parse(readFileSync(masterPath, 'utf8')).master_key);
   // Signer: the configured audit key, else the first vault key purpose-bound
   // to 'backup-manifest' (config-less dirs still sign honestly).
