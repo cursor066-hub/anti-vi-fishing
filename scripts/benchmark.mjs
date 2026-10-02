@@ -3,14 +3,8 @@ import { cpus, totalmem, platform, arch } from 'node:os';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { fixture, runtimeInput, runtimeRequest } from '../tests/helpers.mjs';
 import { evaluatePolicy } from '../src/policy.mjs';
+import { percentile, summary, integratedTargetOps } from './bench-common.mjs';
 const h = fixture(null, ['acme']);
-const percentile = (values, q) => [...values].sort((a, b) => a - b)[Math.min(values.length - 1, Math.floor(values.length * q))];
-// ops/sec divides by the SUM of measured per-operation times, not total
-// wall-clock: a shared-runner scheduler or GC pause BETWEEN operations is
-// not part of the operation's cost. A uniform slowdown of the code itself
-// still fails the asserted bound identically (w9 CI: hosted 4-vCPU noise
-// produced a 86ms p95 while per-op times stayed ~3ms).
-function summary(values, elapsed) { const spent = values.reduce((a, b) => a + b, 0); return { samples: values.length, p50_ms: percentile(values, .5), p95_ms: percentile(values, .95), p99_ms: percentile(values, .99), operations_per_second: values.length * 1000 / (spent || elapsed) }; }
 try {
   // Environment calibration: the certify path exercises the same
   // sqlite-WAL-fsync + signing mix the integrated loop measures, so its
@@ -53,11 +47,9 @@ try {
   // bound scales with the calibration above: 100/s on the reference
   // environment, proportionally less on measurably slower silicon, never
   // below the 60/s floor.
-  const REFERENCE_CALIBRATION_MS = 45;
-  const environment_scale = Math.min(1, REFERENCE_CALIBRATION_MS / calibration_ms);
   // Within 10% of the reference box this IS a reference-class runner —
   // assert the full claim; below that, scale proportionally to the floor.
-  const integrated_target_ops = environment_scale >= 0.9 ? 100 : Math.max(60, Math.round(100 * environment_scale));
+  const { environment_scale, integrated_target_ops } = integratedTargetOps(calibration_ms);
   const asserted_targets = { core_p95_at_most_250_ms: core.p95_ms <= 250, core_p99_at_most_750_ms: core.p99_ms <= 750, integrated_evaluations_per_second_at_least: control.best_round_operations_per_second >= integrated_target_ops };
   const observations = { runtime_p99_ms: local.p99_ms, runtime_p99_at_1_ms_target_met: local.p99_ms <= 1 };
   const result = { reference_environment: { node: process.version, os: platform(), architecture: arch(), cpu: cpus()[0]?.model ?? 'unknown', logical_cpus: cpus().length, memory_bytes: totalmem(), isolated_environment: true }, environment_calibration_ms: calibration_ms, environment_scale, integrated_target_ops_per_second: integrated_target_ops, core_deterministic_evaluation: core, integrated_evaluation_with_sqlite_audit: control, local_software_runtime_with_signed_audit: local, target_network_latency: 'not measured: no external target connector', asserted_targets, observations, production_capacity_claim: false, caveat: 'Single-node microbenchmark, warm process, synthetic data and virtual policy clock advanced to respect budget/rate limits; not a production load, soak, packet or multi-zone benchmark.' };

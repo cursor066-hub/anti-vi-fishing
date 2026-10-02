@@ -101,9 +101,13 @@
       "lines": 108,
       "bytes": 7306
     },
+    "scripts/bench-common.mjs": {
+      "lines": 25,
+      "bytes": 1924
+    },
     "scripts/benchmark.mjs": {
-      "lines": 67,
-      "bytes": 6631
+      "lines": 59,
+      "bytes": 5795
     },
     "scripts/canonical-vectors.py": {
       "lines": 39,
@@ -210,8 +214,8 @@
       "bytes": 29561
     },
     "tests/ledger3.test.mjs": {
-      "lines": 503,
-      "bytes": 32638
+      "lines": 521,
+      "bytes": 33986
     },
     "tests/lifecycle.test.mjs": {
       "lines": 135,
@@ -534,6 +538,6 @@
       "bytes": 6499
     }
   },
-  "total_files": 133,
-  "total_lines": 34808
+  "total_files": 134,
+  "total_lines": 34843
 }
