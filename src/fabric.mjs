@@ -111,6 +111,14 @@ export class Fabric {
   // F4: the file is re-read every call, the parse is what caches).
   #headWmRaw = undefined;
   #headWmParsed = null;
+  // entry-object → resolved seq memo: #headWmParsed returns the SAME entry
+  // object while the file bytes are unchanged, so identity-keying skips the
+  // signature re-verify on every fold (w38 CI: verify per read halved
+  // evaluate() throughput; NFR-PERF-004 regressed on CI runners).
+  #wmVerified = new Map();
+  // audit-checkpoint row digest → attested size, pinned to the verifier-key
+  // fingerprint — rotation invalidates, tampered row bytes re-verify (w38 CI).
+  #cpHeadVerify = new Map();
   constructor(config, directory, clock = Date.now, { vault = null } = {}) {
     requireThat(config.profile === 'engineering', 'INV-503-RELEASE', 'Production mode is blocked: external acceptance evidence is missing', 503);
     this.config = config; this.directory = directory; this.clock = clock;
@@ -696,13 +704,30 @@ export class Fabric {
             // (w37 M-1 / w38-store F-1).
             let checkpoint = 0, checkpoints = 0;
             const cpKeys = this._verifyKeysCached(tenant, 'audit');
+            // Verify each distinct checkpoint row once per verifier-key
+            // fingerprint — the flush runs on every commit edge, so the
+            // ECDSA cost is paid per row digest, not per append (w38 CI:
+            // the sweep halved evaluate() headroom on shared runners).
+            const cpFp = Object.keys(cpKeys).sort().map(k => `${k}:${cpKeys[k].public_key}`).join('|');
+            let cpCache = this.#cpHeadVerify.get(tenant);
+            if (cpCache?.fp !== cpFp) { cpCache = { fp: cpFp, sizes: new Map() }; this.#cpHeadVerify.set(tenant, cpCache); }
             for (const id of this.store.ids(tenant, 'audit-checkpoint', 1_000_000)) {
-              try {
-                const pl = verifySigned(this.store.get(tenant, 'audit-checkpoint', id), cpKeys, 'checkpoint');
-                if (pl.tenant_id !== tenant || !Number.isSafeInteger(pl.size)) continue;
-                checkpoints++;
-                checkpoint = Math.max(checkpoint, pl.size);
-              } catch { /* planted or undecryptable — not attestable residue */ }
+              // An unreadable or undecryptable stored row is planted
+              // residue — the claim counts only what VERIFIES, and a
+              // get() throw must not strand the pending head (w38 CI).
+              let row, rd;
+              try { row = this.store.get(tenant, 'audit-checkpoint', id); rd = digest(row); } catch { continue; }
+              let size = cpCache.sizes.get(rd);
+              if (size === undefined) {
+                try {
+                  const pl = verifySigned(row, cpKeys, 'checkpoint');
+                  size = pl.tenant_id === tenant && Number.isSafeInteger(pl.size) ? pl.size : null;
+                } catch { size = null; /* planted or undecryptable — not attestable residue */ }
+                if (cpCache.sizes.size < 4_096) cpCache.sizes.set(rd, size);
+              }
+              if (size === null) continue;
+              checkpoints++;
+              checkpoint = Math.max(checkpoint, size);
             }
             const ridxMint = this._auditIndex(tenant);
             let revocations = 0;
@@ -736,6 +761,7 @@ export class Fabric {
         // read — normalize in the writer and refuse it in the reader
         // (w27-chainheads F5).
         if (!file.tenants || typeof file.tenants !== 'object' || Array.isArray(file.tenants)) file.tenants = {};
+        const wmWinners = new Map();
         for (const [tenant, h, env, pubs, deadAt] of signed) {
           // Monotone per tenant — but on the VERIFIED payload only. An
           // existing entry whose signature fails is planted state: it may
@@ -767,9 +793,10 @@ export class Fabric {
             const deadSigned = deadSeq !== undefined && existingPl?.seq > deadSeq;
             if (existingPl && !deadSigned && existingPl.tenant_id === tenant && Number.isSafeInteger(existingPl.seq)
               && (existingPl.seq > h.seq || (existingPl.seq === h.seq && existingPl.hash === h.hash))
-              && !h.reanchor) continue;
+              && !h.reanchor) { wmWinners.set(tenant, { seq: existingPl.seq, envelope: existing }); continue; }
           }
           file.tenants[tenant] = env;
+          wmWinners.set(tenant, { seq: h.seq, envelope: env });
         }
         // Re-verify the hold immediately before committing the file: a
         // holder that stalled past the stale window may already have been
@@ -783,6 +810,35 @@ export class Fabric {
         // Our own write changed the bytes after the cached read — drop the
         // snapshot so the next _chainHead re-reads what we just landed.
         this.#chainHeadRaw = undefined;
+        // The watermark rides the same critical section: its durable floor
+        // is exactly the verified head this flush just landed, so the same
+        // envelope doubles as the watermark's signature — no second signing
+        // pass and no second lock acquisition on the commit edge (w38 CI:
+        // the standalone bump's sign+lock+write on every fold regressed
+        // NFR-PERF-004). Non-flush bump callers still self-sign headmark
+        // envelopes.
+        try {
+          const wmFile = this._readHeadWatermark() ?? {};
+          let wmChanged = false;
+          for (const [tenant, win] of wmWinners) {
+            const cur = wmFile[tenant];
+            // A higher SIGNED entry survives: overwriting it would launder
+            // the two-file rollback it exists to convict (heads replayed
+            // low, watermark left high → wedge on the next fold). A bare
+            // number above the winner is unsigned and is replaced — it was
+            // never allowed to pin past the head anyway.
+            if (cur !== null && typeof cur === 'object' && cur.envelope !== undefined && cur.seq > win.seq) continue;
+            wmFile[tenant] = { seq: win.seq, envelope: win.envelope };
+            this.#headWm.set(tenant, win.seq);
+            wmChanged = true;
+          }
+          if (wmChanged) {
+            const wpath = join(this.directory, 'head-watermark.json');
+            writeFileSync(`${wpath}.tmp`, canonical({ format: 'IF-HEADMARK-1', tenants: wmFile }) + '\n', { mode: 0o600 });
+            renameSync(`${wpath}.tmp`, wpath);
+            this.#headWmRaw = undefined;
+          }
+        } catch { /* a failed watermark write degrades to the fold's own bump path — never a flush wedge */ }
       });
     } catch (err) { restore(); throw err; }
   }
@@ -943,18 +999,26 @@ export class Fabric {
   // unsigned entry degrades to the bootstrap floor and is named in the
   // tamper set the seal reports (w38 runtime-gate F-2).
   #watermarkSeq(tenant, entry) {
+    const memo = this.#wmVerified.get(tenant);
+    if (memo?.entry === entry) return memo.seq;
+    const done = seq => { this.#wmVerified.set(tenant, { entry, seq }); return seq; };
     const head = this._chainHead(tenant);
     const cap = head && head !== 'corrupt' ? head.seq : 0;
     if (entry !== null && typeof entry === 'object') {
-      const verified = (() => { try { const p = verifySigned(entry.envelope, this.auditPublicKeys(tenant), 'audit'); return p.format === 'IF-HEADMARK-1' && p.head_seq === entry.seq && p.tenant_id === tenant; } catch { return false; } })();
-      if (verified && Number.isSafeInteger(entry.seq) && entry.seq >= 0) return entry.seq;
+      // Two signed shapes bind a floor: a self-signed headmark envelope
+      // ({format:'IF-HEADMARK-1', head_seq}) from non-flush bump callers,
+      // and a regular chain-head envelope ({seq, hash, …}) copied in by the
+      // flush — both pin the entry seq to a verified audit-purpose
+      // signature for this tenant (w38 runtime-gate F-2).
+      const verified = (() => { try { const p = verifySigned(entry.envelope, this.auditPublicKeys(tenant), 'audit'); const bound = p.format === 'IF-HEADMARK-1' ? p.head_seq : p.seq; return p.tenant_id === tenant && bound === entry.seq; } catch { return false; } })();
+      if (verified && Number.isSafeInteger(entry.seq) && entry.seq >= 0) return done(entry.seq);
       this.#wmTamper.set(tenant, 'signature');
-      return cap;
+      return done(cap);
     }
-    if (Number.isSafeInteger(entry) && entry >= 0 && entry <= cap) return entry;
-    if (Number.isSafeInteger(entry) && entry > cap) { this.#wmTamper.set(tenant, 'unsigned_above_head'); return cap; }
+    if (Number.isSafeInteger(entry) && entry >= 0 && entry <= cap) return done(entry);
+    if (Number.isSafeInteger(entry) && entry > cap) { this.#wmTamper.set(tenant, 'unsigned_above_head'); return done(cap); }
     this.#wmTamper.set(tenant, 'malformed');
-    return cap;
+    return done(cap);
   }
   // The seal report names every watermark entry that failed verification
   // or was unsigned above the committed head — spreadable into any of its
