@@ -3544,7 +3544,6 @@
         "additionalProperties": false,
         "required": [
           "ceremony_id",
-          "tenant_id",
           "purpose",
           "threshold",
           "custodians",
