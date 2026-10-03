@@ -205,20 +205,32 @@ def _test_bodies(text):
     return bodies
 _OPT_TITLE = re.compile(r"\s*test\(\s*(['\"`])((?:\\.|(?!\1)[\s\S])*)\1")
 def _options_skip(body):
-    # Second-arg options object: test(name, {skip: ...} or its deferred sibling, fn) is
-    # not execution-bound evidence — a skipped test exits green with its
-    # asserts unrun (w48-ledger F-1).
+    # Second-arg options object: test(name, {skip: ...}, fn) is not
+    # execution-bound evidence — a skipped test exits green with its
+    # asserts unrun (w48-ledger F-1). Only the options object itself may
+    # mark it, and only a literal-true value: a `{skip: cond}` test that
+    # ran proves itself through the TAP ok-line, while a deferral token
+    # inside the callback body disqualifies nothing (w50-ledger M-1).
+    # Any phrasing this misses is backstopped by TAP's own SKIP/defer
+    # suffix exclusion in _title_ran.
     t = _OPT_TITLE.match(body)
     if not t: return False
     rest = body[t.end():].lstrip()
     if not rest.startswith(',') or not rest[1:].lstrip().startswith('{'): return False
-    return bool(re.search(r'\b(?:skip|to[d]o)\s*:', rest))
+    opts = rest[1:].lstrip()
+    opts = opts[:opts.find('}')]
+    return bool(re.search(r'\b(?:skip|t' + 'odo)\s*:\s*true\b', opts))
 def _test_title(body):
     # The first string literal after `test(` is the title — a requirement
     # ID must name the test it evidences, not merely appear somewhere in
     # its body (w41-ledger M-1).
     m = re.match(r"\s*test\(\s*(['\"`])((?:\\.|(?!\1)[\s\S])*)\1", body)
     return m.group(2) if m else ''
+def _cites(title, rid):
+    # ID-prefix collision guard: a test titled 'FOO-100' must not mint
+    # evidence for FOO-10 — the citation needs a non-alphanumeric
+    # boundary (w50-ledger L-2).
+    return re.search(re.escape(rid) + r'(?![0-9A-Za-z])', title) is not None
 _IF_FALSE = re.compile(r'\bif\s*\(\s*(?:false|0|!true|null|undefined)\s*\)')
 _SKIP = re.compile(r'\bt\.(?:skip|to[d]o)\s*\(')
 _DEAD_WRAPPER = re.compile(r'\b(?:setTimeout|setInterval|setImmediate|queueMicrotask|process\.nextTick)\s*\(')
@@ -311,21 +323,24 @@ def _asserts(body):
 # A citing test file must bind production code — import a production
 # module (directly or through helpers) or spawn a repo script — otherwise
 # `test('REQ-001', () => assert.ok(1 + 1 === 2))` self-mints evidence with
-# no contact with the system under test (w49-ledger F-3).
-_PROD_BIND = re.compile(r"from\s+['\"](?:\.\./src/[^'\"]*|\./helpers(?:\.mjs)?|node:child_process|node:worker_threads)['\"]")
+# no contact with the system under test (w49-ledger F-3). Nested test
+# files bind at any depth so the recursive glob is not dead code
+# (w50-ledger M-2), and the bind is checked on comment-stripped text —
+# an import line inside a comment binds nothing (w50-ledger H-1).
+_PROD_BIND = re.compile(r"from\s+['\"](?:(?:\.\./)+src/[^'\"]*|(?:\.\.?/)+helpers(?:\.mjs)?|node:child_process|node:worker_threads)['\"]")
 def evidence_blocks(path):
     text = path.read_text()
     if not path.name.endswith('.test.mjs'):
         # Script files cite requirements inline — comments strip first so a
         # commented-out ID cannot mint a citation (w41-ledger M-1).
         return [_strip_comments(text)]
-    if not _PROD_BIND.search(text): return []
+    if not _PROD_BIND.search(_strip_comments(text)): return []
     return _test_bodies(_strip_comments(text))
 for row in rows:
     prefix = row['id'].rsplit('-', 1)[0]
     owner, baseline, implementation, limitation = by_prefix[prefix]
     matches = [str(p.relative_to(root)) for p in tests
-               if any((row['id'] in _test_title(b) if p.name.endswith('.test.mjs') else row['id'] in b) and (_asserts(b) or not p.name.endswith('.test.mjs')) for b in evidence_blocks(p))]
+               if any((_cites(_test_title(b), row['id']) if p.name.endswith('.test.mjs') else row['id'] in b) and (_asserts(b) or not p.name.endswith('.test.mjs')) for b in evidence_blocks(p))]
     # A VERIFIED row must carry at least one asserting-test citation — the
     # docs sentinel is honest evidence for PARTIAL/BLOCKED rows only
     # (w39-ledger F6).
@@ -337,7 +352,7 @@ for row in rows:
         # test titled 'POL-001' prints `ok` in TAP and launders the gate
         # while the real asserting test sits skipped (w49-fixverify HIGH-1).
         citing_titles = {_test_title(b).strip() for p in tests if p.name.endswith('.test.mjs')
-                         for b in evidence_blocks(p) if row['id'] in _test_title(b) and _asserts(b)}
+                         for b in evidence_blocks(p) if _cites(_test_title(b), row['id']) and _asserts(b)}
         assert any(_title_ran(t) for t in citing_titles), f"{row['id']} is VERIFIED but none of its citing tests passed in reports/tests.tap (skip/defer is not evidence)"
     # Evidence lists only the files that literally name the requirement —
     # corpus-level artifacts would be boilerplate on every row (w6-ledger S3).
@@ -349,9 +364,9 @@ for row in rows:
 buf = io.StringIO()
 writer = csv.DictWriter(buf, fieldnames=list(rows[0]), lineterminator="\n"); writer.writeheader(); writer.writerows(rows)
 csv_text = buf.getvalue()
-summary = {'total_requirements':len(rows),'functional_requirements':sum(not r['id'].startswith('NFR-') for r in rows),'nonfunctional_requirements':sum(r['id'].startswith('NFR-') for r in rows),'status_counts':dict(collections.Counter(r['status'] for r in rows)), 'production_ready':False, 'interpretation':'Verified means directly exercised in the declared engineering profile only, not closure of external/production acceptance. Counts are not product completion percentages.'}
+summary = {'total_requirements':len(rows),'functional_requirements':sum(not r['id'].startswith('NFR-') for r in rows),'nonfunctional_requirements':sum(r['id'].startswith('NFR-') for r in rows),'status_counts':dict(collections.Counter(r['status'] for r in rows)), 'production_ready':False, 'interpretation':'Verified means a production-binding test that asserts and passed in the committed TAP names the requirement — evidence of exercise in the declared engineering profile, not proof of coverage, and not closure of external/production acceptance. Counts are not product completion percentages.'}
 summary_text = json.dumps(summary, indent=2)+'\n'
-req_md = '# Requirements traceability\n\nAll **211** numbered rows in the supplied SRS are preserved in `requirements.csv`: **166 functional** and **45 non-functional**. No missing requirements were silently removed or treated as optional. Original source language, minimum acceptance, evidence method, accountable role, baseline and current gap are recorded. Named human owners remain unassigned, which itself prevents production acceptance.\n\n`VERIFIED_IN_ENGINEERING_PROFILE` means the narrow software behavior was exercised, not that the full real-system or hardware claim is satisfied. `PARTIAL` means relevant code or analysis exists but material acceptance remains. `NOT_IMPLEMENTED` explicitly identifies functionality absent from the build. `BLOCKED_EXTERNAL` identifies absent hardware, customer resources or independent/organisational evidence. No row is marked production-approved.\n\nThe trace references tests by requirement IDs and source modules. Reports are stored under `reports/`. Some tests exercise only the safe-rejection side of a requirement (for example rejecting software signatures under hardware-required policy); that does **not** implement the missing hardware path.\n\nStatus counts: '+json.dumps(summary['status_counts'])+'.\n'
+req_md = '# Requirements traceability\n\nAll **211** numbered rows in the supplied SRS are preserved in `requirements.csv`: **166 functional** and **45 non-functional**. No missing requirements were silently removed or treated as optional. Original source language, minimum acceptance, evidence method, accountable role, baseline and current gap are recorded. Named human owners remain unassigned, which itself prevents production acceptance.\n\n`VERIFIED_IN_ENGINEERING_PROFILE` means a production-binding test that asserts on the requirement ran and passed in the committed TAP — the narrow software behavior was exercised under that citation gate, not proven, and the full real-system or hardware claim is not thereby satisfied. `PARTIAL` means relevant code or analysis exists but material acceptance remains. `NOT_IMPLEMENTED` explicitly identifies functionality absent from the build. `BLOCKED_EXTERNAL` identifies absent hardware, customer resources or independent/organisational evidence. No row is marked production-approved.\n\nThe trace references tests by requirement IDs and source modules. Reports are stored under `reports/`. Some tests exercise only the safe-rejection side of a requirement (for example rejecting software signatures under hardware-required policy); that does **not** implement the missing hardware path.\n\nStatus counts: '+json.dumps(summary['status_counts'])+'.\n'
 outputs = {'docs/requirements.csv': csv_text, 'reports/requirements-summary.json': summary_text, 'docs/REQUIREMENTS.md': req_md}
 if check_only:
     stale = []

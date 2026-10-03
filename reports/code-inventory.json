@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 7964,
-      "bytes": 613253
+      "lines": 8029,
+      "bytes": 618962
     },
     "src/issuerd.mjs": {
       "lines": 942,
@@ -74,24 +74,24 @@
       "bytes": 13696
     },
     "src/server.mjs": {
-      "lines": 543,
-      "bytes": 52600
+      "lines": 561,
+      "bytes": 54051
     },
     "src/shamir.mjs": {
       "lines": 91,
       "bytes": 3876
     },
     "src/store.mjs": {
-      "lines": 1185,
-      "bytes": 87441
+      "lines": 1222,
+      "bytes": 90014
     },
     "src/target.mjs": {
-      "lines": 610,
-      "bytes": 44772
+      "lines": 622,
+      "bytes": 45713
     },
     "web/app.js": {
-      "lines": 256,
-      "bytes": 34191
+      "lines": 263,
+      "bytes": 34883
     },
     "scripts/ai-eval.mjs": {
       "lines": 38,
@@ -114,12 +114,12 @@
       "bytes": 1523
     },
     "scripts/check.mjs": {
-      "lines": 263,
-      "bytes": 14369
+      "lines": 285,
+      "bytes": 16308
     },
     "scripts/generate-contracts.mjs": {
-      "lines": 107,
-      "bytes": 19466
+      "lines": 110,
+      "bytes": 19753
     },
     "scripts/generate-vectors.mjs": {
       "lines": 143,
@@ -139,7 +139,7 @@
     },
     "scripts/report.mjs": {
       "lines": 210,
-      "bytes": 15094
+      "bytes": 15140
     },
     "scripts/restore-check.mjs": {
       "lines": 170,
@@ -154,8 +154,8 @@
       "bytes": 269
     },
     "scripts/traceability.py": {
-      "lines": 371,
-      "bytes": 31067
+      "lines": 386,
+      "bytes": 32269
     },
     "scripts/verify-export-webcrypto.mjs": {
       "lines": 114,
@@ -202,8 +202,8 @@
       "bytes": 14539
     },
     "tests/http-concurrency-ui.test.mjs": {
-      "lines": 263,
-      "bytes": 22300
+      "lines": 265,
+      "bytes": 22483
     },
     "tests/issuerd.test.mjs": {
       "lines": 119,
@@ -493,6 +493,14 @@
       "lines": 96,
       "bytes": 6240
     },
+    "tests/w50.test.mjs": {
+      "lines": 205,
+      "bytes": 12180
+    },
+    "tests/w50b.test.mjs": {
+      "lines": 198,
+      "bytes": 12644
+    },
     "tests/w6-fix.test.mjs": {
       "lines": 186,
       "bytes": 14384
@@ -550,6 +558,6 @@
       "bytes": 6499
     }
   },
-  "total_files": 137,
-  "total_lines": 36179
+  "total_files": 139,
+  "total_lines": 36763
 }

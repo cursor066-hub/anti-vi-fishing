@@ -206,4 +206,4 @@ Independent verification: node:crypto export verifier, WebCrypto/bun export veri
 const tapFailNames = (tapText.match(/^not ok \d+ [^\n]*/gm) ?? []).slice(0, 25);
 console.log(JSON.stringify(checkOnly ? { check_only: true, stale, stale_detail: staleDetail, tests: counts, tap_status: tap.status, tap_signal: tap.signal ?? null, tap_error: tap.error?.message ?? null, tap_failures: tapFailNames } : { regenerated: true, tests: counts, sims, ledger: statusCounts }));
 if (stale.length) { console.error(`stale committed reports: ${stale.join(', ')} — run node scripts/report.mjs and commit`); process.exitCode = 1; }
-if (counts.fail > 0 || tap.status !== 0) process.exitCode = 1;
+if (counts.fail > 0 || tap.status !== 0 || nodeVerify.status !== 0 || py.status !== 0) process.exitCode = 1;

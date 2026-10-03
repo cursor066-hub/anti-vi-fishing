@@ -663,6 +663,13 @@ export class Store {
     const pair = () => {
       this._stmt('DELETE FROM deks WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id);
       this._stmt('DELETE FROM records WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id);
+      // A planted BEFORE DELETE RAISE(IGNORE) swallows the row silently —
+      // changes()==0 is indistinguishable from absent at the delta level,
+      // so probe the residue: a surviving row is trigger evidence, never
+      // 'already gone' (w50-fv F-2).
+      requireThat(!this._stmt('SELECT 1 FROM deks WHERE tenant=? AND kind=? AND id=?').get(tenant, kind, id)
+        && !this._stmt('SELECT 1 FROM records WHERE tenant=? AND kind=? AND id=?').get(tenant, kind, id),
+        'INV-409-INTEGRITY', 'Delete refused by a planted trigger — tamper evidence', 409);
     };
     if (this.db.isTransaction) pair(); else this.tx(pair);
     if (!this.db.isTransaction) this.checkpoint(); // non-tx paths must not leave the DEK in the WAL (store-audit LOW)
@@ -687,8 +694,16 @@ export class Store {
     // and stay honest in the retention report.
     // The pair deletes atomically when no caller tx is open — a crash
     // between them leaves dekless residue, not a verdict (w32-store F5).
-    const pair = () => this._stmt('DELETE FROM deks WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id).changes
-      + this._stmt('DELETE FROM records WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id).changes;
+    const pair = () => {
+      const changes = this._stmt('DELETE FROM deks WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id).changes
+        + this._stmt('DELETE FROM records WHERE tenant=? AND kind=? AND id=?').run(tenant, kind, id).changes;
+      // Same residue probe as remove(): a swallowed delete must convict,
+      // not read as 'nothing was there' (w50-fv F-2).
+      requireThat(!this._stmt('SELECT 1 FROM deks WHERE tenant=? AND kind=? AND id=?').get(tenant, kind, id)
+        && !this._stmt('SELECT 1 FROM records WHERE tenant=? AND kind=? AND id=?').get(tenant, kind, id),
+        'INV-409-INTEGRITY', 'Shred refused by a planted trigger — tamper evidence', 409);
+      return changes;
+    };
     const changes = this.db.isTransaction ? pair() : this.tx(pair);
     this._shredded = this._shredded || changes > 0;
     this._dirtSeq = (this._dirtSeq ?? 0) + 1;
@@ -829,18 +844,29 @@ export class Store {
       // evidence — a planted mimic trigger replaying a known guard's
       // RAISE text is indistinguishable from the real guard firing, so
       // the allowlist arm laundered planted payloads into raw errors
-      // (w48-store W48-3). Our own guards never fire on a legitimate
-      // write; anything that does is a refusal worth wedging on.
+      // (w48-store W48-3). The one legitimate-fire exception is the audit
+      // seq-guard on a multi-writer head race — the append path re-
+      // discriminates it via the unwrapped cause (w50-fv F-1).
       if (e?.errcode === 1811)
         throw new InvariantError('INV-409-INTEGRITY', 'Ledger write refused by a trigger — tamper evidence', 409, { cause: e });
       // Contention is not tamper evidence — busy/locked propagates for
       // the outer layers' INV-503-LEDGER translation.
       if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw e;
+      // Extended sqlite codes carry the primary class in the low byte —
+      // BUSY_SNAPSHOT/RECOVERY/TIMEOUT (261/517/769) are the same
+      // contention class as a bare busy, not surgery evidence (w50-fv
+      // F-5). Contention stays raw so outer layers translate/retry.
+      const base = typeof e?.errcode === 'number' ? e.errcode & 0xFF : null;
+      if (base === 5 || base === 6) throw e;
+      // NOMEM/INTERRUPT/SCHEMA are engine faults — honest infrastructure,
+      // never mislabeled tamper.
+      if (base !== null && [7, 9, 17].includes(base))
+        throw new InvariantError('INV-503-LEDGER', `Ledger engine fault: ${e?.message ?? 'sqlite error'}`, 503, { cause: e });
       // Storage-class faults (readonly file, I/O error, corrupt image,
       // disk full, can't-open) are infrastructure, not surgery evidence —
       // a filled disk must not read as tamper (w49-fixverify M-4). The low
       // byte holds the primary code under better-sqlite's extended codes.
-      if (typeof e?.errcode === 'number' && [8, 10, 11, 13, 14, 15].includes(e.errcode & 0xFF))
+      if (base !== null && [8, 10, 11, 13, 14, 15].includes(base))
         throw new InvariantError('INV-503-STORAGE', `Ledger storage fault: ${e?.message ?? 'sqlite error'}`, 503, { cause: e });
       // Any remaining sqlite-class fault on a ledger path is likewise
       // schema/integrity evidence, not raw internals for callers to
@@ -934,28 +960,39 @@ export class Store {
       // and not raw sqlite internals leaking to callers (w23 W23-09).
       // errcode 517 = SQLITE_BUSY_SNAPSHOT: a deferred reader's snapshot
       // went stale under a peer write — same retry semantics as busy.
-      if (e?.errcode === 5 || e?.errcode === 6 || e?.errcode === 517 || /database .*locked|database is busy/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
-      if (/audit sequence must extend the head/.test(e?.message ?? '')) {
-        // The guard's RAISE text is attacker-replayable through a planted
-        // AFTER trigger — before classifying retryable, prove the guard
-        // could have fired at all: attempted == MAX+1 means nothing
-        // legitimately raised it, so the text is a mimic laundering a
-        // planted refusal into a retryable conflict (w49-fixverify M-1).
-        const headNow = this._stmt('SELECT COALESCE(MAX(seq),0) m FROM audit WHERE tenant=?').get(tenant)?.m;
-        if (Number.isInteger(headNow) && headNow + 1 === entry.sequence)
-          throw new InvariantError('INV-409-INTEGRITY', 'Audit append refused by a mimic trigger — tamper evidence', 409, { cause: e });
+      // _schemaGuard wraps every trigger abort (errcode 1811) as INTEGRITY
+      // with the sqlite error as `cause` — discriminate on the RAW error
+      // so the real audit_seq_guard firing on an honest multi-writer head
+      // race stays retryable INV-409-CONFLICT instead of a false tamper
+      // verdict, while the mimic text it replays still dies here (w50-fv
+      // F-1: classification must happen against the unwrapped error).
+      const raw = e?.details?.cause ?? e?.cause ?? e;
+      if (raw?.errcode === 5 || raw?.errcode === 6 || raw?.errcode === 517 || /database .*locked|database is busy/i.test(raw?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
+      if (raw?.errcode === 1811) {
+        // A trigger aborted the insert — prove which. The guard's RAISE
+        // text is attacker-replayable through a planted AFTER trigger, so
+        // the discriminator is the slot itself, not the message: if a row
+        // now owns the attempted seq, a peer append won the race and the
+        // real seq guard could have fired — retryable conflict. If the
+        // slot is still free no legitimate guard could have fired — the
+        // refusal is foreign-trigger evidence either way (w50-fv F-1).
+        let headNow;
+        try { headNow = this._stmt('SELECT COALESCE(MAX(seq),0) m FROM audit WHERE tenant=?').get(tenant)?.m; }
+        catch (probe) { throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: probe }); }
+        if (Number.isInteger(headNow) && headNow < entry.sequence)
+          throw new InvariantError('INV-409-INTEGRITY', 'Audit append refused by a foreign trigger — tamper evidence', 409, { cause: e });
         throw new InvariantError('INV-409-CONFLICT', 'Audit head moved during append; retry', 409);
       }
       // A dropped or rewritten table is integrity evidence, never raw
       // sqlite noise on the write path (w44-store M-2).
-      if (/no such table|no such column|not a database|malformed/i.test(e?.message ?? '')) throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e });
+      if (/no such table|no such column|not a database|malformed/i.test(raw?.message ?? '')) throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e });
       // Storage-class faults are infrastructure, not surgery — same split
       // as _schemaGuard (w49-fixverify M-4).
-      if (typeof e?.errcode === 'number' && [8, 10, 11, 13, 14, 15].includes(e.errcode & 0xFF)) throw new InvariantError('INV-503-STORAGE', `Audit storage fault: ${e?.message ?? 'sqlite error'}`, 503, { cause: e });
-      // A planted trigger (errcode 1811), grafted-PK collision (1555) or
-      // any other sqlite-class fault on the audit append is tamper
-      // evidence, never raw internals (w48-store W48-3).
-      if (e?.code === 'ERR_SQLITE_ERROR' || typeof e?.errcode === 'number') throw new InvariantError('INV-409-INTEGRITY', `Audit append refused: ${e?.message ?? 'sqlite error'}`, 409, { cause: e });
+      if (typeof raw?.errcode === 'number' && [8, 10, 11, 13, 14, 15].includes(raw.errcode & 0xFF)) throw new InvariantError('INV-503-STORAGE', `Audit storage fault: ${raw?.message ?? 'sqlite error'}`, 503, { cause: e });
+      // A grafted-PK collision (1555) or any other sqlite-class fault on
+      // the audit append is tamper evidence, never raw internals
+      // (w48-store W48-3).
+      if (raw?.code === 'ERR_SQLITE_ERROR' || typeof raw?.errcode === 'number') throw new InvariantError('INV-409-INTEGRITY', `Audit append refused: ${raw?.message ?? 'sqlite error'}`, 409, { cause: e });
       throw e;
     }
     // In-ledger fold marker: the signed head files are peer-facing hints

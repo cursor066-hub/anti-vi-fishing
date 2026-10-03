@@ -2657,7 +2657,7 @@ export class Fabric {
       // destroyed or carried by exactly the set this loop sees, never by
       // what existed minutes ago (w41-seal F1: a verified peer event
       // silently deleted would launder its spend authority).
-      const cutRows = this.store._stmt('SELECT seq,hash,envelope FROM audit WHERE tenant=? ORDER BY seq').all(t);
+      const cutRows = this.store._stmt('SELECT seq,hash,previous,envelope FROM audit WHERE tenant=? ORDER BY seq').all(t);
       // livedUntil records the furthest time a SIGNATURE-VERIFIED doomed row
       // attests the gate believed it had reached. A verified payload's time
       // is signed by the vault-bound audit key — present in the table it
@@ -2682,7 +2682,11 @@ export class Fabric {
               livedUntil = Math.max(livedUntil, sm.lived_until);
             if (typeof env.payload.time !== 'number' || env.payload.time <= Math.max(consumeNow, prevPlTime) + 60_000) {
               pl = env.payload;
-              if (env.payload.sequence !== r.seq || !ctEqual(digest(env.payload), r.hash)) divergentStored++;
+              // Column divergence counts every stored column — a previous-
+              // column rewrite is the exact surgery doomed-restore remediates,
+              // so under-reporting it would mislabel the seal's own record
+              // (w50-seal LOW-1).
+              if (env.payload.sequence !== r.seq || !ctEqual(digest(env.payload), r.hash) || r.previous !== env.payload.previous) divergentStored++;
             } else {
               // Verified signature but beyond the fold's time bound: the row
               // still lifts the horizon (its time is signed), yet its
@@ -2753,7 +2757,8 @@ export class Fabric {
           // A doomed carry page bound to a SURVIVING seal keeps that seal's
           // attestation honest — its content re-carries into this seal, so
           // the residue recount below still finds it (w36-seal F-H).
-          if (pl.type === 'AUDIT_SEAL_CARRY' && typeof meta.seal_seq === 'number' && sealClaims.has(meta.seal_seq)) {
+          const restored = pl.type === 'AUDIT_SEAL_CARRY' && typeof meta.seal_seq === 'number' && sealClaims.has(meta.seal_seq);
+          if (restored) {
             const pg = carrySeen.get(meta.seal_seq) ?? { count: 0, sums: { spend: 0, access: 0, revocations: 0, capabilities: 0, lifecycle: 0 } };
             pg.count++;
             pg.sums.spend += (Array.isArray(meta.spend_carryover) ? meta.spend_carryover.length : 0); pg.sums.access += (Array.isArray(meta.access_carryover) ? meta.access_carryover.length : 0); pg.sums.revocations += (Array.isArray(meta.revocations_carryover) ? meta.revocations_carryover.length : 0); pg.sums.capabilities += (Array.isArray(meta.capabilities_cut) ? meta.capabilities_cut.length : 0); pg.sums.lifecycle += (Array.isArray(meta.lifecycle_carryover) ? meta.lifecycle_carryover.length : 0);
@@ -2764,7 +2769,13 @@ export class Fabric {
             // (w49-seal F1).
             carryRestores.push({ reference: pl.reference ?? null, actor: pl.actor, metadata: meta });
           }
-          for (const u of meta.spend_carryover ?? []) addSpend(u); for (const a of meta.access_carryover ?? []) addAccess(a); for (const c of meta.capabilities_cut ?? []) addCap(c); for (const rv of meta.revocations_carryover ?? []) addRevoked(rv); for (const lc of meta.lifecycle_carryover ?? []) addLifecycle(lc); for (const de of meta.dropped_events ?? []) droppedEvents.push(de); droppedEventsOverflow += Math.max(0, (meta.carryover_totals?.dropped_events ?? (Array.isArray(meta.dropped_events) ? meta.dropped_events.length : 0)) - (Array.isArray(meta.dropped_events) ? meta.dropped_events.length : 0));
+          // A page restored verbatim under its surviving seal is already
+          // attested there — unfolding its arrays again would attest every
+          // entry twice (double budget charge, double coverage credit —
+          // w50-seal MEDIUM-1). Only a page bound to a DOOMED seal unfolds.
+          if (!restored) {
+            for (const u of meta.spend_carryover ?? []) addSpend(u); for (const a of meta.access_carryover ?? []) addAccess(a); for (const c of meta.capabilities_cut ?? []) addCap(c); for (const rv of meta.revocations_carryover ?? []) addRevoked(rv); for (const lc of meta.lifecycle_carryover ?? []) addLifecycle(lc); for (const de of meta.dropped_events ?? []) droppedEvents.push(de); droppedEventsOverflow += Math.max(0, (meta.carryover_totals?.dropped_events ?? (Array.isArray(meta.dropped_events) ? meta.dropped_events.length : 0)) - (Array.isArray(meta.dropped_events) ? meta.dropped_events.length : 0));
+          }
         }
         // Every other verifiable doomed event — proposals, evidence,
         // approvals, certificate issuance, reservations, dispatches,
@@ -3508,7 +3519,11 @@ export class Fabric {
     // The window is consumed only by a write that lands — a failed audit
     // insert must not suppress the next identical denial's evidence
     // (w18-fixverify F14).
-    try { this.store.audit(t, 'AUTHORIZATION_DENIED', subject_id ?? 'anonymous', null, { code, message: String(message).slice(0, 200) }, now); this.#denyAudit.set(key, now); } catch { /* ledger write failure does not change the verdict */ }
+    // quarantine_denial in the audited metadata marks the denial anchors
+    // that mint a containment row — murder coverage binds only anchors
+    // that promised a row, so a plain denial can never fabricate missing-
+    // row evidence (w50-fv F-3).
+    try { this.store.audit(t, 'AUTHORIZATION_DENIED', subject_id ?? 'anonymous', null, { code, message: String(message).slice(0, 200), ...(details?.quarantine_denial ? { quarantine_denial: true } : {}) }, now); this.#denyAudit.set(key, now); } catch { /* ledger write failure does not change the verdict */ }
     // Quarantine denials land in the containment ledger too — a quarantined
     // device hammering proposals must be reconstructible, not invisible
     // (w11-lifecycle F5; NET-010 coverage of pre-transaction denials).
@@ -3940,7 +3955,7 @@ export class Fabric {
         // negative diff that must mint, not suppress (w49-runtime W49-2).
         const rDiff = rNow - (this.#rejectMemo.get(rKey) ?? -Infinity);
         if (!(rDiff >= 0 && rDiff < 60_000)) {
-          try { this.store.tx(() => { const now = this.clock(); this.store.clock(now); this.store.audit(principal.tenant_id, 'SECURITY_OPERATION_REJECTED', principal.subject_id, 'local-gate', { code: error.code }, now); }); this.#rejectMemo.set(rKey, rNow); } catch { /* ledger unavailable — surface the real rejection */ }
+          try { this.store.tx(() => { const now = this.clock(); this.store.clock(now); this.store.audit(principal.tenant_id, 'SECURITY_OPERATION_REJECTED', principal.subject_id, 'local-gate', { code: error.code, ...(error.code === 'INV-403-QUARANTINE' && error.details?.quarantine_denial ? { quarantine_denial: true } : {}) }, now); }); this.#rejectMemo.set(rKey, rNow); } catch { /* ledger unavailable — surface the real rejection */ }
         }
         // Quarantine denials land in the containment ledger too — NET-010
         // reconstruction must see denied executes/proposes, not only denied
@@ -4116,7 +4131,7 @@ export class Fabric {
       // enumerate them and lets ensureMurdered locate the unsigned line
       // a row-writer deletes (w49-runtime W49-4).
       case 'AUTHORIZATION_DENIED':
-      case 'SECURITY_OPERATION_REJECTED': { const d = { request_id: 'gate-deny', actor: pl.actor, code: meta.code ?? null, capability_id: null, at: pl.time }; const rl = idx.denialsByReq.get('gate-deny') ?? []; rl.push(d); idx.denialsByReq.set('gate-deny', rl); break; }
+      case 'SECURITY_OPERATION_REJECTED': { const d = { request_id: 'gate-deny', actor: pl.actor, code: meta.code ?? null, capability_id: null, contained: meta.quarantine_denial === true, at: pl.time }; const rl = idx.denialsByReq.get('gate-deny') ?? []; rl.push(d); idx.denialsByReq.set('gate-deny', rl); break; }
       // A governed spec re-pin anchors the new spec content digest the
       // drift check must accept — the frozen registration baseline alone
       // could never honour an honest issuer record-set change
@@ -4165,11 +4180,13 @@ export class Fabric {
       case 'CLOCK_RECOVERED': idx.clockUnverifiable = Array.isArray(meta.unverifiable_tenants) && meta.unverifiable_tenants.includes(t); break;
       case 'AUDIT_SEALED': case 'AUDIT_WEDGE_CLEARED': case 'AUDIT_SEAL_CARRY': {
         if (pl.type === 'AUDIT_SEAL_CARRY') {
-          // A carryover page replays only when it names the seal it
-          // belongs to — honest pages land immediately after their
-          // AUDIT_SEALED row inside one transaction; a stray or
-          // mis-pointed page is fold tampering, not data (w33-seal F-4).
-          requireThat(meta.seal_seq === idx.lastSealSeq, 'INV-409-INTEGRITY', 'Audit carryover page references no live seal', 409);
+          // A carryover page replays only when it names a seal that
+          // survives on this chain — honest pages land inside their seal's
+          // own transaction; a restored page names the OLDER surviving seal
+          // it preserves, so the binding is set membership, not adjacency
+          // (w50-seal CRITICAL-1 — the lastSealSeq equality wedged the fold
+          // permanently after any restore).
+          requireThat(idx.sealSeqs?.has(meta.seal_seq) === true, 'INV-409-INTEGRITY', 'Audit carryover page references no live seal', 409);
         } else {
           idx.clockUnverifiable = false;
           if (pl.type === 'AUDIT_SEALED') { idx.lastSealSeq = seq; (idx.sealSeqs ??= new Set()).add(seq); }
@@ -4232,12 +4249,23 @@ export class Fabric {
         // MEDIUM-1, w39-seal F-3).
         const droppedNow = (typeof meta.carryover_totals?.dropped_events === 'number' ? meta.carryover_totals.dropped_events : (Array.isArray(meta.dropped_events) ? meta.dropped_events.length : 0))
           + (typeof meta.carryover_totals?.deleted_events === 'number' ? meta.carryover_totals.deleted_events : 0);
-        idx.sealDroppedEvents = (idx.sealDroppedEvents ?? 0) + droppedNow;
+        // Drop claims are CUMULATIVE: every later seal re-attests the loss
+        // its predecessor already counted (the doomed rows cannot be
+        // re-derived), so adding droppedNow again would double-count a
+        // re-attested loss — and refreshing sealDroppedAt would keep the
+        // reconstruction wedge alive forever (w50-fv F-6). The tally is the
+        // running maximum; itemized drops dedupe by (seq,hash) identity.
+        const prevDropped = idx.sealDroppedEvents ?? 0;
+        const dropSeen = (idx.sealDroppedSeqs ??= new Set());
+        let freshDrops = 0;
+        for (const de of meta.dropped_events ?? []) { const dk = `${de?.seq ?? 'x'}|${de?.hash ?? ''}`; if (!dropSeen.has(dk)) { dropSeen.add(dk); freshDrops++; } }
+        idx.sealDroppedEvents = Math.max(prevDropped, droppedNow);
         // The reconstruction gate only wedges while the drop is FRESH — a
         // seal that dropped evidence months ago must not INV-429 every
-        // honest export forever (w49-runtime W49-3). Track the newest
-        // dropping seal's chain time; readers bound it by their window.
-        if (droppedNow > 0) idx.sealDroppedAt = Math.max(idx.sealDroppedAt ?? 0, pl.time ?? 0);
+        // honest export forever (w49-runtime W49-3). The window refreshes
+        // only when this seal attests genuinely NEW loss, never on a
+        // re-attestation (w50-fv F-6).
+        if (Math.max(droppedNow - prevDropped, freshDrops) > 0) idx.sealDroppedAt = Math.max(idx.sealDroppedAt ?? 0, pl.time ?? 0);
         break;
       }
     }
@@ -4761,10 +4789,10 @@ export class Fabric {
       // so a quarantined actor hammering proposals is reconstructible from
       // the containment ledger too (w11-lifecycle F5).
       if (error instanceof InvariantError && !this.store.db.isTransaction) {
+        // _rejectionAudit already mints the quarantine containment row —
+        // minting a second here double-counted every pre-transaction
+        // denial on the ledger (w50-fv F-8).
         this._rejectionAudit(t, subject, error.code, error.message, error.details);
-        if (error.code === 'INV-403-QUARANTINE' && error.details?.quarantine_denial) {
-          try { const n0 = this.clock(); this.store.tx(() => this.store.put(t, 'containment', `deny:${randomUUID()}`, { contained_at: n0, subject_id: subject, device_id: error.details.device ?? null, capability_id: null, resource: null, destination: null, action: null, code: error.code, request_id: 'gate-deny', dropped_requests: 1 }, n0)); } catch { /* containment logging never masks the original denial */ }
-        }
       }
       throw error;
     }
@@ -5180,6 +5208,12 @@ export class Fabric {
     requireThat(issuer.endpoint, 'INV-412-EVIDENCE', 'Issuer has no live endpoint; attach a pre-signed envelope instead', 412);
     requireThat(!this.revoked(t, 'issuer', key_id) && !this.revoked(t, 'key', key_id), 'INV-401-EVIDENCE', 'Evidence source revoked', 401);
     requireThat(!this._auditIndex(t).issuerDrift.has(key_id), 'INV-403-QUARANTINE', 'Issuer connector drifted — acquisition suspended pending revalidation', 403);
+    // A config-file tamper already convicted the served endpoint — egress
+    // now would deliver the live Bearer credential to the attacker's host
+    // (w50-http HIGH). The endpoint field is outside ISSUER_MUTABLE, so a
+    // persistent rewrite arrives as construction-time drift; repair the
+    // config and restart, never fetch against the tampered target.
+    requireThat(!this._configDrift.has(t), 'INV-403-QUARANTINE', 'Configuration drift — the served endpoint is untrusted until the config is repaired', 403);
     // The fabric — not the caller — derives the claims that bind the evidence
     // to this action's declared content, so a caller cannot query the issuer
     // about an unrelated entity and attach the answer (HIGH-2).
@@ -5226,6 +5260,11 @@ export class Fabric {
     this.authorize(p, ['security', 'policy_admin']);
     const issuer = this.tenant(p.tenant_id).issuers[key_id];
     requireThat(issuer?.endpoint, 'INV-404-NOT-FOUND', 'Issuer endpoint not found', 404);
+    // Egress gates run BEFORE the socket opens — a config-tampered endpoint
+    // must never see the Bearer credential (w50-http HIGH). issuerDrift is
+    // deliberately NOT gated here: this method is the remediation that
+    // clears it.
+    requireThat(!this._configDrift.has(p.tenant_id), 'INV-403-QUARANTINE', 'Configuration drift — the served endpoint is untrusted until the config is repaired', 403);
     let observed;
     const callStarted = Date.now();
     try { const res = await readWithRetry(`${issuer.endpoint}/v1/issuers/${issuer.name}/manifest?tenant=${p.tenant_id}`, { timeout_ms: 10000, retries: 2, headers: (issuer.read_token ?? issuer.issue_token) ? { Authorization: `Bearer ${issuer.read_token ?? issuer.issue_token}` } : undefined }); observed = res.data; this.recordIssuerCall(key_id, Date.now() - callStarted, false); } catch (e) {
@@ -5303,17 +5342,27 @@ export class Fabric {
     this.authorize(p, ['security']);
     const issuer = this.tenant(p.tenant_id).issuers[key_id];
     requireThat(issuer?.endpoint, 'INV-404-NOT-FOUND', 'Issuer endpoint not found', 404);
+    // A revoked connector earns no privileged remediation spend — and the
+    // refusal must land before the socket opens, same as every other
+    // issuer egress gate (w50-http LOW/HIGH).
+    requireThat(!this.revoked(p.tenant_id, 'issuer', key_id) && !this.revoked(p.tenant_id, 'key', key_id), 'INV-401-EVIDENCE', 'Evidence source revoked', 401);
+    requireThat(!this._configDrift.has(p.tenant_id), 'INV-403-QUARANTINE', 'Configuration drift — the served endpoint is untrusted until the config is repaired', 403);
     // The re-pin binds what the issuer ACTUALLY serves — the verified
     // manifest's own spec_digest — never a caller-supplied digest: an
     // operator pinning bytes the issuer does not serve would re-pin the
     // drift it is meant to clear (w49-ledger F4).
     let observed;
-    try { const res = await readWithRetry(`${issuer.endpoint}/v1/issuers/${issuer.name}/manifest?tenant=${p.tenant_id}`, { timeout_ms: 10000, retries: 2, headers: (issuer.read_token ?? issuer.issue_token) ? { Authorization: `Bearer ${issuer.read_token ?? issuer.issue_token}` } : undefined }); observed = res.data; }
-    catch (e) { throw new InvariantError('INV-503-CONNECTOR', `Issuer unreachable — cannot observe the spec to re-pin: ${e?.message ?? 'transport error'}`, 503, { cause: e }); }
+    const callStarted = Date.now();
+    try { const res = await readWithRetry(`${issuer.endpoint}/v1/issuers/${issuer.name}/manifest?tenant=${p.tenant_id}`, { timeout_ms: 10000, retries: 2, headers: (issuer.read_token ?? issuer.issue_token) ? { Authorization: `Bearer ${issuer.read_token ?? issuer.issue_token}` } : undefined }); observed = res.data; this.recordIssuerCall(key_id, Date.now() - callStarted, false); }
+    catch (e) { this.recordIssuerCall(key_id, Date.now() - callStarted, true); throw new InvariantError('INV-503-CONNECTOR', `Issuer unreachable — cannot observe the spec to re-pin: ${e?.message ?? 'transport error'}`, 503, { cause: e }); }
     let observedPayload;
     try {
       observedPayload = verifyManifest(observed, { [key_id]: issuer }, this.clock(), { max_age_ms: 300000 });
       this.assertSuiteAllowed(p.tenant_id, observed.protected.suite);
+      // The signed-horizon cap is part of the same contract the drift
+      // check enforces — a 1-year manifest cannot mint a pin the sibling
+      // gate would refuse (w50-http MEDIUM).
+      requireThat(observedPayload.expires_at <= this.clock() + 900000, 'INV-401-CONNECTOR', 'Connector manifest horizon too long', 401);
     } catch (e) {
       if (e instanceof InvariantError) throw e;
       throw new InvariantError('INV-401-CONNECTOR', 'Issuer manifest failed verification — refusing to pin unproven content', 401, { cause: e });
@@ -5323,12 +5372,22 @@ export class Fabric {
     const idx = this._auditIndex(p.tenant_id);
     const prior = idx.issuerRepins?.get(key_id) ?? issuer.spec_digest;
     requireThat(next !== prior, 'INV-409-CONFLICT', 'Issuer spec digest already pinned — nothing to re-provision', 409);
+    // The pin settles only the digest field — the rest of the contract
+    // still gets the same field-level evaluation the drift check runs, so
+    // an escalated permissions set riding a fresh digest is NAMED on the
+    // response and keeps the forensic row, never silently settled
+    // (w50-http MEDIUM).
+    const registered = { connector_id: `issuer:${issuer.name}`, version: issuer.version ?? '1.0.0', actions: issuer.kinds, channel: issuer.channel, key_id, permissions: issuer.permissions, limitations: issuer.limitations, idempotency: issuer.idempotency, coverage_implications: issuer.coverage_implications, spec_digest: next };
+    const observedSpec = { connector_id: observedPayload.connector_id, version: observedPayload.version, actions: observedPayload.actions, channel: observedPayload.domain, key_id: observed.protected.key_id, permissions: observedPayload.permissions, limitations: observedPayload.limitations, idempotency: observedPayload.idempotency, coverage_implications: observedPayload.coverage_implications, spec_digest: next };
+    const residual = driftCheck(registered, observedSpec, this.clock());
     return this.transaction(p, now => {
-      this.store.audit(p.tenant_id, 'ISSUER_SPEC_REPINNED', p.subject_id, key_id, { spec_digest: next, prior_digest: prior ?? null }, now);
-      // The re-pin settles the drift row honestly — the next drift check
-      // compares the observed digest against this anchored pin.
-      this.store.remove(p.tenant_id, 'issuer-drift', key_id);
-      return { repinned: true, key_id, prior_digest: prior ?? null, spec_digest: next };
+      this.store.audit(p.tenant_id, 'ISSUER_SPEC_REPINNED', p.subject_id, key_id, { spec_digest: next, prior_digest: prior ?? null, residual_drift: residual.changes }, now);
+      // The digest drift is settled by the pin; any residual contract
+      // drift keeps the forensic row alive — deleting it while quarantine
+      // stands would hide exactly what remains unremediated.
+      if (residual.drifted) this.store.put(p.tenant_id, 'issuer-drift', key_id, { drifted_at: now, changes: residual.changes }, now);
+      else this.store.remove(p.tenant_id, 'issuer-drift', key_id);
+      return { repinned: true, key_id, prior_digest: prior ?? null, spec_digest: next, residual_drift: residual.changes };
     });
   }
   approvalChallenge(p, id, signer_id = null) {
@@ -7323,9 +7382,15 @@ export class Fabric {
     // surface the freshest evidence inside the cap, with the uncapped
     // total published alongside so saturation can never read as 512
     // (w45-runtime F5).
+    // gate-deny anchors (AUTHORIZATION_DENIED/SECURITY_OPERATION_REJECTED)
+    // fold only into denialsByReq['gate-deny'], so a deleted gate-deny row
+    // was silent before (w50-fv F-3). Only anchors that minted a row —
+    // meta.quarantine_denial — join coverage: a plain denial promises no
+    // row, and covering it would fabricate murder evidence.
+    const anchorsAll = [...idx.denials, ...(idx.denialsByReq?.get('gate-deny') ?? []).filter(d => d.contained === true)];
     const missingDenials = [];
     let missingTotal = 0;
-    for (const d of [...idx.denials].reverse()) {
+    for (const d of anchorsAll.sort((a, b) => b.at - a.at)) {
       const arr = rowsByTriple.get(`${d.request_id}|${d.code}|${d.actor}`);
       let hit = -1, best = Infinity;
       if (arr) for (let i = 0; i < arr.length; i++) { const dt = Math.abs(arr[i] - d.at); if (dt < best) { best = dt; hit = i; } }

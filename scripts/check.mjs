@@ -222,20 +222,42 @@ for (const file of textFiles) {
     return paths;
   };
   for (const line of server) {
-    const meth = /req\.method === '([A-Z]+)'/.exec(line)?.[1];
-    if (!meth) continue;
-    const lit = /path === '([^']+)'/.exec(line);
-    if (lit) {
-      if (!declared.has(`${meth} ${lit[1]}`)) { console.error(`route-spec parity: ${meth} ${lit[1]} handled but absent from docs/openapi.json`); failed = true; }
-      continue;
+    // Comments cannot carry live dispatch — only the code half counts.
+    // Route dispatch names both req.method and path; guards that mention
+    // the method alone (CSRF, the 405 floor) are not routes (w50-ledger
+    // H-2). Every method arm and every literal/regex arm in a shared
+    // condition is audited, not just the first.
+    const code = line.split('//', 1)[0];
+    if (!/req\.method/.test(code) || !/\bpath\b/.test(code)) continue;
+    const meths = [...code.matchAll(/req\.method\s*===\s*'([A-Z]+)'/g)].map(m => m[1]);
+    // Every live handler must take an auditable shape — a `!==`, an
+    // `includes()` set, an aliased variable, a switch or a handler table
+    // escapes the audit silently (w50-ledger H-2).
+    if (!meths.length) { console.error(`route-spec parity: unauditable method dispatch — ${line.trim().slice(0, 100)}`); failed = true; continue; }
+    const lits = [...code.matchAll(/path\s*===\s*'([^']+)'/g)].map(m => m[1]);
+    const rxxs = [...code.matchAll(/\/\^(.+?)\$\/\.(?:exec|test)\(path\)/g)].map(m => m[1]);
+    // Anchored exec/test and literal equality are the only shapes this
+    // gate can map — path.match/startsWith/unanchored dispatch is live
+    // code the audit cannot see, so it is flagged rather than skipped.
+    if (!lits.length && !rxxs.length) { console.error(`route-spec parity: unauditable path dispatch — ${line.trim().slice(0, 100)}`); failed = true; continue; }
+    for (const lit of lits)
+      for (const m of meths) if (!declared.has(`${m} ${lit}`)) { console.error(`route-spec parity: ${m} ${lit} handled but absent from docs/openapi.json`); failed = true; }
+    for (const r of rxxs) {
+      const raw = r.replace(/\\\//g, '/');
+      for (const p of expandAlternations(raw)) {
+        const norm = p.replace(/\([^()]+\)/g, '{}');
+        for (const m of meths) if (!declared.has(`${m} ${norm}`)) { console.error(`route-spec parity: ${m} ${norm} handled but absent from docs/openapi.json`); failed = true; }
+      }
     }
-    const rxx = /\/\^(.+?)\$\/\.exec\(path\)/.exec(line);
-    if (!rxx) continue;
-    const raw = rxx[1].replace(/\\\//g, '/');
-    for (const p of expandAlternations(raw)) {
-      const norm = p.replace(/\([^()]+\)/g, '{}');
-      if (!declared.has(`${meth} ${norm}`)) { console.error(`route-spec parity: ${meth} ${norm} handled but absent from docs/openapi.json`); failed = true; }
-    }
+  }
+  // Live HTTP dispatch outside server.mjs escapes this gate entirely — a
+  // second handler file is undocumented live code (w50-ledger H-2).
+  // issuerd.mjs is the consciously-scoped exception: the issuer daemon's
+  // own /v1/issuers contract, a separate process surface described in
+  // docs/ARCHITECTURE.md — not part of the fabric openapi.
+  for (const f of readdirSync('src')) {
+    if (f === 'server.mjs' || f === 'issuerd.mjs' || !f.endsWith('.mjs')) continue;
+    if (/req\.method/.test(readFileSync(`src/${f}`, 'utf8'))) { console.error(`route-spec parity: HTTP method dispatch in src/${f} — outside the audited file`); failed = true; }
   }
 }
 

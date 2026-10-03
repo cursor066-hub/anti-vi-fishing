@@ -235,7 +235,9 @@ test('w5-M8: a wrong method on a documented path is a 405 on every route', async
   for (const [template, ops] of Object.entries(spec.paths)) {
     const wrong = ['GET', 'POST'].find(m => !Object.keys(ops).includes(m.toLowerCase()));
     if (!wrong) continue;
-    const path = template.replaceAll(/\{[^}]+\}/g, 'x-1');
+    // Substitute within each param's dispatch charset — a value outside it
+    // is correctly a 404, not a 405 (w50-http template/dispatch parity).
+    const path = template.replaceAll('{sequence}', '42').replaceAll(/\{[^}]+\}/g, 'x-1');
     const r = await h.request(path, { method: wrong });
     assert.equal(r.status, 405, `${wrong} ${path}`); assert.equal(r.data.error.code, 'INV-405-METHOD');
   }

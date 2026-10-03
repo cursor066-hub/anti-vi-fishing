@@ -421,8 +421,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "pattern": "^[A-Za-z0-9-]+$",
-              "maxLength": 128
+              "pattern": "^[A-Za-z0-9-]{1,128}$"
             }
           }
         ]
@@ -475,8 +474,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "pattern": "^[A-Za-z0-9-]+$",
-              "maxLength": 128
+              "pattern": "^[A-Za-z0-9-]{1,128}$"
             }
           }
         ]
@@ -529,8 +527,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "pattern": "^[A-Za-z0-9-]+$",
-              "maxLength": 128
+              "pattern": "^[A-Za-z0-9-]{1,128}$"
             }
           }
         ]
@@ -583,8 +580,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "pattern": "^[A-Za-z0-9-]+$",
-              "maxLength": 128
+              "pattern": "^[A-Za-z0-9-]{1,128}$"
             }
           }
         ]
@@ -637,8 +633,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "pattern": "^[A-Za-z0-9-]+$",
-              "maxLength": 128
+              "pattern": "^[A-Za-z0-9-]{1,128}$"
             }
           }
         ]
@@ -681,8 +676,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "pattern": "^[A-Za-z0-9-]+$",
-              "maxLength": 128
+              "pattern": "^[A-Za-z0-9-]{1,128}$"
             }
           },
           {
@@ -947,8 +941,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "pattern": "^[A-Za-z0-9-]+$",
-              "maxLength": 128
+              "pattern": "^[A-Za-z0-9-]{1,128}$"
             }
           }
         ]
@@ -1033,8 +1026,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
-              "maxLength": 128
+              "pattern": "^[A-Za-z0-9-]{1,128}$"
             }
           }
         ]
@@ -1075,8 +1067,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
-              "maxLength": 128
+              "pattern": "^[A-Za-z0-9-]{1,128}$"
             }
           }
         ]
@@ -1119,8 +1110,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
-              "maxLength": 128
+              "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
             }
           }
         ]
@@ -1446,8 +1436,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "pattern": "^[A-Za-z0-9-]+$",
-              "maxLength": 128
+              "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
             }
           }
         ]
@@ -1554,8 +1543,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "pattern": "^[A-Za-z0-9-]+$",
-              "maxLength": 128
+              "pattern": "^[A-Za-z0-9-]{1,128}$"
             }
           }
         ]
@@ -1598,8 +1586,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "pattern": "^[A-Za-z0-9-]+$",
-              "maxLength": 128
+              "pattern": "^[A-Za-z0-9-]{1,128}$"
             }
           }
         ]
@@ -2302,8 +2289,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
-              "maxLength": 128
+              "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
             }
           }
         ]
@@ -2356,8 +2342,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
-              "maxLength": 128
+              "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
             }
           }
         ]
@@ -2410,8 +2395,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
-              "maxLength": 128
+              "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
             }
           }
         ]
@@ -2464,8 +2448,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
-              "maxLength": 128
+              "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
             }
           }
         ]
@@ -2582,8 +2565,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
-              "maxLength": 128
+              "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
             }
           },
           {

@@ -41,6 +41,14 @@ export const ROUTE_METHODS = new Map(Object.entries({
   '/v1/secure-perception/fallback': 'POST', '/v1/advisory': 'POST',
 }).map(([k, v]) => [k, v.split(',')]));
 
+// Compiled once: each template's {param} expands to the charset its dispatch
+// regex enforces, so the 405 binding can never exceed the 404 one
+// (w50-http LOW — template/dispatch charset oracle).
+const ROUTE_TEMPLATES = [...ROUTE_METHODS.keys()].filter(t => t.includes('{')).map(t => {
+  const wide = t.startsWith('/v1/resources/') || t.startsWith('/v1/coverage/') || t.startsWith('/v1/ceremonies/') || t.startsWith('/v1/keys/');
+  return [t, new RegExp('^' + t.split('/').map(seg => seg.startsWith('{') ? (seg === '{sequence}' ? '\\d+' : (wide ? '[A-Za-z0-9_.:-]{1,128}' : '[A-Za-z0-9-]{1,128}')) : seg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('/') + '$')];
+});
+
 export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin = `http://127.0.0.1:${port}`, tenantSessionCap = 250, trustProxy = false, proxySecret = null, connectionCap = 2048 } = {}) {
   // A non-numeric or negative cap disables the comparison silently:
   // `openConnections > NaN` is always false and the accept path is then
@@ -279,7 +287,9 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       // its own check inside the handler; public assets have no
       // parameters to leak.
       const queryCheckAfterAuth = path !== '/session';
-      if (req.method === 'GET' && assets[path]) { const [file, type] = assets[path]; return send(200, readFileSync(join(web, file)), type); }
+      // Static assets dispatch as literal route arms — the route-parity
+      // gate audits this shape; a map lookup is live code it cannot see.
+      if (req.method === 'GET' && (path === '/' || path === '/app.js' || path === '/style.css')) { const [file, type] = assets[path]; return send(200, readFileSync(join(web, file)), type); }
       if (path === '/session' && req.method === 'POST') {
         // Two buckets: a coarse per-IP ceiling AND a per-token FAILURE
         // counter. Keying login only on the address starves every console
@@ -395,12 +405,12 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       }
       if (path === '/v1/action-capsules' && req.method === 'POST') { fabric.authorize(p, ['operator', 'workload', 'policy_admin']); const input = await body(req); fields(input, ['input', 'signature']); return send(201, fabric.capsuleView(fabric.propose(p, input.input, req.headers['idempotency-key'], input.signature))); }
       let m;
-      if ((m = /^\/v1\/action-capsules\/([A-Za-z0-9-]+)$/.exec(path)) && req.method === 'GET') return send(200, fabric.getCapsule(p, m[1]));
-      if ((m = /^\/v1\/action-capsules\/([A-Za-z0-9-]+)\/approval-challenge$/.exec(path)) && req.method === 'GET') return send(200, fabric.approvalChallenge(p, m[1], url.searchParams.get('signer_id')));
+      if ((m = /^\/v1\/action-capsules\/([A-Za-z0-9-]{1,128})$/.exec(path)) && req.method === 'GET') return send(200, fabric.getCapsule(p, m[1]));
+      if ((m = /^\/v1\/action-capsules\/([A-Za-z0-9-]{1,128})\/approval-challenge$/.exec(path)) && req.method === 'GET') return send(200, fabric.approvalChallenge(p, m[1], url.searchParams.get('signer_id')));
       // Authorize BEFORE field-shape validation: a 400-vs-403 delta leaks
       // the route's field whitelist to unauthorized callers (w22-http F2).
-      if ((m = /^\/v1\/action-capsules\/([A-Za-z0-9-]+)\/evaluate$/.exec(path)) && req.method === 'POST') { fabric.authorize(p, ['operator', 'policy_admin', 'approver', 'custodian']); const input = await body(req); fields(input, []); return send(200, fabric.evaluate(p, m[1])); }
-      if ((m = /^\/v1\/action-capsules\/([A-Za-z0-9-]+)\/(evidence|cancel)$/.exec(path)) && req.method === 'POST') {
+      if ((m = /^\/v1\/action-capsules\/([A-Za-z0-9-]{1,128})\/evaluate$/.exec(path)) && req.method === 'POST') { fabric.authorize(p, ['operator', 'policy_admin', 'approver', 'custodian']); const input = await body(req); fields(input, []); return send(200, fabric.evaluate(p, m[1])); }
+      if ((m = /^\/v1\/action-capsules\/([A-Za-z0-9-]{1,128})\/(evidence|cancel)$/.exec(path)) && req.method === 'POST') {
         fabric.authorize(p, ['operator', 'security', 'policy_admin']);
         const input = await body(req); if (m[2] === 'evidence') return send(201, fabric.attachEvidence(p, m[1], input)); fields(input, []);
         return send(200, fabric.cancel(p, m[1]));
@@ -411,16 +421,16 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       if (path === '/v1/approvals/batch' && req.method === 'POST') { fabric.authorize(p, ['approver', 'custodian']); return send(201, fabric.batchApprove(p, await body(req))); }
       if (path === '/v1/containment' && req.method === 'GET') return send(200, fabric.containmentReport(p));
       if (path === '/v1/certificates' && req.method === 'POST') { fabric.authorize(p, ['operator', 'policy_admin']); const input = await body(req); fields(input, ['capsule_id']); identifier(input.capsule_id); return send(201, fabric.certificate(p, input.capsule_id)); }
-      if ((m = /^\/v1\/certificates\/([A-Za-z0-9-]+)$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['operator', 'policy_admin', 'security']); return send(200, fabric.store.must(p.tenant_id, 'certificate', m[1]).envelope); }
+      if ((m = /^\/v1\/certificates\/([A-Za-z0-9-]{1,128})$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['operator', 'policy_admin', 'security']); return send(200, fabric.store.must(p.tenant_id, 'certificate', m[1]).envelope); }
       if (path === '/gate/v1/execute' && req.method === 'POST') { fabric.authorize(p, ['operator', 'policy_admin']); const input = await body(req); fields(input, ['certificate', 'dry_run']); requireThat(typeof input.dry_run === 'boolean', 'INV-400-SCHEMA', 'dry_run must be boolean'); return send(200, fabric.execute(p, input.certificate, { dryRun: input.dry_run })); }
-      if ((m = /^\/gate\/v1\/outcomes\/([A-Za-z0-9-]+)$/.exec(path)) && req.method === 'GET') {
+      if ((m = /^\/gate\/v1\/outcomes\/([A-Za-z0-9-]{1,128})$/.exec(path)) && req.method === 'GET') {
         // Read-only view: reconciliation itself is a POST — a GET never writes.
         fabric.authorize(p, ['operator', 'security', 'policy_admin']); const out = fabric.store.get(p.tenant_id, 'outcome', m[1]);
         requireThat(out, 'INV-404-NOT-FOUND', 'No recorded outcome for this certificate', 404);
         return send(200, fabric.outcomeView(p.tenant_id, out, m[1]));
       }
-      if ((m = /^\/gate\/v1\/outcomes\/([A-Za-z0-9-]+)$/.exec(path)) && req.method === 'POST') { fabric.authorize(p, ['operator', 'security', 'policy_admin']); await noBody(req); return send(200, fabric.outcomeView(p.tenant_id, fabric.reconcile(p, m[1]), m[1])); }
-      if ((m = /^\/v1\/resources\/([A-Za-z0-9_.:-]+)$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['operator', 'policy_admin']); requireThat(fabric.target.exists(p.tenant_id, m[1]), 'INV-404-NOT-FOUND', 'Resource not found', 404); const state = fabric.target.state(p.tenant_id, m[1]); if (Array.isArray(state.material_fields.rows)) throw new InvariantError('INV-403-SCOPE', 'Use a data capability for dataset access', 403); return send(200, fabric.resourceStateView(state)); }
+      if ((m = /^\/gate\/v1\/outcomes\/([A-Za-z0-9-]{1,128})$/.exec(path)) && req.method === 'POST') { fabric.authorize(p, ['operator', 'security', 'policy_admin']); await noBody(req); return send(200, fabric.outcomeView(p.tenant_id, fabric.reconcile(p, m[1]), m[1])); }
+      if ((m = /^\/v1\/resources\/([A-Za-z0-9_.:-]{1,128})$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['operator', 'policy_admin']); requireThat(fabric.target.exists(p.tenant_id, m[1]), 'INV-404-NOT-FOUND', 'Resource not found', 404); const state = fabric.target.state(p.tenant_id, m[1]); if (Array.isArray(state.material_fields.rows)) throw new InvariantError('INV-403-SCOPE', 'Use a data capability for dataset access', 403); return send(200, fabric.resourceStateView(state)); }
       if (path === '/v1/capabilities' && req.method === 'POST') { fabric.authorize(p, ['operator', 'workload']); return send(201, fabric.runtime.issue(p, object(await body(req)))); }
       if (path === '/gate/v1/runtime' && req.method === 'POST') { fabric.authorize(p, ['operator', 'workload']); return send(200, fabric.runtime.consume(p, object(await body(req)))); }
       if (path === '/v1/revocations' && req.method === 'POST') { fabric.authorize(p, ['security']); return send(201, fabric.revoke(p, object(await body(req)))); }
@@ -430,7 +440,7 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       // The path-id alphabet is the identifier alphabet declarePath admits —
       // ':'/'.'/'_' ids are legal coverage paths, so the route must reach
       // them or a declared obligation can never close (w45-http HIGH).
-      if ((m = /^\/v1\/coverage\/([A-Za-z0-9_.:-]+)\/technical-validation$/.exec(path)) && req.method === 'POST') { fabric.authorize(p, ['security']); return send(200, fabric.technicalValidation(p, m[1], await body(req))); }
+      if ((m = /^\/v1\/coverage\/([A-Za-z0-9_.:-]{1,128})\/technical-validation$/.exec(path)) && req.method === 'POST') { fabric.authorize(p, ['security']); return send(200, fabric.technicalValidation(p, m[1], await body(req))); }
       if (path === '/v1/connectors' && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'policy_admin', 'auditor']); return send(200, fabric.target.manifest()); }
       if (path === '/v1/policies/simulate' && req.method === 'POST') { fabric.authorize(p, ['policy_admin', 'security']); return send(200, fabric.simulate(p, object(await body(req)))); }
       if (path === '/v1/audit-exports' && req.method === 'POST') { fabric.authorize(p, ['auditor', 'security']); const input = await body(req); fields(input, ['purpose']); return send(200, fabric.exportAudit(p, input.purpose)); }
@@ -444,13 +454,13 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       if (path === '/v1/subjects' && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'auditor', 'policy_admin']); return send(200, { items: Object.values(fabric.identities(p.tenant_id)).map(i => ({ subject_id: i.subject_id, roles: i.roles, device_id: i.device_id, identity_class: i.identity_class, health_expires_at: i.health_expires_at })) }); }
       if (path === '/v1/certificates' && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'auditor', 'policy_admin']); const limit = qint(url.searchParams.get('limit'), 'limit', 50, 1, 200), offset = qint(url.searchParams.get('offset'), 'offset', 0, 0, 1000000); return send(200, { items: fabric.store.list(p.tenant_id, 'certificate', limit, offset).map(c => ({ certificate_id: c.envelope?.payload?.certificate_id ?? null, status: c.status, issued_at: c.issued_at ?? null, consumed: c.consumed === true })), limit, offset }); }
       if (path === '/v1/policy/history' && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'auditor', 'policy_admin']); return send(200, { items: fabric.store.list(p.tenant_id, 'policy-history', 100, 0), staged: fabric.store.get(p.tenant_id, 'policy', 'staged') ?? null }); }
-      if ((m = /^\/v1\/action-capsules\/([A-Za-z0-9-]+)\/acquire-evidence$/.exec(path)) && req.method === 'POST') { fabric.authorize(p, ['operator', 'security', 'policy_admin']); const input = await body(req); fields(input, ['issuer', 'kind', 'claims']); return send(201, await fabric.acquireEvidence(p, m[1], input)); }
+      if ((m = /^\/v1\/action-capsules\/([A-Za-z0-9-]{1,128})\/acquire-evidence$/.exec(path)) && req.method === 'POST') { fabric.authorize(p, ['operator', 'security', 'policy_admin']); const input = await body(req); fields(input, ['issuer', 'kind', 'claims']); return send(201, await fabric.acquireEvidence(p, m[1], input)); }
       if (path === '/v1/connectors/status' && req.method === 'GET') return send(200, fabric.connectorStatus(p));
-      if ((m = /^\/v1\/connectors\/([A-Za-z0-9-]+)\/drift-check$/.exec(path)) && req.method === 'POST') { fabric.authorize(p, ['security', 'policy_admin']); await noBody(req); return send(200, await fabric.checkIssuerDrift(p, m[1])); }
+      if ((m = /^\/v1\/connectors\/([A-Za-z0-9-]{1,128})\/drift-check$/.exec(path)) && req.method === 'POST') { fabric.authorize(p, ['security', 'policy_admin']); await noBody(req); return send(200, await fabric.checkIssuerDrift(p, m[1])); }
       // The governed re-provisioning path: an honest issuer record-set
       // change re-pins the served spec digest on-chain instead of file
       // surgery (w49-ledger F4).
-      if ((m = /^\/v1\/connectors\/([A-Za-z0-9-]+)\/repin$/.exec(path)) && req.method === 'POST') { fabric.authorize(p, ['security']); await noBody(req); return send(200, await fabric.repinIssuerSpec(p, m[1])); }
+      if ((m = /^\/v1\/connectors\/([A-Za-z0-9-]{1,128})\/repin$/.exec(path)) && req.method === 'POST') { fabric.authorize(p, ['security']); await noBody(req); return send(200, await fabric.repinIssuerSpec(p, m[1])); }
       if ((m = /^\/v1\/audit\/proofs\/(\d+)$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'auditor']); return send(200, fabric.auditProof(p, Number(m[1]))); }
       if (path === '/v1/audit/consistency' && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'auditor']); const first = qint(url.searchParams.get('first'), 'first', 1, 1, 1e12); return send(200, fabric.auditConsistency(p, first)); }
       if (path === '/v1/audit/entries' && req.method === 'GET') { const cursor = qint(url.searchParams.get('cursor'), 'cursor', 0, 0, 1e12), limit = qint(url.searchParams.get('limit'), 'limit', 1000, 1, 5000); return send(200, fabric.auditPageScoped(p, { after: cursor, limit, view: url.searchParams.get('view') ?? undefined })); }
@@ -463,7 +473,7 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       if (path === '/v1/audit/verify-proof' && req.method === 'POST') { fabric.authorize(p, ['operator', 'security', 'auditor']); const i = await body(req); fields(i, ['proof'], ['pin']); let pinned = null; if (i.pin !== undefined) { fields(i.pin, ['root', 'size']); text(i.pin.root, 'pin.root', 128); integer(i.pin.size, 'pin.size', 1); pinned = { root: i.pin.root, size: i.pin.size }; } return send(200, { valid: fabric.verifyAuditProof(p.tenant_id, i.proof, pinned) }); }
       if (path === '/v1/ceremonies' && req.method === 'GET') { fabric.authorize(p, ['security', 'custodian', 'policy_admin']); return send(200, { items: fabric.store.list(p.tenant_id, 'ceremony', 100, 0).map(c => ({ ceremony_id: c.ceremony_id, status: fabric.ceremonyStatus(p.tenant_id, c), row_status: c.status, purpose: c.purpose })) }); }
       if (path === '/v1/ceremonies' && req.method === 'POST') { fabric.authorize(p, ['security', 'custodian']); return send(201, fabric.createCeremony(p, object(await body(req)))); }
-      if ((m = /^\/v1\/ceremonies\/([A-Za-z0-9_.:-]+)\/(acknowledge|split|reconstruct|abort)$/.exec(path)) && req.method === 'POST') {
+      if ((m = /^\/v1\/ceremonies\/([A-Za-z0-9_.:-]{1,128})\/(acknowledge|split|reconstruct|abort)$/.exec(path)) && req.method === 'POST') {
         // Authorize before parsing the body — a body-shape 400 must not
         // leak parse semantics to a caller who would 403 anyway
         // (w38-http LOW ordering parity with the noBody routes).
@@ -484,14 +494,22 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       // A caller-supplied nonce binds the artifact to the verifier's
       // challenge — without it the endpoint mints freely-replayable
       // attestations (w28-crypto F7).
-      if ((m = /^\/v1\/keys\/([A-Za-z0-9_.:-]+)\/attest$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['security', 'auditor']); const e = fabric.vault.keys.get(m[1]); requireThat(e && fabric.ownsVaultKey(p.tenant_id, m[1]), 'INV-404-NOT-FOUND', 'Key not found', 404); const nonce = url.searchParams.get('nonce'); if (nonce !== null) text(nonce, 'nonce', 128); return send(200, fabric.vault.attest(m[1], { now: fabric.clock(), nonce })); }
+      if ((m = /^\/v1\/keys\/([A-Za-z0-9_.:-]{1,128})\/attest$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['security', 'auditor']); const e = fabric.vault.keys.get(m[1]); requireThat(e && fabric.ownsVaultKey(p.tenant_id, m[1]), 'INV-404-NOT-FOUND', 'Key not found', 404); const nonce = url.searchParams.get('nonce'); if (nonce !== null) text(nonce, 'nonce', 128); return send(200, fabric.vault.attest(m[1], { now: fabric.clock(), nonce })); }
       if (path === '/v1/secure-perception/sessions' && req.method === 'POST') { fabric.authorize(p, ['operator', 'approver', 'custodian', 'security']); const input = await body(req); fields(input, ['attestation']); return send(201, fabric.perceptionSession(p, input.attestation)); }
       if (path === '/v1/secure-perception/release' && req.method === 'POST') { fabric.authorize(p, ['operator', 'approver', 'custodian', 'security']); const input = await body(req); fields(input, ['session_id', 'fields', 'purpose'], ['capsule_id', 'evidence_ref']); const { session_id, ...release } = input; return send(200, fabric.perceptionRelease(p, session_id, release)); }
       if (path === '/v1/secure-perception/fallback' && req.method === 'POST') { fabric.authorize(p, ['operator', 'approver', 'custodian', 'security']); const input = await body(req); fields(input, ['fields', 'purpose'], ['reason', 'capsule_id', 'evidence_ref']); return send(200, fabric.perceptionFallback(p, input)); }
       if (path === '/v1/advisory' && req.method === 'POST') { fabric.authorize(p, ['operator', 'security', 'policy_admin', 'approver', 'custodian', 'auditor']); return send(200, fabric.advise(p, object(await body(req)))); }
       // A real path with the wrong method is a 405, not an ambiguous 404 —
       // keeps the contract honest for method-probing clients (w5-http L-6).
-      const routeMethods = ROUTE_METHODS.get(path) ?? ROUTE_METHODS.get([...ROUTE_METHODS.keys()].find(t => t.includes('{') && new RegExp('^' + t.replace(/\{[^}]+\}/g, '[^/]+') + '$').test(path)));
+      // The {param} expansion must carry the SAME charset dispatch enforces:
+      // a wider match would oracle template existence (GET on an
+      // undispatchable id answering 405 where its POST sibling 404s) —
+      // w50-http LOW. Charsets mirror the dispatch regexes: {sequence} is
+      // numeric; the resources/coverage/ceremonies/keys families accept the
+      // wider id grammar; every other {id} is [A-Za-z0-9-]. All captures
+      // are length-bounded {1,128} — the openapi contract's maxLength and
+      // dispatch now agree (w50-ledger L-1).
+      const routeMethods = ROUTE_METHODS.get(path) ?? ROUTE_METHODS.get(ROUTE_TEMPLATES.find(([, re]) => re.test(path))?.[0]);
       requireThat(!routeMethods || routeMethods.includes(req.method), 'INV-405-METHOD', 'Method not allowed', 405);
       throw new InvariantError('INV-404-NOT-FOUND', 'Resource not found', 404);
     } catch (e) {

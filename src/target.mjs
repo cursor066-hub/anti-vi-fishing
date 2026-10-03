@@ -262,7 +262,11 @@ export class SimulatedTarget {
       const sp = `sp_${++this._sp}`;
       this.db.exec(`SAVEPOINT ${sp}`);
       try { const r = fn(); requireThat(typeof r?.then !== 'function', 'INV-409-STATE', 'Transactions must be synchronous — an async body commits before it runs', 409); this.db.exec(`RELEASE ${sp}`); return r; }
-      catch (e) { this.db.exec(`ROLLBACK TO ${sp}; RELEASE ${sp}`); throw e; }
+      // A RAISE(ROLLBACK) trigger destroys the whole transaction and the
+      // savepoint with it — the rollback itself then faults, and the
+      // original trigger evidence must still surface, not a bare 'no
+      // such savepoint' that masks it (w50-fv F-7; store.mjs twin).
+      catch (e) { try { this.db.exec(`ROLLBACK TO ${sp}; RELEASE ${sp}`); } catch (rb) { if (e instanceof Error) e.rollback_error = rb?.message ?? String(rb); } throw e; }
     }
     try {
       this.db.exec('BEGIN IMMEDIATE');
@@ -412,9 +416,17 @@ export class SimulatedTarget {
       if (e?.errcode === 1811)
         throw new InvariantError('INV-409-INTEGRITY', 'Ledger access refused by a trigger — tamper evidence', 409, { cause: e });
       if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw e;
+      // Extended sqlite codes carry the primary class in the low byte —
+      // BUSY_SNAPSHOT/RECOVERY/TIMEOUT are the same contention class as a
+      // bare busy, and NOMEM/INTERRUPT/SCHEMA are engine faults — honest
+      // infrastructure, never mislabeled tamper (w50-fv F-5).
+      const base = typeof e?.errcode === 'number' ? e.errcode & 0xFF : null;
+      if (base === 5 || base === 6) throw e;
+      if (base !== null && [7, 9, 17].includes(base))
+        throw new InvariantError('INV-503-LEDGER', `Ledger engine fault: ${e?.message ?? 'sqlite error'}`, 503, { cause: e });
       // Storage-class faults (readonly, I/O, corrupt, full, cant-open)
       // are infrastructure, not surgery evidence (w49-fixverify M-4).
-      if (typeof e?.errcode === 'number' && [8, 10, 11, 13, 14, 15].includes(e.errcode & 0xFF))
+      if (base !== null && [8, 10, 11, 13, 14, 15].includes(base))
         throw new InvariantError('INV-503-STORAGE', `Ledger storage fault: ${e?.message ?? 'sqlite error'}`, 503, { cause: e });
       // Any remaining sqlite-class fault is schema/integrity evidence,
       // not raw internals for callers to pattern-match (w48-store W48-3).

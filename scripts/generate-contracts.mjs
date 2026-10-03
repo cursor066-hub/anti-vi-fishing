@@ -48,7 +48,10 @@ const paths = {};
 function operation(path, method, description, role, request = null, status = 200) {
   const op = { operationId: method + path.replace(/[^a-zA-Z0-9]+/g, '_'), summary: description, description: `Roles: ${role}. Engineering profile; all target mutations are simulated.`, tags: [path.startsWith('/gate') ? 'Gate' : 'Control'], responses: { [status]: { description: 'Successful response; see API.md for exact record contracts', content: { 'application/json': { schema: { type: 'object' } } } }, default: { description: 'Reason-coded rejection', content: { 'application/json': { schema: Ref('Error') } } } } };
   if (request) op.requestBody = { required: true, content: { 'application/json': { schema: Ref(request) } } };
-  const params = [...path.matchAll(/\{([^}]+)\}/g)].map(m => ({ name: m[1], in: 'path', required: true, schema: m[1] === 'sequence' ? { type: 'integer', minimum: 1 } : path.startsWith('/gate') || path.includes('resources') || path.includes('keys') || path.includes('ceremonies') ? type.id : { type: 'string', pattern: '^[A-Za-z0-9-]+$', maxLength: 128 } }));
+  // Path-parameter contracts mirror the dispatch charsets exactly —
+  // resources/coverage/ceremonies/keys accept the wider set, every other
+  // {id} is narrow; both are length-bounded at dispatch (w50-ledger L-1).
+  const params = [...path.matchAll(/\{([^}]+)\}/g)].map(m => ({ name: m[1], in: 'path', required: true, schema: m[1] === 'sequence' ? { type: 'integer', minimum: 1 } : path.startsWith('/v1/resources/') || path.startsWith('/v1/coverage/') || path.startsWith('/v1/ceremonies/') || path.startsWith('/v1/keys/') ? { type: 'string', pattern: '^[A-Za-z0-9_.:-]{1,128}$' } : { type: 'string', pattern: '^[A-Za-z0-9-]{1,128}$' } }));
   if (path === '/v1/action-capsules' && method === 'post') params.push({ name: 'Idempotency-Key', in: 'header', required: true, schema: { type: 'string', pattern: '^[A-Za-z0-9_-]{8,128}$' } });
   if (path === '/v1/audit/entries' && method === 'get') params.push(
     { name: 'cursor', in: 'query', required: false, schema: { type: 'integer', minimum: 0 } },

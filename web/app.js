@@ -237,7 +237,14 @@ if (typeof document !== 'undefined') {
       if (!i.endpoint) { button.disabled = true; button.title = 'No live endpoint registered'; }
       button.hidden = !(state.me?.roles ?? []).some(r => ['security', 'policy_admin'].includes(r));
       button.addEventListener('click', async () => { try { $('drift-result').textContent = JSON.stringify(await api(`/v1/connectors/${i.key_id}/drift-check`, { method: 'POST', body: {} }), null, 2); } catch (error) { notify(error.message || 'Drift check failed.', true); } });
-      cell.append(button); tr.append(title, node('td', `${i.channel} / ${i.failure_domain}`), node('td', i.endpoint ?? 'offline envelope only'), node('td', i.revoked ? 'revoked' : 'trusted'), cell); $('connector-rows').append(tr);
+      // The governed remediation path for a real spec_digest change lives
+      // next to the check that convicts it — security-only, matching the
+      // route's role set (w50-http LOW).
+      const repin = node('button', 'Re-pin spec', 'secondary');
+      if (!i.endpoint) { repin.disabled = true; repin.title = 'No live endpoint registered'; }
+      repin.hidden = !(state.me?.roles ?? []).includes('security');
+      repin.addEventListener('click', async () => { try { $('drift-result').textContent = JSON.stringify(await api(`/v1/connectors/${i.key_id}/repin`, { method: 'POST', body: {} }), null, 2); } catch (error) { notify(error.message || 'Re-pin failed.', true); } });
+      cell.append(button, repin); tr.append(title, node('td', `${i.channel} / ${i.failure_domain}`), node('td', i.endpoint ?? 'offline envelope only'), node('td', i.revoked ? 'revoked' : 'trusted'), cell); $('connector-rows').append(tr);
     }
   }
   handle('refresh-connectors', 'click', loadConnectors);
