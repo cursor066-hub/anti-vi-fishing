@@ -624,26 +624,10 @@ ok 104 - NFR-SEC-006: crypto agility is configurable and both suites sign/verify
   type: 'test'
   ...
 # Subtest: NFR-PERF-004: the integrated evaluation path sustains >=100 decisions/second in-process
-not ok 105 - NFR-PERF-004: the integrated evaluation path sustains >=100 decisions/second in-process
+ok 105 - NFR-PERF-004: the integrated evaluation path sustains >=100 decisions/second in-process
   ---
   duration_ms: 0
   type: 'test'
-  location: '/home/ubuntu/repos/anti-vi-fishing/tests/ledger3.test.mjs:184:1'
-  failureType: 'testCodeFailure'
-  error: 'in-process audited evaluation throughput 79/s < calibrated 84/s (reference-hardware bound 100/s)'
-  code: 'ERR_ASSERTION'
-  name: 'AssertionError'
-  expected: true
-  actual: false
-  operator: '=='
-  stack: |-
-    TestContext.<anonymous> (file:///home/ubuntu/repos/anti-vi-fishing/tests/ledger3.test.mjs:208:10)
-    Test.runInAsyncScope (node:async_hooks:227:14)
-    Test.run (node:internal/test_runner/test:1382:25)
-    Test.processPendingSubtests (node:internal/test_runner/test:960:18)
-    Test.postRun (node:internal/test_runner/test:1522:19)
-    Test.run (node:internal/test_runner/test:1447:12)
-    async Test.processPendingSubtests (node:internal/test_runner/test:960:7)
   ...
 # Subtest: NFR-PERF-001 NFR-PERF-003: the benchmark publishes its environment, separates connector latency and meets its declared targets
 ok 106 - NFR-PERF-001 NFR-PERF-003: the benchmark publishes its environment, separates connector latency and meets its declared targets
@@ -688,10 +672,35 @@ ok 112 - NFR-USA-004: a recorded decision replays deterministically from stored 
   type: 'test'
   ...
 # Subtest: NFR-TST-001: every requirement row carries a verification method, and every VERIFIED id is exercised by a tagged test
-ok 113 - NFR-TST-001: every requirement row carries a verification method, and every VERIFIED id is exercised by a tagged test
+not ok 113 - NFR-TST-001: every requirement row carries a verification method, and every VERIFIED id is exercised by a tagged test
   ---
   duration_ms: 0
   type: 'test'
+  location: '/home/ubuntu/repos/anti-vi-fishing/tests/ledger3.test.mjs:313:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    traceability --check failed:
+    Traceback (most recent call last):
+      File "/home/ubuntu/repos/anti-vi-fishing/scripts/traceability.py", line 514, in <module>
+        assert any(_title_ran(t) for t in citing_titles), f"{row['id']} is VERIFIED but none of its citing tests passed in reports/tests.tap (skip/defer is not evidence)"
+    AssertionError: NFR-PERF-004 is VERIFIED but none of its citing tests passed in reports/tests.tap (skip/defer is not evidence)
+    
+    
+    1 !== 0
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 0
+  actual: 1
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///home/ubuntu/repos/anti-vi-fishing/tests/ledger3.test.mjs:334:10)
+    Test.runInAsyncScope (node:async_hooks:227:14)
+    Test.run (node:internal/test_runner/test:1382:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:960:18)
+    Test.postRun (node:internal/test_runner/test:1522:19)
+    Test.run (node:internal/test_runner/test:1447:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:960:7)
   ...
 # Subtest: NFR-TST-003: seeded test data is synthetic and marked as such
 ok 114 - NFR-TST-003: seeded test data is synthetic and marked as such
@@ -748,10 +757,30 @@ ok 122 - NFR-OPS-005: staged rollout and rollback are drilled in the simulation 
   type: 'test'
   ...
 # Subtest: NFR-TST-004: the release gate refuses release while any critical finding is open
-ok 123 - NFR-TST-004: the release gate refuses release while any critical finding is open
+not ok 123 - NFR-TST-004: the release gate refuses release while any critical finding is open
   ---
   duration_ms: 0
   type: 'test'
+  location: '/home/ubuntu/repos/anti-vi-fishing/tests/ledger3.test.mjs:442:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    release-check must fail closed while external acceptance items remain unverified
+    
+    2 !== 1
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 1
+  actual: 2
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///home/ubuntu/repos/anti-vi-fishing/tests/ledger3.test.mjs:444:10)
+    Test.runInAsyncScope (node:async_hooks:227:14)
+    Test.run (node:internal/test_runner/test:1382:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:960:18)
+    Test.postRun (node:internal/test_runner/test:1522:19)
+    Test.run (node:internal/test_runner/test:1447:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:960:7)
   ...
 # Subtest: NFR-MNT-004: repository policy requires owner review of every security-critical module
 ok 124 - NFR-MNT-004: repository policy requires owner review of every security-critical module
@@ -5181,6 +5210,10 @@ ok 860 - w39-crypto F7: vault.generate/importKey clone the caller-purpose array
   duration_ms: 0
   type: 'test'
   ...
+# Traceback (most recent call last):
+#   File "/home/ubuntu/repos/anti-vi-fishing/scripts/traceability.py", line 514, in <module>
+#     assert any(_title_ran(t) for t in citing_titles), f"{row['id']} is VERIFIED but none of its citing tests passed in reports/tests.tap (skip/defer is not evidence)"
+# AssertionError: NFR-PERF-004 is VERIFIED but none of its citing tests passed in reports/tests.tap (skip/defer is not evidence)
 # Subtest: w39-ledger F2: privileged routes authorize before parsing the body
 ok 861 - w39-ledger F2: privileged routes authorize before parsing the body
   ---
@@ -5194,10 +5227,31 @@ ok 862 - w39-ledger F4/F8/F9: honest limitation text lands in the generated ledg
   type: 'test'
   ...
 # Subtest: w39-ledger F6/F7: the generator gate runs byte-clean against the committed ledger
-ok 863 - w39-ledger F6/F7: the generator gate runs byte-clean against the committed ledger
+not ok 863 - w39-ledger F6/F7: the generator gate runs byte-clean against the committed ledger
   ---
   duration_ms: 0
   type: 'test'
+  location: '/home/ubuntu/repos/anti-vi-fishing/tests/w39.test.mjs:229:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Command failed: python3 scripts/traceability.py --check
+    Traceback (most recent call last):
+      File "/home/ubuntu/repos/anti-vi-fishing/scripts/traceability.py", line 514, in <module>
+        assert any(_title_ran(t) for t in citing_titles), f"{row['id']} is VERIFIED but none of its citing tests passed in reports/tests.tap (skip/defer is not evidence)"
+    AssertionError: NFR-PERF-004 is VERIFIED but none of its citing tests passed in reports/tests.tap (skip/defer is not evidence)
+    
+  code: 'ERR_TEST_FAILURE'
+  stack: |-
+    genericNodeError (node:internal/errors:985:15)
+    wrappedFn (node:internal/errors:539:14)
+    checkExecSyncError (node:child_process:942:11)
+    execFileSync (node:child_process:978:15)
+    TestContext.<anonymous> (file:///home/ubuntu/repos/anti-vi-fishing/tests/w39.test.mjs:232:15)
+    Test.runInAsyncScope (node:async_hooks:227:14)
+    Test.run (node:internal/test_runner/test:1382:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:960:18)
+    Test.postRun (node:internal/test_runner/test:1522:19)
+    Test.run (node:internal/test_runner/test:1447:12)
   ...
 # Subtest: w40-fv F-1: a stripped watermark entry resolves to the head-attested floor and is named, never laundered
 ok 864 - w40-fv F-1: a stripped watermark entry resolves to the head-attested floor and is named, never laundered
@@ -7375,8 +7429,8 @@ ok 1225 - w9-schema F-9: a leftover deployment dir gets an actionable refusal
 1..1225
 # tests 1225
 # suites 0
-# pass 1224
-# fail 1
+# pass 1222
+# fail 3
 # cancelled 0
 # skipped 0
 # todo 0
