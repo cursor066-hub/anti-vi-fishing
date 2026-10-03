@@ -1561,6 +1561,50 @@
         ]
       }
     },
+    "/v1/connectors/{id}/repin": {
+      "post": {
+        "operationId": "post_v1_connectors_id_repin",
+        "summary": "Re-pin the issuer spec digest on-chain after a governed record-set change",
+        "description": "Roles: security. Engineering profile; all target mutations are simulated.",
+        "tags": [
+          "Control"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9-]+$",
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
     "/v1/policies/simulate": {
       "post": {
         "operationId": "post_v1_policies_simulate",

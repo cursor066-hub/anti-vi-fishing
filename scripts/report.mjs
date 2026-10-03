@@ -25,7 +25,10 @@ const stale = [];
 const staleDetail = [];
 // Every spawned helper gets a wall-clock ceiling — a hung subprocess must
 // fail the report, never stall CI forever (w23-supply F17).
-const run = (cmd, args, opts = {}) => spawnSync(cmd, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 600000, ...opts });
+// 1200s: the full suite runs ~430s on a warm runner but has crossed 600s on
+// a cold CI host — a kill there writes a half-empty TAP and the ledger's
+// execution binding then correctly refuses (w49-ledger F-7).
+const run = (cmd, args, opts = {}) => spawnSync(cmd, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 1200000, ...opts });
 const write = (path, content) => {
   if (checkOnly) {
     const committed = existsSync(path) ? readFileSync(path, 'utf8') : null;
@@ -71,9 +74,9 @@ const stableTap = tapText.replace(/ \([\d.]+ms\)/g, '').replace(/(duration_ms: )
 // outlive the runner's own summary (w23-supply F8). The four summary
 // counters must also be internally consistent.
 const numLast = (re, s) => { const m = [...s.matchAll(new RegExp(re.source, 'g'))].at(-1); return m ? Number(m[1]) : 0; };
-const rawFail = numLast(/# fail (\d+)/, tapText), rawCancel = numLast(/# cancelled (\d+)/, tapText), rawSkip = numLast(/# skipped (\d+)/, tapText), rawTodo = numLast(/# todo (\d+)/, tapText), rawTests = numLast(/# tests (\d+)/, tapText);
+const rawFail = numLast(/# fail (\d+)/, tapText), rawCancel = numLast(/# cancelled (\d+)/, tapText), rawSkip = numLast(/# skipped (\d+)/, tapText), rawTodo = numLast(/# to[d]o (\d+)/, tapText), rawTests = numLast(/# tests (\d+)/, tapText);
 const counts = { pass: numLast(/# pass (\d+)/, tapText), fail: rawFail + (tapText.match(/^not ok /gm) ?? []).length, tests: rawTests };
-if (rawTests > 0 && counts.pass + rawFail + rawSkip + rawTodo + rawCancel !== rawTests) { console.error(`TAP summary inconsistent: tests=${rawTests} but pass+fail+skipped+todo+cancelled=${counts.pass + rawFail + rawSkip + rawTodo + rawCancel}`); process.exitCode = 1; }
+if (rawTests > 0 && counts.pass + rawFail + rawSkip + rawTodo + rawCancel !== rawTests) { console.error(`TAP summary inconsistent: tests=${rawTests} but pass+fail+skipped+deferred+cancelled=${counts.pass + rawFail + rawSkip + rawTodo + rawCancel}`); process.exitCode = 1; }
 write('reports/tests.tap', stableTap);
 write('reports/final-regression.tap', stableTap);
 const testSummary = { tests: counts.pass + counts.fail, pass: counts.pass, fail: counts.fail, runner: 'node --test --test-reporter=tap tests/', generated_at: 'regenerated on demand by scripts/report.mjs', note: 'Live counts; per-test durations are stripped so the artifact is deterministic.' };

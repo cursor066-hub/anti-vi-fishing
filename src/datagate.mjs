@@ -111,7 +111,7 @@ export function watermark(rows, ctx) {
 // DAT-009: cumulative reconstruction control. Counts distinct rows and
 // columns a subject has touched per dataset inside the window; crossing the
 // configured coverage threshold produces a budget denial plus an audit signal.
-export function reconstructionCheck(touchDb, catalogDb, { tenant, subject, dataset, rows, columns, now, policy, record = true, access = null, droppedEvents = 0, verifiedRowCount = null }) {
+export function reconstructionCheck(touchDb, catalogDb, { tenant, subject, dataset, rows, columns, now, policy, record = true, access = null, droppedEvents = 0, sealDroppedAt = 0, verifiedRowCount = null }) {
   // Touch records live on the fabric store's transaction so a rolled-back
   // consume cannot leave phantom access rows (cross-DB atomicity, M2).
   // Counts are computed PROSPECTIVELY before writing: a denied attempt
@@ -147,10 +147,14 @@ export function reconstructionCheck(touchDb, catalogDb, { tenant, subject, datas
   const datasetCoverage = totalRows ? Math.floor((datasetTouched.size * 100) / totalRows) : 0;
   // Seal-drop accounting: a seal that destroyed rows it could not re-verify
   // leaves the ledger unable to re-derive the erased disclosure — every
-  // dropped event might have been a full-dataset access. Worst-case coverage
-  // keeps the configured budget honest instead of under-reporting what the
-  // chain can no longer prove (w34-composite MEDIUM-1).
-  const sealDropped = droppedEvents > 0;
+  // dropped event might have been a full-dataset access. Worst-case
+  // coverage keeps the configured budget honest instead of under-reporting
+  // what the chain can no longer prove (w34-composite MEDIUM-1). The wedge
+  // is window-scoped like every other coverage input: a seal that dropped
+  // rows BEFORE this window still attested the loss on-chain, but an
+  // ancient drop cannot wedge honest exports forever — the reconstruction
+  // horizon the coverage claims is the window itself (w49-runtime W49-3).
+  const sealDropped = droppedEvents > 0 && sealDroppedAt > now - window;
   const limits = policy ?? { max_distinct_rows: 100000, max_distinct_columns: 100000, max_coverage_percent: 100 };
   const maxDatasetCoverage = limits.max_dataset_coverage_percent ?? limits.max_coverage_percent;
   if (rowCount > limits.max_distinct_rows || colCount > limits.max_distinct_columns || coveragePercent > limits.max_coverage_percent || datasetCoverage > maxDatasetCoverage || sealDropped) {
@@ -162,10 +166,16 @@ export function reconstructionCheck(touchDb, catalogDb, { tenant, subject, datas
     const ins = touchDb.prepare('INSERT INTO data_access VALUES(?,?,?,?,?,?)');
     // A silent RAISE(IGNORE) trigger on the mirror table would undercount
     // disclosure while the caller reads success — every touch must land
-    // (w48-fixverify CRITICAL).
+    // (w48-fixverify CRITICAL). An AFTER trigger firing extra writes
+    // launders disclosure the same way — the transaction's total_changes
+    // delta must equal exactly the touches written (w49-seal C-2 parity).
+    const tcProbe = touchDb.prepare('SELECT total_changes() tc');
+    const before = tcProbe.get().tc;
     let landed = 0;
     for (const row of rows) for (const c of columns) landed += ins.run(tenant, subject, dataset, row, c, now).changes;
+    const delta = Number(tcProbe.get().tc - before);
     requireThat(landed === rows.length * columns.length, 'INV-409-INTEGRITY', 'Data-access mirror write abandoned — ledger write refused by a foreign trigger', 409);
+    requireThat(delta === rows.length * columns.length, 'INV-409-INTEGRITY', 'Data-access mirror write produced unaccounted rows — foreign trigger side-effects', 409);
   }
   return { allowed: true, row_count: rowCount, column_count: colCount, coverage_percent: sealDropped ? 100 : coveragePercent, dataset_coverage_percent: sealDropped ? 100 : datasetCoverage };
 }

@@ -34,20 +34,20 @@
       "bytes": 7468
     },
     "src/datagate.mjs": {
-      "lines": 172,
-      "bytes": 12327
+      "lines": 182,
+      "bytes": 13199
     },
     "src/errors.mjs": {
       "lines": 10,
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 7824,
-      "bytes": 602882
+      "lines": 7964,
+      "bytes": 613253
     },
     "src/issuerd.mjs": {
-      "lines": 920,
-      "bytes": 65182
+      "lines": 942,
+      "bytes": 67064
     },
     "src/keystore.mjs": {
       "lines": 254,
@@ -63,7 +63,7 @@
     },
     "src/runtime.mjs": {
       "lines": 313,
-      "bytes": 26285
+      "bytes": 26325
     },
     "src/schema.mjs": {
       "lines": 94,
@@ -74,20 +74,20 @@
       "bytes": 13696
     },
     "src/server.mjs": {
-      "lines": 539,
-      "bytes": 52172
+      "lines": 543,
+      "bytes": 52600
     },
     "src/shamir.mjs": {
       "lines": 91,
       "bytes": 3876
     },
     "src/store.mjs": {
-      "lines": 1146,
-      "bytes": 84395
+      "lines": 1185,
+      "bytes": 87441
     },
     "src/target.mjs": {
-      "lines": 589,
-      "bytes": 43172
+      "lines": 610,
+      "bytes": 44772
     },
     "web/app.js": {
       "lines": 256,
@@ -114,12 +114,12 @@
       "bytes": 1523
     },
     "scripts/check.mjs": {
-      "lines": 207,
-      "bytes": 11291
+      "lines": 263,
+      "bytes": 14369
     },
     "scripts/generate-contracts.mjs": {
       "lines": 107,
-      "bytes": 19341
+      "bytes": 19466
     },
     "scripts/generate-vectors.mjs": {
       "lines": 143,
@@ -138,8 +138,8 @@
       "bytes": 7158
     },
     "scripts/report.mjs": {
-      "lines": 207,
-      "bytes": 14872
+      "lines": 210,
+      "bytes": 15094
     },
     "scripts/restore-check.mjs": {
       "lines": 170,
@@ -154,8 +154,8 @@
       "bytes": 269
     },
     "scripts/traceability.py": {
-      "lines": 356,
-      "bytes": 29954
+      "lines": 371,
+      "bytes": 31067
     },
     "scripts/verify-export-webcrypto.mjs": {
       "lines": 114,
@@ -214,8 +214,8 @@
       "bytes": 29561
     },
     "tests/ledger3.test.mjs": {
-      "lines": 463,
-      "bytes": 31564
+      "lines": 483,
+      "bytes": 32580
     },
     "tests/lifecycle.test.mjs": {
       "lines": 135,
@@ -322,8 +322,8 @@
       "bytes": 16792
     },
     "tests/w20-fixverify.test.mjs": {
-      "lines": 209,
-      "bytes": 14261
+      "lines": 214,
+      "bytes": 14602
     },
     "tests/w21-crypto.test.mjs": {
       "lines": 187,
@@ -477,6 +477,10 @@
       "lines": 203,
       "bytes": 13695
     },
+    "tests/w49.test.mjs": {
+      "lines": 224,
+      "bytes": 14624
+    },
     "tests/w5-mutations.test.mjs": {
       "lines": 194,
       "bytes": 13645
@@ -546,6 +550,6 @@
       "bytes": 6499
     }
   },
-  "total_files": 136,
-  "total_lines": 35620
+  "total_files": 137,
+  "total_lines": 36179
 }

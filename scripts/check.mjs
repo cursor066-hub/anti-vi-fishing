@@ -83,7 +83,9 @@ for (const file of files.filter(f => CODE_EXT.test(f) && existsSync(f))) {
 // exemption.
 const SINK_EXT = /\.(mjs|js|cjs|ts|jsx|tsx|py|sh|bash|zsh|ps1|yml|yaml|html|htm|json)$/;
 const SINK_RULES = [
-  ['dynamic eval', new RegExp(`\\beval\\s*\\(|new\\s+Function\\s*\\(|eval\\s*\\/\\*\\*\\/\\s*\\(|\\bFunction\\s*\\(|Reflect\\.apply\\s*\\(\\s*eval|node:${'v'}m`)],
+  // The vm specifier is spelled in pieces so this file does not flag its
+  // own rule table (w49-ledger F-1).
+  ['dynamic eval', new RegExp(`\\beval\\s*\\(|new\\s+Function\\s*\\(|eval\\s*\\/\\*\\*\\/\\s*\\(|\\bFunction\\s*\\(|Reflect\\.apply\\s*\\(\\s*eval|node:${'v'}m|from\\s+['"](?:node:)?${'v'}m['"]|require\\s*\\(\\s*['"](?:node:)?${'v'}m['"]|import\\s*\\(\\s*['"](?:node:)?${'v'}m['"]|runIn(?:This|New)?Context`)],
   ['string-timed code', /\bset(?:Timeout|Interval)\s*\(\s*['"`]/],
   ['embedded private key', /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
   ['cloud credential pattern', /\bAKIA[0-9A-Z]{16}\b/]
@@ -92,17 +94,29 @@ const SINK_RULES = [
 const MARKER_RULES = [
   ['unfinished code marker', new RegExp(`\\b(?:${'TO' + 'DO'}|${'FIX' + 'ME'})\\b`)]
 ];
-// DOM-injection sinks only matter in code that renders — production sources
-// and the console, INCLUDING static .html assets whose markup could carry a
-// live sink (w31-ledger F7). Tests legitimately contain these strings
-// inside regexes that assert their absence.
+// Case-insensitive on authored files: a lowercase marker is the same
+// unfinished code (w49-ledger F-1). reports/ is exempt — '# to'+'do N'
+// lines are generated TAP protocol fields, not authored markers; the few
+// files that legitimately name node:test's skip/defer vocabulary dodge
+// the literal word instead.
+const MARKER_LOOSE = [
+  ['unfinished code marker (any case)', new RegExp(`\\b(?:${'TO' + 'DO'}|${'FIX' + 'ME'})\\b`, 'i')]
+];
+// DOM-injection sinks matter in ANY code that renders — not only src/ and
+// web/: an .html asset or script-generated page outside those roots could
+// carry a live sink (w49-ledger F-1). Tests legitimately contain these
+// strings inside regexes that assert their absence; this file exempts
+// itself because it hosts the rules.
 const RENDER_ONLY = [
   ['DOM injection', /\.(?:innerHTML|outerHTML)\s*(?:=|\+=)|insertAdjacentHTML|document\.write\s*\(/]
 ];
 for (const file of textFiles) {
   if (file === 'vectors/keys.json' || !existsSync(file) || isBinary(file)) continue;
   const s = readFileSync(file, 'utf8');
-  const rules = [...(SINK_EXT.test(file) ? SINK_RULES : []), ...((file.startsWith('src/') || file.startsWith('web/')) ? RENDER_ONLY : []), ...MARKER_RULES];
+  // check.mjs exempts itself only from the DOM rules — its rule table
+  // legitimately hosts the sink literals; sinks and markers still apply.
+  const renderable = file !== 'scripts/check.mjs' && (file.startsWith('src/') || file.startsWith('web/') || /\.(?:html?|jsx|tsx)$/.test(file)) && !file.startsWith('tests/');
+  const rules = [...(SINK_EXT.test(file) ? SINK_RULES : []), ...(renderable ? RENDER_ONLY : []), ...MARKER_RULES, ...(file.startsWith('reports/') ? [] : MARKER_LOOSE)];
   for (const [name, regex] of rules) if (regex.test(s)) { console.error(`${file}: ${name}`); failed = true; }
 }
 
@@ -180,6 +194,48 @@ for (const file of textFiles) {
     }
     if (!code) { console.error(`route-role parity: ${r.method} ${r.path} — cannot resolve the role gate`); failed = true; }
     else if (sortR(code) !== sortR(r.roles)) { console.error(`route-role parity: ${r.method} ${r.path} — code=[${sortR(code)}] openapi=[${sortR(r.roles)}]`); failed = true; }
+  }
+}
+
+// Reverse parity: every live route handler in server.mjs must be declared
+// in the emitted contract — an undeclared route is undocumented live code
+// the forward parity above never audits (w49-ledger F-2).
+{
+  const spec = JSON.parse(readFileSync('docs/openapi.json', 'utf8'));
+  const declared = new Set();
+  for (const [p, ops] of Object.entries(spec.paths ?? {})) {
+    const norm = p.split('/').map(s => (s.startsWith('{') && s.endsWith('}') ? '{}' : s)).join('/');
+    for (const m of Object.keys(ops)) if (['get', 'post', 'put', 'delete', 'patch'].includes(m)) declared.add(`${m.toUpperCase()} ${norm}`);
+  }
+  const server = readFileSync('src/server.mjs', 'utf8').split('\n');
+  // A literal alternation group (a|b) expands into one path per arm; every
+  // other capture group normalizes to the contract's {} placeholder.
+  const expandAlternations = rx => {
+    let paths = [rx];
+    const ALT = /\(([^()]*\|[^()]*)\)/;
+    for (let guard = 0; guard < 8; guard++) {
+      const i = paths.findIndex(p => ALT.test(p));
+      if (i === -1) return paths;
+      const m = ALT.exec(paths[i]);
+      paths.splice(i, 1, ...m[1].split('|').map(a => paths[i].split(m[0]).join(a)));
+    }
+    return paths;
+  };
+  for (const line of server) {
+    const meth = /req\.method === '([A-Z]+)'/.exec(line)?.[1];
+    if (!meth) continue;
+    const lit = /path === '([^']+)'/.exec(line);
+    if (lit) {
+      if (!declared.has(`${meth} ${lit[1]}`)) { console.error(`route-spec parity: ${meth} ${lit[1]} handled but absent from docs/openapi.json`); failed = true; }
+      continue;
+    }
+    const rxx = /\/\^(.+?)\$\/\.exec\(path\)/.exec(line);
+    if (!rxx) continue;
+    const raw = rxx[1].replace(/\\\//g, '/');
+    for (const p of expandAlternations(raw)) {
+      const norm = p.replace(/\([^()]+\)/g, '{}');
+      if (!declared.has(`${meth} ${norm}`)) { console.error(`route-spec parity: ${meth} ${norm} handled but absent from docs/openapi.json`); failed = true; }
+    }
   }
 }
 

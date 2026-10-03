@@ -126,7 +126,12 @@ test('w20-fv F-7/F-8: a mid-chain edit refuses boot; a valid prefix resumes', as
   }
   await srv.close();
   const lines = readFileSync(logPath, 'utf8').trim().split('\n');
-  assert.equal(lines.length, 2);
+  // The second windowed probe first closes the expired window — its
+  // trailing tally is chained evidence, not a memory loss (w49-ledger F5).
+  assert.equal(lines.length, 3);
+  const closeLine = JSON.parse(lines[1]);
+  assert.equal(closeLine.type, 'probe_burst_close');
+  assert.equal(closeLine.prior_window_probes, 1, 'the close line carries the first window tally');
   // A mid-chain edit (first line tampered) must refuse boot.
   const tampered = JSON.parse(lines[0]); tampered.malformed = false;
   writeFileSync(logPath, JSON.stringify(tampered) + '\n' + lines[1] + '\n');

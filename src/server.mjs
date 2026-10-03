@@ -26,7 +26,7 @@ export const ROUTE_METHODS = new Map(Object.entries({
   '/v1/resources/{id}': 'GET', '/v1/capabilities': 'POST', '/gate/v1/runtime': 'POST',
   '/v1/revocations': 'GET,POST', '/v1/coverage': 'GET,POST', '/v1/coverage/history': 'GET',
   '/v1/coverage/{id}/technical-validation': 'POST',
-  '/v1/connectors': 'GET', '/v1/connectors/status': 'GET', '/v1/connectors/{id}/drift-check': 'POST',
+  '/v1/connectors': 'GET', '/v1/connectors/status': 'GET', '/v1/connectors/{id}/drift-check': 'POST', '/v1/connectors/{id}/repin': 'POST',
   '/v1/policies/simulate': 'POST',
   '/v1/audit-exports': 'POST', '/v1/audit/entries': 'GET', '/v1/audit/proofs/{sequence}': 'GET',
   '/v1/audit/consistency': 'GET', '/v1/audit/verify-proof': 'POST',
@@ -447,6 +447,10 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       if ((m = /^\/v1\/action-capsules\/([A-Za-z0-9-]+)\/acquire-evidence$/.exec(path)) && req.method === 'POST') { fabric.authorize(p, ['operator', 'security', 'policy_admin']); const input = await body(req); fields(input, ['issuer', 'kind', 'claims']); return send(201, await fabric.acquireEvidence(p, m[1], input)); }
       if (path === '/v1/connectors/status' && req.method === 'GET') return send(200, fabric.connectorStatus(p));
       if ((m = /^\/v1\/connectors\/([A-Za-z0-9-]+)\/drift-check$/.exec(path)) && req.method === 'POST') { fabric.authorize(p, ['security', 'policy_admin']); await noBody(req); return send(200, await fabric.checkIssuerDrift(p, m[1])); }
+      // The governed re-provisioning path: an honest issuer record-set
+      // change re-pins the served spec digest on-chain instead of file
+      // surgery (w49-ledger F4).
+      if ((m = /^\/v1\/connectors\/([A-Za-z0-9-]+)\/repin$/.exec(path)) && req.method === 'POST') { fabric.authorize(p, ['security']); await noBody(req); return send(200, await fabric.repinIssuerSpec(p, m[1])); }
       if ((m = /^\/v1\/audit\/proofs\/(\d+)$/.exec(path)) && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'auditor']); return send(200, fabric.auditProof(p, Number(m[1]))); }
       if (path === '/v1/audit/consistency' && req.method === 'GET') { fabric.authorize(p, ['operator', 'security', 'auditor']); const first = qint(url.searchParams.get('first'), 'first', 1, 1, 1e12); return send(200, fabric.auditConsistency(p, first)); }
       if (path === '/v1/audit/entries' && req.method === 'GET') { const cursor = qint(url.searchParams.get('cursor'), 'cursor', 0, 0, 1e12), limit = qint(url.searchParams.get('limit'), 'limit', 1000, 1, 5000); return send(200, fabric.auditPageScoped(p, { after: cursor, limit, view: url.searchParams.get('view') ?? undefined })); }

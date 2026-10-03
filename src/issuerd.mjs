@@ -289,7 +289,11 @@ export function slash64(addr) {
   if (dc.length === 1) segs = dc[0].split(':');
   else if (dc.length === 2) {
     const head = dc[0] ? dc[0].split(':') : [], tail = dc[1] ? dc[1].split(':') : [];
-    segs = head.concat(new Array(8 - head.length - tail.length).fill('0'), tail);
+    // head+tail can exceed 8 segments on a malformed literal — new Array
+    // would throw RangeError; treat it as unparseable (w49-ledger F6).
+    const pad = 8 - head.length - tail.length;
+    if (pad < 0) return addr;
+    segs = head.concat(new Array(pad).fill('0'), tail);
   } else return addr;
   if (segs.length !== 8 || segs.some(s => !/^[0-9a-f]{1,4}$/.test(s))) return addr;
   const net = segs.slice(0, 4).map(s => parseInt(s, 16).toString(16)).join(':');
@@ -336,7 +340,9 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
         try { lst = lstatSync(logLockPath); } catch (le) { if (le.code === 'ENOENT') continue; throw le; }
         requireThat(lst && !lst.isSymbolicLink() && lst.isFile(), 'INV-503-CONFIG', 'Issuance log lock is not a regular file — refusing to treat it as a stale lock', 503);
         let holder = null;
-        const lfd = openSync(logLockPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+        let lfd = null;
+        try { lfd = openSync(logLockPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK); }
+        catch (e) { throw new InvariantError('INV-503-CONFIG', `Issuance log lock sidecar unreadable — refusing to trust the lock state: ${e?.message ?? 'io error'}`, 503, { cause: e }); }
         try { holder = readFileSync(lfd, 'utf8').trim().split(' ')[0]; } catch { holder = null; } finally { closeSync(lfd); }
         const pid = Number(holder);
         let alive = false;
@@ -403,7 +409,9 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
       try { hs = lstatSync(headPath); } catch (e) { if (e.code === 'ENOENT') return null; throw e; }
       requireThat(!hs.isSymbolicLink() && hs.isFile(), 'INV-503-CONFIG', 'Issuance log head watermark must be a regular file', 503);
       requireThat((hs.mode & 0o077) === 0, 'INV-503-CONFIG', 'Issuance log head watermark must not be readable by group or other users', 503);
-      const hfd = openSync(headPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+      let hfd = null;
+      try { hfd = openSync(headPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK); }
+      catch (e) { throw new InvariantError('INV-503-CONFIG', `Issuance log head watermark unreadable — refusing to trust the watermark: ${e?.message ?? 'io error'}`, 503, { cause: e }); }
       try { return readFileSync(hfd, 'utf8'); } finally { closeSync(hfd); }
     };
     if (fd !== null) {
@@ -616,12 +624,26 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
     // already priced by the token budgets.
     const refusalLog = (entry) => {
       if (!entry.unauthenticated) { issuanceLog(entry); return; }
+      const nowC = clock();
+      // An expired window owes the chain its trailing count — without a
+      // flush the burst tally dies in memory when probes simply stop.
+      // Closing stale windows on the next refusal (bounded per call) and
+      // on eviction keeps provenance complete (w49-ledger F5).
+      // This key's own expired window must close BEFORE its tally is
+      // read — otherwise the flush destroys the prior count the new
+      // burst's open line is meant to report (w49 M3 regression).
       const key = `${principalKey}:${entry.route ?? ''}:${entry.code ?? ''}`;
       const b = probeBursts.get(key);
-      if (b && clock() < b.reset) { b.count++; return; }
+      if (b && nowC < b.reset) { b.count++; return; }
       const seen = b?.count ?? 0;
-      while (probeBursts.size > 10000) probeBursts.delete(probeBursts.keys().next().value);
-      probeBursts.set(key, { count: 1, reset: clock() + 60000 });
+      if (b) { probeBursts.delete(key); issuanceLog({ type: 'probe_burst_close', route: key, code: 'window_expired', prior_window_probes: seen, principal_digest: hashBytes(key).slice(0, 24) }); }
+      let flushed = 0;
+      for (const [ek, eb] of probeBursts) {
+        if (flushed >= 64) break;
+        if (nowC >= eb.reset) { probeBursts.delete(ek); issuanceLog({ type: 'probe_burst_close', route: ek, code: 'window_expired', prior_window_probes: eb.count, principal_digest: hashBytes(ek).slice(0, 24) }); flushed++; }
+      }
+      while (probeBursts.size > 10000) { const k2 = probeBursts.keys().next().value; const eb2 = probeBursts.get(k2); probeBursts.delete(k2); issuanceLog({ type: 'probe_burst_close', route: k2, code: 'evicted', prior_window_probes: eb2?.count ?? 0, principal_digest: hashBytes(k2).slice(0, 24) }); }
+      probeBursts.set(key, { count: 1, reset: nowC + 60000 });
       issuanceLog({ ...entry, probe_burst: true, prior_window_probes: seen, principal_digest: hashBytes(key).slice(0, 24) });
     };
     try {

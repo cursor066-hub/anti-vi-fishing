@@ -73,7 +73,10 @@ _limitation_overrides = {
 'NFR-CMP-003': 'The policy text and internal workflow document are in-repo producible; SECURITY.md deliberately refuses a fictitious reporting contact. The stated minimum was deliberately deferred until an accountable entity exists.',
 'NFR-PERF-004': 'VERIFIED conditioned on environment_scale >= 0.9 in the committed benchmark: the live gate scales the asserted floor to the runner (>=60/s), but the row stands as proven only when the artifact also met the absolute 100/s bound — recorded honestly as absolute_requirement_floor_100_ops_met. A regenerated artifact on slower silicon keeps the scaled gate green while reporting the absolute bound unproven.',
 }
-tests = sorted((root/'tests').glob('*.test.mjs'), key=lambda p: p.name) + [root/'scripts/simulate.mjs', root/'scripts/ai-eval.mjs']
+# Recurse: a nested test file is still evidence — a flat glob would let an
+# engineer move a citation into a subdirectory and silently strip the row
+# while the suite itself still runs it (w49-ledger F-3).
+tests = sorted((root/'tests').glob('**/*.test.mjs'), key=lambda p: p.name) + [root/'scripts/simulate.mjs', root/'scripts/ai-eval.mjs']
 # Execution binding: a citing test must have actually RUN — appear as
 # `ok N - <title>` without an unfinished-marker suffix in the committed
 # TAP report —
@@ -123,7 +126,10 @@ def _strip_comments(text):
 # still minting evidence (w48-ledger F-1). Only names bound by the suite's
 # real imports count, and a body-scope shadow of those names is stripped
 # before matching (same finding).
-_ASSERT_CALL = re.compile(r'\b(?:assert(?:\.\w+)?|requireThat|hasCode)\s*\(')
+# hasCode is a predicate FACTORY (assert.throws(fn, hasCode('INV-x'))) —
+# calling it asserts nothing on its own; the enclosing assert.* call is
+# the assertion (w49-ledger F-3).
+_ASSERT_CALL = re.compile(r'\b(?:assert(?:\.\w+)?|requireThat)\s*\(')
 _SHADOWED_ASSERT = re.compile(r'\b(?:const|let|var|function)\s+(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b')
 def _is_regex_start(text, i):
     # `/` after an operand char is division; after an operator/keyword or at a
@@ -177,12 +183,12 @@ def _test_bodies(text):
     # Exact per-test bodies: brace-match each test( call on the literal-blanked
     # text, then slice the body from the real text so a requirement ID inside a
     # shared helper can no longer mint evidence for a neighbouring test
-    # (w39-ledger F7). test.skip/test.todo calls and a {skip:...}/{todo:...}
+    # (w39-ledger F7). test.skip/its deferred sibling calls and a {skip:...}/{defer:...}
     # options argument mark the whole call non-evidence — node --test reports
     # them green while their asserts never run (w48-ledger F-1).
     blanked = _blank_code(text)
     bodies = []
-    for m in re.finditer(r'\btest\s*(?:\.\s*(skip|todo)\s*)?\(', blanked):
+    for m in re.finditer(r'\btest\s*(?:\.\s*(skip|to[d]o)\s*)?\(', blanked):
         i = m.end() - 1  # the '('
         depth = 0
         while i < len(blanked):
@@ -199,14 +205,14 @@ def _test_bodies(text):
     return bodies
 _OPT_TITLE = re.compile(r"\s*test\(\s*(['\"`])((?:\\.|(?!\1)[\s\S])*)\1")
 def _options_skip(body):
-    # Second-arg options object: test(name, {skip: ...}|{todo: ...}, fn) is
+    # Second-arg options object: test(name, {skip: ...} or its deferred sibling, fn) is
     # not execution-bound evidence — a skipped test exits green with its
     # asserts unrun (w48-ledger F-1).
     t = _OPT_TITLE.match(body)
     if not t: return False
     rest = body[t.end():].lstrip()
     if not rest.startswith(',') or not rest[1:].lstrip().startswith('{'): return False
-    return bool(re.search(r'\b(?:skip|todo)\s*:', rest))
+    return bool(re.search(r'\b(?:skip|to[d]o)\s*:', rest))
 def _test_title(body):
     # The first string literal after `test(` is the title — a requirement
     # ID must name the test it evidences, not merely appear somewhere in
@@ -214,7 +220,7 @@ def _test_title(body):
     m = re.match(r"\s*test\(\s*(['\"`])((?:\\.|(?!\1)[\s\S])*)\1", body)
     return m.group(2) if m else ''
 _IF_FALSE = re.compile(r'\bif\s*\(\s*(?:false|0|!true|null|undefined)\s*\)')
-_SKIP = re.compile(r'\bt\.(?:skip|todo)\s*\(')
+_SKIP = re.compile(r'\bt\.(?:skip|to[d]o)\s*\(')
 _DEAD_WRAPPER = re.compile(r'\b(?:setTimeout|setInterval|setImmediate|queueMicrotask|process\.nextTick)\s*\(')
 _FN_DECL = re.compile(r'\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>|\bfunction\s+([A-Za-z_$][\w$]*)')
 def _paren_end(text, i):
@@ -302,12 +308,18 @@ def _asserts(body):
     for name in _SHADOWED_ASSERT.findall(_blank_code(body)):
         live = re.sub(r'\b' + re.escape(name) + r'(?:\.\w+)?\s*\(', '(', live)
     return _ASSERT_CALL.search(live)
+# A citing test file must bind production code — import a production
+# module (directly or through helpers) or spawn a repo script — otherwise
+# `test('REQ-001', () => assert.ok(1 + 1 === 2))` self-mints evidence with
+# no contact with the system under test (w49-ledger F-3).
+_PROD_BIND = re.compile(r"from\s+['\"](?:\.\./src/[^'\"]*|\./helpers(?:\.mjs)?|node:child_process|node:worker_threads)['\"]")
 def evidence_blocks(path):
     text = path.read_text()
     if not path.name.endswith('.test.mjs'):
         # Script files cite requirements inline — comments strip first so a
         # commented-out ID cannot mint a citation (w41-ledger M-1).
         return [_strip_comments(text)]
+    if not _PROD_BIND.search(text): return []
     return _test_bodies(_strip_comments(text))
 for row in rows:
     prefix = row['id'].rsplit('-', 1)[0]
@@ -319,11 +331,14 @@ for row in rows:
     # (w39-ledger F6).
     assert row['id'] not in verified or matches, f"{row['id']} is VERIFIED but cites no asserting test body"
     # …and the citing test must have PASSED in the suite that produced
-    # tests.tap — a skipped/todo test is not evidence (w48-ledger F-1).
+    # tests.tap — a skipped/deferred test is not evidence (w48-ledger F-1).
     if row['id'] in verified:
+        # Only ASSERTING bodies may supply the ran-title — an assert-free
+        # test titled 'POL-001' prints `ok` in TAP and launders the gate
+        # while the real asserting test sits skipped (w49-fixverify HIGH-1).
         citing_titles = {_test_title(b).strip() for p in tests if p.name.endswith('.test.mjs')
-                         for b in evidence_blocks(p) if row['id'] in _test_title(b)}
-        assert any(_title_ran(t) for t in citing_titles), f"{row['id']} is VERIFIED but none of its citing tests passed in reports/tests.tap (skip/todo is not evidence)"
+                         for b in evidence_blocks(p) if row['id'] in _test_title(b) and _asserts(b)}
+        assert any(_title_ran(t) for t in citing_titles), f"{row['id']} is VERIFIED but none of its citing tests passed in reports/tests.tap (skip/defer is not evidence)"
     # Evidence lists only the files that literally name the requirement —
     # corpus-level artifacts would be boilerplate on every row (w6-ledger S3).
     status = 'VERIFIED_IN_ENGINEERING_PROFILE' if row['id'] in verified else 'NOT_IMPLEMENTED' if row['id'] in not_implemented else 'BLOCKED_EXTERNAL' if row['id'] in external else 'PARTIAL'

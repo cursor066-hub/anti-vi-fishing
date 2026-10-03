@@ -323,7 +323,7 @@ test('NFR-TST-001: every requirement row carries a verification method, and ever
   }
   // The citation gate must be the REAL gate, not a reimplemented mirror:
   // a JS mirror drifts from traceability.py and cannot detect the dead-
-  // evidence shapes the gate rejects (skip/todo options, try/catch
+  // evidence shapes the gate rejects (skip/defer options, try/catch
   // swallows, shadowed no-ops, TAP non-execution — w48-ledger F-3).
   const gate = spawnSync('python3', ['scripts/traceability.py', '--check'], { encoding: 'utf8' });
   assert.equal(gate.status, 0, `traceability --check failed:\n${gate.stderr || gate.stdout}`);
@@ -443,14 +443,34 @@ test('NFR-TST-004: the release gate refuses release while any critical finding i
 });
 
 test('NFR-MNT-004: repository policy requires owner review of every security-critical module', () => {
-  const co = readFileSync('.github/CODEOWNERS', 'utf8');
+  // Real rule evaluation, not substring presence: 'src/x.mjs' appearing
+  // inside a comment, an owner name, or a non-matching pattern never
+  // owned the file (w49-ledger F-6).
+  const rules = readFileSync('.github/CODEOWNERS', 'utf8').split('\n')
+    .map(l => l.trim()).filter(l => l && !l.startsWith('#'))
+    .map(l => l.split(/\s+/))
+    .filter(parts => parts.length >= 2 && parts.slice(1).every(o => o.startsWith('@')))
+    .map(parts => parts[0]);
+  const ownedBy = path => rules.some(pat => {
+    const p = pat.startsWith('/') ? pat.slice(1) : pat;
+    if (p.endsWith('/')) return path.startsWith(p);
+    if (p.includes('*')) {
+      const rx = p.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*/g, '').replace(/\*/g, '[^/]*').replace(//g, '.*');
+      return new RegExp(`^${rx}$`).test(path);
+    }
+    return p === path || (!p.includes('/') && path.split('/').pop() === p);
+  });
   // Set equality against the live tree — a hardcoded list drifts silently
   // as new security-critical modules appear (coverage.mjs and merkle.mjs
   // passed unowned for two waves — w48-ledger F-2).
   const ownedSrc = new Set(readdirSync('src').filter(f => f.endsWith('.mjs')).map(f => `src/${f}`));
-  for (const f of ownedSrc) assert.ok(co.includes(f), `CODEOWNERS missing security-critical path: ${f}`);
-  for (const path of ['tests/', 'vectors/', 'deploy/', '.github/', 'docs/SECURITY.md', 'docs/requirements.csv'])
-    assert.ok(co.includes(path), `CODEOWNERS missing security-critical path: ${path}`);
+  for (const f of ownedSrc) assert.ok(ownedBy(f), `CODEOWNERS missing security-critical path: ${f}`);
+  // Directories are probed through a member path — the prefix rule must
+  // own everything beneath it.
+  for (const entry of ['tests/', 'vectors/', 'deploy/', '.github/', 'docs/SECURITY.md', 'docs/requirements.csv']) {
+    const probe = entry.endsWith('/') ? `${entry}probe` : entry;
+    assert.ok(ownedBy(probe), `CODEOWNERS missing security-critical path: ${entry}`);
+  }
 });
 
 test('NFR-TST-002: release acceptance includes adversarial bypass testing, executed by the gate', t => {

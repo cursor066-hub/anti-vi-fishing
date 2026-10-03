@@ -465,7 +465,7 @@ export class Store {
             // sanctioned write — same drop+recreate-in-tx discipline the
             // delete path uses (w48-store W48-4).
             this.db.exec('DROP TRIGGER IF EXISTS aad_marker_keep_ins');
-            try { this._landed(this._stmt("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', ?)").run(mtenant, JSON.stringify(ms)), 'aad-migration marker'); }
+            try { this._landed(() => this._stmt("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', ?)").run(mtenant, JSON.stringify(ms)), 'aad-migration marker'); }
             finally { this.db.exec("CREATE TRIGGER IF NOT EXISTS aad_marker_keep_ins BEFORE INSERT ON meta_kv WHEN NEW.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END"); }
           });
       this.db.exec('COMMIT');
@@ -631,8 +631,8 @@ export class Store {
     // table or planted trigger on the write is tamper evidence, not raw
     // sqlite noise (w47-fixverify M-1).
     const pair = () => this._schemaGuard(() => {
-      this._landed(this._stmt('INSERT INTO records VALUES(?,?,?,?,?) ON CONFLICT(tenant,kind,id) DO UPDATE SET value=excluded.value').run(tenant, kind, id, encrypt(value, dek, recAad(tenant, kind, id)), at), 'record write');
-      this._landed(this._stmt('INSERT INTO deks VALUES(?,?,?,?) ON CONFLICT(tenant,kind,id) DO UPDATE SET wrapped=excluded.wrapped').run(tenant, kind, id, encrypt(dek.toString('base64url'), this.key(tenant), dekAad(tenant, kind, id))), 'dek write');
+      this._landed(() => this._stmt('INSERT INTO records VALUES(?,?,?,?,?) ON CONFLICT(tenant,kind,id) DO UPDATE SET value=excluded.value').run(tenant, kind, id, encrypt(value, dek, recAad(tenant, kind, id)), at), 'record write');
+      this._landed(() => this._stmt('INSERT INTO deks VALUES(?,?,?,?) ON CONFLICT(tenant,kind,id) DO UPDATE SET wrapped=excluded.wrapped').run(tenant, kind, id, encrypt(dek.toString('base64url'), this.key(tenant), dekAad(tenant, kind, id))), 'dek write');
     });
     if (this.db.isTransaction) pair(); else this.tx(pair);
     if (!this.db.isTransaction) this.checkpoint();
@@ -769,7 +769,7 @@ export class Store {
     // regression detector, not the time source — expiry is evaluated
     // against host time either way, and an over-high `last` would wedge
     // the gate permanently after an honest rewind (VM snapshot restore).
-    this._landed(this._stmt('INSERT INTO clock VALUES(1,?) ON CONFLICT(id) DO UPDATE SET last=excluded.last').run(now), 'clock ratchet');
+    this._landed(() => this._stmt('INSERT INTO clock VALUES(1,?) ON CONFLICT(id) DO UPDATE SET last=excluded.last').run(now), 'clock ratchet');
     return now;
   }
   auditHeadSeq(tenant) {
@@ -796,9 +796,26 @@ export class Store {
   // (w48-fixverify CRITICAL). Security-critical writes assert their
   // change count inside the same transaction instead of trusting the
   // silent return.
-  _landed(result, what) {
-    requireThat(result?.changes >= 1, 'INV-409-INTEGRITY', `${what} abandoned — ledger write refused by a foreign trigger`, 409);
-    return result;
+  _totalChanges() { return Number(this._stmt('SELECT total_changes() tc').get().tc); }
+  // changes() counts only the top-level statement — an AFTER trigger's
+  // side-effects (a silent revert, a shadow row, a planted mirror) never
+  // show in it. total_changes() counts every row the connection touched,
+  // trigger work included: measuring the statement-level delta catches the
+  // last laundering arm (w49-fixverify C-2). The write runs inside a
+  // transaction so no peer can interleave between the delta probe and the
+  // statement itself; `expect` is the number of legitimate row writes the
+  // statement performs — total_changes counts an upsert over an existing
+  // row as 1 (the implicit delete is not a change), so every single-row
+  // statement is 1 and any trigger side-effect pushes the delta past it.
+  _landed(write, what, expect = 1) {
+    return this._schemaGuard(() => this.tx(() => {
+      const before = this._totalChanges();
+      const result = write();
+      requireThat(result?.changes >= 1, 'INV-409-INTEGRITY', `${what} abandoned — ledger write refused by a foreign trigger`, 409);
+      const delta = this._totalChanges() - before;
+      requireThat(delta === expect, 'INV-409-INTEGRITY', `${what} produced ${delta} row write(s) in one statement — foreign trigger side-effects`, 409);
+      return result;
+    }));
   }
   // A dropped or rewritten table is integrity evidence inside the INV
   // taxonomy, never bare sqlite noise escaping to callers (w44-store M-2).
@@ -819,6 +836,12 @@ export class Store {
       // Contention is not tamper evidence — busy/locked propagates for
       // the outer layers' INV-503-LEDGER translation.
       if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw e;
+      // Storage-class faults (readonly file, I/O error, corrupt image,
+      // disk full, can't-open) are infrastructure, not surgery evidence —
+      // a filled disk must not read as tamper (w49-fixverify M-4). The low
+      // byte holds the primary code under better-sqlite's extended codes.
+      if (typeof e?.errcode === 'number' && [8, 10, 11, 13, 14, 15].includes(e.errcode & 0xFF))
+        throw new InvariantError('INV-503-STORAGE', `Ledger storage fault: ${e?.message ?? 'sqlite error'}`, 503, { cause: e });
       // Any remaining sqlite-class fault on a ledger path is likewise
       // schema/integrity evidence, not raw internals for callers to
       // pattern-match (w48-store W48-3).
@@ -904,7 +927,7 @@ export class Store {
     const hash = digest(envelope.payload);
     const envText = canonical(envelope);
     try {
-      this._landed(this._stmt('INSERT INTO audit VALUES(?,?,?,?,?)').run(tenant, entry.sequence, entry.previous, hash, envText), 'audit append');
+      this._landed(() => this._stmt('INSERT INTO audit VALUES(?,?,?,?,?)').run(tenant, entry.sequence, entry.previous, hash, envText), 'audit append');
     } catch (e) {
       // A peer instance appending between our head-read and this insert
       // trips the seq guard — that is a retryable conflict, not tamper
@@ -912,10 +935,23 @@ export class Store {
       // errcode 517 = SQLITE_BUSY_SNAPSHOT: a deferred reader's snapshot
       // went stale under a peer write — same retry semantics as busy.
       if (e?.errcode === 5 || e?.errcode === 6 || e?.errcode === 517 || /database .*locked|database is busy/i.test(e?.message ?? '')) throw new InvariantError('INV-503-LEDGER', 'Ledger writer contention exceeded the wait bound; retry', 503);
-      if (/audit sequence must extend the head/.test(e?.message ?? '')) throw new InvariantError('INV-409-CONFLICT', 'Audit head moved during append; retry', 409);
+      if (/audit sequence must extend the head/.test(e?.message ?? '')) {
+        // The guard's RAISE text is attacker-replayable through a planted
+        // AFTER trigger — before classifying retryable, prove the guard
+        // could have fired at all: attempted == MAX+1 means nothing
+        // legitimately raised it, so the text is a mimic laundering a
+        // planted refusal into a retryable conflict (w49-fixverify M-1).
+        const headNow = this._stmt('SELECT COALESCE(MAX(seq),0) m FROM audit WHERE tenant=?').get(tenant)?.m;
+        if (Number.isInteger(headNow) && headNow + 1 === entry.sequence)
+          throw new InvariantError('INV-409-INTEGRITY', 'Audit append refused by a mimic trigger — tamper evidence', 409, { cause: e });
+        throw new InvariantError('INV-409-CONFLICT', 'Audit head moved during append; retry', 409);
+      }
       // A dropped or rewritten table is integrity evidence, never raw
       // sqlite noise on the write path (w44-store M-2).
       if (/no such table|no such column|not a database|malformed/i.test(e?.message ?? '')) throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e });
+      // Storage-class faults are infrastructure, not surgery — same split
+      // as _schemaGuard (w49-fixverify M-4).
+      if (typeof e?.errcode === 'number' && [8, 10, 11, 13, 14, 15].includes(e.errcode & 0xFF)) throw new InvariantError('INV-503-STORAGE', `Audit storage fault: ${e?.message ?? 'sqlite error'}`, 503, { cause: e });
       // A planted trigger (errcode 1811), grafted-PK collision (1555) or
       // any other sqlite-class fault on the audit append is tamper
       // evidence, never raw internals (w48-store W48-3).
@@ -929,7 +965,7 @@ export class Store {
     // survives tail-cuts (it is not a chained row), and a fresh open can
     // attest any head/watermark pair that claims less than it
     // (w44-fixverify F-2).
-    this._schemaGuard(() => this._landed(this._stmt("INSERT INTO meta_kv VALUES(?,'fold_floor',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, `${entry.sequence}:${hash}`), 'fold-floor marker'));
+    this._landed(() => this._stmt("INSERT INTO meta_kv VALUES(?,'fold_floor',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, `${entry.sequence}:${hash}`), 'fold-floor marker');
     // Post-commit ordering: only a landed entry may move the anchors and
     // ratchet the detector (w23 W23-05). Our own head is the newest
     // verifiable row — mark it scanned so a later refresh skips it.
@@ -949,7 +985,7 @@ export class Store {
     // honest high-water during a halted or recovered span; the legality
     // assert runs on the pre-write row so the ratchet itself can never
     // launder a rewind.
-    this._landed(this._stmt('INSERT INTO clock VALUES(1,?) ON CONFLICT(id) DO UPDATE SET last=MAX(clock.last, excluded.last)').run(now), 'clock ratchet');
+    this._landed(() => this._stmt('INSERT INTO clock VALUES(1,?) ON CONFLICT(id) DO UPDATE SET last=MAX(clock.last, excluded.last)').run(now), 'clock ratchet');
     // End-of-chain commitment: the fabric moves its signed head watermark
     // post-commit — a truncated tail can never drag the watermark back
     // with it (w24-fixverify W24-01).
@@ -984,7 +1020,7 @@ export class Store {
     // the internal index fold legitimately pages through the entire chain
     // (w23 W23-08).
     requireThat(Number.isSafeInteger(after) && after >= 0 && Number.isSafeInteger(limit) && limit >= 1, 'INV-400-SCHEMA', 'Invalid audit cursor or limit', 400);
-    const rows = this._schemaGuard(() => this._stmt('SELECT seq,hash,envelope FROM audit WHERE tenant=? AND seq>? ORDER BY seq LIMIT ?').all(tenant, after, limit));
+    const rows = this._schemaGuard(() => this._stmt('SELECT seq,previous,hash,envelope FROM audit WHERE tenant=? AND seq>? ORDER BY seq LIMIT ?').all(tenant, after, limit));
     const signer = this._signer(tenant), public_keys = signer.keys ? signer.keys() : { [signer.key_id]: { public_key: signer.public_key } };
     // Serving the log is a security surface: re-verify each row's stored
     // hash against its signed payload and check chain continuity back to the
@@ -1005,7 +1041,10 @@ export class Store {
       // A payload-less envelope is tamper evidence too — guard before
       // digest so the failure classifies as AUDIT-TAMPER, not a bare
       // schema crash (w18-fixverify F16).
-      requireThat(envelope.payload !== undefined && ctEqual(digest(envelope.payload), r.hash) && envelope.payload.sequence === r.seq && ctEqual(envelope.payload.previous, previous), 'INV-409-AUDIT-TAMPER', 'Audit row failed integrity verification', 409);
+      // The stored `previous` column is checked too — it is written by
+      // every audit() append but was never compared, so stored-column
+      // surgery on it would go unnamed (w49-seal LOW).
+      requireThat(envelope.payload !== undefined && ctEqual(digest(envelope.payload), r.hash) && envelope.payload.sequence === r.seq && ctEqual(envelope.payload.previous, previous) && r.previous === previous, 'INV-409-AUDIT-TAMPER', 'Audit row failed integrity verification', 409);
       // Hash+previous are attacker-computable (the seq trigger permits a raw
       // MAX+1 append): without signature verification the read path would
       // serve an unsigned forged row as a legitimate chain entry (w15).
@@ -1036,11 +1075,11 @@ export class Store {
     // for attacker JSON.
     let previous = '0'.repeat(64);
     const deadAt = this._auditKeyDeaths(tenant);
-    const rows = this._schemaGuard(() => this._stmt('SELECT seq,hash,envelope FROM audit WHERE tenant=? ORDER BY seq').all(tenant)).map(r => {
+    const rows = this._schemaGuard(() => this._stmt('SELECT seq,previous,hash,envelope FROM audit WHERE tenant=? ORDER BY seq').all(tenant)).map(r => {
       let envelope;
       try { envelope = JSON.parse(r.envelope); }
       catch { throw new InvariantError('INV-409-AUDIT-TAMPER', 'Audit row failed integrity verification', 409); }
-      requireThat(envelope.payload !== undefined && ctEqual(digest(envelope.payload), r.hash) && envelope.payload.sequence === r.seq && ctEqual(envelope.payload.previous, previous), 'INV-409-AUDIT-TAMPER', 'Audit row failed integrity verification', 409);
+      requireThat(envelope.payload !== undefined && ctEqual(digest(envelope.payload), r.hash) && envelope.payload.sequence === r.seq && ctEqual(envelope.payload.previous, previous) && r.previous === previous, 'INV-409-AUDIT-TAMPER', 'Audit row failed integrity verification', 409);
       try { verifySigned(envelope, public_keys, 'audit'); }
       catch { throw new InvariantError('INV-409-AUDIT-TAMPER', 'Audit row failed signature verification', 409); }
       // The signed payload must attest THIS tenant's row — a validly
@@ -1086,7 +1125,7 @@ export class Store {
     // The receipt may carry a redacted projection — callers that want the
     // stored value minimal (shredder-safe) pass project/resolve; without
     // them the full result is receipt+response as before (w28-crypto F1).
-    this._landed(this._stmt('INSERT INTO idempotency VALUES(?,?,?,?,?)').run(tenant, scope, key, requestHash, encrypt(project ? project(result) : result, this.key(tenant), idemAad(tenant, scope, key))), 'idempotency receipt');
+    this._landed(() => this._stmt('INSERT INTO idempotency VALUES(?,?,?,?,?)').run(tenant, scope, key, requestHash, encrypt(project ? project(result) : result, this.key(tenant), idemAad(tenant, scope, key))), 'idempotency receipt');
     return result;
   }
 }
