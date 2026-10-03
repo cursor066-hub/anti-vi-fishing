@@ -2,7 +2,7 @@
 
 ## Executed evidence
 
-**1129 automated test cases passed, 6 failed** (node --test over tests/). TAP output in reports/tests.tap.
+**1142 automated test cases passed, 0 failed** (node --test over tests/). TAP output in reports/tests.tap.
 
 **25 simulation scenarios** run by scripts/simulate.mjs (reports/simulation-results.json).
 
@@ -15,6 +15,6 @@
 | BLOCKED_EXTERNAL | 16 |
 | NOT_IMPLEMENTED | 2 |
 
-VERIFIED_IN_ENGINEERING_PROFILE means directly exercised in the declared engineering profile only — not closure of external/production acceptance. The production gate is expected BLOCKED: 2 is the observed exit code (1 = blocked by named items).
+VERIFIED_IN_ENGINEERING_PROFILE means directly exercised in the declared engineering profile only — not closure of external/production acceptance. The production gate is expected BLOCKED: 1 is the observed exit code (1 = blocked by named items).
 
 Independent verification: node:crypto export verifier, WebCrypto/bun export verifier, Python cryptography vector verifier — see reports/verification-*.json.

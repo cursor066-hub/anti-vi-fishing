@@ -5183,8 +5183,8 @@ export class Fabric {
     // may compare — an undeclared baseline records the observed value
     // informationally instead of false-drifting every pre-upgrade tenant
     // (w21-fixverify M-3).
-    const registered = { connector_id: `issuer:${issuer.name}`, version: issuer.version ?? '1.0.0', actions: issuer.kinds, channel: issuer.channel, key_id, permissions: issuer.permissions, limitations: issuer.limitations, idempotency: issuer.idempotency, coverage_implications: issuer.coverage_implications };
-    const result = driftCheck(registered, { connector_id: observedPayload.connector_id, version: observedPayload.version, actions: observedPayload.actions, channel: observedPayload.domain, key_id: observed.protected.key_id, permissions: observedPayload.permissions, limitations: observedPayload.limitations, idempotency: observedPayload.idempotency, coverage_implications: observedPayload.coverage_implications }, this.clock());
+    const registered = { connector_id: `issuer:${issuer.name}`, version: issuer.version ?? '1.0.0', actions: issuer.kinds, channel: issuer.channel, key_id, permissions: issuer.permissions, limitations: issuer.limitations, idempotency: issuer.idempotency, coverage_implications: issuer.coverage_implications, spec_digest: issuer.spec_digest };
+    const result = driftCheck(registered, { connector_id: observedPayload.connector_id, version: observedPayload.version, actions: observedPayload.actions, channel: observedPayload.domain, key_id: observed.protected.key_id, permissions: observedPayload.permissions, limitations: observedPayload.limitations, idempotency: observedPayload.idempotency, coverage_implications: observedPayload.coverage_implications, spec_digest: observedPayload.spec_digest }, this.clock());
     return this.transaction(p, now => {
       // A clean re-check clears the suspension; a drifted one records it and
       // stops the issuer's evidence until then (MED-2).

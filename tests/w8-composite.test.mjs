@@ -11,7 +11,7 @@ import { fixture, hasCode, coverageIdentity } from './helpers.mjs';
 import { digest } from '../src/canonical.mjs';
 import { signed } from '../src/crypto.mjs';
 import { createIssuerServer, loadIssuers, writeIssuer } from '../src/issuerd.mjs';
-import { ISSUER_RULES } from '../src/bootstrap.mjs';
+import { ISSUER_RULES, issuerRecords } from '../src/bootstrap.mjs';
 import { coverageAt } from '../src/coverage.mjs';
 
 const JIT_REQ = { subject_id: 'operator', resources: ['dataset-1'], actions: ['data.read'], destinations: ['customer-vault'], columns: ['id'], row_ids: ['row-1'], ttl_ms: 60000, reason: 'Incident', roles: [] };
@@ -164,7 +164,7 @@ test('w8 F10/F12/F14: unreachable issuer stales paths; same-ms replays keep writ
   const h = fixture(t, ['acme']);
   const [bankKeyId, bank] = Object.entries(h.f.tenant('acme').issuers).find(([, v]) => v.name === 'bank');
   const dir = mkdtempSync(join(tmpdir(), 'if-unreach-')); t.after(() => rmSync(dir, { recursive: true }));
-  writeIssuer(dir, { issuer: 'bank', tenant: 'acme', channel: 'authoritative', version: '1.0.0', key: h.setup.issuerKeys.acme['bank'], kinds: ISSUER_RULES.bank, records: {}, issue_token: bank.issue_token, read_token: bank.read_token });
+  writeIssuer(dir, { issuer: 'bank', tenant: 'acme', channel: 'authoritative', version: '1.0.0', key: h.setup.issuerKeys.acme['bank'], kinds: ISSUER_RULES.bank, records: issuerRecords().bank, issue_token: bank.issue_token, read_token: bank.read_token });
   const srv = createIssuerServer(loadIssuers(dir), { port: 0, host: '127.0.0.1', clock: () => h.now() });
   await srv.listen();
   h.repoint(bankKeyId, `http://127.0.0.1:${srv.server.address().port}`);

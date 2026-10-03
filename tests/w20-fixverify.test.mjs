@@ -110,15 +110,19 @@ test('w20-fv F-7/F-8: a mid-chain edit refuses boot; a valid prefix resumes', as
   const spec = { issuer: 'bank', tenant: T, version: '1.0.0', channel: 'authoritative', key: generateKey(), kinds: ISSUER_RULES.bank, records: issuerRecords().bank };
   writeIssuer(dir, spec);
   const logPath = join(dir, 'issuance.log');
-  const srv = createIssuerServer(loadIssuers(dir), { port: 0, host: '127.0.0.1', allow_insecure_loopback: true, logPath });
+  // Unauthenticated refusals aggregate per (principal,route,code) into one
+  // line per 60s window (w48-issuerd M3), so the two probes must cross a
+  // window boundary to mint two lines — a controllable clock does it.
+  let probeClock = 1700000000000;
+  const srv = createIssuerServer(loadIssuers(dir), { port: 0, host: '127.0.0.1', allow_insecure_loopback: true, logPath, clock: () => probeClock });
   await srv.listen();
   const port = srv.server.address().port;
-  // Two refused probes mint two chained log lines.
   for (const _ of [1, 2]) {
     await new Promise((resolve, reject) => {
       const req = httpRequest({ host: '127.0.0.1', port, path: '/v1/issuers/bank/issue', method: 'POST', headers: { 'Content-Type': 'application/json' } }, r => { r.resume(); r.on('end', resolve); });
       req.on('error', reject); req.end('x'.repeat(300 * 1024));
     });
+    probeClock += 61000;
   }
   await srv.close();
   const lines = readFileSync(logPath, 'utf8').trim().split('\n');

@@ -6,8 +6,8 @@
       "bytes": 6716
     },
     "src/bootstrap.mjs": {
-      "lines": 276,
-      "bytes": 23323
+      "lines": 282,
+      "bytes": 23917
     },
     "src/canonical.mjs": {
       "lines": 113,
@@ -22,8 +22,8 @@
       "bytes": 7568
     },
     "src/connectors.mjs": {
-      "lines": 188,
-      "bytes": 13131
+      "lines": 195,
+      "bytes": 13765
     },
     "src/coverage.mjs": {
       "lines": 76,
@@ -43,11 +43,11 @@
     },
     "src/fabric.mjs": {
       "lines": 7824,
-      "bytes": 602807
+      "bytes": 602882
     },
     "src/issuerd.mjs": {
-      "lines": 820,
-      "bytes": 58541
+      "lines": 920,
+      "bytes": 65182
     },
     "src/keystore.mjs": {
       "lines": 254,
@@ -154,8 +154,8 @@
       "bytes": 269
     },
     "scripts/traceability.py": {
-      "lines": 346,
-      "bytes": 29469
+      "lines": 356,
+      "bytes": 29954
     },
     "scripts/verify-export-webcrypto.mjs": {
       "lines": 114,
@@ -183,7 +183,7 @@
     },
     "tests/adversarial.test.mjs": {
       "lines": 132,
-      "bytes": 7640
+      "bytes": 7610
     },
     "tests/canonical.test.mjs": {
       "lines": 31,
@@ -322,8 +322,8 @@
       "bytes": 16792
     },
     "tests/w20-fixverify.test.mjs": {
-      "lines": 205,
-      "bytes": 14006
+      "lines": 209,
+      "bytes": 14261
     },
     "tests/w21-crypto.test.mjs": {
       "lines": 187,
@@ -403,7 +403,7 @@
     },
     "tests/w31.test.mjs": {
       "lines": 376,
-      "bytes": 26665
+      "bytes": 26698
     },
     "tests/w32.test.mjs": {
       "lines": 366,
@@ -473,6 +473,10 @@
       "lines": 193,
       "bytes": 11897
     },
+    "tests/w48b.test.mjs": {
+      "lines": 203,
+      "bytes": 13695
+    },
     "tests/w5-mutations.test.mjs": {
       "lines": 194,
       "bytes": 13645
@@ -511,7 +515,7 @@
     },
     "tests/w8-composite.test.mjs": {
       "lines": 201,
-      "bytes": 15496
+      "bytes": 15529
     },
     "tests/w8-fixverify.test.mjs": {
       "lines": 86,
@@ -519,7 +523,7 @@
     },
     "tests/w8-ledger.test.mjs": {
       "lines": 84,
-      "bytes": 4743
+      "bytes": 4776
     },
     "tests/w8-tooling.test.mjs": {
       "lines": 129,
@@ -542,6 +546,6 @@
       "bytes": 6499
     }
   },
-  "total_files": 135,
-  "total_lines": 35290
+  "total_files": 136,
+  "total_lines": 35620
 }

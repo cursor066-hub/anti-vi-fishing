@@ -8,6 +8,7 @@ import { defaultPolicy } from './policy.mjs';
 import { KeyVault } from './keystore.mjs';
 import { requireThat } from './errors.mjs';
 import { Fabric } from './fabric.mjs';
+import { specDigest } from './issuerd.mjs';
 import { createComponent as createSecureViewComponent } from './secureview.mjs';
 
 // Issuer roles used by the evidence mesh. kinds: what the issuer may attest.
@@ -139,6 +140,7 @@ export function createConfiguration(tenantNames = ['acme'], now = Date.now(), { 
       if (role.includes('custodian')) custodianKeys[tenant][subject] = key;
     }
     const issuers = {};
+    const issuerRecordSet = issuerRecords();
     for (const [name, role] of Object.entries(ISSUER_ROLES)) {
       const key = generateKey(); issuerKeys[tenant][name] = key;
       // Registered kinds are the issuer's own ceiling — a compromised issuer
@@ -150,7 +152,12 @@ export function createConfiguration(tenantNames = ['acme'], now = Date.now(), { 
       // issue_token for /issue and a read-scope read_token for manifest/
       // health/listing; both expire within a day and rotate via config update.
       const issue_token = randomBytes(24).toString('base64url'), read_token = randomBytes(24).toString('base64url'), token_expires_at = now + 86400000;
-      issuers[key.key_id] = { public_key: key.public_key, name, issuer_id: name, failure_domain: `${tenant}-${name}`, channel: role.channel, kinds: role.kinds, version: '1.0.0', issue_token, read_token, token_expires_at, permissions: ISSUER_MANIFEST_PERMISSIONS, limitations: ISSUER_MANIFEST_LIMITATIONS, idempotency: ISSUER_MANIFEST_IDEMPOTENCY, coverage_implications: ISSUER_MANIFEST_COVERAGE };
+      // The registered record pins the digest of the spec's semantic body
+      // (records + kinds + identity claims): a file-level edit of the
+      // daemon's spec diverges at the next drift check instead of minting
+      // fabricated facts under the live key (w48-issuerd H1). The pin is
+      // computed from the same body the spec file is written with below.
+      issuers[key.key_id] = { public_key: key.public_key, name, issuer_id: name, failure_domain: `${tenant}-${name}`, channel: role.channel, kinds: role.kinds, version: '1.0.0', spec_digest: specDigest({ issuer: name, tenant, version: '1.0.0', channel: role.channel, kinds: ISSUER_RULES[name] ?? {}, records: issuerRecordSet[name] ?? {} }), issue_token, read_token, token_expires_at, permissions: ISSUER_MANIFEST_PERMISSIONS, limitations: ISSUER_MANIFEST_LIMITATIONS, idempotency: ISSUER_MANIFEST_IDEMPOTENCY, coverage_implications: ISSUER_MANIFEST_COVERAGE };
       if (issuerEndpoint) issuers[key.key_id].endpoint = `${issuerEndpoint}`;
     }
     // Dev Secure Perception component: generated per tenant; private material
@@ -212,7 +219,6 @@ export function bootstrap(directory, tenants = ['acme'], now = Date.now(), { iss
   save(join(directory, 'config.json'), setup.config); save(join(directory, 'access-tokens.json'), setup.credentials);
   const signingDir = join(directory, 'offline-custodians'); mkdirSync(signingDir, { mode: 0o700 });
   const issuerDir = join(directory, 'issuers'); mkdirSync(issuerDir, { mode: 0o700 });
-  const records = issuerRecords();
   for (const tenant of tenants) {
     const audit = setup.config.tenants[tenant].keys.audit;
     save(join(directory, `trust-public-${tenant}.json`), { [audit.key_id]: { public_key: audit.public_key }, attestor: setup.vault.attestorPublicKeys() });
@@ -227,7 +233,7 @@ export function bootstrap(directory, tenants = ['acme'], now = Date.now(), { iss
       // Spec files carry bearer DIGESTS, not plaintext — the file handed to
       // the issuerd host must not hold a live credential (w9-deploy F7).
       // config.json keeps the plaintext it needs for outbound auth.
-      const spec = { issuer: name, tenant, version: '1.0.0', channel: role.channel, key, kinds: ISSUER_RULES[name] ?? {}, records: records[name] ?? {}, ...(registered?.issue_token ? { issue_token_digest: digest(`Bearer ${registered.issue_token}`) } : {}), ...(registered?.read_token ? { read_token_digest: digest(`Bearer ${registered.read_token}`) } : {}), ...(registered?.token_expires_at ? { token_expires_at: registered.token_expires_at } : {}) };
+      const spec = { issuer: name, tenant, version: '1.0.0', channel: role.channel, key, kinds: ISSUER_RULES[name] ?? {}, records: issuerRecords()[name] ?? {}, ...(registered?.issue_token ? { issue_token_digest: digest(`Bearer ${registered.issue_token}`) } : {}), ...(registered?.read_token ? { read_token_digest: digest(`Bearer ${registered.read_token}`) } : {}), ...(registered?.token_expires_at ? { token_expires_at: registered.token_expires_at } : {}) };
       save(join(issuerDir, `${tenant}-${name}.issuer.json`), spec);
     }
     // Dev secure-view component bundle for the operator console.

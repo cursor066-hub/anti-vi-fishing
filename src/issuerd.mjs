@@ -58,6 +58,11 @@ export function loadIssuers(directory) {
     // the vault applies per entry (w11-fixverify R3).
     const derivedPublic = (() => { try { return createPublicKey(createPrivateKey(spec.key.private_key)).export({ type: 'spki', format: 'pem' }).trim(); } catch { return null; } })();
     requireThat(derivedPublic !== null && derivedPublic === spec.key.public_key.trim(), 'INV-400-SCHEMA', 'Issuer key public/private material is inconsistent');
+    // key_id must DERIVE from the public key — a spec whose key_id diverges
+    // loads, serves 201s and mints envelopes the fabric can never resolve
+    // ('Signer unavailable'): refuse at boot, not at the consumer
+    // (w48-issuerd L1).
+    requireThat(spec.key.key_id === digest({ public_key: spec.key.public_key }).slice(0, 32), 'INV-400-SCHEMA', 'Issuer key_id must derive from the declared public key');
     for (const [kind, rule] of Object.entries(spec.kinds)) {
       identifier(kind, 'kind'); requireThat(rule && typeof rule === 'object' && !Array.isArray(rule), 'INV-400-SCHEMA', `Kind rule ${kind} must be an object`);
       // Semantics, not only shape (w18-issuerd F-6): a string ttl_ms would
@@ -106,6 +111,11 @@ export function loadIssuers(directory) {
     // refuse it at boot instead of shipping a dead issuer (w21-issuerd F8).
     requireThat(/^[A-Za-z0-9_-]+$/.test(spec.issuer), 'INV-400-SCHEMA', 'Issuer name must use the route charset [A-Za-z0-9_-]');
     requireThat(['authoritative', 'communication', 'device', 'counterparty'].includes(spec.channel), 'INV-400-SCHEMA', 'Unsupported issuer channel');
+    // The content anchor the fabric pins against its registered issuer
+    // record: a sibling-file edit of records/kinds is invisible to the
+    // custody bits, so the signed manifest carries the digest of the spec's
+    // semantic body and driftCheck convicts the divergence (w48-issuerd H1).
+    spec.spec_digest = specDigest(spec);
     parsed.push(spec);
   }
   // Registry key: '<tenant>:<issuer>' when the spec carries a tenant, so
@@ -132,6 +142,14 @@ export function loadIssuers(directory) {
   requireThat(Object.keys(issuers).length > 0, 'INV-503-CONFIG', 'No issuers configured', 503);
   return issuers;
 }
+
+// The signed manifest's content anchor: the digest of the spec's semantic
+// body (records + kinds + identity claims — never credentials or key
+// material). The fabric's registered issuer record pins this value; a file
+// edit that survives custody still diverges at the next drift check
+// (w48-issuerd H1). Credential fields are excluded so token rotation never
+// mints false drift.
+export const specDigest = spec => digest({ issuer: spec.issuer, tenant: spec.tenant ?? null, channel: spec.channel, version: spec.version, kinds: spec.kinds, records: spec.records });
 
 // Constant-time bearer comparison — a plain `===` leaks match length via
 // early-exit timing (issuerd-audit LOW-2). The stored side is the bearer
@@ -257,6 +275,27 @@ export function answerQuery(issuer, request, now) {
 // already asserts.
 const contentMac = (issuer, obj) => createHmac('sha256', issuer.key.private_key).update(canonical(obj)).digest('hex');
 
+// Collapse an IPv6 literal to its /64 bucket identity by parsing it —
+// expand the '::' elision to eight hextets, mask the first four, then
+// compress canonically (exported for the w48 regression harness).
+// String-splitting a compressed literal embeds host bits in the key
+// (w48-issuerd M2). A '%zone' suffix is interface-local and never part
+// of the identity. Unparseable input falls back to the raw string —
+// still a stable bucket key, never a crash.
+export function slash64(addr) {
+  const a = addr.toLowerCase().split('%', 1)[0];
+  const dc = a.split('::');
+  let segs;
+  if (dc.length === 1) segs = dc[0].split(':');
+  else if (dc.length === 2) {
+    const head = dc[0] ? dc[0].split(':') : [], tail = dc[1] ? dc[1].split(':') : [];
+    segs = head.concat(new Array(8 - head.length - tail.length).fill('0'), tail);
+  } else return addr;
+  if (segs.length !== 8 || segs.some(s => !/^[0-9a-f]{1,4}$/.test(s))) return addr;
+  const net = segs.slice(0, 4).map(s => parseInt(s, 16).toString(16)).join(':');
+  return `${net}::/64`;
+}
+
 export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', clock = Date.now, logPath, allow_insecure_loopback = false, log_max_bytes = 67108864 } = {}) {
   // Bind-time honesty: configuration states that make parts of the
   // registry unreachable are warned once on stderr instead of leaking
@@ -289,7 +328,16 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
 `); }
       catch (e) {
         if (e.code !== 'EEXIST') throw e;
-        let holder = null; try { holder = readFileSync(logLockPath, 'utf8').trim().split(' ')[0]; } catch { holder = null; }
+        // Custody before content: a directory/symlink/FIFO at the lock path
+        // is tamper evidence, never a stale lock to read or remove — a FIFO
+        // would hang the read, a directory dies as a raw SystemError on
+        // rmSync. Both refuse named (w48-issuerd H2/L2).
+        let lst = null;
+        try { lst = lstatSync(logLockPath); } catch (le) { if (le.code === 'ENOENT') continue; throw le; }
+        requireThat(lst && !lst.isSymbolicLink() && lst.isFile(), 'INV-503-CONFIG', 'Issuance log lock is not a regular file — refusing to treat it as a stale lock', 503);
+        let holder = null;
+        const lfd = openSync(logLockPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+        try { holder = readFileSync(lfd, 'utf8').trim().split(' ')[0]; } catch { holder = null; } finally { closeSync(lfd); }
         const pid = Number(holder);
         let alive = false;
         if (Number.isSafeInteger(pid) && pid > 0) { try { process.kill(pid, 0); alive = true; } catch (err) { alive = err.code === 'EPERM'; } }
@@ -345,6 +393,19 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
     catch (e) {
       if (e.code !== 'ENOENT') { if (e instanceof InvariantError) throw e; throw new InvariantError('INV-503-CONFIG', 'Issuance log path is not openable as a regular file', 503); }
     }
+    const headPath = `${logPath}.head`;
+    // The watermark sidecar gets the same file-type discipline as the log
+    // and the key: a symlink/FIFO/directory at .head must refuse named at
+    // boot — a bare readFileSync would hang on a FIFO forever or swallow a
+    // directory into 'no head' (w48-issuerd H2/M1).
+    const readHead = () => {
+      let hs;
+      try { hs = lstatSync(headPath); } catch (e) { if (e.code === 'ENOENT') return null; throw e; }
+      requireThat(!hs.isSymbolicLink() && hs.isFile(), 'INV-503-CONFIG', 'Issuance log head watermark must be a regular file', 503);
+      requireThat((hs.mode & 0o077) === 0, 'INV-503-CONFIG', 'Issuance log head watermark must not be readable by group or other users', 503);
+      const hfd = openSync(headPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+      try { return readFileSync(hfd, 'utf8'); } finally { closeSync(hfd); }
+    };
     if (fd !== null) {
       let lines;
       try {
@@ -384,13 +445,13 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
         previous = d; last = rec;
       }
       if (!last) {
-        // An empty log under a live head watermark is truncation-to-zero —
-        // the watermarked history vanished, which is tamper evidence rather
-        // than a fresh segment; re-genesis would silently orphan it
-        // (w30-issuerd F3). A first-boot log carries no watermark at all.
-        let headRec = null;
-        try { headRec = JSON.parse(readFileSync(`${logPath}.head`, 'utf8')); } catch { headRec = null; }
-        requireThat(!headRec || headRec.format !== 'ISSUER-LOG-HEAD-1' || !(headRec.sequence > 0), 'INV-503-CONFIG', 'Issuance log vanished under a live head watermark — refuse to re-genesis silently', 503);
+        // An empty log with ANY surviving head watermark is truncation —
+        // a first-boot daemon writes no .head at all, so the file's
+        // presence alone is evidence of a prior segment (or a plant). The
+        // check must not pattern-match the record's own fields: flipping
+        // `format`/`sequence` in the sidecar would otherwise launder a
+        // deleted chain into a silent re-genesis (w48-issuerd H3).
+        requireThat(readHead() === null, 'INV-503-CONFIG', 'Issuance log vanished while a head watermark survives — refuse to re-genesis silently', 503);
       }
       if (last) {
         // Head watermark parity with the fabric's chain-heads.json: the
@@ -403,14 +464,19 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
         // deleted-watermark truncation, so it refuses too; legacy
         // pre-watermark logs re-anchor via the runbook (delete the file
         // after archiving), never silently (w25-issuerd F-2).
-        const headPath = logPath + '.head';
+        const headRaw = readHead();
         let headRec = null;
-        try { headRec = JSON.parse(readFileSync(headPath, 'utf8')); } catch { headRec = null; }
+        try { headRec = JSON.parse(headRaw); } catch { headRec = null; }
         const headMac = (sequence, digest) => logMac({ format: 'ISSUER-LOG-HEAD-1', sequence, digest });
         requireThat(headRec !== null, 'INV-503-CONFIG', 'Issuance log head watermark is absent over a non-empty log — the file was deleted or the log predates the watermark; archive and re-anchor per runbook', 503);
         requireThat(headRec.format === 'ISSUER-LOG-HEAD-1' && Number.isSafeInteger(headRec.sequence) && headRec.sequence === last.sequence && ctEqual(headRec.mac ?? '', headMac(last.sequence, last.digest)), 'INV-503-CONFIG', 'Issuance log head watermark diverges from the log tail — the log was truncated or replaced', 503);
         sequence.n = last.sequence; sequence.previous = last.digest;
       }
+    } else {
+      // No log file at all: a surviving head watermark is the same
+      // truncation evidence as the empty-log case — a deleted log must
+      // never re-genesis cleanly under its own watermark (w48-issuerd H3).
+      requireThat(readHead() === null, 'INV-503-CONFIG', 'Issuance log is absent while a head watermark survives — refuse to re-genesis silently', 503);
     }
   }
   } catch (e) { releaseLock(); throw e; }
@@ -457,7 +523,17 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
       // The MAC is keyed over the claimed tail, so a file-editor cannot
       // re-anchor a truncated prefix by copying a stored digest
       // (w25-issuerd F-3).
-      writeFileSync(logPath + '.head', canonical({ format: 'ISSUER-LOG-HEAD-1', sequence: record.sequence, mac: logMac({ format: 'ISSUER-LOG-HEAD-1', sequence: record.sequence, digest: next }) }) + '\n', { mode: 0o600 });
+      // The watermark write takes the same file-type discipline as the
+      // log append: a planted FIFO at .head must refuse named instead of
+      // hanging the whole event loop on the write (w48-issuerd H2).
+      let hfd;
+      try { hfd = openSync(`${logPath}.head`, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK, 0o600); }
+      catch (he) { throw new InvariantError('INV-503-CONFIG', `Issuance log head watermark is not writable as a regular file (${he.code ?? 'ERR'})`, 503); }
+      try {
+        const hst = fstatSync(hfd);
+        requireThat(hst.isFile() && (hst.mode & 0o077) === 0, 'INV-503-CONFIG', 'Issuance log head watermark must be a regular file', 503);
+        writeSync(hfd, canonical({ format: 'ISSUER-LOG-HEAD-1', sequence: record.sequence, mac: logMac({ format: 'ISSUER-LOG-HEAD-1', sequence: record.sequence, digest: next }) }) + '\n');
+      } finally { closeSync(hfd); }
       writeSync(afd, canonical({ ...record, digest: next }) + '\n');
     } finally { closeSync(afd); }
     // Chain state commits only once the bytes are durable: a failed
@@ -470,6 +546,7 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
   // across createIssuerServer calls leaks budgets between daemons and
   // couples unrelated tests (w9-deploy F10).
   const buckets = new Map();
+  const probeBursts = new Map();
   const server = http.createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Cache-Control', 'no-store');
     // Same response-header bar as the main server — issuer responses are
@@ -488,7 +565,13 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
     // (w30-issuerd F6).
     const bindLoopback = ['127.0.0.1', '::1'].includes(host);
     const rawIp = (req.socket.remoteAddress ?? 'unknown').replace(/^::ffff:/, '');
-    const ip = bindLoopback ? '127.0.0.1' : (rawIp.includes(':') ? `${rawIp.split(':').slice(0, 4).join(':')}::/64` : rawIp);
+    // /64 bucketing must parse the address, never string-split it: Node
+    // reports the COMPRESSED form, so '2001:db8::1'.split(':') keeps the
+    // host bits inside the key and every rotated address inside one /64
+    // mints its own budget — the flood bound becomes per-address
+    // (w48-issuerd M2). A trailing %zone (link-local) is interface noise,
+    // not identity.
+    const ip = bindLoopback ? '127.0.0.1' : (rawIp.includes(':') ? slash64(rawIp) : rawIp);
     // The coarse gate is keyed on the PRESENTED credential when it matches
     // a configured bearer: a loopback flood holding one token spends its own
     // budget and can never starve the fabric's drift checks riding a
@@ -524,6 +607,23 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
       return b;
     };
     const take = (scope) => { const b = bucketFor(scope); requireThat(b.left > 0, 'INV-429-RATE', 'Rate limit exceeded', 429); b.left--; };
+    // Unauthenticated refusals aggregate per (principal, route, code):
+    // each 60s window appends at most one chain entry that reports the
+    // PREVIOUS window's probe count — provenance stays complete without
+    // letting an unauthenticated flood mint a ~200-byte line per request
+    // until the 64 MiB custody cap wedges honest issuance (w48-issuerd
+    // M3). Authenticated refusals keep per-event lines: their spend is
+    // already priced by the token budgets.
+    const refusalLog = (entry) => {
+      if (!entry.unauthenticated) { issuanceLog(entry); return; }
+      const key = `${principalKey}:${entry.route ?? ''}:${entry.code ?? ''}`;
+      const b = probeBursts.get(key);
+      if (b && clock() < b.reset) { b.count++; return; }
+      const seen = b?.count ?? 0;
+      while (probeBursts.size > 10000) probeBursts.delete(probeBursts.keys().next().value);
+      probeBursts.set(key, { count: 1, reset: clock() + 60000 });
+      issuanceLog({ ...entry, probe_burst: true, prior_window_probes: seen, principal_digest: hashBytes(key).slice(0, 24) });
+    };
     try {
       // The coarse per-IP bucket is taken before any request validation —
       // malformed traffic must consume budget too (w9-deploy F9).
@@ -626,7 +726,7 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
           // Refused listing probes land on the issuance chain too — the
           // same provenance bar as manifest/health reads (w21-fixverify L-4).
           if (!(configOk && openLoopback)) {
-            issuanceLog({ issuer: null, tenant: null, refused: true, unauthenticated: true, route: 'issuers-list', code: 'INV-401-AUTH' });
+            refusalLog({ issuer: null, tenant: null, refused: true, unauthenticated: true, route: 'issuers-list', code: 'INV-401-AUTH' });
             throw new InvariantError('INV-401-AUTH', 'Issuer listing requires a valid read bearer token', 401);
           }
         } else take('read');
@@ -662,7 +762,7 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
         const ok = issuer && (!requestedTenant || !issuer.tenant || issuer.tenant === requestedTenant) && issuerAuthOk(issuer, 'read');
         if (!ok) {
           if (authed || openLoopback) take('probe');
-          issuanceLog({ issuer: m[1], tenant: requestedTenant ?? null, refused: true, unauthenticated: !authed, route: 'manifest', code: 'INV-404-NOT-FOUND' });
+          refusalLog({ issuer: m[1], tenant: requestedTenant ?? null, refused: true, unauthenticated: !authed, route: 'manifest', code: 'INV-404-NOT-FOUND' });
           throw new InvariantError('INV-404-NOT-FOUND', 'Issuer not found', 404);
         }
         issuanceLog({ issuer: issuer.issuer, tenant: issuer.tenant ?? null, route: 'manifest', accessed: true });
@@ -674,7 +774,7 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
           // Manifests are short-lived so a captured replay cannot suppress
           // drift detection for weeks (w9-network F8): the consumer bounds
           // both the accepted issue age and the signed horizon.
-          coverage_implications: ISSUER_MANIFEST_COVERAGE, issued_at: clock(), expires_at: clock() + 600000
+          coverage_implications: ISSUER_MANIFEST_COVERAGE, ...(issuer.spec_digest !== undefined ? { spec_digest: issuer.spec_digest } : {}), issued_at: clock(), expires_at: clock() + 600000
         }, issuer.key, 'connector-manifest'));
       }
       if (req.method === 'POST' && (m = /^\/v1\/issuers\/([A-Za-z0-9_-]+)\/issue$/.exec(url.pathname))) {
@@ -687,7 +787,7 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
           // and land in the same log, never 413'd silently
           // (w18-issuerd F-2, w20-fixverify F-6).
           take('probe');
-          issuanceLog({ issuer: 'unknown', request_digest: logMac({ wire_bytes: size }), refused: true, unauthenticated: !anyBearer('issue'), malformed: true, code: e.code ?? 'INV-413-BODY' });
+          refusalLog({ issuer: 'unknown', request_digest: logMac({ wire_bytes: size }), refused: true, unauthenticated: !anyBearer('issue'), malformed: true, code: e.code ?? 'INV-413-BODY' });
           throw e;
         }
         let request;
@@ -710,20 +810,20 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
           // unauthenticated one (w18-http F-5, w20-fixverify F-6); the
           // probe bucket bounds the entries.
           take('probe');
-          issuanceLog({ issuer: 'unknown', request_digest: logMac(request ?? { wire_bytes: size }), refused: true, unauthenticated: !anyBearer('issue'), malformed: true, code: e.code ?? 'INV-400-SCHEMA' });
+          refusalLog({ issuer: 'unknown', request_digest: logMac(request ?? { wire_bytes: size }), refused: true, unauthenticated: !anyBearer('issue'), malformed: true, code: e.code ?? 'INV-400-SCHEMA' });
           throw e;
         }
         // 'refused' is logged only when the request is actually refused —
         // a tokenless open-loopback issue must not precede every success
         // with a phantom denial entry (w18-issuerd F-12).
-        try { gate('issue'); } catch (e) { if (!anyBearer('issue')) { take('probe'); issuanceLog({ issuer: 'unknown', request_digest: logMac(request), refused: true, unauthenticated: true, code: e.code ?? 'INV-401-AUTH' }); } throw e; }
+        try { gate('issue'); } catch (e) { if (!anyBearer('issue')) { take('probe'); refusalLog({ issuer: 'unknown', request_digest: logMac(request), refused: true, unauthenticated: true, code: e.code ?? 'INV-401-AUTH' }); } throw e; }
         take('issue');
         const issuer = resolveIssuer(m[1], request.tenant_id);
         // Authentication failures are logged to the issuance chain too —
         // probing must not be invisible to provenance audit (MED-5) — but
         // the response is a uniform 404 so wrong-issuer bearers cannot
         // enumerate names (w9-deploy F4).
-        try { requireThat(issuer && issuerAuthOk(issuer, 'issue'), 'INV-404-NOT-FOUND', 'Issuer not found', 404); } catch (e) { if (anyBearer('issue') || openLoopback) take('probe'); issuanceLog({ issuer: issuer?.issuer ?? 'unknown', request_digest: logMac(request), refused: true, unauthenticated: !anyBearer('issue'), code: 'INV-404-NOT-FOUND' }); throw e; }
+        try { requireThat(issuer && issuerAuthOk(issuer, 'issue'), 'INV-404-NOT-FOUND', 'Issuer not found', 404); } catch (e) { if (anyBearer('issue') || openLoopback) take('probe'); refusalLog({ issuer: issuer?.issuer ?? 'unknown', request_digest: logMac(request), refused: true, unauthenticated: !anyBearer('issue'), code: 'INV-404-NOT-FOUND' }); throw e; }
         issuer.metrics.requests++; const t0 = performance.now();
         try {
           const envelope = answerQuery(issuer, request, clock());
@@ -745,7 +845,7 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
         // and leave a chain entry (w21-issuerd F6).
         if (!(issuer && issuerAuthOk(issuer, 'read'))) {
           if (authed || openLoopback) take('probe');
-          issuanceLog({ issuer: m[1], refused: true, unauthenticated: !authed, route: 'health', code: 'INV-404-NOT-FOUND' });
+          refusalLog({ issuer: m[1], refused: true, unauthenticated: !authed, route: 'health', code: 'INV-404-NOT-FOUND' });
           throw new InvariantError('INV-404-NOT-FOUND', 'Issuer not found', 404);
         }
         issuanceLog({ issuer: issuer.issuer, tenant: issuer.tenant ?? null, route: 'health', accessed: true });
@@ -759,7 +859,7 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
       // Unauthenticated unknown-path probes must consume probe budget and
       // land in the issuance log — a silent 404 fallthrough is a free recon
       // surface below the daemon's own provenance bar (w47-http LOW).
-      if (!anyBearer('read') && !anyBearer('issue')) { take('probe'); issuanceLog({ issuer: 'unknown', refused: true, unauthenticated: true, route: 'unknown', code: 'INV-404-NOT-FOUND' }); }
+      if (!anyBearer('read') && !anyBearer('issue')) { take('probe'); refusalLog({ issuer: 'unknown', refused: true, unauthenticated: true, route: 'unknown', code: 'INV-404-NOT-FOUND' }); }
       throw new InvariantError('INV-404-NOT-FOUND', 'Resource not found', 404);
     } catch (e) {
       // Serialize-first send plus this guard: a mid-response failure
