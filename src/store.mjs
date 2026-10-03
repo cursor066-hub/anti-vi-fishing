@@ -1025,12 +1025,34 @@ export class Store {
     // write zero rows).
     this._schemaGuard(() => this.tx(() => {
       const before = this._totalChanges();
+      // The stored marker is consulted BEFORE the write: a value no honest
+      // path emits (' 999999999:x', 'abc', a bare hash) is planted garbage —
+      // CAST parses its prefix arbitrarily (high → the guarded UPDATE
+      // refuses and every later append wedges on the probe, remediation
+      // included; low → it is silently overwritten). Both directions heal
+      // here and bind the healed content to this commit — a planted marker
+      // can never brick the append path or evaporate unnamed
+      // (w55-runtime F-1, w55-fv C-1/M-3).
+      const prior = this._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor'").get(tenant)?.value;
+      const priorWellFormed = typeof prior === 'string' && /^\d+:/.test(prior);
       this._stmt("INSERT INTO meta_kv VALUES(?,'fold_floor',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value WHERE CAST(substr(meta_kv.value,1,instr(meta_kv.value,':')-1) AS INTEGER) < CAST(substr(excluded.value,1,instr(excluded.value,':')-1) AS INTEGER)").run(tenant, `${entry.sequence}:${hash}`);
       const delta = this._totalChanges() - before;
       requireThat(delta <= 1, 'INV-409-INTEGRITY', `fold-floor marker produced ${delta} row writes in one statement — foreign trigger side-effects`, 409);
-      const stored = this._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor'").get(tenant)?.value;
+      let stored = this._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor'").get(tenant)?.value;
+      if (stored !== undefined && !(typeof stored === 'string' && /^\d+:/.test(stored))) {
+        // The refused update left planted garbage in place — overwrite it
+        // outright. A real foreign trigger fighting the heal re-fires on
+        // this write and the re-probe below still convicts.
+        this._stmt("UPDATE meta_kv SET value=? WHERE tenant=? AND key='fold_floor'").run(`${entry.sequence}:${hash}`, tenant);
+        stored = this._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor'").get(tenant)?.value;
+      }
+      if (prior !== undefined && !priorWellFormed) {
+        // Evidence, not laundering: the divergent content is preserved on
+        // the marker plane, bound to the append that healed it.
+        this._stmt("INSERT INTO meta_kv VALUES(?,'fold_floor_healed',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, `${entry.sequence}:${prior}`);
+      }
       const storedSeq = typeof stored === 'string' && /^\d+:/.test(stored) ? Number(stored.split(':')[0]) : undefined;
-      requireThat(storedSeq !== undefined && storedSeq >= entry.sequence, 'INV-409-INTEGRITY', 'fold-floor marker write refused by a foreign trigger', 409);
+      requireThat(storedSeq !== undefined && storedSeq >= entry.sequence, 'INV-409-INTEGRITY', `fold-floor marker write ${stored === undefined ? 'missing' : 'refused'} after write — foreign trigger side-effects`, 409);
     }));
     // Post-commit ordering: only a landed entry may move the anchors and
     // ratchet the detector (w23 W23-05). Our own head is the newest

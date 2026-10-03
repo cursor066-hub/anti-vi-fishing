@@ -25,11 +25,12 @@ const stale = [];
 const staleDetail = [];
 // Every spawned helper gets a wall-clock ceiling — a hung subprocess must
 // fail the report, never stall CI forever (w23-supply F17).
-// 2400s: the full suite runs ~1500s now that the w54 ledger-gate
-// regressions run five copy-tree check.mjs passes (~2min each) — the old
-// 20-minute budget killed it mid-stream, wrote a truncated TAP, and the
-// ledger's execution binding correctly refused (w49-ledger F-7, w54 regen).
-const run = (cmd, args, opts = {}) => spawnSync(cmd, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 2400000, ...opts });
+// 3600s: the full suite runs ~25-40min under 4-way file concurrency —
+// the copy-tree gate regressions run ~4min of check.mjs each. The old
+// 20- then 40-minute budgets each died mid-stream, wrote a truncated
+// TAP, and the ledger's execution binding correctly refused
+// (w49-ledger F-7, w54/w55 regen).
+const run = (cmd, args, opts = {}) => spawnSync(cmd, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 3600000, ...opts });
 const write = (path, content) => {
   if (checkOnly) {
     const committed = existsSync(path) ? readFileSync(path, 'utf8') : null;
@@ -62,8 +63,24 @@ const collectTests = (dir) => {
   }
 };
 collectTests('tests');
-const tap = run(process.execPath, ['--test', '--test-concurrency=1', '--test-reporter=tap', ...testFiles]);
+// File-level parallelism: each file owns an isolated fixture (ephemeral
+// ports, mkdtemp stores), so concurrency only buys wall-clock — the
+// assertions and the emitted TAP rows are identical (w55-ledger M-1: the
+// copy-tree gate tests pushed serial execution past the spawn timeout).
+const tap = run(process.execPath, ['--test', '--test-concurrency=4', '--test-reporter=tap', ...testFiles]);
 const tapText = (tap.stdout ?? '') + (tap.stderr ?? '');
+// A dead or red runner must not mint evidence: a timed-out or crashed
+// suite leaves a truncated TAP (no footer counters) and a red one leaves
+// 'not ok' rows — copying either into reports/ poisons every
+// traceability check that binds the committed artifact (a `not ok`
+// disqualifies the requirement its test names). Diagnose, write nothing,
+// stop (w55 regen: the 40-minute kill wrote a counter-less tests.tap
+// every later check choked on).
+if (tap.error || tap.status !== 0) {
+  const reds = tapText.split('\n').filter(l => /^not ok\s/.test(l)).slice(0, 20);
+  console.error(`test suite did not complete green${tap.error ? ` — ${tap.error.message ?? tap.error}` : ''}${tap.signal ? ` (signal ${tap.signal})` : ''}${reds.length ? ` — failing: ${reds.join(' | ')}` : ''} — reports/tests.tap is left untouched. Fix the suite, then re-run.`);
+  process.exit(2);
+}
 // Strip per-test durations so the committed TAP is byte-stable.
 const stableTap = tapText.replace(/ \([\d.]+ms\)/g, '').replace(/(duration_ms: )[\d.]+/g, '$10').replace(/(# duration_ms )[\d.]+/g, '$10')
   // issuerd construction warnings ride process.stderr and land at
@@ -83,7 +100,10 @@ const counts = { pass: numLast(/# pass (\d+)/, tapText), fail: rawFail, tests: r
 if (rawTests > 0 && counts.pass + rawFail + rawSkip + rawTodo + rawCancel !== rawTests) { console.error(`TAP summary inconsistent: tests=${rawTests} but pass+fail+skipped+deferred+cancelled=${counts.pass + rawFail + rawSkip + rawTodo + rawCancel}`); process.exitCode = 1; }
 write('reports/tests.tap', stableTap);
 write('reports/final-regression.tap', stableTap);
-const testSummary = { tests: counts.pass + counts.fail, pass: counts.pass, fail: counts.fail, runner: "node --test --test-concurrency=1 'tests/**/*.test.mjs'", generated_at: 'regenerated on demand by scripts/report.mjs', note: 'Live counts; per-test durations are stripped so the artifact is deterministic.' };
+// The runner string names the invocation actually performed above — an
+// explicit sorted file list, not a glob the environment could expand
+// differently (w55-ledger M-1).
+const testSummary = { tests: counts.pass + counts.fail, pass: counts.pass, fail: counts.fail, runner: 'node --test --test-concurrency=4 --test-reporter=tap <sorted tests/**/*.test.mjs list>', generated_at: 'regenerated on demand by scripts/report.mjs', note: 'Live counts; per-test durations are stripped so the artifact is deterministic.' };
 write('reports/test-summary.json', JSON.stringify(testSummary, null, 2) + '\n');
 write('reports/final-regression-summary.json', JSON.stringify({ ...testSummary, scope: 'final regression baseline' }, null, 2) + '\n');
 
@@ -190,8 +210,10 @@ const gate = run(process.execPath, ['scripts/release-check.mjs']);
 // ledger was regenerated moments ago, so the committed-tree freshness
 // check could not have failed. Record that plainly: the meaningful
 // freshness proof is the CI `--check-only` invocation, not this artifact
-// (w54-ledger M-4).
-write('reports/production-gate.json', JSON.stringify({ verifier: 'scripts/release-check.mjs', exit: gate.status, expected_exit: 1, freshness_arm: checkOnly ? 'meaningful — compares committed files to a fresh regeneration' : 'vacuous — the ledger was regenerated by this run; committed-tree freshness is proven only by the --check-only/CI invocation', output: (gate.stdout ?? '').trim() }, null, 2) + '\n');
+// (w54-ledger M-4). The wording must not VARY by mode: --check-only
+// byte-compares this file against a fresh regeneration, so a mode-shaped
+// string wedges the gate on every run (w55-seal F-2).
+write('reports/production-gate.json', JSON.stringify({ verifier: 'scripts/release-check.mjs', exit: gate.status, expected_exit: 1, freshness_arm: 'committed-tree freshness is proven by the --check-only/CI invocation — in generation mode this artifact describes the tree it just regenerated, tautologically fresh', output: (gate.stdout ?? '').trim() }, null, 2) + '\n');
 const ledgerSummary = existsSync('reports/requirements-summary.json') ? JSON.parse(readFileSync('reports/requirements-summary.json', 'utf8')) : null;
 const statusCounts = ledgerSummary?.status_counts ?? {}, total = ledgerSummary?.total_requirements ?? 0;
 const sims = existsSync('reports/simulation-results.json') ? JSON.parse(readFileSync('reports/simulation-results.json', 'utf8')).scenarios?.length : null;

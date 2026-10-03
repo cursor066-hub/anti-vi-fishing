@@ -191,7 +191,20 @@ test('w53-seal M-3: the re-anchor names the real surviving tip under stored-seq 
 
 const copyTree = () => {
   const dir = mkdtempSync(join(tmpdir(), 'w53-ledger-'));
-  execFileSync('sh', ['-c', 'git ls-files -z | xargs -0 cp --parents -t "$1"', 'sh', dir], { cwd: new URL('..', import.meta.url).pathname });
+  const root = new URL('..', import.meta.url).pathname;
+  execFileSync('sh', ['-c', 'git ls-files -z | xargs -0 cp --parents -t "$1"', 'sh', dir], { cwd: root });
+  // The copied tree has no .git, so its traceability falls back to the
+  // reports/tests.tap FILE — cp just cloned the working one, which may
+  // hold an uncommitted mid-regeneration run. The gate semantics bind
+  // the committed artifact (`git show HEAD:` first, file only as
+  // fallback) — give the copy exactly that so a dirty working TAP does
+  // not poison every citation check on the copy (w55 regen: a red
+  // working TAP made every gate test trip the disqualification arm
+  // before the arm under test could fire).
+  try {
+    const tap = execFileSync('git', ['show', 'HEAD:reports/tests.tap'], { cwd: root, encoding: 'utf8' });
+    writeFileSync(join(dir, 'reports/tests.tap'), tap);
+  } catch { /* no HEAD TAP — the copied file stands on its own */ }
   return dir;
 };
 
@@ -246,6 +259,11 @@ test('w53-ledger H-2/H-3: a false authenticated claim and a .js dispatch surface
 // marker-free).
 test('w53-ledger M: the marker gate flags the widened vocabulary too', t => {
   const src = readFileSync(new URL('../scripts/check.mjs', import.meta.url), 'utf8');
-  for (const [w, lit] of [['T' + 'BD', "T' + 'BD"], ['W' + 'IP', "W' + 'IP"], ['HA' + 'CK', "HA' + 'CK"], ['TO' + ' DO', "TO' + '[ ._-]' + 'DO"], ['FIX' + ' ME', "FIX' + '[ ._-]' + 'ME"]])
+  // The widened pattern spells each letter through an interpolated
+  // separator class (space/tab/NBSP/dot/underscore/dash and none at
+  // all) — pin the class plus the fullwidth coverage and the
+  // single-word markers (w55-ledger: the old [ ._-] literal pins died
+  // with the class).
+  for (const [w, lit] of [['T' + 'BD', "T' + 'BD"], ['W' + 'IP', "W' + 'IP"], ['HA' + 'CK', "HA' + 'CK"], ['separated spellings', '[ \\\\t\\\\u00A0._-]'], ['fullwidth spellings', 'Ｔ']])
     assert.ok(src.includes(lit), `marker ${w} must be in the gate (split literal ${lit})`);
 });

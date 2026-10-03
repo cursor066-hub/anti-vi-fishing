@@ -332,6 +332,11 @@ test('w54-ledger H-4: .cjs and out-of-tree dispatch surfaces flag', t => {
     writeFileSync(join(dir, 'scripts/__plant.cjs'), "require('http').createServer((req,res)=>{ if(req.url==='/x') res.end('x'); });\n");
     mkdirSync(join(dir, 'deploy'), { recursive: true });
     writeFileSync(join(dir, 'deploy/__plant.mjs'), "import http from 'node:http'; http.createServer((req,res)=>{ if(req.headers['x']) res.end('x'); });\n");
+    // The gate rides `git ls-files` — a git-less copy only exercises the
+    // fallback directory walk, not the tracked-set arm the fix claims
+    // (w55-ledger H-5). Give the copy a real index, plants included.
+    execFileSync('git', ['init', '-q'], { cwd: dir });
+    execFileSync('git', ['add', '-A'], { cwd: dir });
     const out = checkErr(dir);
     assert.match(out ?? '', /__plant\.cjs/, 'the .cjs dispatch plant must flag');
     assert.match(out ?? '', /deploy\/__plant\.mjs/, 'the deploy-dir dispatch plant must flag');
@@ -350,10 +355,11 @@ print(bool(g['_asserts']("test('X', () => { function check(assert) { assert.ok(f
 print(bool(g['_asserts']("test('X', () => { class C { m() { assert.ok(false); } } new C(); })")))
 print(bool(g['_asserts']("test('X', () => { class D { m() { assert.ok(false); } } const d = new D(); d.m(); })")))
 print(g['_prod_binds']("import { execFileSync } from 'node:child_process'; test('X', () => assert.ok(true));"))
-print(g['_prod_binds']("import { execFileSync } from 'node:child_process'; test('X', () => assert.ok(execFileSync('true')));"))`;
+print(g['_prod_binds']("import { execFileSync } from 'node:child_process'; test('X', () => assert.ok(execFileSync('true')));"))
+print(g['_prod_binds']("import { execFileSync } from 'node:child_process'; test('X', () => assert.ok(execFileSync('node', ['scripts/check.mjs'])));"))`;
   const out = execFileSync('python3', ['-c', py], { cwd: new URL('..', import.meta.url).pathname, encoding: 'utf8' }).trim().split('\n');
-  assert.deepEqual(out, ['False', 'True', 'False', 'False', 'True', 'False', 'True'],
-    'uniterated generator, shadowed param, never-invoked method and unused import are all dead; live shapes still count');
+  assert.deepEqual(out, ['False', 'True', 'False', 'False', 'True', 'False', 'False', 'True'],
+    'uniterated generator, shadowed param, never-invoked method, unused import and a repo-free spawn are all dead; live shapes still count');
 });
 
 // M-1: spaced spellings are the same unfinished marker.
@@ -362,7 +368,10 @@ test('w54-ledger M-1: the marker gate flags spaced spellings', t => {
   try {
     writeFileSync(join(dir, 'src/__markerplant.mjs'), `// TO ${'DO'}: wire this up\nexport const x = 1;\n`);
     const out = checkErr(dir);
-    assert.match(out ?? '', /__markerplant\.mjs/, 'the two' + '-word marker must flag');
+    // The assertion must name the marker-gate arm — a bare filename match
+    // is also satisfied by the manifest's 'unexpected file:' line even
+    // when the marker rule never fires (w55-fv L-3).
+    assert.match(out ?? '', /__markerplant\.mjs: unfinished code marker/, 'the two' + '-word marker must flag');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -383,11 +392,15 @@ test('w54-ledger M-3: release-check names a spawn failure, not staleness', t => 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-// M-4: production-gate.json must disclose that the generation-mode
-// freshness arm is vacuous.
-test('w54-ledger M-4: production-gate records the freshness arm vacuity', t => {
+// M-4: production-gate.json discloses the freshness arm honestly —
+// the constant names what the committed-tree check actually proves
+// (the generation-mode arm is tautological; --check-only proves
+// freshness), so the pin is on the disclosure, not the vacuity
+// spelling (w55-ledger C2).
+test('w54-ledger M-4: production-gate records the freshness arm disclosure', t => {
   const gate = JSON.parse(readFileSync(new URL('../reports/production-gate.json', import.meta.url), 'utf8'));
-  assert.match(gate.freshness_arm ?? '', /vacuous/, 'the committed artifact discloses the vacuous arm');
+  assert.match(gate.freshness_arm ?? '', /committed-tree freshness/, 'the committed artifact discloses the freshness arm honestly');
+  assert.doesNotMatch(gate.freshness_arm ?? '', /checkOnly\s*\?/, 'the freshness arm is a constant disclosure, not mode-vacuous');
 });
 
 // ── w54-fixverify ───────────────────────────────────────────────────
@@ -411,6 +424,14 @@ test('w54-fv H-3: authorize(p, CONST_ARRAY) resolves module-scope role sets', t 
     writeFileSync(srv, src.replace("const p = auth(req", arm + "const p = auth(req"));
     const out = checkErr(dir);
     assert.ok(out == null || !out.includes('aliasgate'), `the const-alias gate must resolve its roles: ${out?.slice(0, 400)}`);
+    // Non-const carriers gate the same way — `let`, an alias chain, and a
+    // post-decl mutation all carry the role set (w55-fv L-3/M-5: the old
+    // const-only regex resolved none of these).
+    const srv2 = readFileSync(srv, 'utf8');
+    writeFileSync(srv, srv2.replace("const W54_SET = ['auditor'];", "let W54_LET = [];\n      const W54_SET = W54_LET; W54_SET.push('auditor');"));
+    const outLet = checkErr(dir);
+    assert.ok(outLet == null || !outLet.includes('aliasgate'), `the let/alias/mutated gate must resolve its roles: ${outLet?.slice(0, 400)}`);
+    writeFileSync(srv, srv2);
     // Negative: the same arm claiming a different role must flag — the
     // resolution is to the real set contents, not a satisfied claim.
     specPatched(dir, o => { o.paths['/aliasgate'].get.description = 'Roles: security. plant'; });

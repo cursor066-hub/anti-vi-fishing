@@ -160,8 +160,13 @@ _SHADOWED_ASSERT = re.compile(
     r'|\(\s*[^)]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b[^)]*\)\s*=>'
     # A classic-function parameter shadows the name for its whole body —
     # `function check(assert) { assert.ok(false) }` calls the parameter,
-    # never node:assert (w54-ledger H-5).
-    r'|\bfunction\s*\w*\s*\([^)]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b[^)]*\)'
+    # never node:assert; `function* check(assert)` is the same shadow
+    # (w54-ledger H-5, w55-ledger H-1).
+    r'|\bfunction\s*\*?\s*\w*\s*\([^)]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b[^)]*\)'
+    # A shorthand-object/class method parameter shadows identically —
+    # `{ check(assert) { … } }` binds `assert` for its body without the
+    # `function` keyword (w55-ledger H-1).
+    r'|(?<![\w$.])(?:async\s+|static\s+|get\s+|set\s+)*[A-Za-z_$][\w$]*\s*\([^)]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b[^)]*\)\s*\{'
     # A catch-param or bare for-head binding neuters the name for its
     # whole clause — `try {} catch (assert) { assert(...) }` and
     # `for (assert of x) assert(...)` never call node:assert (w53-fv H-1).
@@ -169,11 +174,12 @@ _SHADOWED_ASSERT = re.compile(
     r'|\bfor\s*\(\s*(?:const|let|var\s+)?(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\s+(?:of|in)\b'
     # Destructured shadows neuter the name the same way —
     # `const { assert } = fake` and `for (const [assert] of z)` bind a
-    # local that is not node:assert; `class assert {}` does too
-    # (w54-fixverify M-4).
-    r'|\b(?:const|let|var)\s*\{[^}\n]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b[^}\n]*\}\s*='
-    r'|\b(?:const|let|var)\s*\[[^\]\n]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b[^\]\n]*\]\s*='
-    r'|\bfor\s*\(\s*(?:const|let|var)\s+[\[{][^\]}\n]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b'
+    # local that is not node:assert; `class assert {}` does too. The
+    # destructure may span lines — `const {\n  assert,\n} = fake` is the
+    # same shadow (w54-fixverify M-4, w55-ledger H-1).
+    r'|\b(?:const|let|var)\s*\{[^}]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b[^}]*\}\s*='
+    r'|\b(?:const|let|var)\s*\[[^\]]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b[^\]]*\]\s*='
+    r'|\bfor\s*\(\s*(?:const|let|var)\s+[\[{][^\]}]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b'
     r'|\bclass\s+(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b'
 )
 # The assert namespace itself is import-bound: `import { strict as asrt }`
@@ -361,16 +367,11 @@ def _live_code(text):
         spans.append((m.start(), j))
     for m in _DEAD_WRAPPER.finditer(text):
         spans.append((m.start(), _paren_end(text, m.end() - 1)))
-    # A `.on/.once` handler on a named receiver that the test never
-    # `.emit()`s is dead evidence — `bus.on('go', () => assert…)` mints
-    # nothing when nothing fires it. A same-name `.emit(` keeps it live:
-    # `ee.on('go', assert); ee.emit('go')` is the honest synchronous idiom
-    # (w54-fixverify M-4).
-    for m in re.finditer(r'\b([A-Za-z_$][\w$]*)\s*\.\s*(?:on|once|addListener|addEventListener)\s*\(', text):
-        name = m.group(1)
-        if name in {'process', 'globalThis'}: continue  # already killed
-        if re.search(r'\b' + re.escape(name) + r'\s*\.\s*emit\s*\(', text): continue
-        spans.append((m.start(), _paren_end(text, m.end() - 1)))
+    # The `.on/.once` keep-alive check runs in the second pass on text2 —
+    # an `.emit(` inside a dead span (if(false){…}, after t.skip(), inside
+    # an uninvoked helper) can never resurrect its handler, and scanning
+    # the RAW text let exactly those dead emits keep dead evidence live
+    # (w55-fv H-4). Collected below alongside the second _FN_DECL pass.
     # Statements after an unconditional return/throw inside a block can
     # never run — blank to the enclosing '}' (stopping at case/default
     # labels: a case arm ends at the next label, not the switch's '}').
@@ -435,11 +436,19 @@ def _live_code(text):
         name = m.group(1) or m.group(2)
         # A function literal whose name is never REFERENCED carries dead
         # asserts — call-site invocation is one binding, but a callback
-        # handed to t.test/foo(cb) stays live by name alone (w51-ledger M-7).
-        if name and not re.search(r'\b' + re.escape(name) + r'\b', text[m.end():]):
-            b = text.find('{', m.end())
-            k = text.find(';', m.end())
-            if b != -1 and (k == -1 or b < k): spans.append((m.start(), _paren_end(text, b)))
+        # handed to t.test/foo(cb) stays live by name alone (w51-ledger
+        # M-7). References count in both directions — function
+        # declarations hoist, and a callback above a const-arrow decl runs
+        # after it resolves (w55-fv M-1). A reference INSIDE the decl's
+        # own span (a `g;` in `function g(){ g; … }`) is self-citation,
+        # not reachability (w55-ledger H-1).
+        b = text.find('{', m.end())
+        k = text.find(';', m.end())
+        if b != -1 and (k == -1 or b < k): span_end = _paren_end(text, b)
+        elif k != -1: span_end = k + 1
+        else: span_end = m.end()
+        if name and not (re.search(r'\b' + re.escape(name) + r'\b', text[span_end:]) or re.search(r'\b' + re.escape(name) + r'\b', text[:m.start()])):
+            if b != -1 and (k == -1 or b < k): spans.append((m.start(), span_end))
             elif k != -1: spans.append((m.start(), k + 1))  # expression-body arrow: dead to statement end
     for m in re.finditer(r'\btry\s*\{', text):
         # An assert inside try{}…catch{} can never fail the test — the catch
@@ -470,20 +479,28 @@ def _live_code(text):
         if not consumed:
             spans.append((m.start(), end))
     # A class method never invoked by name carries dead asserts —
-    # `new C()` alone runs only the constructor. A `.m(`/`this.#m(` call
-    # anywhere in the test keeps it live (w54-ledger H-5).
+    # `new C()` alone runs only the constructor. Only a call bound to a
+    # receiver that can BE this class keeps the method live — `this.m`,
+    # `C.m`, or a variable bound to `new C()`; `other.m()` on an unrelated
+    # receiver cannot reach it (w54-ledger H-5, w55-ledger H-1).
     for m in re.finditer(r'\bclass\s+([A-Za-z_$][\w$]*)[^\{]*\{', text):
         cls_name = m.group(1)
         body_start = text.index('{', m.start())
         body_end = _paren_end(text, body_start)
         body, outside = text[body_start:body_end], text[:body_start] + text[body_end:]
         inst_used = re.search(r'\bnew\s+' + re.escape(cls_name) + r'\b', outside)
+        recv = {'this', cls_name}
+        for v in re.finditer(r'\b(?:const|let|var)\s+(\w+)\s*=\s*new\s+' + re.escape(cls_name) + r'\b', text):
+            recv.add(v.group(1))
+        for v in re.finditer(r'\b(?:const|let|var)\s+(\w+)\s*=\s*(\w+)\s*;', text):
+            if v.group(2) in recv: recv.add(v.group(1))
+        recv_alt = '|'.join(re.escape(r) for r in sorted(recv))
         for mm in re.finditer(r'\b(?:static\s+)?(?:async\s+)?([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{', body):
             name = mm.group(1)
             if name in {'if', 'for', 'while', 'switch', 'catch', 'function', 'else', 'do'}: continue
             if name == 'constructor':
                 if inst_used: continue
-            elif re.search(r'\.\s*#?\s*' + re.escape(name) + r'\s*\(', text):
+            elif re.search(r'\b(?:' + recv_alt + r')\s*\.\s*#?\s*' + re.escape(name) + r'\s*\(', text):
                 continue
             b = body_start + mm.end() - 1  # the match ends on the method's own '{'
             spans.append((body_start + mm.start(), _paren_end(text, b)))
@@ -494,13 +511,34 @@ def _live_code(text):
     # Second pass on the blanked text: a named function whose only
     # reference sits inside a dead span (e.g. `ee.on('x', handler)` killed
     # above) is itself dead — its asserts never run (w54-fixverify M-4).
+    # A `.on/.once` handler keeps evidence live ONLY while a live `.emit(`
+    # fires it — dead emits are gone from text2 (w55-fv H-4).
+    for m in re.finditer(r'\b([A-Za-z_$][\w$]*)\s*\.\s*(?:on|once|addListener|addEventListener)\s*\(', text2):
+        name = m.group(1)
+        if name in {'process', 'globalThis'}: continue  # already killed
+        # Only a `.emit(` firing the SAME literal event on the same
+        # emitter keeps the handler live — `emit('other')` cannot reach
+        # `ee.on('x', cb)` (w55-ledger C3). A non-literal event name
+        # proves nothing and stays dead.
+        em = re.match(r'\s*([\'"`])([^\'"`]*)\1', text2[m.end():])
+        if em and re.search(r'\b' + re.escape(name) + r'\s*\.\s*emit\s*\(\s*' + re.escape(em.group(1)) + re.escape(em.group(2)) + re.escape(em.group(1)), text2): continue
+        spans.append((m.start(), _paren_end(text2, m.end() - 1)))
     for m in _FN_DECL.finditer(text2):
         name = m.group(1) or m.group(2)
-        if name and not re.search(r'\b' + re.escape(name) + r'\b', text2[m.end():]):
-            b = text2.find('{', m.end())
-            k = text2.find(';', m.end())
+        # References count in BOTH directions: function declarations hoist
+        # (a call site above the decl is live), and a name handed to a
+        # callback above the const-arrow decl still resolves when the
+        # callback runs — forward-only probing killed honest hoisted
+        # helpers (w55-fv M-1). References inside the decl's own span are
+        # self-citation, not reachability (w55-ledger H-1).
+        b = text2.find('{', m.end())
+        k = text2.find(';', m.end())
+        if b != -1 and (k == -1 or b < k): span_end = _paren_end(text2, b)
+        elif k != -1: span_end = k + 1
+        else: span_end = m.end()
+        if name and not (re.search(r'\b' + re.escape(name) + r'\b', text2[span_end:]) or re.search(r'\b' + re.escape(name) + r'\b', text2[:m.start()])):
             if b != -1 and (k == -1 or b < k):
-                spans.append((m.start(), _paren_end(text2, b)))
+                spans.append((m.start(), span_end))
             elif k != -1:
                 spans.append((m.start(), k + 1))
     for a, b in spans:
@@ -572,14 +610,39 @@ def _bind_names(text, m):
         names.add(dm.group(1) or dm.group(2))
     names.discard('import'); names.discard('require'); names.discard('const'); names.discard('let'); names.discard('var'); names.discard('from')
     return {n for n in names if re.fullmatch(r'\w+', n)}
+# Spawning is production contact only when the spawn reaches the repo —
+# `execFileSync('true')` touches nothing under test. The call's own
+# arguments must name a repo path/script (a literal containing '/',
+# join(), execPath, or a repo file suffix), or drive git with a
+# tree-touching subcommand (w55-ledger C3).
+_SPAWN_CONTACT = re.compile(r'[/\\]|join\s*\(|execPath|\.(?:mjs|py|sh|json|cjs)\b')
+_GIT_TREE_OP = re.compile(r"(['\"])(?:ls-files|rev-parse|status|show|log|diff|add|init|checkout|cat-file|worktree|ls-remote)\b")
+def _spawn_contacts(live, text, names):
+    for n in names:
+        for cm in re.finditer(r'\b' + re.escape(n) + r'\s*\(', live):
+            # The call position comes from the live view (a dead call
+            # binds nothing) but the ARGUMENTS are read from the raw
+            # text — the live view blanks literal contents, so
+            # 'scripts/x' would never name its path there (w55-ledger C3).
+            args = text[cm.end():_paren_end(live, cm.end() - 1)]
+            if _SPAWN_CONTACT.search(args): return True
+            if re.search(r"(['\"])git\1", args) and _GIT_TREE_OP.search(args): return True
+    return False
 def _prod_binds(text):
     blanked = _blank_code(text)
+    # A bind inside dead code binds nothing — `if(false){ require('../src/x') }`,
+    # an uninvoked helper, or a post-t.skip import is decorative evidence
+    # (w55-fv M-1). The live-blanked view keeps positions aligned, so a
+    # token whose own position died can't mint the bind, and a `node:` import's
+    # bound names must be used in code that actually runs.
+    live = _live_code(blanked)
     for m in _PROD_BIND_TOKEN.finditer(text):
-        if blanked[m.start()].isspace() or not _PROD_SPEC.fullmatch(m.group(2)): continue
+        if blanked[m.start()].isspace() or live[m.start()].isspace() or not _PROD_SPEC.fullmatch(m.group(2)): continue
         spec = m.group(2)
         if spec.startswith('node:'):
             names = _bind_names(text, m)
-            if not any(re.search(r'\b' + re.escape(n) + r'\b', text[m.end():]) for n in names): continue
+            if not any(re.search(r'\b' + re.escape(n) + r'\b', live[m.end():]) for n in names): continue
+            if not _spawn_contacts(live, text, names): continue
         return True
     return False
 def evidence_blocks(path):

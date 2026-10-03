@@ -1,8 +1,8 @@
 {
-  "tests": 1248,
-  "pass": 1248,
+  "tests": 1260,
+  "pass": 1260,
   "fail": 0,
-  "runner": "node --test --test-concurrency=1 'tests/**/*.test.mjs'",
+  "runner": "node --test --test-concurrency=4 --test-reporter=tap <sorted tests/**/*.test.mjs list>",
   "generated_at": "regenerated on demand by scripts/report.mjs",
   "note": "Live counts; per-test durations are stripped so the artifact is deterministic."
 }

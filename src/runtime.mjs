@@ -279,8 +279,14 @@ export class RuntimeGate {
         try { kept = this.f.store.get(t, 'containment', last.id); }
         catch { suppressedRow = last.id; }
         if (kept !== null) {
-          this.f.store.put(t, 'containment', last.id, { ...kept, dropped_requests: (Number.isInteger(kept.dropped_requests) && kept.dropped_requests > 0 ? kept.dropped_requests : 1) + 1 }, now);
-          return;
+          // A failed bump-put must not swallow the suppressed denial —
+          // falling through to the fresh mint lands anchor + row evidence
+          // instead of silence (w55-runtime F-4; the sibling paths attest
+          // put failure rather than absorb it).
+          try {
+            this.f.store.put(t, 'containment', last.id, { ...kept, dropped_requests: (Number.isInteger(kept.dropped_requests) && kept.dropped_requests > 0 ? kept.dropped_requests : 1) + 1 }, now);
+            return;
+          } catch { /* falls through to the fresh anchored mint below */ }
         }
       }
       // An unverified envelope's capability_id is attacker-chosen — it

@@ -225,8 +225,12 @@ test('w50 L-1: openapi path params carry the dispatch grammar', t => {
 test('w50 H-2: check.mjs parity gate flags unauditable dispatch shapes', t => {
   // Slice the REAL gate block (expandAlternations through auditDispatch)
   // out of check.mjs and run it against crafted dispatch lines — the
-  // code under test is the shipped scanner, verbatim.
+  // code under test is the shipped scanner, verbatim. The module-scope
+  // helpers the block consumes (codeSpan, stripComment) live between the
+  // shared-scanner sentinels; they are spliced in beside it (w55-ledger).
   const src = readFileSync('scripts/check.mjs', 'utf8');
+  const helpers = src.slice(src.indexOf('// === shared source scanners'), src.indexOf('// === end shared source scanners'));
+  assert.ok(helpers.includes('codeSpan') && helpers.includes('stripComment'), 'the slice carries the shared scanners');
   const block = src.slice(src.indexOf('const expandAlternations'), src.indexOf('// Live HTTP dispatch outside'));
   assert.ok(block.includes('auditDispatch ='), 'the slice carries the scanner');
   const run = (lines, declaredSet) => {
@@ -239,6 +243,7 @@ test('w50 H-2: check.mjs parity gate flags unauditable dispatch shapes', t => {
       `const errors = [];`,
       `const console = { error: m => errors.push(m) };`,
       'let failed = false;',
+      helpers,
       block,
       `globalThis.process.stdout.write(JSON.stringify({ failed, errors }));`
     ].join('\n');

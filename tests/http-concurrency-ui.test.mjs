@@ -91,9 +91,13 @@ test('COM-003 NFR-TST-002: eight independent gate workers race; exactly one cert
   const results = await Promise.all(Array.from({ length: 8 }, () => runWorker(data))); assert.equal(results.filter(r => r.success).length, 1, JSON.stringify(results));
   // A loser folding after the winner's commit is convicted INV-409-REPLAY;
   // a loser that never reached the ledger writer is refused INV-503-LEDGER
-  // (sqlite busy-timeout contention). Both prevent double-consumption —
-  // any third code is a real failure (same doctrine as DAT-002 above).
-  assert.ok(results.filter(r => !r.success).every(r => r.code === 'INV-409-REPLAY' || r.code === 'INV-503-LEDGER'), JSON.stringify(results)); assert.equal(h.f.target.state('acme', record.capsule.action.target_resource).version, 1);
+  // — but ONLY the writer-contention shape: the same code also covers
+  // engine faults (store.mjs Ledger engine fault), and absorbing a real
+  // integrity failure as scheduling noise would hide exactly the class an
+  // operator must see (w55-fv M-4). Both prevent double-consumption —
+  // any third code, or a non-contention INV-503, is a real failure
+  // (same doctrine as DAT-002 above).
+  assert.ok(results.filter(r => !r.success).every(r => r.code === 'INV-409-REPLAY' || (r.code === 'INV-503-LEDGER' && /contention/i.test(r.message ?? ''))), JSON.stringify(results)); assert.equal(h.f.target.state('acme', record.capsule.action.target_resource).version, 1);
 });
 test('DAT-002: concurrent gates cannot overspend shared rolling budget', async t => {
   const h = fixture(t); installPolicy(h, p => { p.runtime.windows[0].limit = 2; }); const cap = h.f.runtime.issue(h.p(), runtimeInput());

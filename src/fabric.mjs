@@ -1426,23 +1426,41 @@ export class Fabric {
   }
   _foldFloorMarker(t, attestedFloor) {
     try {
+      // The append-side heal lands the divergent content it overwrote on
+      // this plane as `fold_floor_healed` — one-shot forensic residue:
+      // latch it once and delete the row so the report surface names the
+      // heal exactly once (w55-runtime F-1 residue).
+      const healed = this.store._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_healed'").get(t)?.value;
+      if (healed !== undefined) {
+        this.store._stmt("DELETE FROM meta_kv WHERE tenant=? AND key='fold_floor_healed'").run(t);
+        const hs = typeof healed === 'string' && /^\d+:/.test(healed) ? Number(healed.split(':')[0]) : undefined;
+        // The residue row retires on this consult — carry its divergent
+        // content in the conviction itself so the report names what was
+        // overwritten, not only which append healed it.
+        this.#wmTamperSet(t, { kind: 'floor_marker_healed', seq: Number.isSafeInteger(hs) ? hs : undefined, healed_marker: String(healed).slice(0, 200) });
+      }
       const marker = this.store._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor'").get(t)?.value;
       const parts = typeof marker === 'string' ? marker.split(':') : null;
       const markerSeq = parts && /^\d+$/.test(parts[0]) ? Number(parts[0]) : undefined;
       // A marker that honest code can never emit ('garbage', a bare hash,
       // a non-integer seq) is itself in-ledger evidence — name it rather
-      // than returning silently (w54-fixverify M-2).
-      if (marker !== undefined && !Number.isSafeInteger(markerSeq)) { this.#wmTamperSet(t, { kind: 'floor_marker_malformed' }); return; }
+      // than returning silently (w54-fixverify M-2). `seq:hash:extra` and
+      // seq 0 are equally non-honest shapes — the only honest write is
+      // exactly `${seq}:${hash}` with seq ≥ 1 (w55-fv L-1).
+      if (marker !== undefined && (parts === null || parts.length !== 2 || !Number.isSafeInteger(markerSeq) || markerSeq < 1)) { this.#wmTamperSet(t, { kind: 'floor_marker_malformed', seq: Number.isSafeInteger(markerSeq) ? markerSeq : undefined }); return; }
       if (!Number.isSafeInteger(markerSeq)) return;
       // The only honest write is `${seq}:${hash}` — a bare seq carries no
       // hash to convict but is equally not an honest shape (w54-fv M-2).
       if (parts[1] === undefined || parts[1] === '') { this.#wmTamperSet(t, { kind: 'floor_marker_malformed', seq: markerSeq }); return; }
       // The marker and the row it names commit atomically inside
       // store.audit, so a committed marker can never outrun the committed
-      // tip by an honest append — re-probing MAX(seq) AFTER the marker
-      // read keeps a racing peer commit from minting a false conviction
-      // on a probe-stale floor (w54-seal M-3).
-      const committedMax = this.store._stmt('SELECT MAX(seq) m FROM audit WHERE tenant=?').get(t)?.m ?? 0;
+      // tip by an honest append. The committed-max probe and the named
+      // row's hash read MUST share one statement — two reads see
+      // different snapshots and a peer delete between them mints a
+      // phantom orphaned conviction (w55-fv M-2; the w54-seal M-3
+      // re-probe narrowed the window without closing it).
+      const probe = this.store._stmt('SELECT (SELECT hash FROM audit WHERE tenant=? AND seq=?) h, (SELECT MAX(seq) FROM audit WHERE tenant=?) m').get(t, markerSeq, t);
+      const committedMax = probe?.m ?? 0;
       if (markerSeq > Math.max(attestedFloor, committedMax)) { this.#wmTamperSet(t, { kind: 'floor_marker_ahead', seq: markerSeq }); return; }
       // The hash half binds the marker to the row it claims as fold tip:
       // when that row still exists its hash must equal the marker's, or
@@ -1451,14 +1469,18 @@ export class Fabric {
       // — its span was already attested by the seal that retired it.
       const markerHash = parts[1];
       if (markerHash) {
-        const row = markerSeq > 0 ? this.store._stmt('SELECT hash FROM audit WHERE tenant=? AND seq=?').get(t, markerSeq) : undefined;
+        const row = probe?.h !== undefined && probe.h !== null ? { hash: probe.h } : undefined;
         if (row && !ctEqual(row.hash, markerHash)) { this.#wmTamperSet(t, { kind: 'floor_marker_forged', seq: markerSeq }); return; }
         // A marker naming a slot that is not ahead of any witness and
         // does not hold the named row: honest markers always ride the
         // append tip, and honest retirement (seal cut, re-anchor) removes
         // the marker with the rows — an in-span hole where the row should
-        // be is surgical residue, not silence (w54-fixverify M-2).
-        if (!row && markerSeq > 0 && markerSeq <= committedMax) { this.#wmTamperSet(t, { kind: 'floor_marker_orphaned', seq: markerSeq }); return; }
+        // be is surgical residue, not silence (w54-fixverify M-2). The
+        // bound is the attested span too: a marker past committedMax but
+        // within the fold's attested floor can only ever be missing its
+        // row (the row would lift committedMax), so the gap between the
+        // two witnesses is never a silent window (w55-seal F-6).
+        if (!row && markerSeq <= Math.max(committedMax, attestedFloor)) { this.#wmTamperSet(t, { kind: 'floor_marker_orphaned', seq: markerSeq }); return; }
       }
       // Marker flags are latched convictions, not consult verdicts: once
       // a divergence was observed it must reach a report — a marker
@@ -1588,8 +1610,15 @@ export class Fabric {
     return entry ? { head_watermark_tampered: this.#wmTamperEntries(tenant, entry) } : {};
   }
   #wmTamperEntries(tenant, entry) {
-    return [{ tenant_id: tenant, kind: entry.kind, ...(entry.seq !== undefined ? { seq: entry.seq } : {}) },
-            ...[...(entry.masked?.entries() ?? [])].map(([k, s]) => ({ tenant_id: tenant, kind: k, ...(s !== undefined ? { seq: s } : {}) }))];
+    const evidence = f => ({
+      ...(f?.seq !== undefined ? { seq: f.seq } : {}),
+      // The healed-marker conviction carries the divergent content it
+      // overwrote — the residue row is one-shot, so the content must
+      // ride the attestation itself (w55-runtime F-1).
+      ...(f?.healed_marker !== undefined ? { healed_marker: f.healed_marker } : {})
+    });
+    return [{ tenant_id: tenant, kind: entry.kind, ...evidence(entry) },
+            ...[...(entry.masked?.entries() ?? [])].map(([k, v]) => ({ tenant_id: tenant, kind: k, ...evidence(typeof v === 'object' ? v : { seq: v }) }))];
   }
   // The tamper slot records the FIRST observed flag per tenant — a later
   // distinct kind must not be laundered behind it. Secondary classes are
@@ -1600,8 +1629,8 @@ export class Fabric {
   #wmTamperSet(tenant, flag) {
     const cur = this.#wmTamper.get(tenant);
     if (cur === undefined) { this.#wmTamper.set(tenant, flag); return; }
-    if (cur.kind === flag.kind) { if (flag.seq !== undefined) cur.seq = flag.seq; return; }
-    (cur.masked ??= new Map()).set(flag.kind, flag.seq);
+    if (cur.kind === flag.kind) { if (flag.seq !== undefined) cur.seq = flag.seq; if (flag.healed_marker !== undefined) cur.healed_marker = flag.healed_marker; return; }
+    (cur.masked ??= new Map()).set(flag.kind, { seq: flag.seq, ...(flag.healed_marker !== undefined ? { healed_marker: flag.healed_marker } : {}) });
   }
   #wmTamperHas(tenant, kind) {
     const cur = this.#wmTamper.get(tenant);
@@ -1617,7 +1646,8 @@ export class Fabric {
       if (nxt === undefined) { this.#wmTamper.delete(tenant); return; }
       cur.masked.delete(nxt[0]);
       const masked = cur.masked;
-      const promoted = nxt[1] !== undefined ? { kind: nxt[0], seq: nxt[1] } : { kind: nxt[0] };
+      const pv = typeof nxt[1] === 'object' && nxt[1] !== null ? nxt[1] : { seq: nxt[1] };
+      const promoted = nxt[1] !== undefined ? { kind: nxt[0], ...pv } : { kind: nxt[0] };
       this.#wmTamper.set(tenant, masked.size ? { ...promoted, masked } : promoted);
     } else cur.masked?.delete(kind);
   }
@@ -1626,11 +1656,11 @@ export class Fabric {
   // consistent again (w54-runtime F-1, w54-seal L-5). Called after a
   // result or error-details surface emitted the flag.
   #wmTamperReported(tenant, entries) {
-    // All four marker kinds retire once attested — the divergence was
+    // The marker kinds retire once attested — the divergence was
     // named on a surface; a marker row that still stands re-convicts on
     // the next consult, and a deleted one can no longer carry a phantom
     // (w54-fv M-2 parity with ahead/forged).
-    for (const e of entries ?? []) if (e.kind === 'floor_marker_ahead' || e.kind === 'floor_marker_forged' || e.kind === 'floor_marker_malformed' || e.kind === 'floor_marker_orphaned') this.#wmTamperRetire(tenant, e.kind);
+    for (const e of entries ?? []) if (e.kind === 'floor_marker_ahead' || e.kind === 'floor_marker_forged' || e.kind === 'floor_marker_malformed' || e.kind === 'floor_marker_orphaned' || e.kind === 'floor_marker_healed') this.#wmTamperRetire(tenant, e.kind);
   }
   // A landed signed file entry retires file-side evidence only — the
   // in-ledger witness classes (fold-marker divergence, regressed fact
@@ -1639,13 +1669,14 @@ export class Fabric {
   #wmTamperClearSigned(tenant) {
     const cur = this.#wmTamper.get(tenant);
     if (cur === undefined) return;
-    const LEDGER = new Set(['floor_marker_ahead', 'floor_marker_forged', 'floor_marker_malformed', 'floor_marker_orphaned', 'facts_regressed']);
+    const LEDGER = new Set(['floor_marker_ahead', 'floor_marker_forged', 'floor_marker_malformed', 'floor_marker_orphaned', 'floor_marker_healed', 'facts_regressed']);
     const keep = [];
-    if (LEDGER.has(cur.kind)) keep.push(cur.seq !== undefined ? { kind: cur.kind, seq: cur.seq } : { kind: cur.kind });
-    for (const [k, s] of cur.masked?.entries() ?? []) if (LEDGER.has(k)) keep.push(s !== undefined ? { kind: k, seq: s } : { kind: k });
+    const lifted = f => ({ kind: f.kind, ...(f.seq !== undefined ? { seq: f.seq } : {}), ...(f.healed_marker !== undefined ? { healed_marker: f.healed_marker } : {}) });
+    if (LEDGER.has(cur.kind)) keep.push(lifted(cur));
+    for (const [k, s] of cur.masked?.entries() ?? []) if (LEDGER.has(k)) keep.push(lifted({ kind: k, ...(typeof s === 'object' && s !== null ? s : { seq: s }) }));
     if (!keep.length) { this.#wmTamper.delete(tenant); return; }
     const [head, ...rest] = keep;
-    this.#wmTamper.set(tenant, rest.length ? { ...head, masked: new Map(rest.map(e => [e.kind, e.seq])) } : head);
+    this.#wmTamper.set(tenant, rest.length ? { ...head, masked: new Map(rest.map(e => [e.kind, { seq: e.seq, ...(e.healed_marker !== undefined ? { healed_marker: e.healed_marker } : {}) }])) } : head);
   }
   // The 'signed' half of an abandoned-watermark attestation must mean the
   // envelope actually verifies under this tenant's audit keys — a
@@ -2511,10 +2542,17 @@ export class Fabric {
     catch (e) {
       if (e instanceof InvariantError && (this.#wmTamper.size || sealPreTamperEntries.length)) {
         const seen = new Set(), attested = [];
-        for (const e2 of [...sealPreTamperEntries, ...(this.#wmTamperAttest(t).head_watermark_tampered ?? [])])
+        // Live flags first — a flag retired and re-latched mid-seal at a
+        // newer seq must name the newest evidence position, not the stale
+        // snapshot's (w55-fv L-2).
+        for (const e2 of [...(this.#wmTamperAttest(t).head_watermark_tampered ?? []), ...sealPreTamperEntries])
           if (e2 && !seen.has(e2.kind)) { seen.add(e2.kind); attested.push(e2); }
         e.details = { ...(e.details ?? {}), ...(attested.length ? { head_watermark_tampered: attested } : {}) };
-        this.#wmTamperReported(t, attested);
+        // A refusal is NOT an attestation surface: an attacker can induce
+        // one on demand (hold the write lock, revoke the sealing identity)
+        // and retiring the conviction inside a thrown object launders it
+        // off every later durable report (w55-fv H-1). The flags stay
+        // latched — the next delivered report names them.
       }
       throw e;
     }
@@ -2678,7 +2716,10 @@ export class Fabric {
       const preTamperEntries = sealPreTamperEntries;
       const wmAttested = () => {
         const seen = new Set(), out = [];
-        for (const e of [...preTamperEntries, ...duringTamper, ...(this.#wmTamperAttest(t).head_watermark_tampered ?? [])])
+        // Newest evidence first: a flag retired and re-latched mid-seal at
+        // a newer seq must name the newest position — live state, then
+        // in-tx captures, then the pre-seal snapshot (w55-fv L-2).
+        for (const e of [...(this.#wmTamperAttest(t).head_watermark_tampered ?? []), ...duringTamper, ...preTamperEntries])
           if (e && !seen.has(e.kind)) { seen.add(e.kind); out.push(e); }
         // Marker-kind convictions are attested-once: surfaced here, they
         // retire — a still-divergent marker re-derives the flag on the
@@ -2810,6 +2851,7 @@ export class Fabric {
         this.#wmTamperRetire(t, 'floor_marker_forged');
         this.#wmTamperRetire(t, 'floor_marker_malformed');
         this.#wmTamperRetire(t, 'floor_marker_orphaned');
+        this.#wmTamperRetire(t, 'floor_marker_healed');
       }
       });
       else {
@@ -2835,14 +2877,19 @@ export class Fabric {
             // the report measures the re-anchor the same way as the
             // non-empty arm (w54-seal L-6). In-tx flag capture and the
             // marker reset follow the landed re-anchor (w54-seal M-2,
-            // w54-runtime F-1).
+            // w54-runtime F-1). On an empty chain the fold never consulted
+            // the marker — run it here so a planted divergence is latched
+            // and attested before the delete erases its row, never erased
+            // unnamed (w55-seal F-7).
             headMinted = true;
+            this._foldFloorMarker(t, 0);
             duringTamper.push(...(this.#wmTamperAttest(t).head_watermark_tampered ?? []));
             this.store._stmt("DELETE FROM meta_kv WHERE tenant=? AND key='fold_floor'").run(t);
             this.#wmTamperRetire(t, 'floor_marker_ahead');
             this.#wmTamperRetire(t, 'floor_marker_forged');
             this.#wmTamperRetire(t, 'floor_marker_malformed');
             this.#wmTamperRetire(t, 'floor_marker_orphaned');
+            this.#wmTamperRetire(t, 'floor_marker_healed');
           });
         }
       }
@@ -3299,6 +3346,15 @@ export class Fabric {
       for (const v of doomedVerified) doomedStored.add(v.storedSeq);
       removed = this.store._stmt(`SELECT seq,hash FROM audit WHERE tenant=? AND seq IN (SELECT value FROM json_each(?)) ORDER BY seq`).all(t, JSON.stringify([...doomedStored])).map(r => r.hash);
       this.store._stmt('DELETE FROM audit WHERE tenant=? AND seq IN (SELECT value FROM json_each(?))').run(t, JSON.stringify([...doomedStored]));
+      // The fold-floor marker names the pre-cut tip — the cut removes its
+      // row, so the marker retires with it (same doctrine as the
+      // re-anchor arms). Left standing it would out-sequence the post-cut
+      // committed tip and mint a phantom floor_marker_ahead — then
+      // floor_marker_forged once the slot regrows — on every honest seal
+      // thereafter (w55-seal F-4). The next append rewrites it. Only the
+      // ROW dies here — any conviction already latched still retires
+      // through the seal result's attestation, never silently.
+      this.store._stmt("DELETE FROM meta_kv WHERE tenant=? AND key='fold_floor'").run(t);
       // A planted same-name trigger on a sibling table would make the bare
       // CREATE below die mid-statement — sqlite trigger names are global,
       // not table-scoped. Drop our names first: the guards are fixed schema
@@ -3490,7 +3546,10 @@ export class Fabric {
       // (prevPlSeq + 1) — never firstBad's stored-column value, which
       // stored-seq surgery shapes freely (w54-seal M-1).
       const cutSeen = new Set(), cutTamper = [];
-      for (const e of [...sealPreTamperEntries, ...(this.#wmTamperAttest(t).head_watermark_tampered ?? [])])
+      // Live flags first — a flag retired and re-latched mid-seal at a
+      // newer seq must name the newest evidence position, not the stale
+      // snapshot's (w55-fv L-2).
+      for (const e of [...(this.#wmTamperAttest(t).head_watermark_tampered ?? []), ...sealPreTamperEntries])
         if (e && !cutSeen.has(e.kind)) { cutSeen.add(e.kind); cutTamper.push(e); }
       const sealedResult = { sealed: true, sealed_at_seq: prevPlSeq + 1, seal_seq: sealSeq, removed_count: removed.length, carryover_totals: { spend: carrySpend.length, access: carryAccess.length, revocations: carryRevoked.length, capabilities: capsCut.length, lifecycle: carryLifecycle.length, mirrors_dropped: droppedMirrorCount, dropped_events: droppedEvents.length + droppedEventsOverflow, deleted_events: deletedRowsTotal, divergent_stored: divergentStored, deleted_gaps_total: deletedGapsTotal, deleted_rows_total: deletedRowsTotal }, floor_derived: floorDerived.slice(0, 512), planted_floor_refs: plantedFloor.slice(0, 512), murdered_floor_refs: murderedFloor.slice(0, 512), deleted_gaps: deletedGaps.slice(0, 64), ...(cutTamper.length ? { head_watermark_tampered: cutTamper } : {}), ...(abandonedHead ?? {}) };
       this.#wmTamperReported(t, sealedResult.head_watermark_tampered);
@@ -4361,18 +4420,22 @@ export class Fabric {
         // consume calls (w9-network F7). Best-effort like the audit row.
         // contained_at binds the minted anchor's own time (monotonic on
         // rewind) — a raw clock() re-read could reopen the ±2s gap (w51).
-        if (error.code === 'INV-403-QUARANTINE' && error.details?.quarantine_denial) {
+        if (error.code === 'INV-403-QUARANTINE' && error.details?.quarantine_denial && denialSeq !== null) {
           // Same atomic-mint discipline as _rejectionAudit: the rejection
           // anchor promised a containment row — attest a non-commit so
           // the report does not read it as a permanent murder (w51-fv F-6).
+          // A dedup-SUPPRESSED rejection minted no anchor — it makes no
+          // new promise, so it writes no row and attests nothing. The
+          // surviving row's dedup accounting already carries the burst;
+          // putting a second unanchored row only laundered its murder via
+          // ±2s occurrence binding, and an uncommitted attestation pinned
+          // to the PREVIOUS anchor absorbed that anchor's own murder
+          // (w55-runtime F-2/F-3 — _rejectionAudit's early-return parity).
           try { const n0 = mintedAt ?? this.clock(); this.store.tx(() => this.store.put(principal.tenant_id, 'containment', `deny:${randomUUID()}`, { contained_at: n0, subject_id: principal.subject_id, device_id: error.details.device ?? null, capability_id: null, resource: null, destination: null, action: null, code: error.code, request_id: `gate-deny`, dropped_requests: 1 }, n0)); }
-          // A dedup-suppressed rejection mint leaves denialSeq null — pin
-          // the uncommitted attestation to the SUPPRESSED anchor's seq
-          // (the fold carries it in #rejectMemo) so a murdered committed
-          // row can never be absorbed by an unbound attestation
-          // (w54-runtime F-2). The ±2s legacy arm then matches only
-          // pre-pin historical content.
-          catch { try { this.store.audit(principal.tenant_id, 'CONTAINMENT_ROW_UNCOMMITTED', principal.subject_id ?? 'anonymous', 'gate-deny', { code: error.code, at: mintedAt ?? this.clock(), denial_seq: denialSeq ?? rMemo?.seq ?? null }, this.clock()); } catch { /* ledger write failure does not change the verdict */ } }
+          // The pin binds the FRESH anchor seq — the row the suppression
+          // promised is this mint's own, never a memo-carried anchor whose
+          // promise already committed (w54-runtime F-2, w55-runtime F-2).
+          catch { try { this.store.audit(principal.tenant_id, 'CONTAINMENT_ROW_UNCOMMITTED', principal.subject_id ?? 'anonymous', 'gate-deny', { code: error.code, at: mintedAt ?? this.clock(), denial_seq: denialSeq }, this.clock()); } catch { /* ledger write failure does not change the verdict */ } }
         }
         throw error;
       }

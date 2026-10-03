@@ -21,7 +21,9 @@ REQUIRE_CI=
 [ "${CI:-}" = "true" ] && REQUIRE_CI=--require-ci
 node scripts/verify-release.mjs var/release-attestation.json var/relkeys/anchors.json $REQUIRE_CI --anchors-in-tree --ack-self-anchors
 unset IF_TEST_ANCHORS
-node --test --test-concurrency=1 'tests/**/*.test.mjs'
+# 4-way file concurrency: fixtures are isolated (ephemeral ports, mkdtemp
+# stores) — same assertions, shorter wall-clock (parity with report.mjs).
+node --test --test-concurrency=4 'tests/**/*.test.mjs'
 node scripts/simulate.mjs
 # Verify the committed vector set before regeneration (same ordering as CI).
 python3 scripts/verify-vectors.py

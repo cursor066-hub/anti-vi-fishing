@@ -17,8 +17,12 @@ const CODE_EXT = /\.(mjs|js|cjs)$/;
 const ANY_EXT = /\.(mjs|js|cjs|ts)$/;
 let files = [];
 // Every spawned helper gets a wall-clock ceiling — a hung subprocess must
-// fail the gate, never stall it forever (w23-supply F17).
-const SPAWN_OPTS = { encoding: 'utf8', timeout: 300000 };
+// fail the gate, never stall it forever (w23-supply F17). Fifteen minutes:
+// under --test-concurrency several copy-tree gate runs share the box and a
+// healthy python3 traceability can legitimately need more than five —
+// a ceiling only has to outlive honest load, a real wedge never finishes
+// either way (w55 regen: python3 ETIMEDOUT at 300s under 4-way suites).
+const SPAWN_OPTS = { encoding: 'utf8', timeout: 900000 };
 const tracked = spawnSync('git', ['ls-files', '-z'], SPAWN_OPTS);
 if (tracked.status === 0) {
   files = tracked.stdout.split('\0').filter(f => ANY_EXT.test(f));
@@ -96,7 +100,11 @@ const SINK_RULES = [
 // dotted two-word spellings are the same marker — the alternation could
 // not see them (w54-ledger M-1).
 const MARKER_RULES = [
-  ['unfinished code marker', new RegExp(`\\b(?:${'TO' + 'DO'}|${'TO' + '[ ._-]' + 'DO'}|${'FIX' + 'ME'}|${'FIX' + '[ ._-]' + 'ME'}|${'T' + 'BD'}|${'W' + 'IP'}|${'HA' + 'CK'})\\b`)],
+  // Multi-char separators, letter-spacing, NBSP/tab and fullwidth
+  // spellings are the same marker — a separated or widened spelling
+  // still names an unfinished plant (w55-ledger H-2). The separator
+  // classes live inside the pattern so this comment names none of them.
+  ['unfinished code marker', new RegExp(`\\b(?:${'T'}[ \\t\\u00A0._-]*${'O'}[ \\t\\u00A0._-]*${'D'}[ \\t\\u00A0._-]*${'O'}|${'Ｔ'}[ \\t\\u00A0._-]*${'Ｏ'}[ \\t\\u00A0._-]*${'Ｄ'}[ \\t\\u00A0._-]*${'Ｏ'}|${'F'}[ \\t\\u00A0._-]*${'I'}[ \\t\\u00A0._-]*${'X'}[ \\t\\u00A0._-]*${'M'}[ \\t\\u00A0._-]*${'E'}|${'Ｆ'}[ \\t\\u00A0._-]*${'Ｉ'}[ \\t\\u00A0._-]*${'Ｘ'}[ \\t\\u00A0._-]*${'Ｍ'}[ \\t\\u00A0._-]*${'Ｅ'}|${'T' + 'BD'}|${'W' + 'IP'}|${'HA' + 'CK'})\\b`)],
   // The triple-X word followed by a colon is a planted unfinished-marker
   // label, not the ISO-4217 fixture value — the bare word stays exempt
   // (w54-fv M-5).
@@ -108,7 +116,7 @@ const MARKER_RULES = [
 // files that legitimately name node:test's skip/defer vocabulary dodge
 // the literal word instead.
 const MARKER_LOOSE = [
-  ['unfinished code marker (any case)', new RegExp(`\\b(?:${'TO' + 'DO'}|${'TO' + '[ ._-]' + 'DO'}|${'FIX' + 'ME'}|${'FIX' + '[ ._-]' + 'ME'}|${'T' + 'BD'}|${'W' + 'IP'}|${'HA' + 'CK'})\\b`, 'i')],
+  ['unfinished code marker (any case)', new RegExp(`\\b(?:${'T'}[ \\t\\u00A0._-]*${'O'}[ \\t\\u00A0._-]*${'D'}[ \\t\\u00A0._-]*${'O'}|${'Ｔ'}[ \\t\\u00A0._-]*${'Ｏ'}[ \\t\\u00A0._-]*${'Ｄ'}[ \\t\\u00A0._-]*${'Ｏ'}|${'F'}[ \\t\\u00A0._-]*${'I'}[ \\t\\u00A0._-]*${'X'}[ \\t\\u00A0._-]*${'M'}[ \\t\\u00A0._-]*${'E'}|${'Ｆ'}[ \\t\\u00A0._-]*${'Ｉ'}[ \\t\\u00A0._-]*${'Ｘ'}[ \\t\\u00A0._-]*${'Ｍ'}[ \\t\\u00A0._-]*${'Ｅ'}|${'T' + 'BD'}|${'W' + 'IP'}|${'HA' + 'CK'})\\b`, 'i')],
   ['unfinished code marker (xxx label any case)', new RegExp(`\\b${'XX' + 'X'}\\s*:`, 'i')]
 ];
 // DOM-injection sinks matter in ANY code that renders — not only src/ and
@@ -134,7 +142,118 @@ for (const file of textFiles) {
 // the handler line(s) in server.mjs or the first authorize() inside the
 // delegated fabric method (w20-ledger F-4: the generator table is
 // hand-maintained, so without this a drifted contract is "verified"
-// only by its own output).
+// only by its own output). The line-analysis helpers below live at
+// module scope — the route-role parity block and the reverse dispatch
+// audit share them (w55-ledger: block-scoped helpers left auditDispatch
+// crashing on an undefined codeSpan).
+// === shared source scanners (extracted verbatim by tests/w50b H-2) ===
+const isIf = l => /^\s*(?:\}\s*)?(?:else\s+)?if\s*\(/.test(l);
+// A single-statement validation guard (queryCheck/noBody) is not a
+// handler boundary — the fabric call that carries the role gate may
+// legitimately sit below it (w43-fv M1 ordering).
+const isValidationGuard = l => /^\s*if \([^)]*\)\s*(queryCheck|noBody)\s*\(/.test(l);
+// A route-arm `if` is the only `if` that bounds a handler scan — a
+// nested `if` inside the arm is part of the handler, not a boundary
+// (w55-ledger C4-c).
+const isRouteArmIf = l => isIf(l) && /(?:\bpath\b|req\.method|req\.url|url\.pathname)\s*===\s*'|\/\^/.test(l);
+// Dead short-circuit arms can never evaluate: `false && authorize(...)`
+// and `true || authorize(...)` carry the literal without ever executing
+// it — strip them before any auth-claim evidence is collected
+// (w54-ledger H-2). Comments are stripped first: `// auth(req)` is dead
+// text that launders the same way.
+const stripComment = l => {
+  let q = null;
+  for (let i = 0; i < l.length - 1; i++) {
+    const c = l[i];
+    if (q) { if (c === '\\') i++; else if (c === q) q = null; continue; }
+    if (c === "'" || c === '"' || c === '`') { q = c; continue; }
+    if (c === '/' && l[i + 1] === '/' && l[i - 1] !== '\\') return l.slice(0, i);
+  }
+  return l;
+};
+// A brace inside a string literal or comment is not syntax — counting
+// raw characters skews every depth/scope measurement (w55-fv H-2).
+// `codeSpan` returns the line with quoted spans blanked to spaces and
+// the trailing comment dropped, so structural counting sees only code.
+const codeSpan = l => {
+  const out = l.split('');
+  let q = null;
+  for (let i = 0; i < out.length; i++) {
+    const c = out[i];
+    if (q) { if (c === '\\') { out[i] = ' '; if (i + 1 < out.length) out[++i] = ' '; } else { out[i] = ' '; if (c === q) q = null; } continue; }
+    if (c === "'" || c === '"' || c === '`') { q = c; out[i] = ' '; continue; }
+    if (c === '/' && out[i + 1] === '/') { for (let j = i; j < out.length; j++) out[j] = ' '; break; }
+  }
+  return out.join('');
+};
+// Whether `pos` sits inside a string literal or a line comment on the
+// same line — a 'false &&' inside quotes is data, not a dead operand
+// (w55-fv H-3: string-first matching ate real code after the literal).
+const inString = (l, pos) => {
+  let q = null;
+  for (let i = 0; i < Math.min(pos, l.length - 1); i++) {
+    const c = l[i];
+    if (q) { if (c === '\\') i++; else if (c === q) q = null; continue; }
+    if (c === "'" || c === '"' || c === '`') { q = c; continue; }
+    if (c === '/' && l[i + 1] === '/') return true;
+  }
+  return q !== null;
+};
+// `false &&`/`true ||` are always dead as the short-circuit's left
+// operand — including behind `||`, `&&`, `?` and `:` which all bind
+// looser and leave the literal in operand position (w55-fv H-3). The
+// live exceptions are only positions where the literal is another
+// operator's operand: comparisons (`x === false &&`), unary/binary
+// arithmetic and single bitwise ops (`a | false &&` binds `(a|false)`
+// to &&). A dead arm that spills past the line end keeps eating lines
+// until a statement terminator — the continuation carries the same
+// unreachable operand (w55-fv H-3 multiline).
+let deadPending = false;
+const deadContinues = m => !/;|\{|\}|,/.test(m);
+const stripDead = l => {
+  if (deadPending) {
+    if (/^\s*(?:case\b|default\b|\}|\)|\])/.test(l)) deadPending = false;
+    else { if (!deadContinues(l)) deadPending = false; return ' '; }
+  }
+  let out = stripComment(l);
+  const livePrefix = i => { const b = out.slice(0, i).trimEnd(); return /[=!<>]=+\s*$|[&^~%+\-*/!<>]\s*$/.test(b) && !/(?:\|\||&&|\?|:)\s*$/.test(b); };
+  // Splice right-to-left: replacing earlier spans first would drift the
+  // indices the later matches were collected on.
+  for (const m of [...out.matchAll(/\b(?:false|0|null|undefined|!true)\s*&&[^;{}]*/g)].reverse()) {
+    if (inString(out, m.index) || livePrefix(m.index)) continue;
+    if (deadContinues(m[0])) deadPending = true;
+    out = out.slice(0, m.index) + ' ' + out.slice(m.index + m[0].length);
+  }
+  for (const m of [...out.matchAll(/\b(?:true|!false|1)\s*\|\|[^;{}]*/g)].reverse()) {
+    if (inString(out, m.index) || livePrefix(m.index)) continue;
+    if (deadContinues(m[0])) deadPending = true;
+    out = out.slice(0, m.index) + ' ' + out.slice(m.index + m[0].length);
+  }
+  return out;
+};
+// A role gate may name its set through a module-scope constant —
+// `authorize(p, ADMIN_SET)` gates exactly as honestly as the literal
+// array, and treating it as no gate turns a real role check into a
+// satisfied 'unauthenticated' claim (w54-fixverify H-3). The same
+// reasoning covers let/var declarations, plain reassignments, alias
+// bindings (const B = A) and .push/.concat mutations — any of them may
+// carry or grow the gate's role set (w55-fv M-5).
+const roleSets = lines => {
+  const defs = new Map();
+  for (const l of lines) {
+    const s = stripDead(l);
+    const m = /\b(?:const|let|var)?\s*([A-Za-z_$][\w$]*)\s*=\s*\[([^\]]*)\]/.exec(s);
+    if (m) { defs.set(m[1], m[2].split(',').map(x => x.trim().replace(/['"]/g, '')).filter(Boolean)); continue; }
+    const alias = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\s*[;\s]/.exec(s);
+    if (alias && defs.has(alias[2])) defs.set(alias[1], [...defs.get(alias[2])]);
+    for (const p of s.matchAll(/\b([A-Za-z_$][\w$]*)\s*\.\s*push\s*\(([^)]*)\)/g))
+      if (defs.has(p[1])) defs.get(p[1]).push(...p[2].split(',').map(x => x.trim().replace(/['"]/g, '')).filter(Boolean));
+    for (const c of s.matchAll(/\b(?:const|let|var)?\s*([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\s*\.\s*concat\s*\(([^)]*)\)/g))
+      if (defs.has(c[1])) defs.get(c[1]).push(...c[3].split(',').map(x => x.trim().replace(/['"]/g, '')).filter(Boolean));
+  }
+  return defs;
+};
+// === end shared source scanners ===
 {
   const server = readFileSync('src/server.mjs', 'utf8').split('\n');
   const fabric = readFileSync('src/fabric.mjs', 'utf8').split('\n');
@@ -154,59 +273,41 @@ for (const file of textFiles) {
   }
   const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unauthenticated', 'issuer bearer token']);
   const sortR = r => [...r].sort().join(',');
-  const isIf = l => /^\s*(?:\}\s*)?(?:else\s+)?if\s*\(/.test(l);
-  // A single-statement validation guard (queryCheck/noBody) is not a
-  // handler boundary — the fabric call that carries the role gate may
-  // legitimately sit below it (w43-fv M1 ordering).
-  const isValidationGuard = l => /^\s*if \([^)]*\)\s*(queryCheck|noBody)\s*\(/.test(l);
-  // Dead short-circuit arms can never evaluate: `false && authorize(...)`
-  // and `true || authorize(...)` carry the literal without ever executing
-  // it — strip them before any auth-claim evidence is collected
-  // (w54-ledger H-2). Comments are stripped first: `// auth(req)` is dead
-  // text that launders the same way.
-  const stripComment = l => {
-    let q = null;
-    for (let i = 0; i < l.length - 1; i++) {
-      const c = l[i];
-      if (q) { if (c === '\\') i++; else if (c === q) q = null; continue; }
-      if (c === "'" || c === '"' || c === '`') { q = c; continue; }
-      if (c === '/' && l[i + 1] === '/' && l[i - 1] !== '\\') return l.slice(0, i);
-    }
-    return l;
-  };
-  // The dead-operand strip must not eat a LIVE comparison: `x === false
-  // && gate()` still evaluates the gate when x is false, and `a | false`,
-  // `!false` are live operands — only a literal preceded by non-operator
-  // context (or a bare `=`) is a provably dead short-circuit (w54-fv M-5).
-  const stripDead = l => stripComment(l)
-    .replace(/(?<!(?:[=!<>]=+|[|&^~%+\-*/!<>?:!])\s*)\b(?:false|0|null|undefined|!true)\s*&&[^;{}]*/g, ' ')
-    .replace(/(?<!(?:[=!<>]=+|[|&^~%+\-*/!<>?:!])\s*)\b(?:true|!false|1)\s*\|\|[^;{}]*/g, ' ');
-  // A role gate may name its set through a module-scope constant —
-  // `authorize(p, ADMIN_SET)` gates exactly as honestly as the literal
-  // array, and treating it as no gate turns a real role check into a
-  // satisfied 'unauthenticated' claim (w54-fixverify H-3).
-  const roleSets = lines => {
-    const defs = new Map();
-    for (const l of lines) {
-      const m = /\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*\[([^\]]+)\]/.exec(stripDead(l));
-      if (m) defs.set(m[1], m[2].split(',').map(s => s.trim().replace(/['"]/g, '')));
-    }
-    return defs;
-  };
-  const collectAuthorize = (lines, from, depth, breakIf = true) => {
+  const collectAuthorize = (lines, from, depth, breakIf = true, verb = null) => {
     const defs = roleSets(lines);
     const found = new Set();
+    let depthCur = 0;
+    let skipDepth = null;
     for (let i = from; i < Math.min(from + depth, lines.length); i++) {
-      if (i !== from && breakIf && isIf(lines[i]) && !isValidationGuard(lines[i])) break;
+      // Only a route-arm-shaped `if` bounds the scan — a nested `if`
+      // inside the handler is part of the handler and its gate still
+      // counts (w55-ledger C4-c: `if (p.tenant_id) { authorize }` hid a
+      // real role gate under an 'authenticated' claim).
+      if (i !== from && breakIf && isRouteArmIf(lines[i]) && !isValidationGuard(lines[i])) break;
+      const cs = codeSpan(lines[i]);
+      const opens = (cs.match(/\{/g) ?? []).length;
+      const closes = (cs.match(/\}/g) ?? []).length;
+      // A multiplexed arm (one regex `if` serving several contract paths)
+      // dispatches sub-routes through inner `if (m[N] === 'x')` tests —
+      // an authorize inside a sibling's sub-route belongs to that row,
+      // not this one. `verb` names this row's sub-route; without it
+      // every gate in the arm counts (w55-ledger C4-c over-collection).
+      if (skipDepth !== null && (depthCur < skipDepth || /^\s*\}\s*else\b/.test(cs))) skipDepth = null;
       const l = stripDead(lines[i]);
-      for (const m of l.matchAll(/authorize\(p,\s*\[([^\]]+)\]/g))
-        for (const r of m[1].split(',')) found.add(r.trim().replace(/['"]/g, ''));
-      for (const m of l.matchAll(/authorize\(p,\s*([A-Za-z_$][\w$]*)\s*\)/g))
-        for (const r of defs.get(m[1]) ?? []) found.add(r);
+      const disp = verb && i !== from ? [...l.matchAll(/m\[\d+\]\s*===\s*'([^']+)'/g)].map(x => x[1]) : [];
+      const excluded = skipDepth !== null || (disp.length > 0 && !disp.includes(verb));
+      if (disp.length > 0 && !disp.includes(verb) && opens > closes) skipDepth = depthCur + opens - closes;
+      if (!excluded) {
+        for (const m of l.matchAll(/authorize\(p,\s*\[([^\]]+)\]/g))
+          for (const r of m[1].split(',')) found.add(r.trim().replace(/['"]/g, ''));
+        for (const m of l.matchAll(/authorize\(p,\s*([A-Za-z_$][\w$]*)\s*\)/g))
+          for (const r of defs.get(m[1]) ?? []) found.add(r);
+      }
+      depthCur += opens - closes;
     }
     return found.size ? [...found] : null;
   };
-  const authorizeAt = (lines, from, depth = 6) => collectAuthorize(lines, from, depth);
+  const authorizeAt = (lines, from, depth = 6, verb = null) => collectAuthorize(lines, from, depth, true, verb);
   const fabricRoles = name => {
     const idx = fabric.findIndex(l => new RegExp(`^\\s{2}(async )?${name}\\(`).test(l));
     if (idx === -1) return null;
@@ -231,9 +332,22 @@ for (const file of textFiles) {
     const segs = r.path.split('/').filter(Boolean);
     const staticSegs = segs.filter(s => !s.startsWith('{'));
     const param = r.path.includes('{');
-    const hi = lines.findIndex(l =>
-      isIf(l) && l.includes(`req.method === '${r.method.toUpperCase()}'`) &&
-      (l.includes(`path === '${r.path}'`) || l.includes(`url.pathname === '${r.path}'`) || l.includes(`req.url === '${r.path}'`) || (param && /\^\\\//.test(l) && staticSegs.every(s => l.includes(s)))));
+    // A route condition may span lines — join the if's continuations for
+    // matching (its '{' may sit lines below), while the boundary index
+    // stays the first line (w55-ledger H-3 multi-line condition).
+    const condText = i => {
+      let t = lines[i];
+      for (let j = i + 1; j < Math.min(i + 6, lines.length); j++) {
+        const prev = codeSpan(lines[j - 1]).trimEnd();
+        const pd = (t.match(/\(/g)?.length ?? 0) - (t.match(/\)/g)?.length ?? 0);
+        if (/\{|;/.test(prev) || (pd <= 0 && !/[&|?:,]\s*$/.test(prev))) break;
+        t += ' ' + lines[j];
+      }
+      return t;
+    };
+    const hi = lines.findIndex((l, i) =>
+      isIf(l) && condText(i).includes(`req.method === '${r.method.toUpperCase()}'`) &&
+      (condText(i).includes(`path === '${r.path}'`) || condText(i).includes(`url.pathname === '${r.path}'`) || condText(i).includes(`req.url === '${r.path}'`) || (param && /\^\\\//.test(condText(i)) && staticSegs.every(s => condText(i).includes(s)))));
     // The handler window: the dispatch arm until the next ROUTE boundary.
     // A nested `if` inside the arm's own block is part of the handler, not
     // a boundary — a real auth call one `if` deep is reachability-true
@@ -242,19 +356,52 @@ for (const file of textFiles) {
       if (hi === -1) return hi;
       const end = Math.min(hi + 40, lines.length);
       let depth = 0;
+      // A multi-line `if (` condition continues until its block opens, and
+      // a brace-less arm's body is the next statement — neither may close
+      // the window early (w55-ledger H-3).
+      let condOpen = false, braceless = false, inner = 0;
       for (let i = hi; i < end; i++) {
         const l = lines[i];
-        const lead = (l.match(/^\s*\}+/)?.[0].match(/\}/g)?.length ?? 0);
-        if (i !== hi && depth - lead <= 0) {
+        // Braces inside strings/comments are data, not syntax — a route
+        // pattern or JSON literal skewing depth both stretches and clips
+        // windows wrongly (w55-fv H-2).
+        const cs = codeSpan(l);
+        const lead = (cs.match(/^\s*\}+/)?.[0].match(/\}/g)?.length ?? 0);
+        const opens = (cs.match(/\{/g)?.length ?? 0), closes = (cs.match(/\}/g)?.length ?? 0);
+        if (i !== hi && !condOpen && !braceless && depth - lead <= 0) {
           if (isIf(l) && !/m\[2\]/.test(l) && !isValidationGuard(l)) return i;
+          // The arm's own `else` is its complement — the else body never
+          // runs for this route, so a credential there cannot launder the
+          // claim (w55-ledger C4-b).
+          if (/^\s*\}?\s*else\b/.test(cs)) return i;
           // A one-line arm closes on its own line — the next statement at
           // the arm's depth is dispatch plumbing (the shared `const p =
           // auth(req` setup), not part of this handler. Counting it would
           // launder a zero-auth arm behind the dispatch-wide call
           // (w54-ledger H-1).
-          if (!isIf(l) && !/^\s*[\}\])]/.test(l) && !/^\s*else\b/.test(l)) return i;
+          if (!isIf(l) && !/^\s*[\}\])]/.test(l)) return i;
         }
-        depth += (l.match(/\{/g)?.length ?? 0) - (l.match(/\}/g)?.length ?? 0);
+        if (condOpen) {
+          // Still inside the arm's condition — its text is never a
+          // boundary; the block's '{' ends it.
+          if (opens > closes) condOpen = false;
+          depth += opens - closes;
+          continue;
+        }
+        if (braceless) {
+          // The brace-less body is one statement — nested blocks track
+          // `inner`; the statement ends at ';' or when a nested block
+          // closes back to zero without a dangling continuation.
+          inner += opens - closes;
+          if ((/;/.test(cs) && inner <= 0) || (opens + closes > 0 && inner <= 0 && !/[,?:]|&&|\|\|\s*$/.test(cs.trimEnd()))) { braceless = false; inner = 0; depth = 0; }
+          continue;
+        }
+        depth += opens - closes;
+        if (i === hi && depth <= 0 && /\bif\s*\(/.test(cs) && !/[\{;]/.test(cs)) {
+          const pd = (cs.match(/\(/g)?.length ?? 0) - (cs.match(/\)/g)?.length ?? 0);
+          if (pd > 0 || /[&|?:,]\s*$/.test(cs.trimEnd())) condOpen = true;
+          else braceless = true;
+        }
       }
       return end;
     };
@@ -292,9 +439,10 @@ for (const file of textFiles) {
         const rows = [];
         for (let i = dispatchStart; i <= hi; i++) {
           const l = lines[i];
-          const lead = (l.match(/^\s*\}+/)?.[0].match(/\}/g)?.length ?? 0);
+          const cs = codeSpan(l);
+          const lead = (cs.match(/^\s*\}+/)?.[0].match(/\}/g)?.length ?? 0);
           rows.push({ i, stmtDepth: depth - lead });
-          depth += (l.match(/\{/g)?.length ?? 0) - (l.match(/\}/g)?.length ?? 0);
+          depth += (cs.match(/\{/g)?.length ?? 0) - (cs.match(/\}/g)?.length ?? 0);
           if (depth < 0) depth = 0;
         }
         const armDepth = rows.at(-1)?.stmtDepth ?? 1;
@@ -313,10 +461,11 @@ for (const file of textFiles) {
     if (r.listener === 'issuerd' && !(r.roles.length === 1 && r.roles[0] === 'issuer bearer token')) { console.error(`route-role parity: ${r.method} ${r.path} — issuerd rows may only claim 'issuer bearer token'`); failed = true; continue; }
     let code = null;
     if (hi !== -1) {
-      code = authorizeAt(lines, hi);
+      const lastSeg = segs[segs.length - 1];
+      code = authorizeAt(lines, hi, 6, !lastSeg.startsWith('{') ? lastSeg : null);
       if (!code) {
         for (let i = hi; i < Math.min(hi + 12, lines.length); i++) {
-          if (i !== hi && isIf(lines[i]) && !/m\[2\]/.test(lines[i]) && !isValidationGuard(lines[i])) break;
+          if (i !== hi && isRouteArmIf(lines[i]) && !/m\[2\]/.test(lines[i]) && !isValidationGuard(lines[i])) break;
           const verb = segs[segs.length - 1];
           if (param && !verb.startsWith('{') && !lines[i].includes(verb)) continue;
           const names = [...lines[i].matchAll(/fabric\.([a-zA-Z_]+)\(p[\s,)]/g)].map(x => x[1]);
@@ -357,18 +506,8 @@ for (const file of textFiles) {
     return paths;
   };
   // A '//' inside a string literal (URL, template) is not a comment — the
-  // naive split-on-first-// truncated lines and let real route conditions
-  // escape the audit (w51-ledger H-2).
-  const stripComment = l => {
-    let q = null;
-    for (let i = 0; i < l.length - 1; i++) {
-      const c = l[i];
-      if (q) { if (c === '\\') i++; else if (c === q) q = null; continue; }
-      if (c === "'" || c === '"' || c === '`') { q = c; continue; }
-      if (c === '/' && l[i + 1] === '/' && l[i - 1] !== '\\') return l.slice(0, i);
-    }
-    return l;
-  };
+  // module-scope stripComment above is quote-aware for exactly that
+  // reason (w51-ledger H-2).
   // Conditions are audited against the ENCLOSING condition too: a route
   // split across lines or nested under a `// comment`-stripped parent
   // still resolves against its full effective context (w51-ledger H-2).
@@ -404,7 +543,10 @@ for (const file of textFiles) {
     const trimmed = code.trim();
     // A leading '}' closes enclosing scopes — drop conditions started at
     // or below the now-closed depth before evaluating this line's context.
-    const lead = /^\s*\}+/.exec(code)?.[0].match(/\}/g)?.length ?? 0;
+    // Braces inside strings/comments are data — the enclosing-scope
+    // tracking counts only code (w55-fv H-2).
+    const cs0 = codeSpan(code);
+    const lead = /^\s*\}+/.exec(cs0)?.[0].match(/\}/g)?.length ?? 0;
     if (lead) { depth = Math.max(0, depth - lead); while (pending.length && pending.at(-1).depth > depth) pending.pop(); tentative = null; }
     // Simple const aliases of the dispatch names resolve into the
     // effective text — `const m = req.method` is the canonicalization
@@ -426,10 +568,18 @@ for (const file of textFiles) {
     // condition onto the next line. A tentative `if (` collects until a
     // net-opening '{' confirms it or a ';' kills it (multi-line route
     // conditions, w51-ledger H-2).
-    const opens = (code.match(/\{/g)?.length ?? 0), closes = (code.match(/\}/g)?.length ?? 0) - lead;
+    const opens = (cs0.match(/\{/g)?.length ?? 0), closes = (cs0.match(/\}/g)?.length ?? 0) - lead;
     if (/\bif\s*\(/.test(code)) {
-      if (opens > closes) { if (tentative) { tentative.text += ' ' + code; pending.push(tentative); } else pending.push({ depth: depth + 1, text: code }); }
-      tentative = null;
+      if (opens > closes) { if (tentative) { tentative.text += ' ' + code; pending.push(tentative); } else pending.push({ depth: depth + 1, text: code }); tentative = null; }
+      else {
+        // A `if (` whose parens stay open is a multi-line condition —
+        // collect it until its block opens or a ';' proves a brace-less
+        // arm. A balanced `if (` is a complete statement, not a
+        // continuation (w55-ledger H-3: tentative was never assigned, so
+        // multi-line conditions lost their method context).
+        const pd = (cs0.match(/\(/g)?.length ?? 0) - (cs0.match(/\)/g)?.length ?? 0);
+        tentative = pd > 0 || /[&|,]\s*$/.test(cs0.trimEnd()) ? { depth: depth + 1, text: code } : null;
+      }
     } else if (tentative) {
       tentative.text += ' ' + code;
       if (opens > closes) { pending.push(tentative); tentative = null; }
