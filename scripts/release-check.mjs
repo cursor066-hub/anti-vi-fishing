@@ -8,7 +8,24 @@ import { spawnSync } from 'node:child_process';
 // caller (w53-ledger HIGH-1). Verify-only — regeneration is a deliberate
 // operator step (report.mjs), never a side effect of checking.
 const regen = spawnSync('python3', ['scripts/traceability.py', '--check'], { cwd: new URL('..', import.meta.url).pathname, encoding: 'utf8', timeout: 300000 });
-if (regen.status !== 0) { console.error(`committed requirement ledger is stale — run node scripts/report.mjs to regenerate\n${regen.stderr || regen.stdout || 'traceability check failed'}`); process.exit(2); }
+// Three distinct failure shapes, three honest headlines: a spawn that
+// never ran (python3 missing — the prescribed regen cannot run either), a
+// crash (any non-stale failure — regenerating hides it), and staleness
+// (STALE: rows — regen is the remedy). Collapsing them into 'stale'
+// misdirects the operator every way (w54-ledger M-3).
+if (regen.error || regen.status === null || regen.status === undefined) {
+  console.error(`traceability check could not run — python3 is required and was not spawnable: ${regen.error?.message ?? 'no status'}\nInstall python3, then run node scripts/report.mjs to regenerate`);
+  process.exit(2);
+}
+if (regen.status !== 0) {
+  const out = `${regen.stdout ?? ''}\n${regen.stderr ?? ''}`.trim();
+  if (/(?:^|\n)STALE:/.test(out)) {
+    console.error(`committed requirement ledger is stale — run node scripts/report.mjs to regenerate\n${out}`);
+  } else {
+    console.error(`traceability check failed without a staleness verdict — fix the reported error before regenerating\n${out}`);
+  }
+  process.exit(2);
+}
 const acceptance = JSON.parse(readFileSync(new URL('../docs/production-acceptance.json', import.meta.url), 'utf8'));
 const requirements = JSON.parse(readFileSync(new URL('../reports/requirements-summary.json', import.meta.url), 'utf8'));
 const blocked = acceptance.items.filter(item => item.status !== 'VERIFIED');

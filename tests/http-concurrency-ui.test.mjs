@@ -88,7 +88,12 @@ test('PER-007 PER-009: Secure Perception is dev-attested: forged attestations fa
 function runWorker(data) { return new Promise((resolve, reject) => { const worker = new Worker(new URL('./race-worker.mjs', import.meta.url), { workerData: data }); worker.once('message', resolve); worker.once('error', reject); worker.once('exit', code => { if (code) reject(new Error(`Worker exit ${code}`)); }); }); }
 test('COM-003 NFR-TST-002: eight independent gate workers race; exactly one certificate is consumed', async t => {
   const h = fixture(t), { certificate, record } = h.ready(), data = { config: h.setup.config, directory: h.directory, now: h.now(), principal: h.p(), certificate };
-  const results = await Promise.all(Array.from({ length: 8 }, () => runWorker(data))); assert.equal(results.filter(r => r.success).length, 1, JSON.stringify(results)); assert.ok(results.filter(r => !r.success).every(r => r.code === 'INV-409-REPLAY')); assert.equal(h.f.target.state('acme', record.capsule.action.target_resource).version, 1);
+  const results = await Promise.all(Array.from({ length: 8 }, () => runWorker(data))); assert.equal(results.filter(r => r.success).length, 1, JSON.stringify(results));
+  // A loser folding after the winner's commit is convicted INV-409-REPLAY;
+  // a loser that never reached the ledger writer is refused INV-503-LEDGER
+  // (sqlite busy-timeout contention). Both prevent double-consumption —
+  // any third code is a real failure (same doctrine as DAT-002 above).
+  assert.ok(results.filter(r => !r.success).every(r => r.code === 'INV-409-REPLAY' || r.code === 'INV-503-LEDGER'), JSON.stringify(results)); assert.equal(h.f.target.state('acme', record.capsule.action.target_resource).version, 1);
 });
 test('DAT-002: concurrent gates cannot overspend shared rolling budget', async t => {
   const h = fixture(t); installPolicy(h, p => { p.runtime.windows[0].limit = 2; }); const cap = h.f.runtime.issue(h.p(), runtimeInput());

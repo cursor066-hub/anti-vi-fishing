@@ -1,6 +1,6 @@
 {
-  "tests": 1225,
-  "pass": 1225,
+  "tests": 1248,
+  "pass": 1248,
   "fail": 0,
   "runner": "node --test --test-concurrency=1 'tests/**/*.test.mjs'",
   "generated_at": "regenerated on demand by scripts/report.mjs",

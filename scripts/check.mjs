@@ -92,9 +92,15 @@ const SINK_RULES = [
 ];
 // The marker words are split so this scanner does not flag its own
 // source. 'XXX' stays out deliberately — it is a real ISO-4217 value in
-// test fixtures, not an unfinished marker (w53-ledger MEDIUM).
+// test fixtures, not an unfinished marker (w53-ledger MEDIUM). Spaced and
+// dotted two-word spellings are the same marker — the alternation could
+// not see them (w54-ledger M-1).
 const MARKER_RULES = [
-  ['unfinished code marker', new RegExp(`\\b(?:${'TO' + 'DO'}|${'FIX' + 'ME'}|${'TO' + '-DO'}|${'T' + 'BD'}|${'W' + 'IP'}|${'HA' + 'CK'})\\b`)]
+  ['unfinished code marker', new RegExp(`\\b(?:${'TO' + 'DO'}|${'TO' + '[ ._-]' + 'DO'}|${'FIX' + 'ME'}|${'FIX' + '[ ._-]' + 'ME'}|${'T' + 'BD'}|${'W' + 'IP'}|${'HA' + 'CK'})\\b`)],
+  // The triple-X word followed by a colon is a planted unfinished-marker
+  // label, not the ISO-4217 fixture value — the bare word stays exempt
+  // (w54-fv M-5).
+  ['unfinished code marker (xxx label)', new RegExp(`\\b${'XX' + 'X'}\\s*:`)]
 ];
 // Case-insensitive on authored files: a lowercase marker is the same
 // unfinished code (w49-ledger F-1). reports/ is exempt — '# to'+'do N'
@@ -102,7 +108,8 @@ const MARKER_RULES = [
 // files that legitimately name node:test's skip/defer vocabulary dodge
 // the literal word instead.
 const MARKER_LOOSE = [
-  ['unfinished code marker (any case)', new RegExp(`\\b(?:${'TO' + 'DO'}|${'FIX' + 'ME'}|${'TO' + '-DO'}|${'T' + 'BD'}|${'W' + 'IP'}|${'HA' + 'CK'})\\b`, 'i')]
+  ['unfinished code marker (any case)', new RegExp(`\\b(?:${'TO' + 'DO'}|${'TO' + '[ ._-]' + 'DO'}|${'FIX' + 'ME'}|${'FIX' + '[ ._-]' + 'ME'}|${'T' + 'BD'}|${'W' + 'IP'}|${'HA' + 'CK'})\\b`, 'i')],
+  ['unfinished code marker (xxx label any case)', new RegExp(`\\b${'XX' + 'X'}\\s*:`, 'i')]
 ];
 // DOM-injection sinks matter in ANY code that renders — not only src/ and
 // web/: an .html asset or script-generated page outside those roots could
@@ -152,14 +159,50 @@ for (const file of textFiles) {
   // handler boundary — the fabric call that carries the role gate may
   // legitimately sit below it (w43-fv M1 ordering).
   const isValidationGuard = l => /^\s*if \([^)]*\)\s*(queryCheck|noBody)\s*\(/.test(l);
-  // Union of EVERY authorize() in the window — the first call alone let a
-  // second gate widen silently past the contract (w51-ledger M-1).
+  // Dead short-circuit arms can never evaluate: `false && authorize(...)`
+  // and `true || authorize(...)` carry the literal without ever executing
+  // it — strip them before any auth-claim evidence is collected
+  // (w54-ledger H-2). Comments are stripped first: `// auth(req)` is dead
+  // text that launders the same way.
+  const stripComment = l => {
+    let q = null;
+    for (let i = 0; i < l.length - 1; i++) {
+      const c = l[i];
+      if (q) { if (c === '\\') i++; else if (c === q) q = null; continue; }
+      if (c === "'" || c === '"' || c === '`') { q = c; continue; }
+      if (c === '/' && l[i + 1] === '/' && l[i - 1] !== '\\') return l.slice(0, i);
+    }
+    return l;
+  };
+  // The dead-operand strip must not eat a LIVE comparison: `x === false
+  // && gate()` still evaluates the gate when x is false, and `a | false`,
+  // `!false` are live operands — only a literal preceded by non-operator
+  // context (or a bare `=`) is a provably dead short-circuit (w54-fv M-5).
+  const stripDead = l => stripComment(l)
+    .replace(/(?<!(?:[=!<>]=+|[|&^~%+\-*/!<>?:!])\s*)\b(?:false|0|null|undefined|!true)\s*&&[^;{}]*/g, ' ')
+    .replace(/(?<!(?:[=!<>]=+|[|&^~%+\-*/!<>?:!])\s*)\b(?:true|!false|1)\s*\|\|[^;{}]*/g, ' ');
+  // A role gate may name its set through a module-scope constant —
+  // `authorize(p, ADMIN_SET)` gates exactly as honestly as the literal
+  // array, and treating it as no gate turns a real role check into a
+  // satisfied 'unauthenticated' claim (w54-fixverify H-3).
+  const roleSets = lines => {
+    const defs = new Map();
+    for (const l of lines) {
+      const m = /\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*\[([^\]]+)\]/.exec(stripDead(l));
+      if (m) defs.set(m[1], m[2].split(',').map(s => s.trim().replace(/['"]/g, '')));
+    }
+    return defs;
+  };
   const collectAuthorize = (lines, from, depth, breakIf = true) => {
+    const defs = roleSets(lines);
     const found = new Set();
     for (let i = from; i < Math.min(from + depth, lines.length); i++) {
       if (i !== from && breakIf && isIf(lines[i]) && !isValidationGuard(lines[i])) break;
-      for (const m of lines[i].matchAll(/authorize\(p,\s*\[([^\]]+)\]/g))
+      const l = stripDead(lines[i]);
+      for (const m of l.matchAll(/authorize\(p,\s*\[([^\]]+)\]/g))
         for (const r of m[1].split(',')) found.add(r.trim().replace(/['"]/g, ''));
+      for (const m of l.matchAll(/authorize\(p,\s*([A-Za-z_$][\w$]*)\s*\)/g))
+        for (const r of defs.get(m[1]) ?? []) found.add(r);
     }
     return found.size ? [...found] : null;
   };
@@ -167,11 +210,14 @@ for (const file of textFiles) {
   const fabricRoles = name => {
     const idx = fabric.findIndex(l => new RegExp(`^\\s{2}(async )?${name}\\(`).test(l));
     if (idx === -1) return null;
+    const defs = roleSets(fabric);
     const found = new Set();
     for (let i = idx; i < Math.min(idx + 140, fabric.length); i++) {
       if (i !== idx && /^\s{2}(async )?[a-zA-Z_]+\(/.test(fabric[i])) break;
       for (const m of fabric[i].matchAll(/this\.authorize\(p,\s*\[([^\]]+)\]/g))
         for (const r of m[1].split(',')) found.add(r.trim().replace(/['"]/g, ''));
+      for (const m of fabric[i].matchAll(/this\.authorize\(p,\s*([A-Za-z_$][\w$]*)\s*\)/g))
+        for (const r of defs.get(m[1]) ?? []) found.add(r);
       const r = /roles\?*\.includes\('([^']+)'\)/.exec(fabric[i]);
       if (r && /requireThat/.test(fabric[i])) found.add(r[1]);
     }
@@ -188,11 +234,31 @@ for (const file of textFiles) {
     const hi = lines.findIndex(l =>
       isIf(l) && l.includes(`req.method === '${r.method.toUpperCase()}'`) &&
       (l.includes(`path === '${r.path}'`) || l.includes(`url.pathname === '${r.path}'`) || l.includes(`req.url === '${r.path}'`) || (param && /\^\\\//.test(l) && staticSegs.every(s => l.includes(s)))));
-    // The handler window: everything from the dispatch arm until the next
-    // route boundary — this is what auth claims are checked against. Wide
-    // enough to see a credential resolve inside a docstring-heavy handler.
-    const windowEnd = () => { let e = hi === -1 ? hi : hi + 40; for (let i = hi + 1; i < Math.min(hi + 40, lines.length); i++) if (isIf(lines[i]) && !/m\[2\]/.test(lines[i]) && !isValidationGuard(lines[i])) { e = i; break; } return e; };
-    const windowCode = hi === -1 ? '' : lines.slice(hi, windowEnd()).join('\n');
+    // The handler window: the dispatch arm until the next ROUTE boundary.
+    // A nested `if` inside the arm's own block is part of the handler, not
+    // a boundary — a real auth call one `if` deep is reachability-true
+    // (w54-ledger H-3). The boundary is an `if` at the arm's own depth.
+    const windowEnd = () => {
+      if (hi === -1) return hi;
+      const end = Math.min(hi + 40, lines.length);
+      let depth = 0;
+      for (let i = hi; i < end; i++) {
+        const l = lines[i];
+        const lead = (l.match(/^\s*\}+/)?.[0].match(/\}/g)?.length ?? 0);
+        if (i !== hi && depth - lead <= 0) {
+          if (isIf(l) && !/m\[2\]/.test(l) && !isValidationGuard(l)) return i;
+          // A one-line arm closes on its own line — the next statement at
+          // the arm's depth is dispatch plumbing (the shared `const p =
+          // auth(req` setup), not part of this handler. Counting it would
+          // launder a zero-auth arm behind the dispatch-wide call
+          // (w54-ledger H-1).
+          if (!isIf(l) && !/^\s*[\}\])]/.test(l) && !/^\s*else\b/.test(l)) return i;
+        }
+        depth += (l.match(/\{/g)?.length ?? 0) - (l.match(/\}/g)?.length ?? 0);
+      }
+      return end;
+    };
+    const windowCode = hi === -1 ? '' : lines.slice(hi, windowEnd()).map(stripDead).join('\n');
     if (r.roles.length === 1 && NONROLE.has(r.roles[0])) {
       // Non-role claims are still contract claims: 'unauthenticated' must
       // name a handler that runs no auth, 'token holder' must actually
@@ -215,10 +281,31 @@ for (const file of textFiles) {
       // `function auth(` declarations and their bodies (which sit above
       // every route) cannot launder the claim.
       const dispatchStart = lines.findIndex(l => /\b(?:http|https)\.createServer\s*\(|createServer\s*\(\s*\{/.test(l) && !/function\s+createServer/.test(l));
-      const priorCalls = (dispatchStart === -1 ? lines : lines.slice(dispatchStart, hi)).filter(l => !/^\s*(?:async\s+)?function\s/.test(l)).join('\n');
+      // Only statements at the ARM's own block level count as 'above the
+      // arm' — an auth call nested inside another route's block is
+      // unreachable for this path and must not launder the claim
+      // (w54-ledger H-1). The depth is measured, not assumed: the arms
+      // sit inside a try{} so their level is whatever the braces say.
+      const priorCalls = [];
+      if (dispatchStart !== -1) {
+        let depth = 0;
+        const rows = [];
+        for (let i = dispatchStart; i <= hi; i++) {
+          const l = lines[i];
+          const lead = (l.match(/^\s*\}+/)?.[0].match(/\}/g)?.length ?? 0);
+          rows.push({ i, stmtDepth: depth - lead });
+          depth += (l.match(/\{/g)?.length ?? 0) - (l.match(/\}/g)?.length ?? 0);
+          if (depth < 0) depth = 0;
+        }
+        const armDepth = rows.at(-1)?.stmtDepth ?? 1;
+        for (const r of rows.slice(1, -1)) {
+          const l = lines[r.i];
+          if (r.stmtDepth === armDepth && !isIf(l) && !/^\s*(?:async\s+)?function\s/.test(l)) priorCalls.push(stripDead(l));
+        }
+      }
       if ((r.roles[0] === 'authenticated' || r.roles[0] === 'bound subject')
           && !/auth\(req|authenticateToken|authBreakglass\(/.test(windowCode)
-          && !/auth\(req|authenticateToken|authBreakglass\(|authorize\(/.test(priorCalls)) {
+          && !/auth\(req|authenticateToken|authBreakglass\(|authorize\(/.test(priorCalls.join('\n'))) {
         console.error(`route-role parity: ${r.method} ${r.path} — claims '${r.roles[0]}' but no credential resolves on or above the handler`); failed = true; continue;
       }
       continue;
@@ -368,20 +455,20 @@ for (const file of textFiles) {
   // x-listener (w52-ledger M-6). cli.mjs only imports the audited
   // server.mjs surface; check.mjs is this file.
   const auditExempt = new Set(['src/server.mjs', 'src/issuerd.mjs', 'src/cli.mjs', 'scripts/check.mjs']);
-  const walk = dir => {
-    for (const e of readdirSync(dir, { withFileTypes: true })) {
-      const p = `${dir}/${e.name}`;
-      if (e.isDirectory() && !e.name.startsWith('.')) walk(p);
-      else if (e.isFile() && /\.(?:mjs|js)$/.test(p) && !auditExempt.has(p))
-        // Dispatch-surface parity: a handler keying on req.url, the parsed
-        // pathname, request headers or a server factory is an unaudited
-        // HTTP surface even when it never reads req.method — and a
-        // .js-suffixed file is no safer than .mjs (w53-fv M-4, w53-ledger
-        // HIGH-3).
-        if (/req\.method|req\.url|url\.pathname|req\.headers|createServer\s*\(/.test(readFileSync(p, 'utf8'))) { console.error(`route-spec parity: HTTP dispatch surface in ${p} — outside the audited file`); failed = true; }
-    }
-  };
-  walk('src'); walk('scripts'); walk('web');
+  // The scan rides the TRACKED-file enumeration, not a directory walk: a
+  // .cjs helper, a dispatch file outside src|scripts|web, or a symlink
+  // landing on one all produced live HTTP surface the three-root walk
+  // never saw (w54-ledger H-4). Test files legitimately stand up servers
+  // and carry these literals — the exemption covers tests/*.mjs; a .js or
+  // .cjs file under tests/ is not a test idiom and still scans
+  // (w54-fv M-5).
+  for (const p of files.filter(f => CODE_EXT.test(f) && !(f.startsWith('tests/') && f.endsWith('.mjs')) && !auditExempt.has(f) && existsSync(f)))
+    // Dispatch-surface parity: a handler keying on req.url, the parsed
+    // pathname, request headers or a server factory is an unaudited
+    // HTTP surface even when it never reads req.method — and a
+    // .js/.cjs-suffixed file is no safer than .mjs (w53-fv M-4,
+    // w53-ledger HIGH-3, w54-ledger H-4).
+    if (/req\.method|req\.url|url\.pathname|req\.headers|createServer\s*\(/.test(readFileSync(p, 'utf8'))) { console.error(`route-spec parity: HTTP dispatch surface in ${p} — outside the audited file`); failed = true; }
 }
 
 // Query-parameter parity: the runtime allowlist (QUERY_ALLOW in

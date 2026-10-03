@@ -1012,8 +1012,26 @@ export class Store {
     // reach — this marker commits atomically with the audit row it names,
     // survives tail-cuts (it is not a chained row), and a fresh open can
     // attest any head/watermark pair that claims less than it
-    // (w44-fixverify F-2).
-    this._landed(() => this._stmt("INSERT INTO meta_kv VALUES(?,'fold_floor',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, `${entry.sequence}:${hash}`), 'fold-floor marker');
+    // (w44-fixverify F-2). The marker only ever ADVANCES: a stored marker
+    // ahead of this append is divergence evidence (rolled-back tail,
+    // planted floor) that an honest write must never launder — it is the
+    // only unsigned witness to destroyed fold progress, and overwriting
+    // it retired the conviction on the next consult (w54-runtime F-1).
+    // The DO UPDATE ... WHERE guard keeps the regression denial atomic
+    // against racing writers; the post-write probe then asserts the
+    // stored marker covers this row's position, which also convicts a
+    // foreign trigger that silently eats the write (same _landed
+    // discipline, expressed for a statement that may legitimately
+    // write zero rows).
+    this._schemaGuard(() => this.tx(() => {
+      const before = this._totalChanges();
+      this._stmt("INSERT INTO meta_kv VALUES(?,'fold_floor',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value WHERE CAST(substr(meta_kv.value,1,instr(meta_kv.value,':')-1) AS INTEGER) < CAST(substr(excluded.value,1,instr(excluded.value,':')-1) AS INTEGER)").run(tenant, `${entry.sequence}:${hash}`);
+      const delta = this._totalChanges() - before;
+      requireThat(delta <= 1, 'INV-409-INTEGRITY', `fold-floor marker produced ${delta} row writes in one statement — foreign trigger side-effects`, 409);
+      const stored = this._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor'").get(tenant)?.value;
+      const storedSeq = typeof stored === 'string' && /^\d+:/.test(stored) ? Number(stored.split(':')[0]) : undefined;
+      requireThat(storedSeq !== undefined && storedSeq >= entry.sequence, 'INV-409-INTEGRITY', 'fold-floor marker write refused by a foreign trigger', 409);
+    }));
     // Post-commit ordering: only a landed entry may move the anchors and
     // ratchet the detector (w23 W23-05). Our own head is the newest
     // verifiable row — mark it scanned so a later refresh skips it.

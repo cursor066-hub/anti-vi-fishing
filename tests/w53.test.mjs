@@ -206,8 +206,10 @@ test('w53-ledger H-1: release-check refuses a stale ledger instead of repairing 
       execFileSync(process.execPath, ['scripts/release-check.mjs'], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
       assert.fail('release-check must refuse a stale ledger');
     } catch (e) {
-      assert.ok(e.status === 2 || e.status === 1, `release-check must fail on stale ledger, exited ${e.status}`);
-      assert.match(String(e.stderr ?? '') + String(e.stdout ?? ''), /stale|STALE|regenerate/i, 'the refusal names the staleness');
+      assert.equal(e.status, 2, `release-check must exit 2 on a stale ledger, exited ${e.status}`);
+      const out = String(e.stderr ?? '') + String(e.stdout ?? '');
+      assert.match(out, /committed requirement ledger is stale/i, 'the STALE arm, not a crash, produced the refusal (w54-ledger L-2)');
+      assert.match(out, /STALE:.*requirements\.csv/s, 'the staleness names the mutated file');
       assert.ok(readFileSync(csv, 'utf8').includes('COV-00X'), 'the verifier must NOT have repaired the file');
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -230,7 +232,10 @@ test('w53-ledger H-2/H-3: a false authenticated claim and a .js dispatch surface
     } catch (e) {
       const out = String(e.stderr ?? '') + String(e.stdout ?? '');
       assert.match(out, /route-role parity.*authenticated/i, 'the refusal names the false claim');
-      assert.match(out, /__check_plant\.js|dispatch surface/i, 'the refusal names the planted file');
+      // The manifest arm fires 'unexpected file' on ANY unlisted path —
+      // the assertion must name the DISPATCH-SURFACE arm's own line so a
+      // plant with no dispatch content cannot satisfy it (w54-ledger M-2).
+      assert.match(out, /dispatch surface in src\/__check_plant\.js/i, 'the refusal names the dispatch-surface arm, not just the manifest arm');
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -241,6 +246,6 @@ test('w53-ledger H-2/H-3: a false authenticated claim and a .js dispatch surface
 // marker-free).
 test('w53-ledger M: the marker gate flags the widened vocabulary too', t => {
   const src = readFileSync(new URL('../scripts/check.mjs', import.meta.url), 'utf8');
-  for (const [w, lit] of [['T' + 'BD', "T' + 'BD"], ['W' + 'IP', "W' + 'IP"], ['HA' + 'CK', "HA' + 'CK"], ['TO' + '-DO', "TO' + '-DO"]])
+  for (const [w, lit] of [['T' + 'BD', "T' + 'BD"], ['W' + 'IP', "W' + 'IP"], ['HA' + 'CK', "HA' + 'CK"], ['TO' + ' DO', "TO' + '[ ._-]' + 'DO"], ['FIX' + ' ME', "FIX' + '[ ._-]' + 'ME"]])
     assert.ok(src.includes(lit), `marker ${w} must be in the gate (split literal ${lit})`);
 });

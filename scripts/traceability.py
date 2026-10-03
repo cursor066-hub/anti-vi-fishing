@@ -158,11 +158,23 @@ _SHADOWED_ASSERT = re.compile(
     r'|\bObject\.assign\s*\(\s*globalThis\b'
     r'|\bdefineProperty\s*\(\s*globalThis\b'
     r'|\(\s*[^)]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b[^)]*\)\s*=>'
+    # A classic-function parameter shadows the name for its whole body —
+    # `function check(assert) { assert.ok(false) }` calls the parameter,
+    # never node:assert (w54-ledger H-5).
+    r'|\bfunction\s*\w*\s*\([^)]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b[^)]*\)'
     # A catch-param or bare for-head binding neuters the name for its
     # whole clause — `try {} catch (assert) { assert(...) }` and
     # `for (assert of x) assert(...)` never call node:assert (w53-fv H-1).
     r'|\bcatch\s*\(\s*(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\s*\)'
     r'|\bfor\s*\(\s*(?:const|let|var\s+)?(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\s+(?:of|in)\b'
+    # Destructured shadows neuter the name the same way —
+    # `const { assert } = fake` and `for (const [assert] of z)` bind a
+    # local that is not node:assert; `class assert {}` does too
+    # (w54-fixverify M-4).
+    r'|\b(?:const|let|var)\s*\{[^}\n]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b[^}\n]*\}\s*='
+    r'|\b(?:const|let|var)\s*\[[^\]\n]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b[^\]\n]*\]\s*='
+    r'|\bfor\s*\(\s*(?:const|let|var)\s+[\[{][^\]}\n]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b'
+    r'|\bclass\s+(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b'
 )
 # The assert namespace itself is import-bound: `import { strict as asrt }`
 # or `import * as a` renames it — the probe runs on the resolved local
@@ -294,10 +306,12 @@ def _cites(title, rid):
 _IF_FALSE = re.compile(r'\bif\s*\(\s*(?:false|0|!true|null|undefined)\s*\)')
 _SKIP = re.compile(r'\bt\.(?:skip|to[d]o)\s*\(')
 # An event handler on a long-lived emitter fires after the test has
-# settled (or never) — an assert inside `process.on('x', …)`/`emitter.on`
-# is dead evidence like a setTimeout callback (w53-fv H-1).
+# settled (or never) — an assert inside `process.on('x', …)` is dead
+# evidence like a setTimeout callback (w53-fv H-1). Named receivers are
+# handled by the emit-aware pass below instead: `ee.on('x', cb)` is dead
+# only while `ee.emit(` never fires it (w54-fixverify M-4).
 _DEAD_WRAPPER = re.compile(r'\b(?:setTimeout|setInterval|setImmediate|queueMicrotask|process\.nextTick)\s*\('
-                           r'|\b(?:process|globalThis|emitter|events|ee)\.(?:on|once|addListener|addEventListener)\s*\(')
+                           r'|\b(?:process|globalThis)\.(?:on|once|addListener|addEventListener)\s*\(')
 _FN_DECL = re.compile(r'\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>|\bfunction\s+([A-Za-z_$][\w$]*)')
 def _paren_end(text, i):
     # i at '(' — index just past its matching ')'
@@ -346,6 +360,16 @@ def _live_code(text):
             j += 1
         spans.append((m.start(), j))
     for m in _DEAD_WRAPPER.finditer(text):
+        spans.append((m.start(), _paren_end(text, m.end() - 1)))
+    # A `.on/.once` handler on a named receiver that the test never
+    # `.emit()`s is dead evidence — `bus.on('go', () => assert…)` mints
+    # nothing when nothing fires it. A same-name `.emit(` keeps it live:
+    # `ee.on('go', assert); ee.emit('go')` is the honest synchronous idiom
+    # (w54-fixverify M-4).
+    for m in re.finditer(r'\b([A-Za-z_$][\w$]*)\s*\.\s*(?:on|once|addListener|addEventListener)\s*\(', text):
+        name = m.group(1)
+        if name in {'process', 'globalThis'}: continue  # already killed
+        if re.search(r'\b' + re.escape(name) + r'\s*\.\s*emit\s*\(', text): continue
         spans.append((m.start(), _paren_end(text, m.end() - 1)))
     # Statements after an unconditional return/throw inside a block can
     # never run — blank to the enclosing '}' (stopping at case/default
@@ -427,7 +451,58 @@ def _live_code(text):
         while k < len(text) and text[k] in ' \t\n': k += 1
         if text[k:k + 5] == 'catch':
             spans.append((m.start(), j))
+    # A generator body runs only when iterated — `function* g() {
+    # assert.ok(false) }; g()` produces an iterator whose body never
+    # executes. The body is dead evidence unless something actually
+    # consumes the iterator (w54-ledger H-5).
+    for m in re.finditer(r'\bfunction\s*\*\s*([A-Za-z_$][\w$]*)?\s*\(', text):
+        name = m.group(1)
+        j = _paren_end(text, m.end() - 1)
+        while j < len(text) and text[j] in ' \t\n': j += 1
+        if j >= len(text) or text[j] != '{': continue
+        end = _paren_end(text, j)
+        consumed = bool(name) and re.search(
+            r'for\s*\([^)]*\bof\s+' + re.escape(name) + r'\s*\('
+            r'|\byield\s*\*\s*' + re.escape(name) + r'\s*\('
+            r'|' + re.escape(name) + r'\s*\(\s*\)\s*\.\s*(?:next|throw|return)\s*\('
+            r'|\[\s*\.\.\.\s*' + re.escape(name) + r'\s*\('
+            r'|\bArray\.from\s*\(\s*' + re.escape(name) + r'\s*\(', text)
+        if not consumed:
+            spans.append((m.start(), end))
+    # A class method never invoked by name carries dead asserts —
+    # `new C()` alone runs only the constructor. A `.m(`/`this.#m(` call
+    # anywhere in the test keeps it live (w54-ledger H-5).
+    for m in re.finditer(r'\bclass\s+([A-Za-z_$][\w$]*)[^\{]*\{', text):
+        cls_name = m.group(1)
+        body_start = text.index('{', m.start())
+        body_end = _paren_end(text, body_start)
+        body, outside = text[body_start:body_end], text[:body_start] + text[body_end:]
+        inst_used = re.search(r'\bnew\s+' + re.escape(cls_name) + r'\b', outside)
+        for mm in re.finditer(r'\b(?:static\s+)?(?:async\s+)?([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{', body):
+            name = mm.group(1)
+            if name in {'if', 'for', 'while', 'switch', 'catch', 'function', 'else', 'do'}: continue
+            if name == 'constructor':
+                if inst_used: continue
+            elif re.search(r'\.\s*#?\s*' + re.escape(name) + r'\s*\(', text):
+                continue
+            b = body_start + mm.end() - 1  # the match ends on the method's own '{'
+            spans.append((body_start + mm.start(), _paren_end(text, b)))
     out = list(text)
+    for a, b in spans:
+        for i in range(a, min(b, len(out))): out[i] = ' '
+    text2 = ''.join(out)
+    # Second pass on the blanked text: a named function whose only
+    # reference sits inside a dead span (e.g. `ee.on('x', handler)` killed
+    # above) is itself dead — its asserts never run (w54-fixverify M-4).
+    for m in _FN_DECL.finditer(text2):
+        name = m.group(1) or m.group(2)
+        if name and not re.search(r'\b' + re.escape(name) + r'\b', text2[m.end():]):
+            b = text2.find('{', m.end())
+            k = text2.find(';', m.end())
+            if b != -1 and (k == -1 or b < k):
+                spans.append((m.start(), _paren_end(text2, b)))
+            elif k != -1:
+                spans.append((m.start(), k + 1))
     for a, b in spans:
         for i in range(a, min(b, len(out))): out[i] = ' '
     return ''.join(out)
@@ -477,10 +552,35 @@ def _asserts(body, names=('assert', 'requireThat')):
 # readable.
 _PROD_SPEC = re.compile(r'(?:(?:\.\./)+src/[\w./-]*|(?:\.\.?/)+helpers(?:\.mjs)?|node:child_process|node:worker_threads)')
 _PROD_BIND_TOKEN = re.compile(r"\b(?:from|import|require)\b\s*\(?\s*(['\"])((?:(?!\1)[^\n])*)\1")
+# A `node:` import binds nothing if none of its imported names is ever
+# used — `import { execFileSync } from 'node:child_process'` that never
+# calls execFileSync is a decorative bind a no-contact test can mint
+# through (w54-ledger H-5).
+def _bind_names(text, m):
+    head = text[:m.start()]
+    line_start = max(head.rfind('\n') + 1, head.rfind(';') + 1)
+    clause = text[line_start:m.start()]
+    names = set()
+    mm = re.search(r'\*\s+as\s+(\w+)', clause)
+    if mm: names.add(mm.group(1))
+    braced = re.search(r'\{([^}]*)\}', clause)
+    if braced:
+        for spec in braced.group(1).split(','):
+            spec = spec.strip()
+            if spec: names.add(re.split(r'\s+as\s+', spec)[-1].strip())
+    for dm in re.finditer(r'\b(?:import\s+([A-Za-z_$][\w$]*)|(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=)\s*', clause):
+        names.add(dm.group(1) or dm.group(2))
+    names.discard('import'); names.discard('require'); names.discard('const'); names.discard('let'); names.discard('var'); names.discard('from')
+    return {n for n in names if re.fullmatch(r'\w+', n)}
 def _prod_binds(text):
     blanked = _blank_code(text)
     for m in _PROD_BIND_TOKEN.finditer(text):
-        if not blanked[m.start()].isspace() and _PROD_SPEC.fullmatch(m.group(2)): return True
+        if blanked[m.start()].isspace() or not _PROD_SPEC.fullmatch(m.group(2)): continue
+        spec = m.group(2)
+        if spec.startswith('node:'):
+            names = _bind_names(text, m)
+            if not any(re.search(r'\b' + re.escape(n) + r'\b', text[m.end():]) for n in names): continue
+        return True
     return False
 def evidence_blocks(path):
     text = path.read_text()
