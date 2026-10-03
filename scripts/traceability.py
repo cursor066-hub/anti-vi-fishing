@@ -158,6 +158,11 @@ _SHADOWED_ASSERT = re.compile(
     r'|\bObject\.assign\s*\(\s*globalThis\b'
     r'|\bdefineProperty\s*\(\s*globalThis\b'
     r'|\(\s*[^)]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b[^)]*\)\s*=>'
+    # A catch-param or bare for-head binding neuters the name for its
+    # whole clause — `try {} catch (assert) { assert(...) }` and
+    # `for (assert of x) assert(...)` never call node:assert (w53-fv H-1).
+    r'|\bcatch\s*\(\s*(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\s*\)'
+    r'|\bfor\s*\(\s*(?:const|let|var\s+)?(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\s+(?:of|in)\b'
 )
 # The assert namespace itself is import-bound: `import { strict as asrt }`
 # or `import * as a` renames it — the probe runs on the resolved local
@@ -288,7 +293,11 @@ def _cites(title, rid):
     return re.search(r'(?<![0-9A-Za-z])' + re.escape(rid) + r'(?![0-9A-Za-z])', title) is not None
 _IF_FALSE = re.compile(r'\bif\s*\(\s*(?:false|0|!true|null|undefined)\s*\)')
 _SKIP = re.compile(r'\bt\.(?:skip|to[d]o)\s*\(')
-_DEAD_WRAPPER = re.compile(r'\b(?:setTimeout|setInterval|setImmediate|queueMicrotask|process\.nextTick)\s*\(')
+# An event handler on a long-lived emitter fires after the test has
+# settled (or never) — an assert inside `process.on('x', …)`/`emitter.on`
+# is dead evidence like a setTimeout callback (w53-fv H-1).
+_DEAD_WRAPPER = re.compile(r'\b(?:setTimeout|setInterval|setImmediate|queueMicrotask|process\.nextTick)\s*\('
+                           r'|\b(?:process|globalThis|emitter|events|ee)\.(?:on|once|addListener|addEventListener)\s*\(')
 _FN_DECL = re.compile(r'\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>|\bfunction\s+([A-Za-z_$][\w$]*)')
 def _paren_end(text, i):
     # i at '(' — index just past its matching ')'

@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, chmodSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
+import { tightenOwnerOnly } from './keystore.mjs';
 import { dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { encrypt, decrypt, verifySigned, ctEqual } from './crypto.mjs';
@@ -36,7 +37,10 @@ export class Store {
     // from the first touch — a raw ERR_SQLITE_ERROR here is a tamper no
     // INV-* alert can see (w30-store F2).
     try { this.db = new DatabaseSync(path); } catch (e) { throw new InvariantError('INV-503-STORAGE', 'Ledger file is unreadable or not a database', 503, { cause: e }); }
-    chmodSync(path, 0o600);
+    // Owner-only like the keystore pair — the shared helper skips the
+    // syscall on a compliant file, so read-only mounts answer with the
+    // INV taxonomy instead of a raw EROFS (w53-fixverify M-3).
+    tightenOwnerOnly(path, 'fabric.db');
     this.tenantKeys = tenantKeys;
     // Shared with the simulated target: a byte-identical ciphertext under
     // two identities is always a transplant — the cross-DB graft only
@@ -1047,7 +1051,7 @@ export class Store {
       sr.set(entry.sequence, hashBytes(envText));
       if (sr.size > 8192) sr.delete(sr.keys().next().value);
     }
-    return { hash, envelope, time: entry.time };
+    return { hash, envelope, time: entry.time, seq: entry.sequence };
   }
   // Serialized-envelope digest this instance minted for (tenant, seq) —
   // consumers skip the ECDSA pass only while the stored bytes still match

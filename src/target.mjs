@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { dirname } from 'node:path';
-import { mkdirSync, chmodSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
+import { tightenOwnerOnly } from './keystore.mjs';
 import { digest, clone, canonical, hashBytes } from './canonical.mjs';
 import { encrypt, decrypt } from './crypto.mjs';
 import { buildPlan, verifyPlan, executePlan } from './datagate.mjs';
@@ -45,7 +46,7 @@ export class SimulatedTarget {
     // from the first touch — a raw ERR_SQLITE_ERROR here is a tamper no
     // INV-* alert can see (w31-fixverify F2, mirrors the store gate).
     try { this.db = new DatabaseSync(path); } catch (e) { throw new InvariantError('INV-503-STORAGE', 'Target ledger file is unreadable or not a database', 503, { cause: e }); }
-    chmodSync(path, 0o600); this.keys = tenantKeys;
+    tightenOwnerOnly(path, 'target.db'); this.keys = tenantKeys;
     // Shared with the ledger store — the same ciphertext must never mint
     // canonical bindings on both sides of a cross-DB graft (w19-aad W19-1).
     this._aadDedup = aadDedup ?? new Map();

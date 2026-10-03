@@ -291,7 +291,13 @@ export class RuntimeGate {
       let provenCapId = null;
       try { provenCapId = verifySigned(input.capability, this.f.executionPublic(t), 'capability').capability_id; } catch { /* unverified — stays null */ }
       const rid = `deny:${randomUUID()}:${e.code}`;
-      this.f.store.tx(() => { this.f.store.put(t, 'containment', rid, {
+      // Anchor first, row second — the signed chain commits the denial in
+      // its own transaction before the mutable row is attempted. A refused
+      // or murdered put used to roll the anchor back with the row (zero
+      // evidence); now it lands as a named CONTAINMENT_ROW_UNCOMMITTED
+      // attestation pinned to this anchor's seq (w53-runtime F-3).
+      const a = this.f.store.audit(t, 'RUNTIME_DENIED', principal.subject_id, input.request_id ?? 'unknown', { code: e.code, capability_id: provenCapId, unverified_capability_id: provenCapId === null ? (input.capability?.payload?.capability_id ?? null) : null, prior_row_unreadable: suppressedRow }, now);
+      try { this.f.store.tx(() => this.f.store.put(t, 'containment', rid, {
         contained_at: now, subject_id: principal.subject_id, device_id: input.device_id ?? null,
         capability_id: provenCapId, unverified_capability_id: provenCapId === null ? (input.capability?.payload?.capability_id ?? null) : null,
         resource: input.resource ?? null,
@@ -301,11 +307,8 @@ export class RuntimeGate {
         // request_id-less denial read as anchored_denials_missing forever
         // (w47-runtime F2).
         request_id: input.request_id ?? 'unknown', dropped_requests: 1, prior_row_unreadable: suppressedRow,
-      }, now);
-      // The denial anchors on the signed chain too — the containment report
-      // cross-checks each mutable row against RUNTIME_DENIED events instead
-      // of trusting store contents (w13-fixverify L7).
-      this.f.store.audit(t, 'RUNTIME_DENIED', principal.subject_id, input.request_id ?? 'unknown', { code: e.code, capability_id: provenCapId, unverified_capability_id: provenCapId === null ? (input.capability?.payload?.capability_id ?? null) : null, prior_row_unreadable: suppressedRow }, now); });
+      }, now)); }
+      catch { try { this.f.store.audit(t, 'CONTAINMENT_ROW_UNCOMMITTED', principal.subject_id ?? 'anonymous', input.request_id ?? 'unknown', { code: e.code, at: now, denial_seq: a?.seq ?? null }, this.f.clock()); } catch { /* ledger write failure does not change the verdict */ } }
       this.f._containMemo.set(memoKey, { at: now, id: rid });
     } catch { /* containment logging never masks the original denial */ }
   }

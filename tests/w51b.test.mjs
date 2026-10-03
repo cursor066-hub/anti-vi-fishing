@@ -123,7 +123,7 @@ test('w52-fv H-2: an in-window envelope graft aborts the seal reconcile', t => {
   h.f.store.tx = origTx;
   // Control: ungrafted, the same chain seals/reconciles cleanly.
   const r = h.f.sealAuditChain(h.p('security'));
-  assert.equal(r.sealed === false || r.sealed === true, true);
+  assert.ok(r.sealed === true || r.reason === 'chain already verifies', 'the ungrafted chain resolves to a real verdict');
   h.close();
 });
 

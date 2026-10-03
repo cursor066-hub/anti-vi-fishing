@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 8329,
-      "bytes": 641466
+      "lines": 8437,
+      "bytes": 647622
     },
     "src/issuerd.mjs": {
       "lines": 942,
@@ -62,8 +62,8 @@
       "bytes": 48496
     },
     "src/runtime.mjs": {
-      "lines": 313,
-      "bytes": 26325
+      "lines": 316,
+      "bytes": 26774
     },
     "src/schema.mjs": {
       "lines": 94,
@@ -82,12 +82,12 @@
       "bytes": 3876
     },
     "src/store.mjs": {
-      "lines": 1229,
-      "bytes": 90558
+      "lines": 1233,
+      "bytes": 90841
     },
     "src/target.mjs": {
-      "lines": 629,
-      "bytes": 46229
+      "lines": 630,
+      "bytes": 46282
     },
     "web/app.js": {
       "lines": 263,
@@ -114,8 +114,8 @@
       "bytes": 1523
     },
     "scripts/check.mjs": {
-      "lines": 416,
-      "bytes": 25888
+      "lines": 439,
+      "bytes": 27853
     },
     "scripts/generate-contracts.mjs": {
       "lines": 120,
@@ -130,16 +130,16 @@
       "bytes": 6330
     },
     "scripts/release-check.mjs": {
-      "lines": 16,
-      "bytes": 1415
+      "lines": 19,
+      "bytes": 1790
     },
     "scripts/release-sign.mjs": {
       "lines": 106,
       "bytes": 7158
     },
     "scripts/report.mjs": {
-      "lines": 216,
-      "bytes": 15543
+      "lines": 225,
+      "bytes": 16124
     },
     "scripts/restore-check.mjs": {
       "lines": 170,
@@ -154,8 +154,8 @@
       "bytes": 269
     },
     "scripts/traceability.py": {
-      "lines": 544,
-      "bytes": 42013
+      "lines": 553,
+      "bytes": 42820
     },
     "scripts/verify-export-webcrypto.mjs": {
       "lines": 114,
@@ -507,7 +507,11 @@
     },
     "tests/w51b.test.mjs": {
       "lines": 412,
-      "bytes": 24890
+      "bytes": 24950
+    },
+    "tests/w53.test.mjs": {
+      "lines": 247,
+      "bytes": 15242
     },
     "tests/w6-fix.test.mjs": {
       "lines": 186,
@@ -566,6 +570,6 @@
       "bytes": 6499
     }
   },
-  "total_files": 141,
-  "total_lines": 38122
+  "total_files": 142,
+  "total_lines": 38529
 }

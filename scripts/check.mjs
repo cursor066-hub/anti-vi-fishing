@@ -90,9 +90,11 @@ const SINK_RULES = [
   ['embedded private key', /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
   ['cloud credential pattern', /\bAKIA[0-9A-Z]{16}\b/]
 ];
-// The marker words are split so this scanner does not flag its own source.
+// The marker words are split so this scanner does not flag its own
+// source. 'XXX' stays out deliberately — it is a real ISO-4217 value in
+// test fixtures, not an unfinished marker (w53-ledger MEDIUM).
 const MARKER_RULES = [
-  ['unfinished code marker', new RegExp(`\\b(?:${'TO' + 'DO'}|${'FIX' + 'ME'})\\b`)]
+  ['unfinished code marker', new RegExp(`\\b(?:${'TO' + 'DO'}|${'FIX' + 'ME'}|${'TO' + '-DO'}|${'T' + 'BD'}|${'W' + 'IP'}|${'HA' + 'CK'})\\b`)]
 ];
 // Case-insensitive on authored files: a lowercase marker is the same
 // unfinished code (w49-ledger F-1). reports/ is exempt — '# to'+'do N'
@@ -100,7 +102,7 @@ const MARKER_RULES = [
 // files that legitimately name node:test's skip/defer vocabulary dodge
 // the literal word instead.
 const MARKER_LOOSE = [
-  ['unfinished code marker (any case)', new RegExp(`\\b(?:${'TO' + 'DO'}|${'FIX' + 'ME'})\\b`, 'i')]
+  ['unfinished code marker (any case)', new RegExp(`\\b(?:${'TO' + 'DO'}|${'FIX' + 'ME'}|${'TO' + '-DO'}|${'T' + 'BD'}|${'W' + 'IP'}|${'HA' + 'CK'})\\b`, 'i')]
 ];
 // DOM-injection sinks matter in ANY code that renders — not only src/ and
 // web/: an .html asset or script-generated page outside those roots could
@@ -203,6 +205,22 @@ for (const file of textFiles) {
       if (r.roles[0] === 'token holder' && !/authenticateToken|auth\(req/.test(windowCode)) { console.error(`route-role parity: ${r.method} ${r.path} — claims token holder but no credential resolves`); failed = true; continue; }
       if (r.roles[0] === 'issuer bearer token' && !/anyBearer\(|bearerMatches\(|issuerAuthOk\(|bearerDigest\(/.test(windowCode)) { console.error(`route-role parity: ${r.method} ${r.path} — claims issuer bearer token but no bearer gate resolves`); failed = true; continue; }
       if (r.roles[0] !== 'unauthenticated' && gate) { console.error(`route-role parity: ${r.method} ${r.path} — claims '${r.roles[0]}' but a role gate [${gate}] resolves`); failed = true; continue; }
+      // 'authenticated' / 'bound subject' claims still mean a credential
+      // resolves — inline in the handler window or via the shared
+      // dispatch auth above the arm (server.mjs authenticates once for
+      // every route below it). A zero-auth arm claiming authenticated is
+      // a contract lie nothing else checks (w53-ledger HIGH-2).
+      // Only dispatch-path CALLS count — the scan starts at the
+      // http.createServer callback so `function authenticateToken`/
+      // `function auth(` declarations and their bodies (which sit above
+      // every route) cannot launder the claim.
+      const dispatchStart = lines.findIndex(l => /\b(?:http|https)\.createServer\s*\(|createServer\s*\(\s*\{/.test(l) && !/function\s+createServer/.test(l));
+      const priorCalls = (dispatchStart === -1 ? lines : lines.slice(dispatchStart, hi)).filter(l => !/^\s*(?:async\s+)?function\s/.test(l)).join('\n');
+      if ((r.roles[0] === 'authenticated' || r.roles[0] === 'bound subject')
+          && !/auth\(req|authenticateToken|authBreakglass\(/.test(windowCode)
+          && !/auth\(req|authenticateToken|authBreakglass\(|authorize\(/.test(priorCalls)) {
+        console.error(`route-role parity: ${r.method} ${r.path} — claims '${r.roles[0]}' but no credential resolves on or above the handler`); failed = true; continue;
+      }
       continue;
     }
     if (r.listener === 'issuerd' && !(r.roles.length === 1 && r.roles[0] === 'issuer bearer token')) { console.error(`route-role parity: ${r.method} ${r.path} — issuerd rows may only claim 'issuer bearer token'`); failed = true; continue; }
@@ -354,11 +372,16 @@ for (const file of textFiles) {
     for (const e of readdirSync(dir, { withFileTypes: true })) {
       const p = `${dir}/${e.name}`;
       if (e.isDirectory() && !e.name.startsWith('.')) walk(p);
-      else if (e.isFile() && p.endsWith('.mjs') && !auditExempt.has(p))
-        if (/req\.method|createServer\s*\(/.test(readFileSync(p, 'utf8'))) { console.error(`route-spec parity: HTTP dispatch surface in ${p} — outside the audited file`); failed = true; }
+      else if (e.isFile() && /\.(?:mjs|js)$/.test(p) && !auditExempt.has(p))
+        // Dispatch-surface parity: a handler keying on req.url, the parsed
+        // pathname, request headers or a server factory is an unaudited
+        // HTTP surface even when it never reads req.method — and a
+        // .js-suffixed file is no safer than .mjs (w53-fv M-4, w53-ledger
+        // HIGH-3).
+        if (/req\.method|req\.url|url\.pathname|req\.headers|createServer\s*\(/.test(readFileSync(p, 'utf8'))) { console.error(`route-spec parity: HTTP dispatch surface in ${p} — outside the audited file`); failed = true; }
     }
   };
-  walk('src'); walk('scripts');
+  walk('src'); walk('scripts'); walk('web');
 }
 
 // Query-parameter parity: the runtime allowlist (QUERY_ALLOW in

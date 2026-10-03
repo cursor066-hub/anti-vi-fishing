@@ -1,7 +1,7 @@
 {
-  "tests": 1212,
-  "pass": 1212,
-  "fail": 0,
+  "tests": 1225,
+  "pass": 1224,
+  "fail": 1,
   "runner": "node --test --test-concurrency=1 'tests/**/*.test.mjs'",
   "generated_at": "regenerated on demand by scripts/report.mjs",
   "note": "Live counts; per-test durations are stripped so the artifact is deterministic."

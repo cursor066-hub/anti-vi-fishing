@@ -126,8 +126,11 @@ const volatileReport = (report) => JSON.stringify({ described_tree: described, n
 writeVolatile('reports/source-check.json', volatileReport(JSON.parse(checkOut)));
 writeVolatile('reports/artifact-audit.json', volatileReport({ check_exit: check.status, report: JSON.parse(checkOut) }));
 writeVolatile('reports/verification-webcrypto.json', volatileReport(bunReport));
-const gate = run(process.execPath, ['scripts/release-check.mjs']);
-write('reports/production-gate.json', JSON.stringify({ verifier: 'scripts/release-check.mjs', exit: gate.status, expected_exit: 1, output: (gate.stdout ?? '').trim() }, null, 2) + '\n');
+// release-check verifies the committed ledger is fresh before gating on
+// it — it must run AFTER the traceability step below so a generation run
+// regenerates first and a check run surfaces staleness as a failure
+// instead of having release-check silently rewrite it (w53-ledger
+// HIGH-1).
 
 // ---- 4. Code inventory (the documented TCB) ----
 const inventory = {};
@@ -177,6 +180,12 @@ if (checkOnly) {
   const traced = (trace.stdout ?? '').trim().split('\n').filter(l => l.startsWith('STALE:'));
   for (const l of traced) stale.push(l.slice(6));
 }
+// The release gate runs AFTER traceability — in generation mode the
+// ledger was just regenerated; in --check-only staleness above already
+// surfaced and release-check's own freshness check reports it again as a
+// blocking verifier rather than repairing it (w53-ledger HIGH-1).
+const gate = run(process.execPath, ['scripts/release-check.mjs']);
+write('reports/production-gate.json', JSON.stringify({ verifier: 'scripts/release-check.mjs', exit: gate.status, expected_exit: 1, output: (gate.stdout ?? '').trim() }, null, 2) + '\n');
 const ledgerSummary = existsSync('reports/requirements-summary.json') ? JSON.parse(readFileSync('reports/requirements-summary.json', 'utf8')) : null;
 const statusCounts = ledgerSummary?.status_counts ?? {}, total = ledgerSummary?.total_requirements ?? 0;
 const sims = existsSync('reports/simulation-results.json') ? JSON.parse(readFileSync('reports/simulation-results.json', 'utf8')).scenarios?.length : null;
