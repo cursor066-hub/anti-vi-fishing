@@ -214,8 +214,8 @@
       "bytes": 31621
     },
     "tests/ledger3.test.mjs": {
-      "lines": 483,
-      "bytes": 32580
+      "lines": 488,
+      "bytes": 32922
     },
     "tests/lifecycle.test.mjs": {
       "lines": 135,
@@ -571,5 +571,5 @@
     }
   },
   "total_files": 142,
-  "total_lines": 38529
+  "total_lines": 38534
 }
