@@ -87,7 +87,7 @@ test('w25 F-3: sealing over an AUTHORITY_REVOKED span carries the orphaned floor
   assert.equal(sealed.sealed, true);
   assert.equal(h.f.revoked('acme', 'device', 'custodian-1-device'), true, 'a revocation its anchor cannot prove stays revoked — fail closed');
   assert.ok(h.f.store.get('acme', 'revocation', 'device:custodian-1-device'), 'orphaned floor row is kept, not dropped');
-  const sealRow = h.f.store.db.prepare("SELECT envelope FROM audit WHERE tenant='acme' ORDER BY seq DESC LIMIT 1").get();
+  const sealRow = h.f.store.db.prepare("SELECT envelope FROM audit WHERE tenant='acme' AND envelope LIKE '%AUDIT_SEALED%' ORDER BY seq DESC LIMIT 1").get();
   const pl = JSON.parse(sealRow.envelope).payload;
   assert.equal(pl.type, 'AUDIT_SEALED');
   assert.ok((pl.metadata.revocations_carryover ?? []).some(r => r.reference === 'device:custodian-1-device' && r.floor_derived === true), 'the floor-derived carry is named in the signed seal record');

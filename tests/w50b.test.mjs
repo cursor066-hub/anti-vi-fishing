@@ -7,6 +7,7 @@
 // honesty gates.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fixture, hasCode } from './helpers.mjs';
 
@@ -35,7 +36,10 @@ test('w50 F-5: _schemaGuard masks extended errcodes by primary class', t => {
   for (const code of [8, 10, 11, 13, 14, 15])
     assert.throws(() => h.f.store._schemaGuard(boom(code)), hasCode('INV-503-STORAGE'), `errcode ${code} is storage-class`);
   assert.throws(() => h.f.store._schemaGuard(boom(1811)), hasCode('INV-409-INTEGRITY'), 'a trigger abort is tamper evidence');
-  assert.throws(() => h.f.store._schemaGuard(boom(1)), hasCode('INV-409-INTEGRITY'), 'an unclassified sqlite fault on a ledger path is integrity evidence');
+  // Unmapped codes are honest engine faults, not mislabeled tamper
+  // evidence (w51-fv F-5 — doctrine update: only guards/constraints mint
+  // INTEGRITY).
+  assert.throws(() => h.f.store._schemaGuard(boom(1)), hasCode('INV-503-LEDGER'), 'an unclassified sqlite fault on a ledger path is an honest engine fault');
   h.close();
 });
 
@@ -148,34 +152,63 @@ test('w50 F-7: a broken savepoint rollback surfaces on the original error', t =>
   h.close();
 });
 
+// The traceability probes below run the REAL gate functions against
+// fixture inputs — a source-grep for a regex would tautologically
+// verify its own presence, not the behaviour (w51-ledger M-3).
+const pyEval = (expr) => execFileSync('python3', ['-c',
+  `import json\nsrc=open('scripts/traceability.py').read()\ng={'__file__':'scripts/traceability.py'}\nexec(src[:src.index('def evidence_blocks')], g)\nprint(${expr})`], { encoding: 'utf8' }).trim();
+// Same pattern for JS-side shipped expressions: a fresh interpreter gets
+// the fixture scope via the environment, the expression under test is the
+// file's own text — no in-process eval primitive (the check gate flags it).
+const jsEval = (expr, scope) => {
+  const prog = `const {${Object.keys(scope).join(',')}} = JSON.parse(process.env.JS_SCOPE);` +
+    `globalThis.process.stdout.write(JSON.stringify((${expr})));`;
+  return JSON.parse(execFileSync(process.execPath, ['-e', prog], { env: { ...process.env, JS_SCOPE: JSON.stringify(scope) }, encoding: 'utf8' }).trim());
+};
+
 // --- ledger M-3: report.mjs fails when any verifier exits nonzero ---
 test('w50 M-3: report.mjs gates on the external verifiers, not only TAP', t => {
-  const src = readFileSync('scripts/report.mjs', 'utf8');
-  assert.ok(src.includes('nodeVerify.status !== 0 || py.status !== 0'), 'a dead verifier must fail the regeneration');
+  // Evaluate the shipped predicate against dead-verifier states — the
+  // expression under test is the file's own exit gate, not a copy.
+  const line = readFileSync('scripts/report.mjs', 'utf8').split('\n').find(l => l.includes('nodeVerify.status') && l.includes('process.exitCode'));
+  assert.ok(line, 'the verifier exit gate exists');
+  const cond = /if \((.+)\) process\.exitCode/.exec(line)[1];
+  const gate = (counts, tap, nodeVerify, py) => jsEval(cond, { counts, tap, nodeVerify, py });
+  const ok = { fail: 0 }, alive = { status: 0 };
+  assert.equal(gate(ok, alive, { status: 1 }, alive), true, 'a dead node verifier fails the regeneration');
+  assert.equal(gate(ok, alive, alive, { status: 1 }), true, 'a dead python verifier fails the regeneration');
+  assert.equal(gate({ fail: 1 }, alive, alive, alive), true, 'a TAP failure fails the regeneration');
+  assert.equal(gate(ok, alive, alive, alive), false, 'green verifiers do not fail it');
 });
 
 // --- ledger H-1: production binding is checked on comment-stripped
 // text — an import inside a comment binds nothing ---
 test('w50 H-1: traceability binds production code outside comments only', t => {
-  const src = readFileSync('scripts/traceability.py', 'utf8');
-  assert.ok(src.includes('_PROD_BIND.search(_strip_comments(text))'), 'the bind scans stripped text');
-  assert.ok(src.includes('(?:\\.\\./)+src/'), 'nested test files bind at any depth');
-  assert.ok(src.includes('(?:\\.\\.?/)+helpers'), 'nested helpers imports bind too');
+  const binds = text => pyEval(`g['_prod_binds'](g['_strip_comments'](${JSON.stringify(text)}))`);
+  assert.equal(binds("import { Fabric } from '../src/fabric.mjs'"), 'True', 'a real production import binds');
+  assert.equal(binds("import { fixture } from './helpers.mjs'"), 'True', 'a helpers import binds');
+  assert.equal(binds("// import { Fabric } from '../src/fabric.mjs'"), 'False', 'a commented import binds nothing');
+  assert.equal(binds("/* import { Fabric } from '../src/fabric.mjs' */"), 'False', 'a block-comment import binds nothing');
+  assert.equal(binds("const s = 'from ../src/fabric.mjs import trick'"), 'False', 'literal text cannot mint the bind');
 });
 
 // --- ledger M-1: only a literal-true skip in the options object
 // disqualifies a citing test ---
 test('w50 M-1: options skip is object-scoped and literal-true', t => {
-  const src = readFileSync('scripts/traceability.py', 'utf8');
-  assert.ok(src.includes("opts[:opts.find('}')]"), 'the scan stops at the options object boundary');
-  assert.ok(src.includes(':\\s*true\\b'), 'only a literal-true skip disqualifies — a conditional one proves itself via TAP');
+  const bodies = text => JSON.parse(pyEval(`json.dumps(len(g['_test_bodies'](${JSON.stringify(text)})))`));
+  assert.equal(bodies("test('X', {skip: true}, t => { assert.ok(1); })"), 0, 'literal skip:true disqualifies');
+  assert.equal(bodies("test('X', {t" + "odo: true}, t => { assert.ok(1); })"), 0, 'literal t' + 'odo:true disqualifies');
+  assert.equal(bodies("test('X', {skip: cond}, t => { assert.ok(1); })"), 1, 'a conditional skip proves itself via TAP');
+  assert.equal(bodies("test('X', t => { const o = {skip: true}; assert.ok(1); })"), 1, 'skip inside the body is not an options token');
+  assert.equal(bodies("test.skip('X', t => { assert.ok(1); })"), 0, 'test.skip disqualifies');
 });
 
 // --- ledger L-2: a test titled FOO-100 cannot mint evidence for FOO-10 ---
 test('w50 L-2: requirement citation needs an ID boundary', t => {
-  const src = readFileSync('scripts/traceability.py', 'utf8');
-  assert.ok(src.includes('(?![0-9A-Za-z])'), 'prefix-collision guard on the title match');
-  assert.equal(src.match(/_cites\(/g).length >= 3, true, 'both citation sites route through _cites');
+  const cites = (title, rid) => pyEval(`g['_cites'](${JSON.stringify(title)}, ${JSON.stringify(rid)})`);
+  assert.equal(cites('FOO-100 must work', 'FOO-10'), 'False', 'FOO-100 is not a FOO-10 citation');
+  assert.equal(cites('XFOO-10 sneaks left', 'FOO-10'), 'False', 'XFOO-10 is not a FOO-10 citation');
+  assert.equal(cites('FOO-10 works', 'FOO-10'), 'True', 'a real citation binds');
 });
 
 // --- ledger L-1: openapi path params mirror the dispatch charsets and
@@ -187,11 +220,34 @@ test('w50 L-1: openapi path params carry the dispatch grammar', t => {
   assert.equal(param('/v1/action-capsules/{id}')?.schema?.pattern, '^[A-Za-z0-9-]{1,128}$', 'narrow family');
 });
 
-// --- ledger H-2: the reverse parity gate audits auditable shapes only
-// and consciously exempts the issuerd daemon surface ---
+// --- ledger H-2: the reverse parity gate flags unauditable dispatch
+// shapes — executed against fixture dispatch lines, not grepped for ---
 test('w50 H-2: check.mjs parity gate flags unauditable dispatch shapes', t => {
+  // Slice the REAL gate block (expandAlternations through auditDispatch)
+  // out of check.mjs and run it against crafted dispatch lines — the
+  // code under test is the shipped scanner, verbatim.
   const src = readFileSync('scripts/check.mjs', 'utf8');
-  assert.ok(src.includes('unauditable method dispatch'), 'aliased/negated method dispatch is flagged');
-  assert.ok(src.includes('unauditable path dispatch'), 'non-literal/non-anchored path dispatch is flagged');
-  assert.ok(src.includes("f === 'issuerd.mjs'"), 'the issuerd exemption is a named, documented scope');
+  const block = src.slice(src.indexOf('const expandAlternations'), src.indexOf('// Live HTTP dispatch outside'));
+  assert.ok(block.includes('auditDispatch ='), 'the slice carries the scanner');
+  const run = (lines, declaredSet) => {
+    // Exec the shipped block verbatim in a subprocess — the same shipped-
+    // code honesty as pyEval, without an in-process eval primitive.
+    const prog = [
+      `const server = ${JSON.stringify(lines)};`,
+      `const issuerd = [];`,
+      `const declared = new Set(${JSON.stringify([...declaredSet])});`,
+      `const errors = [];`,
+      `const console = { error: m => errors.push(m) };`,
+      'let failed = false;',
+      block,
+      `globalThis.process.stdout.write(JSON.stringify({ failed, errors }));`
+    ].join('\n');
+    return JSON.parse(execFileSync(process.execPath, ['-e', prog], { encoding: 'utf8' }).trim());
+  };
+  const declared = new Set(['GET /x']);
+  assert.equal(run(["if (req.method === 'GET' && path === '/x') send(200, {});"], declared).failed, false, 'a declared route passes');
+  const undeclared = run(["if (req.method === 'GET' && path === '/sneak') send(200, {});"], declared);
+  assert.equal(undeclared.failed, true); assert.ok(undeclared.errors.some(e => e.includes('absent from docs/openapi.json')), 'an undeclared literal route is flagged');
+  const negated = run(["if (req.method !== 'GET' && path === '/x') send(200, {});"], declared);
+  assert.equal(negated.failed, true); assert.ok(negated.errors.some(e => e.includes('unauditable method dispatch')), 'a negated method dispatch is flagged');
 });

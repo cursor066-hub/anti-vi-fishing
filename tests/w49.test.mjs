@@ -36,7 +36,7 @@ test('w49 C-2: an AFTER trigger writing side-effects inside a guarded audit inse
 
 test('w49 C-2: an AFTER trigger writing side-effects inside a target grant insert is INV-409', t => {
   const h = fixture(t);
-  h.f.target.db.exec("CREATE TRIGGER side_eff_t AFTER INSERT ON grants BEGIN INSERT INTO resources(tenant,resource_id,value) VALUES('acme','laundered','x'); END");
+  h.f.target.db.exec("CREATE TRIGGER side_eff_t AFTER INSERT ON grants BEGIN INSERT INTO resources(tenant,id,version,value) VALUES('acme','laundered',1,'x'); END");
   assert.throws(() => h.f.target.grant('acme', 'grant-x', { issued_at: h.now() }),
     hasCode('INV-409-INTEGRITY'), 'an AFTER-trigger side-effect on the dataplane convicts the same way');
   h.close();
@@ -219,5 +219,5 @@ test('w49 F2: every live server route is declared in openapi.json', t => {
 // counts as citing evidence for a VERIFIED row ---
 test('w49 HIGH-1: traceability requires the citing test to assert', t => {
   const src = readFileSync('scripts/traceability.py', 'utf8');
-  assert.ok(src.includes("and _asserts(b)}"), 'the citing-titles comprehension demands an asserting body');
+  assert.ok(src.includes("and _asserts(b, _file_assert_names(p))}"), 'the citing-titles comprehension demands an asserting body');
 });

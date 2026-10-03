@@ -89,14 +89,16 @@ test('w37 F-B: a doomed-but-carried rotation repoints to its own attested succes
 });
 
 test('w37 F-H: deleting a carry page refuses remediation on every path', t => {
-  // Early path: the amputated page was the stored tip — the prescan sees a
-  // clean chain but the surviving seal's attestation no longer holds.
+  // Early path: the amputated page plus every row above it is destroyed —
+  // the prescan sees a clean chain but the surviving seal's attestation no
+  // longer holds. (The cut mints an AUDIT_WM_REANCHORED attestation above
+  // the carry pages since w52-fv, so the tip row itself is no longer a
+  // page — delete it too to keep the prefix contiguous.)
   {
     const { h, r } = buildSealedWithPages(t);
     const pages = chainRows(h).filter(x => x.env.payload.type === 'AUDIT_SEAL_CARRY');
-    const tip = chainRows(h).at(-1);
     dropAuditGuards(h);
-    delRow(h, tip.seq);
+    for (const row of chainRows(h).filter(x => x.seq >= pages.at(-1).seq)) delRow(h, row.seq);
     assert.throws(() => h.f.sealAuditChain(h.p('security')), e => e?.code === 'INV-409-INTEGRITY' && /carryover page|amputated/.test(e.message));
   }
   // Cut path: a middle page is amputated, leaving a corruption gap plus the
@@ -123,18 +125,38 @@ test('w37 HIGH-1: the cut consults the signed head — regressed revocation floo
   assert.throws(() => h.f.sealAuditChain(h.p('security')), e => e?.code === 'INV-409-INTEGRITY' && /revocation floor|checkpoint/.test(e.message));
 });
 
-test('w37 HIGH-1: a cut under an attested tip names the abandoned head', t => {
-  const h = fixture(t); h.ready();
-  const head = h.f._chainHead('acme');
-  assert.ok(head && head.seq > 0);
-  dropAuditGuards(h);
-  corruptAt(h, lastSeq(h) - 2); // a mid-chain cut: the head attests a tip that no longer exists
-  const r = h.f.sealAuditChain(h.p('security'));
-  assert.equal(r.sealed, true);
-  assert.equal(r.abandoned_head_seq, head.seq);
-  assert.equal(r.abandoned_head_hash, head.hash);
-  const seal = chainRows(h).find(x => x.env.payload.type === 'AUDIT_SEALED');
-  assert.equal(seal.env.payload.metadata.abandoned_head_seq, head.seq);
+test('w37 HIGH-1: a cut under an attested tip names the retired head', t => {
+  // The head attests exactly the tip the cut retires — self-inflicted
+  // abandonment the seal's own carry claims already account for, so the
+  // record names it 'superseded' (w52-fv: 'abandoned' is reserved for
+  // attestation the seal did NOT itself retire, and convicts the fold).
+  {
+    const h = fixture(t); h.ready();
+    const head = h.f._chainHead('acme');
+    assert.ok(head && head.seq > 0);
+    dropAuditGuards(h);
+    corruptAt(h, lastSeq(h) - 2); // a mid-chain cut: the head attests a tip that no longer exists
+    const r = h.f.sealAuditChain(h.p('security'));
+    assert.equal(r.sealed, true);
+    assert.equal(r.superseded_head_seq, head.seq);
+    assert.equal(r.superseded_head_hash, head.hash);
+    const seal = chainRows(h).find(x => x.env.payload.type === 'AUDIT_SEALED');
+    assert.equal(seal.env.payload.metadata.superseded_head_seq, head.seq);
+  }
+  // Tail destruction on top of the cut: the head attests content the seal
+  // did NOT retire — a real abandoned-head conviction.
+  {
+    const h = fixture(t); h.ready();
+    const head = h.f._chainHead('acme');
+    dropAuditGuards(h);
+    delRow(h, lastSeq(h)); delRow(h, lastSeq(h)); // tip falls below the attested head
+    corruptAt(h, lastSeq(h) - 1); // force the cut path
+    const r = h.f.sealAuditChain(h.p('security'));
+    assert.equal(r.sealed, true);
+    assert.equal(r.abandoned_head_seq, head.seq);
+    const seal = chainRows(h).find(x => x.env.payload.type === 'AUDIT_SEALED');
+    assert.equal(seal.env.payload.metadata.abandoned_head_seq, head.seq);
+  }
 });
 
 test('w37 HIGH-1/L-1: an unverifiable stored tail counts toward deleted_gaps_total', t => {

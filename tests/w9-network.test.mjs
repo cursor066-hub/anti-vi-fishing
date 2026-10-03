@@ -199,7 +199,7 @@ test('w9-network F11: a re-assertion audit records the previous section digests'
   f2.reassertConfig({ subject_id: 'security', tenant_id: 'acme' });
   const entry = f2.store.auditPage('acme', { limit: 100 }).entries.map(e => e.envelope.payload).find(e => e.type === 'CONFIG_REASSERTED');
   assert.ok(entry, 'CONFIG_REASSERTED audit missing');
-  assert.ok(entry.metadata.previous_sections?.auth && entry.metadata.changed_sections.includes('auth'), JSON.stringify(entry.metadata));
+  assert.ok(entry.metadata.previous_section_digests?.auth && entry.metadata.changed_sections.includes('auth'), JSON.stringify(entry.metadata));
 });
 
 test('w9-network F12: the deploy unit carries clock/syscall/sandbox hardening', () => {

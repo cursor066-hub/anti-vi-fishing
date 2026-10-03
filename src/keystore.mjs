@@ -21,7 +21,12 @@ export { SUITES };
 // files already at 0400, so a compliant file must never pay the syscall
 // (w45-ledger HIGH-2).
 export const tightenOwnerOnly = (path, name = path) => {
-  if ((statSync(path).mode & 0o077) === 0) return;
+  // A delete between existsSync and statSync produces a bare ENOENT off
+  // the boot path — the taxonomy covers the stat, not just the chmod
+  // (w52-store L1).
+  let mode;
+  try { mode = statSync(path).mode; } catch (e) { throw new InvariantError('INV-503-CONFIG', `${name} cannot be stat'ed for the owner-only check`, 503, { cause: e }); }
+  if ((mode & 0o077) === 0) return;
   try { chmodSync(path, 0o600); } catch (e) { throw new InvariantError('INV-503-CONFIG', `${name} permissions cannot be tightened to owner-only`, 503, { cause: e }); }
 };
 export const FIRMWARE = 'if-softhsm-1.0.0';

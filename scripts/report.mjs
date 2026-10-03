@@ -75,11 +75,14 @@ const stableTap = tapText.replace(/ \([\d.]+ms\)/g, '').replace(/(duration_ms: )
 // counters must also be internally consistent.
 const numLast = (re, s) => { const m = [...s.matchAll(new RegExp(re.source, 'g'))].at(-1); return m ? Number(m[1]) : 0; };
 const rawFail = numLast(/# fail (\d+)/, tapText), rawCancel = numLast(/# cancelled (\d+)/, tapText), rawSkip = numLast(/# skipped (\d+)/, tapText), rawTodo = numLast(/# to[d]o (\d+)/, tapText), rawTests = numLast(/# tests (\d+)/, tapText);
-const counts = { pass: numLast(/# pass (\d+)/, tapText), fail: rawFail + (tapText.match(/^not ok /gm) ?? []).length, tests: rawTests };
+// # fail already equals the 'not ok' result count — adding them
+// double-counted every failure and inflated tests=pass+fail past the
+// runner's own # tests figure (w51-ledger M-5).
+const counts = { pass: numLast(/# pass (\d+)/, tapText), fail: rawFail, tests: rawTests > 0 ? rawTests : numLast(/# pass (\d+)/, tapText) + rawFail };
 if (rawTests > 0 && counts.pass + rawFail + rawSkip + rawTodo + rawCancel !== rawTests) { console.error(`TAP summary inconsistent: tests=${rawTests} but pass+fail+skipped+deferred+cancelled=${counts.pass + rawFail + rawSkip + rawTodo + rawCancel}`); process.exitCode = 1; }
 write('reports/tests.tap', stableTap);
 write('reports/final-regression.tap', stableTap);
-const testSummary = { tests: counts.pass + counts.fail, pass: counts.pass, fail: counts.fail, runner: 'node --test --test-reporter=tap tests/', generated_at: 'regenerated on demand by scripts/report.mjs', note: 'Live counts; per-test durations are stripped so the artifact is deterministic.' };
+const testSummary = { tests: counts.pass + counts.fail, pass: counts.pass, fail: counts.fail, runner: "node --test --test-concurrency=1 'tests/**/*.test.mjs'", generated_at: 'regenerated on demand by scripts/report.mjs', note: 'Live counts; per-test durations are stripped so the artifact is deterministic.' };
 write('reports/test-summary.json', JSON.stringify(testSummary, null, 2) + '\n');
 write('reports/final-regression-summary.json', JSON.stringify({ ...testSummary, scope: 'final regression baseline' }, null, 2) + '\n');
 
@@ -166,10 +169,13 @@ write('reports/sbom.cdx.json', JSON.stringify(sbom, null, 2) + '\n');
 // its verify-only mode and reports the diffs as stale rather than
 // silently repairing them (w23-supply F7).
 const trace = run('python3', ['scripts/traceability.py', ...(checkOnly ? ['--check'] : [])]);
+// A failed ledger run must block in BOTH modes — ignoring its exit here
+// would regenerate VERIFICATION.md off a stale requirements-summary the
+// verifier just rejected (w51-ledger M-4).
+if (trace.status !== 0) { console.error(trace.stderr ?? trace.stdout); process.exitCode = 1; }
 if (checkOnly) {
   const traced = (trace.stdout ?? '').trim().split('\n').filter(l => l.startsWith('STALE:'));
   for (const l of traced) stale.push(l.slice(6));
-  if (trace.status !== 0 && !traced.length) { console.error(trace.stderr ?? trace.stdout); process.exitCode = 1; }
 }
 const ledgerSummary = existsSync('reports/requirements-summary.json') ? JSON.parse(readFileSync('reports/requirements-summary.json', 'utf8')) : null;
 const statusCounts = ledgerSummary?.status_counts ?? {}, total = ledgerSummary?.total_requirements ?? 0;
@@ -178,7 +184,7 @@ const verification = {
   generated_by: 'scripts/report.mjs',
   engineering_checks: tap.status === 0 ? 'PASS' : 'FAIL',
   production_release: 'BLOCKED (expected)',
-  unique_test_cases_executed: counts.pass,
+  unique_test_cases_executed: counts.pass + counts.fail,
   failed: counts.fail,
   scenarios_run: sims,
   requirement_status_counts: statusCounts,

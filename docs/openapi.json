@@ -380,6 +380,28 @@
               "type": "string",
               "pattern": "^[A-Za-z0-9_-]{8,128}$"
             }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "description": "Canonical decimal integer grammar only (no hex/exponent/float/signed spellings); unknown or duplicate query parameters are rejected"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000,
+              "description": "Canonical decimal integer grammar only (no hex/exponent/float/signed spellings); unknown or duplicate query parameters are rejected"
+            }
           }
         ]
       }
@@ -901,7 +923,31 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "description": "Canonical decimal integer grammar only (no hex/exponent/float/signed spellings); unknown or duplicate query parameters are rejected"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000,
+              "description": "Canonical decimal integer grammar only (no hex/exponent/float/signed spellings); unknown or duplicate query parameters are rejected"
+            }
+          }
+        ]
       }
     },
     "/v1/certificates/{id}": {
@@ -1162,7 +1208,7 @@
       "post": {
         "operationId": "post_gate_v1_runtime",
         "summary": "Consume capability under shared budgets",
-        "description": "Roles: bound subject. Engineering profile; all target mutations are simulated.",
+        "description": "Roles: operator, workload. Engineering profile; all target mutations are simulated.",
         "tags": [
           "Gate"
         ],
@@ -1852,8 +1898,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
-              "minimum": 1
+              "type": "string",
+              "pattern": "^\\d+$"
             }
           }
         ]
@@ -2918,6 +2964,171 @@
             }
           }
         }
+      }
+    },
+    "/v1/issuers": {
+      "get": {
+        "operationId": "get_v1_issuers",
+        "summary": "Issuer inventory (issuerd daemon listener)",
+        "description": "Roles: issuer bearer token. Engineering profile; all target mutations are simulated. Served by the separate issuerd evidence daemon listener, not the fabric API — bearer-scoped per-issuer tokens, not principal roles.",
+        "tags": [
+          "Issuer daemon"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-listener": "issuerd"
+      }
+    },
+    "/v1/issuers/{id}/manifest": {
+      "get": {
+        "operationId": "get_v1_issuers_id_manifest",
+        "summary": "Signed issuer manifest",
+        "description": "Roles: issuer bearer token. Engineering profile; all target mutations are simulated. Served by the separate issuerd evidence daemon listener, not the fabric API — bearer-scoped per-issuer tokens, not principal roles.",
+        "tags": [
+          "Issuer daemon"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-listener": "issuerd",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]+$"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/issuers/{id}/issue": {
+      "post": {
+        "operationId": "post_v1_issuers_id_issue",
+        "summary": "Request signed evidence issuance",
+        "description": "Roles: issuer bearer token. Engineering profile; all target mutations are simulated. Served by the separate issuerd evidence daemon listener, not the fabric API — bearer-scoped per-issuer tokens, not principal roles.",
+        "tags": [
+          "Issuer daemon"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-listener": "issuerd",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]+$"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/issuers/{id}/health": {
+      "get": {
+        "operationId": "get_v1_issuers_id_health",
+        "summary": "Issuer health and refusal metrics",
+        "description": "Roles: issuer bearer token. Engineering profile; all target mutations are simulated. Served by the separate issuerd evidence daemon listener, not the fabric API — bearer-scoped per-issuer tokens, not principal roles.",
+        "tags": [
+          "Issuer daemon"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response; see API.md for exact record contracts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Reason-coded rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-listener": "issuerd",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]+$"
+            }
+          }
+        ]
       }
     }
   },

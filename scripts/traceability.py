@@ -95,11 +95,27 @@ if _tap_text is None:
     _tap = root / 'reports' / 'tests.tap'
     assert _tap.exists(), 'no TAP evidence at HEAD and no reports/tests.tap — nothing to bind citations against'
     _tap_text = _tap.read_text(errors='replace')
-_passed_titles = set()
+# A `not ok` permanently disqualifies its title — a same-titled `ok`
+# elsewhere cannot launder a failing assertion into evidence, and a title
+# that never printed is not evidence either (w51-ledger F-1). Indented
+# lines are real subtests (t.test) — they count identically (M-7).
+_ok_titles, _fail_titles = set(), set()
 for _line in _tap_text.splitlines():
-    _m = re.match(r'^ok\s+\d+\s+-\s+(.*?)(?:\s+#\s*(?:SKIP|TO' + 'DO)\b.*)?$', _line)
+    _m = re.match(r'^\s*(ok|not ok)\s+\d+\s+-\s+(.*?)(?:\s+#\s*(?:SKIP|TO' + 'DO)\b.*)?$', _line)
     if _m and not re.search(r'#\s*(?:SKIP|TO' + 'DO)\b', _line):
-        _passed_titles.add(_m.group(1).strip())
+        (_ok_titles if _m.group(1) == 'ok' else _fail_titles).add(_m.group(2).strip())
+_passed_titles = _ok_titles - _fail_titles
+# The summary counters must agree with the result lines they claim to
+# count — '# fail 0' beside a 'not ok' line is edited evidence, not a
+# report (w51-ledger F-1).
+_tap_tests = re.search(r'(?m)^# tests (\d+)', _tap_text)
+_tap_pass = re.search(r'(?m)^# pass (\d+)', _tap_text)
+_tap_fail = re.search(r'(?m)^# fail (\d+)', _tap_text)
+assert _tap_tests and _tap_pass is not None and _tap_fail is not None, 'TAP summary counters missing — cannot verify the evidence boundary'
+_ok_lines = len(re.findall(r'(?m)^\s*ok\s+\d+\s+-', _tap_text))
+_fail_lines = len(re.findall(r'(?m)^\s*not ok\s+\d+\s+-', _tap_text))
+assert int(_tap_pass.group(1)) == _ok_lines and int(_tap_fail.group(1)) == _fail_lines and int(_tap_tests.group(1)) == _ok_lines + _fail_lines, \
+    f'TAP counters inconsistent: # tests={_tap_tests.group(1)} # pass={_tap_pass.group(1)} # fail={_tap_fail.group(1)} but {_ok_lines} ok / {_fail_lines} not ok lines'
 def _title_ran(title):
     # An interpolated template title (`RUN-002 DAT-004: ${field} …`) expands
     # to several TAP lines — match each literal segment in order
@@ -130,7 +146,35 @@ def _strip_comments(text):
 # calling it asserts nothing on its own; the enclosing assert.* call is
 # the assertion (w49-ledger F-3).
 _ASSERT_CALL = re.compile(r'\b(?:assert(?:\.\w+)?|requireThat)\s*\(')
-_SHADOWED_ASSERT = re.compile(r'\b(?:const|let|var|function)\s+(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b')
+_ASSERT_NAME_SET = ('assert', 'requireThat', 'hasCode', 'expect', 'throws', 'rejects', 'strictEqual', 'deepStrictEqual', 'doesNotThrow')
+# Every binding shape that can neuter an assert name: a local decl, a
+# bare reassignment, an import from a non-node source, a globalThis
+# graft, or a parameter shadow `(assert) =>` (w51-ledger H-1).
+_SHADOWED_ASSERT = re.compile(
+    r'\b(?:const|let|var|function)\s+(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b'
+    r'|\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\s*=(?!=)'
+    r'|\bimport\s+[^;\n]*?\bfrom\s+[\'"](?!node:)'
+    r'|\bglobalThis\s*(?:\.\s*(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b|\[\s*[\'"](assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)[\'"])'
+    r'|\bObject\.assign\s*\(\s*globalThis\b'
+    r'|\bdefineProperty\s*\(\s*globalThis\b'
+    r'|\(\s*[^)]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b[^)]*\)\s*=>'
+)
+# The assert namespace itself is import-bound: `import { strict as asrt }`
+# or `import * as a` renames it — the probe runs on the resolved local
+# names, not a hardcoded 'assert' (w51-ledger M-7).
+def _assert_names(path):
+    text = _strip_comments(path.read_text())
+    names = {'assert', 'requireThat'}
+    for m in re.finditer(r'\bimport\s+([^;\n]*?)\s+from\s+[\'"]node:assert[\'"]', text):
+        clause = m.group(1).replace('{', ' ').replace('}', ' ')
+        am = re.search(r'\*\s+as\s+(\w+)', clause)
+        if am: names.add(am.group(1))
+        clause = re.sub(r'\*\s+as\s+\w+', ' ', clause)
+        for spec in clause.split(','):
+            spec = spec.strip()
+            if not spec: continue
+            names.add(re.split(r'\s+as\s+', spec)[-1].strip())
+    return names
 def _is_regex_start(text, i):
     # `/` after an operand char is division; after an operator/keyword or at a
     # boundary it opens a regex literal.
@@ -162,6 +206,16 @@ def _blank_code(text):
             else: out[i] = ' '
             i += 1; continue
         if c in '"\'`': instr = c; i += 1; continue
+        # `//` outside a literal is ALWAYS a line comment in JS — a regex
+        # literal can never open with it. Stripping here is by design, not
+        # by the accident that the earlier lookbehind pass happened to
+        # leave `x//` for this scanner to misparse (w51-ledger L-5).
+        if c == '/' and i + 1 < n and text[i + 1] == '/':
+            j = i
+            while j < n and text[j] != '\n':
+                out[j] = ' '
+                j += 1
+            i = j; continue
         if c == '/' and _is_regex_start(text, i):
             out[i] = ' '
             j, inclass = i + 1, False
@@ -227,10 +281,11 @@ def _test_title(body):
     m = re.match(r"\s*test\(\s*(['\"`])((?:\\.|(?!\1)[\s\S])*)\1", body)
     return m.group(2) if m else ''
 def _cites(title, rid):
-    # ID-prefix collision guard: a test titled 'FOO-100' must not mint
-    # evidence for FOO-10 — the citation needs a non-alphanumeric
-    # boundary (w50-ledger L-2).
-    return re.search(re.escape(rid) + r'(?![0-9A-Za-z])', title) is not None
+    # ID-prefix collision guard on BOTH sides: 'FOO-100' must not mint
+    # evidence for FOO-10, and 'XFOO-10' must not mint it either — the
+    # citation needs a non-alphanumeric boundary left and right
+    # (w50-ledger L-2, w51-ledger L-1).
+    return re.search(r'(?<![0-9A-Za-z])' + re.escape(rid) + r'(?![0-9A-Za-z])', title) is not None
 _IF_FALSE = re.compile(r'\bif\s*\(\s*(?:false|0|!true|null|undefined)\s*\)')
 _SKIP = re.compile(r'\bt\.(?:skip|to[d]o)\s*\(')
 _DEAD_WRAPPER = re.compile(r'\b(?:setTimeout|setInterval|setImmediate|queueMicrotask|process\.nextTick)\s*\(')
@@ -283,11 +338,72 @@ def _live_code(text):
         spans.append((m.start(), j))
     for m in _DEAD_WRAPPER.finditer(text):
         spans.append((m.start(), _paren_end(text, m.end() - 1)))
+    # Statements after an unconditional return/throw inside a block can
+    # never run — blank to the enclosing '}' (stopping at case/default
+    # labels: a case arm ends at the next label, not the switch's '}').
+    for m in re.finditer(r'\b(?:return|throw)\b', text):
+        j = m.end(); d = 0
+        while j < len(text):
+            c = text[j]
+            if c in '([{': d += 1
+            elif c in ')]}':
+                if d == 0: break
+                d -= 1
+            elif c == ';' and d == 0: break
+            j += 1
+        if j >= len(text) or text[j] != ';': continue  # '}' — nothing follows anyway
+        k = j + 1
+        while k < len(text) and text[k] in ' \t\n': k += 1
+        if text[k:k + 4] == 'else': continue  # `if (x) return; else …` — the else arm is live
+        d = 0
+        while k < len(text):
+            c = text[k]
+            if c == '{': d += 1
+            elif c == '}':
+                if d == 0: break
+                d -= 1
+            elif d == 0 and (re.match(r'case\s', text[k:]) or text.startswith('default', k) or text.startswith('case\n', k)): break
+            k += 1
+        if k > j + 1: spans.append((j + 1, k))
+    # `if (true) {…} else {…}` — the else arm can never run.
+    for m in re.finditer(r'\bif\s*\(\s*(?:true|1)\s*\)', text):
+        j = _paren_end(text, text.index('(', m.start()))
+        while j < len(text) and text[j] in ' \t\n': j += 1
+        k = _paren_end(text, j) if j < len(text) and text[j] == '{' else (text.find(';', j) + 1 if text.find(';', j) != -1 else len(text))
+        l = k
+        while l < len(text) and text[l] in ' \t\n': l += 1
+        if text[l:l + 4] == 'else':
+            l += 4
+            while l < len(text) and text[l] in ' \t\n': l += 1
+            if l < len(text) and text[l] == '{': spans.append((l, _paren_end(text, l)))
+            else:
+                e = text.find(';', l); spans.append((l, len(text) if e == -1 else e + 1))
+    # while(false)/for(;false;) bodies never execute — the dead condition
+    # is the whole while clause or the for's middle clause only, so an
+    # identifier ending in '0' (`for (x of a0)`) stays live.
+    for m in re.finditer(r'\bwhile\s*\(\s*(?:false|0)\s*\)|\bfor\s*\([^;]*;\s*(?:false|0)\s*;', text):
+        j = m.end()
+        while j < len(text) and text[j] in ' \t\n': j += 1
+        if j < len(text) and text[j] == '{': spans.append((j, _paren_end(text, j)))
+        else:
+            e = text.find(';', j); spans.append((j, len(text) if e == -1 else e + 1))
+    # An unawaited .then/.catch/.finally callback never gates the test —
+    # its asserts run (or don't) on the microtask queue after the test's
+    # own verdict is decided. Awaited, returned, yielded or later-awaited
+    # receivers stay live.
+    for m in re.finditer(r'\.(?:then|catch|finally)\s*\(', text):
+        s = max(text.rfind(';', 0, m.start()), text.rfind('{', 0, m.start()), text.rfind('}', 0, m.start())) + 1
+        stmt = text[s:m.start()]
+        if re.search(r'\b(?:await|return|yield)\b', stmt): continue
+        am = re.search(r'\b(?:const|let|var)\s+(\w+)\s*=', stmt)
+        if am and re.search(r'\bawait\s+' + re.escape(am.group(1)) + r'\b|\bPromise\.(?:all|race|allSettled|any)\s*\([^)]*\b' + re.escape(am.group(1)) + r'\b', text[m.end():]): continue
+        spans.append((m.start(), _paren_end(text, m.end() - 1)))
     for m in _FN_DECL.finditer(text):
         name = m.group(1) or m.group(2)
-        # A function literal whose name is never invoked carries dead
-        # asserts — every real caller names it at a call site.
-        if name and not re.search(r'\b' + re.escape(name) + r'\s*\(', text[m.end():]):
+        # A function literal whose name is never REFERENCED carries dead
+        # asserts — call-site invocation is one binding, but a callback
+        # handed to t.test/foo(cb) stays live by name alone (w51-ledger M-7).
+        if name and not re.search(r'\b' + re.escape(name) + r'\b', text[m.end():]):
             b = text.find('{', m.end())
             k = text.find(';', m.end())
             if b != -1 and (k == -1 or b < k): spans.append((m.start(), _paren_end(text, b)))
@@ -306,7 +422,7 @@ def _live_code(text):
     for a, b in spans:
         for i in range(a, min(b, len(out))): out[i] = ' '
     return ''.join(out)
-def _asserts(body):
+def _asserts(body, names=('assert', 'requireThat')):
     # The assert probe runs on the literal-blanked body: 'assert(x)' or
     # 'expect(' sitting inside a string/template/regex literal is dead
     # text, not an assertion — only real call syntax survives blanking
@@ -317,9 +433,26 @@ def _asserts(body):
     # Shadow detection runs on the UNLIVENED body — _live_code may blank
     # the declaration itself ('assert.equal' isn't a call of bare
     # 'assert'), hiding the shadow it created (w48-ledger F-1).
-    for name in _SHADOWED_ASSERT.findall(_blank_code(body)):
-        live = re.sub(r'\b' + re.escape(name) + r'(?:\.\w+)?\s*\(', '(', live)
-    return _ASSERT_CALL.search(live)
+    for m in _SHADOWED_ASSERT.finditer(_blank_code(body)):
+        # Unconditional rebind arms (import/globalThis grafts) neuter the
+        # whole assert vocabulary — a file may not alias its way to
+        # fabricated evidence (w51-ledger H-1).
+        arm_names = [g for g in m.groups() if g] or list(_ASSERT_NAME_SET)
+        for name in arm_names:
+            live = re.sub(r'\b' + re.escape(name) + r'(?:\.\w+)?\s*\(', '(', live)
+    # Body-level member/destructure aliases resolve to assert calls too:
+    # `const ok = assert.ok`, `const { strictEqual } = assert` — an alias
+    # is still the real assertion, not a stub (w51-ledger M-7).
+    extra = set(names)
+    src = '|'.join(re.escape(n) for n in names)
+    for am in re.finditer(r'\b(?:const|let|var)\s+(\w+)\s*=\s*(?:' + src + r')\.\w+', _blank_code(body)):
+        extra.add(am.group(1))
+    for dm in re.finditer(r'\b(?:const|let|var)\s*\{([^}]+)\}\s*=\s*(?:' + src + r')\b', _blank_code(body)):
+        for spec in dm.group(1).split(','):
+            nm = re.split(r'\s+as\s+|:', spec.strip())[-1].strip()
+            if re.fullmatch(r'\w+', nm): extra.add(nm)
+    if not extra - set(('assert', 'requireThat')): return _ASSERT_CALL.search(live)
+    return re.search(r'\b(?:' + '|'.join(re.escape(n) for n in extra) + r')(?:\.\w+)?\s*\(', live)
 # A citing test file must bind production code — import a production
 # module (directly or through helpers) or spawn a repo script — otherwise
 # `test('REQ-001', () => assert.ok(1 + 1 === 2))` self-mints evidence with
@@ -327,20 +460,36 @@ def _asserts(body):
 # files bind at any depth so the recursive glob is not dead code
 # (w50-ledger M-2), and the bind is checked on comment-stripped text —
 # an import line inside a comment binds nothing (w50-ledger H-1).
-_PROD_BIND = re.compile(r"from\s+['\"](?:(?:\.\./)+src/[^'\"]*|(?:\.\.?/)+helpers(?:\.mjs)?|node:child_process|node:worker_threads)['\"]")
+# The specifier is matched character-exactly against the honest bind set
+# — a substring `from './x'` sitting inside a wider string literal or a
+# `from` keyword inside a quoted phrase cannot mint the bind (w51-ledger
+# H-1). The import keyword itself must be code, not literal text —
+# _blank_code masks literal positions while keeping the raw specifier
+# readable.
+_PROD_SPEC = re.compile(r'(?:(?:\.\./)+src/[\w./-]*|(?:\.\.?/)+helpers(?:\.mjs)?|node:child_process|node:worker_threads)')
+_PROD_BIND_TOKEN = re.compile(r"\b(?:from|import|require)\b\s*\(?\s*(['\"])((?:(?!\1)[^\n])*)\1")
+def _prod_binds(text):
+    blanked = _blank_code(text)
+    for m in _PROD_BIND_TOKEN.finditer(text):
+        if not blanked[m.start()].isspace() and _PROD_SPEC.fullmatch(m.group(2)): return True
+    return False
 def evidence_blocks(path):
     text = path.read_text()
     if not path.name.endswith('.test.mjs'):
         # Script files cite requirements inline — comments strip first so a
         # commented-out ID cannot mint a citation (w41-ledger M-1).
         return [_strip_comments(text)]
-    if not _PROD_BIND.search(_strip_comments(text)): return []
+    if not _prod_binds(_strip_comments(text)): return []
     return _test_bodies(_strip_comments(text))
+_assert_names_memo = {}
+def _file_assert_names(p):
+    if p not in _assert_names_memo: _assert_names_memo[p] = _assert_names(p)
+    return _assert_names_memo[p]
 for row in rows:
     prefix = row['id'].rsplit('-', 1)[0]
     owner, baseline, implementation, limitation = by_prefix[prefix]
     matches = [str(p.relative_to(root)) for p in tests
-               if any((_cites(_test_title(b), row['id']) if p.name.endswith('.test.mjs') else row['id'] in b) and (_asserts(b) or not p.name.endswith('.test.mjs')) for b in evidence_blocks(p))]
+               if any((_cites(_test_title(b), row['id']) if p.name.endswith('.test.mjs') else row['id'] in b) and (_asserts(b, _file_assert_names(p)) or not p.name.endswith('.test.mjs')) for b in evidence_blocks(p))]
     # A VERIFIED row must carry at least one asserting-test citation — the
     # docs sentinel is honest evidence for PARTIAL/BLOCKED rows only
     # (w39-ledger F6).
@@ -352,7 +501,7 @@ for row in rows:
         # test titled 'POL-001' prints `ok` in TAP and launders the gate
         # while the real asserting test sits skipped (w49-fixverify HIGH-1).
         citing_titles = {_test_title(b).strip() for p in tests if p.name.endswith('.test.mjs')
-                         for b in evidence_blocks(p) if _cites(_test_title(b), row['id']) and _asserts(b)}
+                         for b in evidence_blocks(p) if _cites(_test_title(b), row['id']) and _asserts(b, _file_assert_names(p))}
         assert any(_title_ran(t) for t in citing_titles), f"{row['id']} is VERIFIED but none of its citing tests passed in reports/tests.tap (skip/defer is not evidence)"
     # Evidence lists only the files that literally name the requirement —
     # corpus-level artifacts would be boilerplate on every row (w6-ledger S3).
@@ -368,6 +517,15 @@ summary = {'total_requirements':len(rows),'functional_requirements':sum(not r['i
 summary_text = json.dumps(summary, indent=2)+'\n'
 req_md = '# Requirements traceability\n\nAll **211** numbered rows in the supplied SRS are preserved in `requirements.csv`: **166 functional** and **45 non-functional**. No missing requirements were silently removed or treated as optional. Original source language, minimum acceptance, evidence method, accountable role, baseline and current gap are recorded. Named human owners remain unassigned, which itself prevents production acceptance.\n\n`VERIFIED_IN_ENGINEERING_PROFILE` means a production-binding test that asserts on the requirement ran and passed in the committed TAP — the narrow software behavior was exercised under that citation gate, not proven, and the full real-system or hardware claim is not thereby satisfied. `PARTIAL` means relevant code or analysis exists but material acceptance remains. `NOT_IMPLEMENTED` explicitly identifies functionality absent from the build. `BLOCKED_EXTERNAL` identifies absent hardware, customer resources or independent/organisational evidence. No row is marked production-approved.\n\nThe trace references tests by requirement IDs and source modules. Reports are stored under `reports/`. Some tests exercise only the safe-rejection side of a requirement (for example rejecting software signatures under hardware-required policy); that does **not** implement the missing hardware path.\n\nStatus counts: '+json.dumps(summary['status_counts'])+'.\n'
 outputs = {'docs/requirements.csv': csv_text, 'reports/requirements-summary.json': summary_text, 'docs/REQUIREMENTS.md': req_md}
+# Demotion tripwire: a row that was VERIFIED in the committed CSV and now
+# regenerates as anything else is a silent understatement — safe
+# direction, but invisible unless it is named (w51-ledger L-6).
+_prev = root / 'docs/requirements.csv'
+if _prev.exists():
+    _old = {r['id']: r.get('status') for r in csv.DictReader(_prev.read_text().splitlines())}
+    for r in rows:
+        if _old.get(r['id']) == 'VERIFIED_IN_ENGINEERING_PROFILE' and r['status'] != 'VERIFIED_IN_ENGINEERING_PROFILE':
+            print(f"DEMOTED:{r['id']} {_old[r['id']]} -> {r['status']}", file=sys.stderr)
 if check_only:
     stale = []
     for rel, content in outputs.items():

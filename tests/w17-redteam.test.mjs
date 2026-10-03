@@ -270,6 +270,9 @@ test('w17-redteam B1: seal attests every row it actually deletes', t => {
   const seal = h.f.sealAuditChain(h.p('security'));
   assert.equal(seal.sealed, true);
   assert.equal(seal.removed_count, 1, 'the planted row is counted in the attestation');
-  const remaining = h.f.store.db.prepare('SELECT COUNT(*) c FROM audit WHERE tenant=? AND seq>?').get('acme', head.seq).c;
-  assert.equal(remaining, 1, 'only the AUDIT_SEALED row sits past the old head');
+  const remaining = h.f.store.db.prepare('SELECT envelope FROM audit WHERE tenant=? AND seq>? ORDER BY seq').all('acme', head.seq)
+    .map(r => JSON.parse(r.envelope).payload.type);
+  // The cut's own attestation plus the watermark re-anchor it minted — the
+  // wm still pointed at the poisoned tip the cut destroyed (w52-fv).
+  assert.deepEqual(remaining, ['AUDIT_SEALED', 'AUDIT_WM_REANCHORED'], 'only the seal attestation rows sit past the old head');
 });

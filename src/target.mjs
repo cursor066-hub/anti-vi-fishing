@@ -428,10 +428,17 @@ export class SimulatedTarget {
       // are infrastructure, not surgery evidence (w49-fixverify M-4).
       if (base !== null && [8, 10, 11, 13, 14, 15].includes(base))
         throw new InvariantError('INV-503-STORAGE', `Ledger storage fault: ${e?.message ?? 'sqlite error'}`, 503, { cause: e });
-      // Any remaining sqlite-class fault is schema/integrity evidence,
-      // not raw internals for callers to pattern-match (w48-store W48-3).
+      // The whole CONSTRAINT family (base 19: CHECK/FK/UNIQUE plus the
+      // 1811 TRIGGER abort above) is guard evidence — planted constraint
+      // guards are indistinguishable from ours, and ours never fire on a
+      // legitimate write (w51-fv F-5).
+      if (base === 19)
+        throw new InvariantError('INV-409-INTEGRITY', `Ledger access refused by a constraint guard — tamper evidence: ${e?.message ?? 'sqlite error'}`, 409, { cause: e });
+      // Unmapped sqlite codes (TOOBIG, MISMATCH, MISUSE, NOLFS, RANGE,
+      // …) are honest engine faults — INTEGRITY would mint false tamper
+      // evidence from infrastructure noise (w51-fv F-5).
       if (e?.code === 'ERR_SQLITE_ERROR' || typeof e?.errcode === 'number')
-        throw new InvariantError('INV-409-INTEGRITY', `Ledger access fault: ${e?.message ?? 'sqlite error'}`, 409, { cause: e });
+        throw new InvariantError('INV-503-LEDGER', `Ledger engine fault: ${e?.message ?? 'sqlite error'}`, 503, { cause: e });
       throw e;
     }
   }

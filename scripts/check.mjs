@@ -129,6 +129,7 @@ for (const file of textFiles) {
 {
   const server = readFileSync('src/server.mjs', 'utf8').split('\n');
   const fabric = readFileSync('src/fabric.mjs', 'utf8').split('\n');
+  const issuerd = readFileSync('src/issuerd.mjs', 'utf8').split('\n');
   // Parity runs on the EMITTED contract, not the generator's source: an
   // operation() call planted outside the literal table writes real openapi
   // paths the regex never saw (w23-supply F5).
@@ -139,53 +140,81 @@ for (const file of textFiles) {
       if (!['get', 'post', 'put', 'delete', 'patch'].includes(method)) continue;
       const m = /^Roles: ([^.]+)\./.exec(op.description ?? '');
       if (!m) { console.error(`route-role parity: ${method} ${path} — contract row lacks a Roles declaration`); failed = true; continue; }
-      rows.push({ path, method, roles: m[1].split(',').map(s => s.trim()) });
+      rows.push({ path, method, roles: m[1].split(',').map(s => s.trim()), listener: op['x-listener'] ?? null });
     }
   }
-  const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unauthenticated']);
+  const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unauthenticated', 'issuer bearer token']);
   const sortR = r => [...r].sort().join(',');
-  const isIf = l => /^\s*if \(/.test(l);
+  const isIf = l => /^\s*(?:\}\s*)?(?:else\s+)?if\s*\(/.test(l);
   // A single-statement validation guard (queryCheck/noBody) is not a
   // handler boundary — the fabric call that carries the role gate may
   // legitimately sit below it (w43-fv M1 ordering).
   const isValidationGuard = l => /^\s*if \([^)]*\)\s*(queryCheck|noBody)\s*\(/.test(l);
-  const authorizeAt = (lines, from, depth = 6) => {
+  // Union of EVERY authorize() in the window — the first call alone let a
+  // second gate widen silently past the contract (w51-ledger M-1).
+  const collectAuthorize = (lines, from, depth, breakIf = true) => {
+    const found = new Set();
     for (let i = from; i < Math.min(from + depth, lines.length); i++) {
-      if (i !== from && isIf(lines[i]) && !isValidationGuard(lines[i])) break;
-      const m = /authorize\(p,\s*\[([^\]]+)\]/.exec(lines[i]);
-      if (m) return m[1].split(',').map(s => s.trim().replace(/['"]/g, ''));
+      if (i !== from && breakIf && isIf(lines[i]) && !isValidationGuard(lines[i])) break;
+      for (const m of lines[i].matchAll(/authorize\(p,\s*\[([^\]]+)\]/g))
+        for (const r of m[1].split(',')) found.add(r.trim().replace(/['"]/g, ''));
     }
-    return null;
+    return found.size ? [...found] : null;
   };
+  const authorizeAt = (lines, from, depth = 6) => collectAuthorize(lines, from, depth);
   const fabricRoles = name => {
     const idx = fabric.findIndex(l => new RegExp(`^\\s{2}(async )?${name}\\(`).test(l));
     if (idx === -1) return null;
+    const found = new Set();
     for (let i = idx; i < Math.min(idx + 140, fabric.length); i++) {
       if (i !== idx && /^\s{2}(async )?[a-zA-Z_]+\(/.test(fabric[i])) break;
-      const m = /this\.authorize\(p,\s*\[([^\]]+)\]/.exec(fabric[i]);
-      if (m) return m[1].split(',').map(s => s.trim().replace(/['"]/g, ''));
+      for (const m of fabric[i].matchAll(/this\.authorize\(p,\s*\[([^\]]+)\]/g))
+        for (const r of m[1].split(',')) found.add(r.trim().replace(/['"]/g, ''));
       const r = /roles\?*\.includes\('([^']+)'\)/.exec(fabric[i]);
-      if (r && /requireThat/.test(fabric[i])) return [r[1]];
+      if (r && /requireThat/.test(fabric[i])) found.add(r[1]);
     }
-    return null;
+    return found.size ? [...found] : null;
   };
   for (const r of rows) {
-    if (r.roles.length === 1 && NONROLE.has(r.roles[0])) continue;
+    // The row's handler lives in its own listener's dispatch file — an
+    // issuerd contract row cannot borrow server.mjs's audit, and vice
+    // versa (w52-ledger M-6).
+    const lines = r.listener === 'issuerd' ? issuerd : server;
     const segs = r.path.split('/').filter(Boolean);
     const staticSegs = segs.filter(s => !s.startsWith('{'));
     const param = r.path.includes('{');
-    const hi = server.findIndex(l =>
+    const hi = lines.findIndex(l =>
       isIf(l) && l.includes(`req.method === '${r.method.toUpperCase()}'`) &&
-      (l.includes(`path === '${r.path}'`) || (param && /\^\\\//.test(l) && staticSegs.every(s => l.includes(s)))));
+      (l.includes(`path === '${r.path}'`) || l.includes(`url.pathname === '${r.path}'`) || l.includes(`req.url === '${r.path}'`) || (param && /\^\\\//.test(l) && staticSegs.every(s => l.includes(s)))));
+    // The handler window: everything from the dispatch arm until the next
+    // route boundary — this is what auth claims are checked against. Wide
+    // enough to see a credential resolve inside a docstring-heavy handler.
+    const windowEnd = () => { let e = hi === -1 ? hi : hi + 40; for (let i = hi + 1; i < Math.min(hi + 40, lines.length); i++) if (isIf(lines[i]) && !/m\[2\]/.test(lines[i]) && !isValidationGuard(lines[i])) { e = i; break; } return e; };
+    const windowCode = hi === -1 ? '' : lines.slice(hi, windowEnd()).join('\n');
+    if (r.roles.length === 1 && NONROLE.has(r.roles[0])) {
+      // Non-role claims are still contract claims: 'unauthenticated' must
+      // name a handler that runs no auth, 'token holder' must actually
+      // resolve a credential, 'issuer bearer token' must resolve the
+      // issuerd bearer machinery — and no non-role row may hide a role
+      // gate (w51-ledger H-3, w52-ledger M-6).
+      if (hi === -1) { console.error(`route-role parity: ${r.method} ${r.path} — cannot resolve the handler behind a '${r.roles[0]}' claim`); failed = true; continue; }
+      const gate = collectAuthorize(lines, hi, 12);
+      if (r.roles[0] === 'unauthenticated' && (gate || /auth\(req|authenticateToken/.test(windowCode))) { console.error(`route-role parity: ${r.method} ${r.path} — claims unauthenticated but the handler authenticates`); failed = true; continue; }
+      if (r.roles[0] === 'token holder' && !/authenticateToken|auth\(req/.test(windowCode)) { console.error(`route-role parity: ${r.method} ${r.path} — claims token holder but no credential resolves`); failed = true; continue; }
+      if (r.roles[0] === 'issuer bearer token' && !/anyBearer\(|bearerMatches\(|issuerAuthOk\(|bearerDigest\(/.test(windowCode)) { console.error(`route-role parity: ${r.method} ${r.path} — claims issuer bearer token but no bearer gate resolves`); failed = true; continue; }
+      if (r.roles[0] !== 'unauthenticated' && gate) { console.error(`route-role parity: ${r.method} ${r.path} — claims '${r.roles[0]}' but a role gate [${gate}] resolves`); failed = true; continue; }
+      continue;
+    }
+    if (r.listener === 'issuerd' && !(r.roles.length === 1 && r.roles[0] === 'issuer bearer token')) { console.error(`route-role parity: ${r.method} ${r.path} — issuerd rows may only claim 'issuer bearer token'`); failed = true; continue; }
     let code = null;
     if (hi !== -1) {
-      code = authorizeAt(server, hi);
+      code = authorizeAt(lines, hi);
       if (!code) {
-        for (let i = hi; i < Math.min(hi + 12, server.length); i++) {
-          if (i !== hi && isIf(server[i]) && !/m\[2\]/.test(server[i]) && !isValidationGuard(server[i])) break;
+        for (let i = hi; i < Math.min(hi + 12, lines.length); i++) {
+          if (i !== hi && isIf(lines[i]) && !/m\[2\]/.test(lines[i]) && !isValidationGuard(lines[i])) break;
           const verb = segs[segs.length - 1];
-          if (param && !verb.startsWith('{') && !server[i].includes(verb)) continue;
-          const names = [...server[i].matchAll(/fabric\.([a-zA-Z_]+)\(p[\s,)]/g)].map(x => x[1]);
+          if (param && !verb.startsWith('{') && !lines[i].includes(verb)) continue;
+          const names = [...lines[i].matchAll(/fabric\.([a-zA-Z_]+)\(p[\s,)]/g)].map(x => x[1]);
           const vkey = verb.replace(/-/g, '').toLowerCase();
           const name = names.find(n => n.toLowerCase().includes(vkey)) ?? names[0];
           if (name) { code = fabricRoles(name); break; }
@@ -208,6 +237,7 @@ for (const file of textFiles) {
     for (const m of Object.keys(ops)) if (['get', 'post', 'put', 'delete', 'patch'].includes(m)) declared.add(`${m.toUpperCase()} ${norm}`);
   }
   const server = readFileSync('src/server.mjs', 'utf8').split('\n');
+  const issuerd = readFileSync('src/issuerd.mjs', 'utf8').split('\n');
   // A literal alternation group (a|b) expands into one path per arm; every
   // other capture group normalizes to the contract's {} placeholder.
   const expandAlternations = rx => {
@@ -221,43 +251,144 @@ for (const file of textFiles) {
     }
     return paths;
   };
-  for (const line of server) {
-    // Comments cannot carry live dispatch — only the code half counts.
-    // Route dispatch names both req.method and path; guards that mention
-    // the method alone (CSRF, the 405 floor) are not routes (w50-ledger
-    // H-2). Every method arm and every literal/regex arm in a shared
-    // condition is audited, not just the first.
-    const code = line.split('//', 1)[0];
-    if (!/req\.method/.test(code) || !/\bpath\b/.test(code)) continue;
-    const meths = [...code.matchAll(/req\.method\s*===\s*'([A-Z]+)'/g)].map(m => m[1]);
+  // A '//' inside a string literal (URL, template) is not a comment — the
+  // naive split-on-first-// truncated lines and let real route conditions
+  // escape the audit (w51-ledger H-2).
+  const stripComment = l => {
+    let q = null;
+    for (let i = 0; i < l.length - 1; i++) {
+      const c = l[i];
+      if (q) { if (c === '\\') i++; else if (c === q) q = null; continue; }
+      if (c === "'" || c === '"' || c === '`') { q = c; continue; }
+      if (c === '/' && l[i + 1] === '/' && l[i - 1] !== '\\') return l.slice(0, i);
+    }
+    return l;
+  };
+  // Conditions are audited against the ENCLOSING condition too: a route
+  // split across lines or nested under a `// comment`-stripped parent
+  // still resolves against its full effective context (w51-ledger H-2).
+  const routeSeen = (eff, line) => {
+    const meths = [...eff.matchAll(/req\.method\s*===\s*'([A-Z]+)'/g)].map(m => m[1]);
+    const lits = [...eff.matchAll(/(?:\bpath\b|req\.url|url\.pathname)\s*===\s*'([^']+)'/g)].map(m => m[1]);
+    const rxxs = [...eff.matchAll(/\/\^(.+?)\$\/\.(?:exec|test)\((?:path|req\.url|url\.pathname)\)/g)].map(m => m[1]);
     // Every live handler must take an auditable shape — a `!==`, an
     // `includes()` set, an aliased variable, a switch or a handler table
-    // escapes the audit silently (w50-ledger H-2).
-    if (!meths.length) { console.error(`route-spec parity: unauditable method dispatch — ${line.trim().slice(0, 100)}`); failed = true; continue; }
-    const lits = [...code.matchAll(/path\s*===\s*'([^']+)'/g)].map(m => m[1]);
-    const rxxs = [...code.matchAll(/\/\^(.+?)\$\/\.(?:exec|test)\(path\)/g)].map(m => m[1]);
-    // Anchored exec/test and literal equality are the only shapes this
-    // gate can map — path.match/startsWith/unanchored dispatch is live
-    // code the audit cannot see, so it is flagged rather than skipped.
-    if (!lits.length && !rxxs.length) { console.error(`route-spec parity: unauditable path dispatch — ${line.trim().slice(0, 100)}`); failed = true; continue; }
+    // escapes the audit silently (w50-ledger H-2, w51-ledger H-2).
+    if (!meths.length) { console.error(`route-spec parity: unauditable method dispatch — ${line.trim().slice(0, 100)}`); failed = true; return; }
+    if (!lits.length && !rxxs.length) { console.error(`route-spec parity: unauditable path dispatch — ${line.trim().slice(0, 100)}`); failed = true; return; }
     for (const lit of lits)
       for (const m of meths) if (!declared.has(`${m} ${lit}`)) { console.error(`route-spec parity: ${m} ${lit} handled but absent from docs/openapi.json`); failed = true; }
     for (const r of rxxs) {
       const raw = r.replace(/\\\//g, '/');
       for (const p of expandAlternations(raw)) {
-        const norm = p.replace(/\([^()]+\)/g, '{}');
+        // Capture groups AND bare char-class quantifiers both mean 'one
+        // dynamic segment' — normalize either to the contract's {}
+        // placeholder (issuerd's allowlist uses [A-Za-z0-9_-]+ bare).
+        const norm = p.replace(/\([^()]+\)/g, '{}').replace(/\[[^\]]*\][+*]/g, '{}');
         for (const m of meths) if (!declared.has(`${m} ${norm}`)) { console.error(`route-spec parity: ${m} ${norm} handled but absent from docs/openapi.json`); failed = true; }
       }
     }
+  };
+  const auditDispatch = lines => {
+  const pending = [];   // confirmed enclosing conditions
+  const aliases = new Map(); // const x = req.method|req.url|path bindings
+  let tentative = null; // a condition start whose body has not opened yet
+  let depth = 0;
+  for (const line of lines) {
+    const code = stripComment(line);
+    const trimmed = code.trim();
+    // A leading '}' closes enclosing scopes — drop conditions started at
+    // or below the now-closed depth before evaluating this line's context.
+    const lead = /^\s*\}+/.exec(code)?.[0].match(/\}/g)?.length ?? 0;
+    if (lead) { depth = Math.max(0, depth - lead); while (pending.length && pending.at(-1).depth > depth) pending.pop(); tentative = null; }
+    // Simple const aliases of the dispatch names resolve into the
+    // effective text — `const m = req.method` is the canonicalization
+    // pattern, not a hiding place; anything else (req['method'], a
+    // switch, an includes-set) stays invisible and is flagged when it
+    // reaches a serving line (w51-ledger H-2).
+    for (const m of code.matchAll(/\b(?:const|let|var)\s+(\w+)\s*=\s*(req\.method|req\.url|path|url\.pathname)\b/g)) if (m[1] !== 'path' && !aliases.has(m[1])) aliases.set(m[1], m[2]);
+    let eff = pending.map(c => c.text).join(' ') + (tentative ? tentative.text : '') + code;
+    for (const [n, tok] of aliases) eff = eff.replace(new RegExp(`\\b${n}\\b`, 'g'), tok === 'url.pathname' ? 'path' : tok);
+    // Dispatch shapes this gate cannot see are failures, not skips:
+    // switch dispatch, non-bare aliasing, path arms that serve without
+    // any method arm (w51-ledger H-2).
+    if (/\bswitch\s*\([^)]*(?:req\.method|req\.url|path|url\.pathname)/.test(code)) { console.error(`route-spec parity: unauditable switch dispatch — ${line.trim().slice(0, 100)}`); failed = true; }
+    else if (/(?:\bpath\b|req\.url|url\.pathname)\s*===\s*'|\.exec\((?:path|req\.url|url\.pathname)\)/.test(code) && !/req\.method/.test(eff) && /send\(|fabric\.|res\./.test(code)) { console.error(`route-spec parity: path arm with no enclosing method gate — ${line.trim().slice(0, 100)}`); failed = true; }
+    else if (/req\.method/.test(eff) && /\bpath\b|req\.url|url\.pathname/.test(eff)) routeSeen(eff, line);
+    // Track enclosing conditions: an `if (` whose block stays open
+    // past this line governs the lines below it; a balanced line
+    // (single-line handler) closes what it opened and must not leak its
+    // condition onto the next line. A tentative `if (` collects until a
+    // net-opening '{' confirms it or a ';' kills it (multi-line route
+    // conditions, w51-ledger H-2).
+    const opens = (code.match(/\{/g)?.length ?? 0), closes = (code.match(/\}/g)?.length ?? 0) - lead;
+    if (/\bif\s*\(/.test(code)) {
+      if (opens > closes) { if (tentative) { tentative.text += ' ' + code; pending.push(tentative); } else pending.push({ depth: depth + 1, text: code }); }
+      tentative = null;
+    } else if (tentative) {
+      tentative.text += ' ' + code;
+      if (opens > closes) { pending.push(tentative); tentative = null; }
+      else if (code.includes(';')) tentative = null;
+    }
+    depth += opens - closes;
+    if (depth < 0) depth = 0;
+    while (pending.length && pending.at(-1).depth > depth) pending.pop();
   }
+  };
+  auditDispatch(server);
+  // The issuerd daemon's own listener gets the same audit — its contract
+  // is declared in openapi under x-listener, so an undeclared issuerd
+  // dispatch is just as unverifiable as an undeclared fabric one
+  // (w52-ledger M-6).
+  auditDispatch(issuerd);
   // Live HTTP dispatch outside server.mjs escapes this gate entirely — a
-  // second handler file is undocumented live code (w50-ledger H-2).
-  // issuerd.mjs is the consciously-scoped exception: the issuer daemon's
-  // own /v1/issuers contract, a separate process surface described in
-  // docs/ARCHITECTURE.md — not part of the fabric openapi.
-  for (const f of readdirSync('src')) {
-    if (f === 'server.mjs' || f === 'issuerd.mjs' || !f.endsWith('.mjs')) continue;
-    if (/req\.method/.test(readFileSync(`src/${f}`, 'utf8'))) { console.error(`route-spec parity: HTTP method dispatch in src/${f} — outside the audited file`); failed = true; }
+  // second handler file is undocumented live code (w50-ledger H-2). The
+  // scan is recursive: a nested file or a helper script cannot slip a
+  // handler past the audit (w51-ledger H-2).
+  // issuerd.mjs is exempt from THIS outside-scan because auditDispatch()
+  // above already audits its dispatch — it is declared in openapi under
+  // x-listener (w52-ledger M-6). cli.mjs only imports the audited
+  // server.mjs surface; check.mjs is this file.
+  const auditExempt = new Set(['src/server.mjs', 'src/issuerd.mjs', 'src/cli.mjs', 'scripts/check.mjs']);
+  const walk = dir => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = `${dir}/${e.name}`;
+      if (e.isDirectory() && !e.name.startsWith('.')) walk(p);
+      else if (e.isFile() && p.endsWith('.mjs') && !auditExempt.has(p))
+        if (/req\.method|createServer\s*\(/.test(readFileSync(p, 'utf8'))) { console.error(`route-spec parity: HTTP dispatch surface in ${p} — outside the audited file`); failed = true; }
+    }
+  };
+  walk('src'); walk('scripts');
+}
+
+// Query-parameter parity: the runtime allowlist (QUERY_ALLOW in
+// src/server.mjs — method-agnostic) must equal the contract's declared
+// in:'query' parameter set per path. A param the gate accepts but the
+// contract doesn't declare is unverifiable surface; one the contract
+// declares but the gate rejects is a contract lie (w52-ledger L-3).
+{
+  const src = readFileSync('src/server.mjs', 'utf8');
+  const spec = JSON.parse(readFileSync('docs/openapi.json', 'utf8'));
+  const qaBlock = /QUERY_ALLOW\s*=\s*new Map\(\[([\s\S]*?)\]\)/.exec(src);
+  if (!qaBlock) { console.error('query-param parity: QUERY_ALLOW literal not found in src/server.mjs'); failed = true; }
+  else {
+    const gate = new Map();
+    for (const m of qaBlock[1].matchAll(/\[\s*'([^']+)'\s*,\s*\[([^\]]*)\]\s*\]/g))
+      gate.set(m[1], new Set([...m[2].matchAll(/'([^']+)'/g)].map(x => x[1])));
+    const specQueries = new Map();
+    for (const [p, ops] of Object.entries(spec.paths ?? {}))
+      for (const [mth, op] of Object.entries(ops)) {
+        if (!['get', 'post', 'put', 'delete', 'patch'].includes(mth)) continue;
+        const names = (op.parameters ?? []).filter(x => x.in === 'query').map(x => x.name);
+        if (names.length) {
+          const s = specQueries.get(p) ?? new Set(); names.forEach(n => s.add(n)); specQueries.set(p, s);
+        }
+      }
+    const eq = (a, b) => a.size === b.size && [...a].every(x => b.has(x));
+    for (const [p, names] of gate)
+      if (!eq(names, specQueries.get(p) ?? new Set())) { console.error(`query-param parity: ${p} — gate=[${[...names]}] contract=[${[...(specQueries.get(p) ?? [])]}]`); failed = true; }
+    for (const p of specQueries.keys())
+      if (!gate.has(p)) { console.error(`query-param parity: ${p} — contract declares query params the gate rejects`); failed = true; }
   }
 }
 

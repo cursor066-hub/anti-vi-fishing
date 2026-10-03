@@ -233,6 +233,9 @@ test('w5-M8: a wrong method on a documented path is a 405 on every route', async
   const h = await httpFixture(t), spec = JSON.parse(readFileSync('docs/openapi.json', 'utf8'));
   for (const template of Object.keys(ROUTE_METHODS)) assert.ok(spec.paths[template], `route ${template} missing from openapi.json`);
   for (const [template, ops] of Object.entries(spec.paths)) {
+    // Issuerd-listener paths are contracted on the daemon's own port — the
+    // main gate has no route for them and honestly answers 404 (w51b).
+    if (Object.values(ops).every(op => op['x-listener'] === 'issuerd')) continue;
     const wrong = ['GET', 'POST'].find(m => !Object.keys(ops).includes(m.toLowerCase()));
     if (!wrong) continue;
     // Substitute within each param's dispatch charset — a value outside it
