@@ -116,6 +116,14 @@ export function fixture(t, tenants = ['acme', 'globex']) {
   return api;
 }
 export const hasCode = code => e => e?.code === code;
+// Plant an aad_migration marker the way the migration writer itself does:
+// the INSERT arm is guarded on both DBs (w48-fixverify LOW), so seeding
+// evidence state means disarming and re-arming the guard around the write.
+export const plantAadMarker = (db, tenant, value) => {
+  db.exec('DROP TRIGGER IF EXISTS aad_marker_keep_ins');
+  try { db.prepare('INSERT INTO meta_kv VALUES(?,?,?)').run(tenant, 'aad_migration', value); }
+  finally { db.exec("CREATE TRIGGER IF NOT EXISTS aad_marker_keep_ins BEFORE INSERT ON meta_kv WHEN NEW.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END"); }
+};
 // A live constitution can only change through the governed policy.change
 // pipeline — the active row is anchored to its ledger-signed activation
 // (w12 red-team), so tests that need a different policy must certify one.

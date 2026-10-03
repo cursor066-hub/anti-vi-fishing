@@ -212,6 +212,12 @@ test('NFR-PERF-004: the integrated evaluation path sustains >=100 decisions/seco
   assert.equal(bench.asserted_targets.integrated_evaluations_per_second_at_least, true);
   assert.ok(bench.integrated_target_ops_per_second >= 60 && bench.integrated_target_ops_per_second <= 100);
   assert.ok(bench.integrated_evaluation_with_sqlite_audit.best_round_operations_per_second >= bench.integrated_target_ops_per_second);
+  // The artifact must say whether the ABSOLUTE 100/s floor was proven —
+  // passing the scaled gate on a slow box is not proof of the stated
+  // number (w48-ledger F-5).
+  assert.equal(typeof bench.absolute_requirement_floor_100_ops_met, 'boolean');
+  assert.equal(bench.absolute_requirement_floor_100_ops_met, bench.integrated_evaluation_with_sqlite_audit.best_round_operations_per_second >= 100);
+  if (bench.environment_scale >= 0.9) assert.equal(bench.absolute_requirement_floor_100_ops_met, true, 'reference-grade environment must prove the stated 100/s floor');
 });
 
 test('NFR-PERF-001 NFR-PERF-003: the benchmark publishes its environment, separates connector latency and meets its declared targets', () => {
@@ -307,89 +313,20 @@ test('NFR-TST-001: every requirement row carries a verification method, and ever
   const methodIdx = rows[0].indexOf('verification_method'), idIdx = rows[0].indexOf('id'), statusIdx = rows[0].indexOf('status'), limIdx = rows[0].indexOf('limitations');
   assert.ok(methodIdx > 0 && idIdx >= 0 && statusIdx > 0 && limIdx > 0);
   assert.equal(rows.length - 1, 211);
-  // Mirror of the traceability gate's evidence rule: the id must appear
-  // inside the test TITLE of a real test() block that also runs an
-  // assertion call — comments are stripped, so a comment mention cannot
-  // mint evidence, and an id buried in a helper or assertion string is
-  // not a citation either (w25-ledger L1, w41-ledger LOW-2).
-  const stripComments = s => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(?<![:/\w\\])\/\/[^\n]*/g, '');
-  const TITLE = /^\s*(['"`])((?:\\.|(?!\1)[\s\S])*)\1/;
-  const ASSERT_CALL = /\b(?:assert(?:\.\w+)?|requireThat|hasCode|throws|rejects|doesNotThrow|strictEqual|deepStrictEqual|expect)\s*\(/;
-  // Mirror of traceability._is_regex_start/_blank_code: `/` after an operand
-  // is division; after an operator or boundary it opens a regex literal —
-  // literal contents are blanked so their brackets cannot perturb the body
-  // boundary detection below.
-  const isRegexStart = (s, i) => {
-    let j = i - 1;
-    while (j >= 0 && (s[j] === ' ' || s[j] === '\t')) j--;
-    if (j < 0 || s[j] === '\n') return true;
-    const p = s[j];
-    if (p === '"' || p === "'" || p === '`') return false;
-    if ('([{,:;!&|?+*~%^<>=}'.includes(p)) return true;
-    if (/[A-Za-z0-9_$)\]]/.test(p)) {
-      let k = j;
-      while (k >= 0 && /[A-Za-z0-9_$]/.test(s[k])) k--;
-      return ['return', 'typeof', 'case', 'throw', 'do', 'else', 'void', 'delete', 'yield', 'new', 'in', 'of', 'instanceof'].includes(s.slice(k + 1, j + 1));
-    }
-    return true;
-  };
-  const blankCode = s => {
-    const out = s.split(''); let i = 0, instr = null;
-    while (i < s.length) {
-      const c = s[i];
-      if (instr) {
-        if (c === '\\') { out[i] = ' '; if (i + 1 < s.length) out[i + 1] = ' '; i += 2; continue; }
-        if (c === instr) instr = null; else out[i] = ' ';
-        i++; continue;
-      }
-      if (c === '"' || c === "'" || c === '`') { instr = c; i++; continue; }
-      if (c === '/' && isRegexStart(s, i)) {
-        out[i] = ' ';
-        let j = i + 1, inclass = false;
-        for (; j < s.length; j++) {
-          const d = s[j]; out[j] = ' ';
-          if (d === '\\') { if (j + 1 < s.length) out[j + 1] = ' '; j++; continue; }
-          if (d === '[') inclass = true;
-          else if (d === ']') inclass = false;
-          else if ((d === '/' && !inclass) || d === '\n') break;
-        }
-        i = j + 1; continue;
-      }
-      i++;
-    }
-    return out.join('');
-  };
-  const testBodies = src => {
-    // Brace-match every test( call — including looped mid-line ones — on
-    // literal-blanked text, then slice the body from the real source.
-    const blank = blankCode(src);
-    const bodies = [];
-    for (const m of src.matchAll(/\btest\(/g)) {
-      let i = m.index + 4, depth = 0;
-      for (; i < src.length; i++) {
-        const c = blank[i];
-        if (c === '(' || c === '[' || c === '{') depth++;
-        else if (c === ')' || c === ']' || c === '}') { if (!--depth) { bodies.push(src.slice(m.index, i + 1)); break; } }
-      }
-    }
-    return bodies;
-  };
-  const evidence = readdirSync('tests').filter(f => f.endsWith('.test.mjs'))
-    .flatMap(f => testBodies(stripComments(readFileSync(`tests/${f}`, 'utf8')))
-      .map(b => ({ title: TITLE.exec(b.slice(5))?.[2] ?? '', body: b })));
+  // Every non-verified row must carry an honest limitation gap — checked
+  // per row regardless of the execution-binding below.
   for (const cells of rows.slice(1)) {
     const id = cells[idIdx];
     assert.ok(cells.length > methodIdx, `short row: ${id}`);
     assert.ok(cells[methodIdx].trim().length > 0, `empty verification_method in ${id}`);
-    if (cells[statusIdx] === 'VERIFIED_IN_ENGINEERING_PROFILE') {
-      // VERIFIED means a test tagged with this id in its title exists —
-      // the row must not be honourable on prose alone.
-      assert.ok(evidence.some(e => e.title.includes(id) && ASSERT_CALL.test(e.body)), `${id} is VERIFIED but no test titled with it carries an assertion`);
-    } else {
-      // Every non-verified row must carry an honest limitation gap.
-      assert.ok(cells[limIdx].trim().length > 0, `${id} non-verified row lacks a limitations statement`);
-    }
+    assert.ok(cells[statusIdx] === 'VERIFIED_IN_ENGINEERING_PROFILE' || cells[limIdx].trim().length > 0, `${id} non-verified row lacks a limitations statement`);
   }
+  // The citation gate must be the REAL gate, not a reimplemented mirror:
+  // a JS mirror drifts from traceability.py and cannot detect the dead-
+  // evidence shapes the gate rejects (skip/todo options, try/catch
+  // swallows, shadowed no-ops, TAP non-execution — w48-ledger F-3).
+  const gate = spawnSync('python3', ['scripts/traceability.py', '--check'], { encoding: 'utf8' });
+  assert.equal(gate.status, 0, `traceability --check failed:\n${gate.stderr || gate.stdout}`);
 });
 
 test('NFR-TST-003: seeded test data is synthetic and marked as such', t => {
@@ -507,7 +444,12 @@ test('NFR-TST-004: the release gate refuses release while any critical finding i
 
 test('NFR-MNT-004: repository policy requires owner review of every security-critical module', () => {
   const co = readFileSync('.github/CODEOWNERS', 'utf8');
-  for (const path of ['src/fabric.mjs', 'src/canonical.mjs', 'src/keystore.mjs', 'src/ceremony.mjs', 'src/shamir.mjs', 'src/crypto.mjs', 'src/policy.mjs', 'src/server.mjs', 'src/issuerd.mjs', 'src/store.mjs', 'src/runtime.mjs', 'src/datagate.mjs', 'src/secureview.mjs', 'src/advisory.mjs', 'src/connectors.mjs', 'src/bootstrap.mjs', 'src/cli.mjs', 'src/target.mjs', 'src/schema.mjs', 'src/errors.mjs', 'tests/', 'vectors/', 'deploy/', 'docs/SECURITY.md', 'docs/requirements.csv'])
+  // Set equality against the live tree — a hardcoded list drifts silently
+  // as new security-critical modules appear (coverage.mjs and merkle.mjs
+  // passed unowned for two waves — w48-ledger F-2).
+  const ownedSrc = new Set(readdirSync('src').filter(f => f.endsWith('.mjs')).map(f => `src/${f}`));
+  for (const f of ownedSrc) assert.ok(co.includes(f), `CODEOWNERS missing security-critical path: ${f}`);
+  for (const path of ['tests/', 'vectors/', 'deploy/', '.github/', 'docs/SECURITY.md', 'docs/requirements.csv'])
     assert.ok(co.includes(path), `CODEOWNERS missing security-critical path: ${path}`);
 });
 

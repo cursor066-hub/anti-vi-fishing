@@ -194,5 +194,13 @@ for (const file of textFiles) {
 // MANIFEST.sha256 must describe exactly the tracked tree — silent drift fails.
 const mf = spawnSync(process.execPath, ['scripts/manifest.mjs', '--verify'], SPAWN_OPTS);
 if (mf.status !== 0) { console.error(mf.stderr || mf.stdout); failed = true; }
+
+// The ledger honesty gate itself: requirements.csv and the summary must be
+// the exact regeneration of traceability.py, whose evidence binding is
+// execution-bound (cited tests must have passed in reports/tests.tap).
+// Without this step `npm run check` alone proved nothing about the 173
+// VERIFIED rows (w48-ledger F-6).
+const tr = spawnSync('python3', ['scripts/traceability.py', '--check'], SPAWN_OPTS);
+if (tr.status !== 0) { console.error(tr.stderr || tr.stdout); failed = true; }
 console.log(JSON.stringify({ syntax_files: files.length, syntax_and_focused_source_checks: !failed, security_certification: false }));
 if (failed) process.exitCode = 1;

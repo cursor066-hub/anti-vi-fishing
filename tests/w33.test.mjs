@@ -190,7 +190,7 @@ test('w33 FV F5: a shredded capsule tombstone passes the wedge sweep', t => {
 
 // w33-seal O-3: the offline verifier's signer-death window unfolds carried
 // 'key:' revocations — a key killed only inside a seal still counts dead.
-test('w33 seal O3: a carried key revocation kills the key for offline verification', t => {
+test('w33 seal O3: a carried key revocation kills the key — floor-derived claims enforce but never pin a window', t => {
   const h = fixture(t, ['acme']);
   h.ready();
   // Revoke the audit key's actor binding via a key revocation, then corrupt
@@ -200,13 +200,21 @@ test('w33 seal O3: a carried key revocation kills the key for offline verificati
   h.f.revoke(h.p('security'), { kind: 'key', id: auditKid, reason: 'suspect' });
   corruptAt(h, seqOf(h, '%AUTHORITY_REVOKED%'));
   assert.equal(h.f.sealAuditChain(h.p('security')).sealed, true);
+  // The destroyed anchor means the claim carries no attested time: pinning a
+  // death seq would let a planted floor fake a key-death window, so the
+  // fold and the offline extractor both exempt floor-derived 'key:' refs
+  // from the death window (w40-fv F-13, w48-crypto F-w48-2 parity).
   const dead = h.f.store._auditKeyDeaths('acme');
-  assert.ok(dead.has(auditKid), 'the carried key revocation reaches the offline death window');
+  assert.equal(dead.has(auditKid), false, 'a floor-derived key claim never manufactures a death window — planted floors cannot fake signer death');
+  // Fail closed: the unverifiable claim still enforces as a revocation
+  // everywhere the row level consults it — only the window pin is withheld.
+  assert.equal(h.f.revoked('acme', 'key', auditKid), true, 'the floor-derived claim still enforces as revoked');
 });
 
-// w33-fixverify F-5 detail: a floor-derived 'key:' carry is what feeds the
-// death window — the offline and fold verdicts must agree for the same
-// destroyed-revocation state.
+// w33-fixverify F-5 detail: a floor-derived 'key:' carry enforces through
+// idx.revoked (fail closed — the claim may be a real orphaned revocation)
+// while the death window deliberately ignores it — the offline and fold
+// verdicts must agree for the same destroyed-revocation state.
 
 // ---- w33-export findings (export/proof surface) ----
 // F-1: the signed head's residue claims convict deletions of unguarded rows.

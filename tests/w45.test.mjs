@@ -8,7 +8,7 @@ import { chmodSync, statSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { fixture, runtimeInput, runtimeRequest, coverageIdentity } from './helpers.mjs';
+import { fixture, runtimeInput, runtimeRequest, coverageIdentity, plantAadMarker } from './helpers.mjs';
 import { Fabric } from '../src/fabric.mjs';
 import { KeyVault } from '../src/keystore.mjs';
 import { hashBytes, digest } from '../src/canonical.mjs';
@@ -46,7 +46,7 @@ const plantUnsignedMarkerRow = (h, tenant, digests) => {
 test('w45-ledger HIGH-1a: an unsigned planted marker row cannot suppress ghost-marker attestation', t => {
   const h = fixture(t);
   const markerValue = JSON.stringify({ migrated: 7 });
-  h.f.store.db.prepare("INSERT INTO meta_kv VALUES('ghost','aad_migration',?)").run(markerValue);
+  plantAadMarker(h.f.store.db, 'ghost', markerValue);
   plantUnsignedMarkerRow(h, 'acme', [hashBytes(markerValue)]);
   h.close();
   // The plant convicts the tail, so the marker attestation cannot write
@@ -69,7 +69,7 @@ test('w45-ledger HIGH-1a: an unsigned planted marker row cannot suppress ghost-m
 test('w45-ledger HIGH-1b: an unsigned planted marker row cannot suppress the configured-tenant AAD_MIGRATION', t => {
   const h = fixture(t);
   const markerValue = JSON.stringify({ migrated: 3 });
-  h.f.store.db.prepare("INSERT INTO meta_kv VALUES('acme','aad_migration',?)").run(markerValue);
+  plantAadMarker(h.f.store.db, 'acme', markerValue);
   plantUnsignedMarkerRow(h, 'acme', [hashBytes(markerValue)]);
   h.close();
   // Same doctrine on the configured path: the unsigned marker-shaped row
@@ -90,7 +90,7 @@ test('w45-ledger HIGH-1b: an unsigned planted marker row cannot suppress the con
 
 test('w45-ledger HIGH-1d: marker attestation is asserted, not just the delete — replay dedupes against the verified anchor', t => {
   const h = fixture(t);
-  h.f.store.db.prepare("INSERT INTO meta_kv VALUES('ghost','aad_migration',?)").run(JSON.stringify({ migrated: 1 }));
+  plantAadMarker(h.f.store.db, 'ghost', JSON.stringify({ migrated: 1 }));
   h.close();
   const f2 = new Fabric(h.setup.config, h.directory, h.now);
   try {
@@ -104,7 +104,7 @@ test('w45-ledger HIGH-1d: marker attestation is asserted, not just the delete �
 test('w45-ledger HIGH-1c: a ghost marker on the honest tail still attests — the planted-decoy variant is covered by HIGH-1a/1b', t => {
   const h = fixture(t);
   const markerValue = JSON.stringify({ migrated: 5 });
-  h.f.store.db.prepare("INSERT INTO meta_kv VALUES('ghost','aad_migration',?)").run(markerValue);
+  plantAadMarker(h.f.store.db, 'ghost', markerValue);
   h.close();
   // A VERIFIED ghost attestation lands even when unrelated residue sits on
   // the chain — replay dedupe consults the verified anchor, so the second

@@ -8,7 +8,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
-import { fixture, runtimeInput, runtimeRequest, hasCode } from './helpers.mjs';
+import { fixture, runtimeInput, runtimeRequest, hasCode, plantAadMarker } from './helpers.mjs';
 import { Fabric } from '../src/fabric.mjs';
 import { createIssuerServer } from '../src/issuerd.mjs';
 import { ISSUER_RULES, issuerRecords } from '../src/bootstrap.mjs';
@@ -17,7 +17,7 @@ import { generateKey } from '../src/crypto.mjs';
 // --- fixverify HIGH-1: the aad_migration marker is update-guarded too ---
 test('w47b store: in-place UPDATE of the evidence marker aborts in-band', t => {
   const h = fixture(t);
-  h.f.store.db.prepare("INSERT INTO meta_kv VALUES('acme','aad_migration','{\"migrated\":1}')").run();
+  plantAadMarker(h.f.store.db, 'acme', '{\"migrated\":1}');
   assert.throws(
     () => h.f.store.db.prepare("UPDATE meta_kv SET value='{}' WHERE tenant='acme' AND key='aad_migration'").run(),
     e => /aad migration marker is evidence/.test(e?.message ?? ''),
@@ -27,7 +27,7 @@ test('w47b store: in-place UPDATE of the evidence marker aborts in-band', t => {
 
 test('w47b target: marker UPDATE guard exists on the target store too', t => {
   const h = fixture(t);
-  h.f.target.db.prepare("INSERT INTO meta_kv VALUES('acme','aad_migration','{\"migrated\":1}')").run();
+  plantAadMarker(h.f.target.db, 'acme', '{\"migrated\":1}');
   assert.throws(
     () => h.f.target.db.prepare("UPDATE meta_kv SET value='{}' WHERE tenant='acme' AND key='aad_migration'").run(),
     e => /aad migration marker is evidence/.test(e?.message ?? ''));

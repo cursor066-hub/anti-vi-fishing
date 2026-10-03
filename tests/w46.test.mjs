@@ -5,7 +5,7 @@
 // shapes come from the auditor PoCs.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fixture } from './helpers.mjs';
+import { fixture, plantAadMarker } from './helpers.mjs';
 import { Fabric } from '../src/fabric.mjs';
 import { hashBytes } from '../src/canonical.mjs';
 
@@ -33,7 +33,7 @@ test('w46-store M-1: a rolled-back revocation cannot keep minting phantom deaths
 
 test('w46-store M-2a: the aad_migration marker is delete-guarded on the live ledger', t => {
   const h = fixture(t);
-  h.f.store.db.prepare("INSERT INTO meta_kv VALUES('acme','aad_migration','{\"migrated\":1}')").run();
+  plantAadMarker(h.f.store.db, 'acme', '{\"migrated\":1}');
   assert.throws(() => h.f.store.db.prepare("DELETE FROM meta_kv WHERE tenant='acme' AND key='aad_migration'").run(),
     e => /aad migration marker is evidence/.test(e?.message ?? ''), 'a live delete of the evidence marker aborts in-band');
   h.close();
@@ -41,7 +41,7 @@ test('w46-store M-2a: the aad_migration marker is delete-guarded on the live led
 
 test('w46-store M-2b: the marker guard exists on the target store too', t => {
   const h = fixture(t);
-  h.f.target.db.prepare("INSERT INTO meta_kv VALUES('acme','aad_migration','{\"migrated\":1}')").run();
+  plantAadMarker(h.f.target.db, 'acme', '{\"migrated\":1}');
   assert.throws(() => h.f.target.db.prepare("DELETE FROM meta_kv WHERE tenant='acme' AND key='aad_migration'").run(),
     e => /aad migration marker is evidence/.test(e?.message ?? ''), 'target-side evidence marker aborts on delete');
   h.close();
@@ -52,7 +52,7 @@ test('w46-store M-2c: sanctioned post-attest cleanup still clears the marker thr
   // A configured-tenant marker attests on the next open, then drops —
   // the guard's drop+recreate path is the sanctioned delete (w45-ledger
   // HIGH-1d parity exercised through the new guard).
-  h.f.store.db.prepare("INSERT INTO meta_kv VALUES('acme','aad_migration',?)").run(JSON.stringify({ migrated: 2 }));
+  plantAadMarker(h.f.store.db, 'acme', JSON.stringify({ migrated: 2 }));
   h.close();
   const f2 = new Fabric(h.setup.config, h.directory, h.now);
   try {
@@ -60,7 +60,7 @@ test('w46-store M-2c: sanctioned post-attest cleanup still clears the marker thr
     const trig = f2.store.db.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='aad_marker_keep'").get();
     assert.ok(trig, 'the guard is recreated after the sanctioned delete');
     assert.throws(() => {
-      f2.store.db.prepare("INSERT INTO meta_kv VALUES('acme','aad_migration','{}')").run();
+      plantAadMarker(f2.store.db, 'acme', '{}');
       f2.store.db.prepare("DELETE FROM meta_kv WHERE tenant='acme' AND key='aad_migration'").run();
     }, e => /aad migration marker is evidence/.test(e?.message ?? ''), 'the recreated guard still fires');
   } finally { f2.close(); }
@@ -105,7 +105,7 @@ test('w46-ledger HIGH-1: a dup-keyed graft cannot launder marker attestation', t
   const h = fixture(t);
   const tenant = 'acme';
   const markerValue = JSON.stringify({ migrated: 4 });
-  h.f.store.db.prepare("INSERT INTO meta_kv VALUES('acme','aad_migration',?)").run(markerValue);
+  plantAadMarker(h.f.store.db, 'acme', markerValue);
   const D = hashBytes(markerValue);
   // Graft a forged first 'payload' member onto any signed row — the SQL
   // narrowing saw its type+digest while verifySigned passed on the last

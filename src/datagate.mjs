@@ -160,7 +160,12 @@ export function reconstructionCheck(touchDb, catalogDb, { tenant, subject, datas
   // must not write touch rows before egress actually commits (w10-datagate F3).
   if (record) {
     const ins = touchDb.prepare('INSERT INTO data_access VALUES(?,?,?,?,?,?)');
-    for (const row of rows) for (const c of columns) ins.run(tenant, subject, dataset, row, c, now);
+    // A silent RAISE(IGNORE) trigger on the mirror table would undercount
+    // disclosure while the caller reads success — every touch must land
+    // (w48-fixverify CRITICAL).
+    let landed = 0;
+    for (const row of rows) for (const c of columns) landed += ins.run(tenant, subject, dataset, row, c, now).changes;
+    requireThat(landed === rows.length * columns.length, 'INV-409-INTEGRITY', 'Data-access mirror write abandoned — ledger write refused by a foreign trigger', 409);
   }
   return { allowed: true, row_count: rowCount, column_count: colCount, coverage_percent: sealDropped ? 100 : coveragePercent, dataset_coverage_percent: sealDropped ? 100 : datasetCoverage };
 }

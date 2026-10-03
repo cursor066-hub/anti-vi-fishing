@@ -71,8 +71,40 @@ _limitation_overrides = {
 'KEY-006': 'The stated acceptance artifact exists — docs/ALGORITHM-AGILITY.md is the inventory mapping each algorithm use to an approved profile and transition plan, bound to SUITES by test. The real residual is that no post-quantum suite is implemented; introducing one is in-repo code work (ML-DSA ships in Node 24 crypto), not an external blocker — the row stays PARTIAL on that honest basis.',
 'NFR-CMP-001': 'A self-labelled control-map document is in-repo producible (ASVS-CAPEC-MAP already carries the self-assessed class); only an authoritative, legal-reviewed mapping is external. The named minimum was deliberately deferred until an accountable owner exists.',
 'NFR-CMP-003': 'The policy text and internal workflow document are in-repo producible; SECURITY.md deliberately refuses a fictitious reporting contact. The stated minimum was deliberately deferred until an accountable entity exists.',
+'NFR-PERF-004': 'VERIFIED conditioned on environment_scale >= 0.9 in the committed benchmark: the live gate scales the asserted floor to the runner (>=60/s), but the row stands as proven only when the artifact also met the absolute 100/s bound — recorded honestly as absolute_requirement_floor_100_ops_met. A regenerated artifact on slower silicon keeps the scaled gate green while reporting the absolute bound unproven.',
 }
 tests = sorted((root/'tests').glob('*.test.mjs'), key=lambda p: p.name) + [root/'scripts/simulate.mjs', root/'scripts/ai-eval.mjs']
+# Execution binding: a citing test must have actually RUN — appear as
+# `ok N - <title>` without an unfinished-marker suffix in the committed
+# TAP report —
+# before it can mint VERIFIED evidence (w48-ledger F-1). The evidence is
+# the last RECORDED pipeline run: prefer the TAP committed at HEAD —
+# a stray or half-written worktree artifact (an interrupted regen left
+# a failing TAP) must not poison or be laundered through this check;
+# fall back to the working file only when no committed TAP exists yet.
+import subprocess as _sp
+_tap_text = None
+try:
+    _r = _sp.run(['git', 'show', 'HEAD:reports/tests.tap'], cwd=root, capture_output=True, text=True)
+    if _r.returncode == 0 and _r.stdout.strip(): _tap_text = _r.stdout
+except OSError: pass
+if _tap_text is None:
+    _tap = root / 'reports' / 'tests.tap'
+    assert _tap.exists(), 'no TAP evidence at HEAD and no reports/tests.tap — nothing to bind citations against'
+    _tap_text = _tap.read_text(errors='replace')
+_passed_titles = set()
+for _line in _tap_text.splitlines():
+    _m = re.match(r'^ok\s+\d+\s+-\s+(.*?)(?:\s+#\s*(?:SKIP|TO' + 'DO)\b.*)?$', _line)
+    if _m and not re.search(r'#\s*(?:SKIP|TO' + 'DO)\b', _line):
+        _passed_titles.add(_m.group(1).strip())
+def _title_ran(title):
+    # An interpolated template title (`RUN-002 DAT-004: ${field} …`) expands
+    # to several TAP lines — match each literal segment in order
+    # (w48-ledger F-1).
+    parts = re.split(r'\$\{[^}]*\}', title.strip())
+    if len(parts) == 1: return title.strip() in _passed_titles
+    pat = re.compile('.*'.join(re.escape(p) for p in parts))
+    return any(pat.fullmatch(t) for t in _passed_titles)
 # A citation must name the requirement inside a real test() block that also
 # runs a real assertion CALL EXPRESSION. Comments are stripped first, so an
 # ID or the word 'assert' sitting in a comment cannot mint evidence —
@@ -86,7 +118,13 @@ def _strip_comments(text):
     # A backslash before `//` means an escaped slash inside a regex literal
     # (e.g. `mongodb:\/\/`), never a comment (w39-ledger F7).
     return re.sub(r'(?m)(?<![:/\w\\])//[^\n]*', '', text)
-_ASSERT_CALL = re.compile(r'\b(?:assert(?:\.\w+)?|requireThat|hasCode|throws|rejects|doesNotThrow|strictEqual|deepStrictEqual|expect)\s*\(')
+# Bare tokens (expect/throws/rejects/strictEqual/…) are NOT assert calls —
+# a `const expect = () => {}` inside the body shadows them to no-ops while
+# still minting evidence (w48-ledger F-1). Only names bound by the suite's
+# real imports count, and a body-scope shadow of those names is stripped
+# before matching (same finding).
+_ASSERT_CALL = re.compile(r'\b(?:assert(?:\.\w+)?|requireThat|hasCode)\s*\(')
+_SHADOWED_ASSERT = re.compile(r'\b(?:const|let|var|function)\s+(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b')
 def _is_regex_start(text, i):
     # `/` after an operand char is division; after an operator/keyword or at a
     # boundary it opens a regex literal.
@@ -139,10 +177,12 @@ def _test_bodies(text):
     # Exact per-test bodies: brace-match each test( call on the literal-blanked
     # text, then slice the body from the real text so a requirement ID inside a
     # shared helper can no longer mint evidence for a neighbouring test
-    # (w39-ledger F7).
+    # (w39-ledger F7). test.skip/test.todo calls and a {skip:...}/{todo:...}
+    # options argument mark the whole call non-evidence — node --test reports
+    # them green while their asserts never run (w48-ledger F-1).
     blanked = _blank_code(text)
     bodies = []
-    for m in re.finditer(r'\btest\(', blanked):
+    for m in re.finditer(r'\btest\s*(?:\.\s*(skip|todo)\s*)?\(', blanked):
         i = m.end() - 1  # the '('
         depth = 0
         while i < len(blanked):
@@ -151,9 +191,22 @@ def _test_bodies(text):
             elif c in ')]}':
                 depth -= 1
                 if depth == 0:
-                    bodies.append(text[m.start():i + 1]); break
+                    body = text[m.start():i + 1]
+                    if not m.group(1) and not _options_skip(body):
+                        bodies.append(body)
+                    break
             i += 1
     return bodies
+_OPT_TITLE = re.compile(r"\s*test\(\s*(['\"`])((?:\\.|(?!\1)[\s\S])*)\1")
+def _options_skip(body):
+    # Second-arg options object: test(name, {skip: ...}|{todo: ...}, fn) is
+    # not execution-bound evidence — a skipped test exits green with its
+    # asserts unrun (w48-ledger F-1).
+    t = _OPT_TITLE.match(body)
+    if not t: return False
+    rest = body[t.end():].lstrip()
+    if not rest.startswith(',') or not rest[1:].lstrip().startswith('{'): return False
+    return bool(re.search(r'\b(?:skip|todo)\s*:', rest))
 def _test_title(body):
     # The first string literal after `test(` is the title — a requirement
     # ID must name the test it evidences, not merely appear somewhere in
@@ -221,6 +274,16 @@ def _live_code(text):
             k = text.find(';', m.end())
             if b != -1 and (k == -1 or b < k): spans.append((m.start(), _paren_end(text, b)))
             elif k != -1: spans.append((m.start(), k + 1))  # expression-body arrow: dead to statement end
+    for m in re.finditer(r'\btry\s*\{', text):
+        # An assert inside try{}…catch{} can never fail the test — the catch
+        # swallows its own evidence. The catch BLOCK's asserts stay live:
+        # they execute when the try leg throws and can still fail
+        # (w48-ledger F-1). try{}…finally{} keeps its asserts — no swallow.
+        j = _paren_end(text, text.index('{', m.start()))
+        k = j
+        while k < len(text) and text[k] in ' \t\n': k += 1
+        if text[k:k + 5] == 'catch':
+            spans.append((m.start(), j))
     out = list(text)
     for a, b in spans:
         for i in range(a, min(b, len(out))): out[i] = ' '
@@ -230,8 +293,15 @@ def _asserts(body):
     # 'expect(' sitting inside a string/template/regex literal is dead
     # text, not an assertion — only real call syntax survives blanking
     # (w43-fv M3), and only asserts in code that can actually run count
-    # (w44-fixverify F-6).
-    return _ASSERT_CALL.search(_live_code(_blank_code(body)))
+    # (w44-fixverify F-6). A body-scope shadow (const assert = () => {})
+    # neutralizes its own name before matching (w48-ledger F-1).
+    live = _live_code(_blank_code(body))
+    # Shadow detection runs on the UNLIVENED body — _live_code may blank
+    # the declaration itself ('assert.equal' isn't a call of bare
+    # 'assert'), hiding the shadow it created (w48-ledger F-1).
+    for name in _SHADOWED_ASSERT.findall(_blank_code(body)):
+        live = re.sub(r'\b' + re.escape(name) + r'(?:\.\w+)?\s*\(', '(', live)
+    return _ASSERT_CALL.search(live)
 def evidence_blocks(path):
     text = path.read_text()
     if not path.name.endswith('.test.mjs'):
@@ -248,6 +318,12 @@ for row in rows:
     # docs sentinel is honest evidence for PARTIAL/BLOCKED rows only
     # (w39-ledger F6).
     assert row['id'] not in verified or matches, f"{row['id']} is VERIFIED but cites no asserting test body"
+    # …and the citing test must have PASSED in the suite that produced
+    # tests.tap — a skipped/todo test is not evidence (w48-ledger F-1).
+    if row['id'] in verified:
+        citing_titles = {_test_title(b).strip() for p in tests if p.name.endswith('.test.mjs')
+                         for b in evidence_blocks(p) if row['id'] in _test_title(b)}
+        assert any(_title_ran(t) for t in citing_titles), f"{row['id']} is VERIFIED but none of its citing tests passed in reports/tests.tap (skip/todo is not evidence)"
     # Evidence lists only the files that literally name the requirement —
     # corpus-level artifacts would be boilerplate on every row (w6-ledger S3).
     status = 'VERIFIED_IN_ENGINEERING_PROFILE' if row['id'] in verified else 'NOT_IMPLEMENTED' if row['id'] in not_implemented else 'BLOCKED_EXTERNAL' if row['id'] in external else 'PARTIAL'

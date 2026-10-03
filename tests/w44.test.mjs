@@ -9,7 +9,7 @@ import http from 'node:http';
 import { execFileSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { fixture, hasCode, runtimeInput, runtimeRequest } from './helpers.mjs';
+import { fixture, hasCode, runtimeInput, runtimeRequest, plantAadMarker } from './helpers.mjs';
 import { createServer } from '../src/server.mjs';
 import { Fabric } from '../src/fabric.mjs';
 import { KeyVault } from '../src/keystore.mjs';
@@ -226,7 +226,7 @@ test('w44 F-8: a real disclosure entry does not suppress journal_missing attesta
 // ============================================================================
 test('w44 L-5: planted aad_migration marker attests digests only, never counts', t => {
   const h = fixture(t);
-  h.f.store.db.prepare("INSERT INTO meta_kv VALUES('acme','aad_migration',?)").run(JSON.stringify({ migrated: 4242, transplants: 0, ambiguous: 0, skipped: 0 }));
+  plantAadMarker(h.f.store.db, 'acme', JSON.stringify({ migrated: 4242, transplants: 0, ambiguous: 0, skipped: 0 }));
   h.reconfigure(() => {});
   const rows = h.f.store.db.prepare("SELECT envelope FROM audit WHERE tenant='acme' AND envelope LIKE '%AAD_MIGRATION%'").all();
   assert.ok(rows.length >= 1, 'planted marker produced the attestation');
@@ -354,7 +354,7 @@ test('w44 H-6: usage PK squat with divergent fields screams; identical mirror ad
 
 test('w44-store H-1/M-1: a ghost-tenant aad_migration marker is attested once, then cleared — never a boot wedge', t => {
   const h = fixture(t);
-  h.f.store.db.prepare("INSERT INTO meta_kv VALUES('ghost','aad_migration',?)").run(JSON.stringify({ migrated: 1 }));
+  plantAadMarker(h.f.store.db, 'ghost', JSON.stringify({ migrated: 1 }));
   h.close();
   const f2 = new Fabric(h.setup.config, h.directory, h.now);
   try {
@@ -368,7 +368,7 @@ test('w44-store H-1/M-1: a ghost-tenant aad_migration marker is attested once, t
   // second anchor (w44-store M-1).
   const f3 = new Fabric(h.setup.config, h.directory, h.now);
   try {
-    f3.store.db.prepare("INSERT INTO meta_kv VALUES('ghost','aad_migration',?)").run(JSON.stringify({ migrated: 1 }));
+    plantAadMarker(f3.store.db, 'ghost', JSON.stringify({ migrated: 1 }));
     f3.close();
     const f4 = new Fabric(h.setup.config, h.directory, h.now);
     try {
@@ -380,7 +380,7 @@ test('w44-store H-1/M-1: a ghost-tenant aad_migration marker is attested once, t
 
 test('w44-store H-1b: an Infinity-valued marker parses as evidence, never wedges as INV-400', t => {
   const h = fixture(t);
-  h.f.store.db.prepare("INSERT INTO meta_kv VALUES('acme','aad_migration',?)").run('{"migrated":1e309}');
+  plantAadMarker(h.f.store.db, 'acme', '{"migrated":1e309}');
   h.close();
   const f2 = new Fabric(h.setup.config, h.directory, h.now);
   try {

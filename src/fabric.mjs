@@ -71,6 +71,7 @@ export class Fabric {
   // not ride a first-read cache forever.
   #auditSigners = {};
   #pendingChainHeads = null;
+  #headFlushStarved = null;
   // Per-tx-depth snapshots of #pendingChainHeads — restored on savepoint
   // rollback so a doomed append never clobbers the outer head (w29-fv F12).
   #pendingHeadStack = null;
@@ -253,7 +254,7 @@ export class Fabric {
     // A bare store.tx commit is a real commit edge too — audit() self-wraps
     // in one when no fabric transaction is open, and the pending head must
     // not wait for a later edge (w28-store F2, w28-regression w25/w27).
-    this.store.onTxCommit = () => { try { this._flushChainHeads(); } catch { /* re-buffered — the next edge retries */ } };
+    this.store.onTxCommit = () => this._flushChainHeadsGuarded();
     // Pending heads ride the same tx boundary as the anchor floor: a
     // savepoint that rolls back must restore the note map — otherwise the
     // doomed append's note clobbers the outer committed append's head and
@@ -390,14 +391,17 @@ export class Fabric {
     // live deployment.
     const markerGuardSql = "CREATE TRIGGER aad_marker_keep BEFORE DELETE ON meta_kv WHEN OLD.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END";
     const markerGuardUpdSql = "CREATE TRIGGER aad_marker_keep_upd BEFORE UPDATE ON meta_kv WHEN OLD.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END";
+    const markerGuardInsSql = "CREATE TRIGGER aad_marker_keep_ins BEFORE INSERT ON meta_kv WHEN NEW.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END";
     const dropAadMarker = (db, t) => {
       db.exec('DROP TRIGGER IF EXISTS aad_marker_keep');
       db.exec('DROP TRIGGER IF EXISTS aad_marker_keep_upd');
+      db.exec('DROP TRIGGER IF EXISTS aad_marker_keep_ins');
       try { db.prepare("DELETE FROM meta_kv WHERE tenant=? AND key='aad_migration'").run(t); }
       catch (e) { if (/no such (table|column)|malformed|not a database/i.test(e?.message ?? '')) throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e }); throw e; }
       finally {
         db.exec(`CREATE TRIGGER IF NOT EXISTS ${markerGuardSql.slice('CREATE TRIGGER '.length)}`);
         db.exec(`CREATE TRIGGER IF NOT EXISTS ${markerGuardUpdSql.slice('CREATE TRIGGER '.length)}`);
+        db.exec(`CREATE TRIGGER IF NOT EXISTS ${markerGuardInsSql.slice('CREATE TRIGGER '.length)}`);
       }
     };
     for (const t of new Set([...this.store.aadMigration.keys(), ...this.target.aadMigration.keys(), ...migPending.keys()])) {
@@ -468,6 +472,24 @@ export class Fabric {
         if (!Object.hasOwn(this.store.auditSigners, t)) continue;
         try { this.store.tx(() => { this.store.audit(t, 'STORE_SCHEMA_RESIDUE', 'system', 'fabric-open', { reason: 'meta_kv-empty-under-nonempty-audit', detail: 'dropped meta_kv recreated empty — prior markers and fold_floor lost' }, this.clock()); }); }
         catch (e) { if (!String(e?.code ?? '').startsWith('INV-409')) throw e; /* wedged chain — residue waits for a healed open */ }
+      }
+    }
+    // Stray triggers are dropped silently at open on both stores — name
+    // every drop on the chain instead. A file-writer's planted trigger
+    // payload must leave signed residue, not just vanish (w48-fixverify
+    // MEDIUM; the drops happen inside the store constructors before the
+    // fabric can sign, so the residue lands on the first configured
+    // tenant here).
+    {
+      const residue = [['store.db', this.store._strayTriggers], ['target.db', this.target._strayTriggers]]
+        .filter(([, names]) => names?.length);
+      if (residue.length) {
+        const attestor = Object.keys(this.store.auditSigners)[0];
+        if (attestor) {
+          const detail = residue.map(([db, names]) => `${db}: ${names.join(', ')}`).join('; ');
+          try { this.store.tx(() => { this.store.audit(attestor, 'STORE_SCHEMA_RESIDUE', 'system', 'fabric-open', { reason: 'foreign-triggers-dropped', detail }, this.clock()); }); }
+          catch (e) { if (!String(e?.code ?? '').startsWith('INV-409')) throw e; /* wedged chain — residue waits for a healed open */ }
+        }
       }
     }
     this.runtime = new RuntimeGate(this);
@@ -822,7 +844,24 @@ export class Fabric {
     // A committed bare append's flush can lose the lock race — the pending
     // heads are re-buffered by restore() and retried on the next edge; the
     // committed write is never reported back as an error (w28-store F5).
-    if (!this.store.db.isTransaction) { try { this._flushChainHeads(); } catch { /* re-buffered; the next append or commit edge retries */ } }
+    if (!this.store.db.isTransaction) this._flushChainHeadsGuarded();
+  }
+  // Flush failures are swallowed at every commit edge by design (a
+  // committed write is never reported back as an error) — but a
+  // permanently-starved flush is tamper evidence, not contention: a
+  // lock file pinned in the future freezes the durable anchors while
+  // commits keep landing and the unwitnessed window grows without bound
+  // (w48-store W48-1). Count consecutive losses and name them on the
+  // chain at the next transaction boundary — a file-side marker can be
+  // deleted, a signed ledger row cannot.
+  _flushChainHeadsGuarded() {
+    try { this._flushChainHeads(); this.#headFlushStarved = null; }
+    catch (e) {
+      const s = this.#headFlushStarved ??= { count: 0, tenants: new Set(), code: e?.code ?? 'ERR' };
+      s.count++;
+      s.code = e?.code ?? s.code;
+      for (const t of this.#pendingChainHeads?.keys() ?? []) s.tenants.add(t);
+    }
   }
   // Single mkdir-dir lock covering BOTH chain-heads files. The owner token
   // keeps a stale-expired holder that resumes from deleting the NEW
@@ -839,7 +878,10 @@ export class Fabric {
         // An expired stale lock dir is cleared and retried; a live-held
         // lock past the deadline reports the honest gate code — never a
         // raw EEXIST off the commit edge (w27-fixverify W27-10).
-        try { if (Date.now() - statSync(lockPath).mtimeMs > 8_000) rmSync(lockPath, { recursive: true, force: true }); } catch { /* lost the race to clear it */ }
+        // A lock dir pinned in the FUTURE is stale too — a write-capable
+        // attacker can otherwise mint an immortal lock that starves every
+        // flush while commits keep landing (w48-store W48-1).
+        try { if (Math.abs(Date.now() - statSync(lockPath).mtimeMs) > 8_000) rmSync(lockPath, { recursive: true, force: true }); } catch { /* lost the race to clear it */ }
         if (Date.now() > deadline) throw new InvariantError('INV-503-GATE', 'Chain-head file lock held by a live peer beyond the deadline', 503);
         const spin = Date.now() + Math.min(2 * (attempt + 1), 20);
         while (Date.now() < spin) { /* bounded backoff; the locked section is microseconds */ }
@@ -1504,11 +1546,47 @@ export class Fabric {
     // Write order: keystore first, master.key last — the master file is the
     // commit marker, so a crash mid-write can never pair a stale master key
     // with a keystore it did not wrap (w6-ceremony F12).
-    this.vault.save(join(this.directory, 'keystore.json'));
-    if (!existsSync(join(this.directory, 'master.key'))) {
-      this.#writeFileSynced(join(this.directory, 'master.key.tmp'), canonical({ format: 'IF-MASTERKEY-1', warning: 'software vault master key; custody is the operator\'s responsibility', master_key: this.vault.masterKey.toString('base64url') }) + '\n');
-      renameSync(join(this.directory, 'master.key.tmp'), join(this.directory, 'master.key'));
+    // Two instances persisting concurrently used to diverge: the second
+    // overwrote keystore.json under ITS master while skipping the existing
+    // master.key — a permanently mismatched pair and a deterministic
+    // INV-503-CONFIG wedge on next open (w48-store W48-2). Lock the whole
+    // persist, and when master.key already exists verify the pair BEFORE
+    // committing: a divergent master's keystore must scream immediately
+    // rather than clobber the consistent pair the other instance wrote.
+    const lockPath = join(this.directory, 'vault-persist.lock');
+    const deadline = Date.now() + 4_000;
+    for (let attempt = 0;; attempt++) {
+      try { mkdirSync(lockPath); break; }
+      catch (err) {
+        if (err?.code !== 'EEXIST') throw err;
+        try { if (Math.abs(Date.now() - statSync(lockPath).mtimeMs) > 8_000) rmSync(lockPath, { recursive: true, force: true }); } catch { /* lost the race to clear it */ }
+        if (Date.now() > deadline) throw new InvariantError('INV-503-GATE', 'Vault persist lock held by a live peer beyond the deadline', 503);
+        const spin = Date.now() + Math.min(2 * (attempt + 1), 20);
+        while (Date.now() < spin) { /* bounded backoff; the locked section is milliseconds */ }
+      }
+    }
+    const ksTmp = join(this.directory, `keystore.${process.pid}.${randomBytes(8).toString('hex')}.tmp`);
+    const ksPath = join(this.directory, 'keystore.json'), masterPath = join(this.directory, 'master.key');
+    try {
+      this.vault.save(ksTmp);
+      if (existsSync(masterPath)) {
+        // Verify BEFORE the rename commits: the keystore about to replace
+        // the file must unwrap under the master already on disk — refuse
+        // to clobber a consistent pair with a divergent master's write.
+        try { KeyVault.load(ksTmp, JSON.parse(readFileSync(masterPath, 'utf8'))?.master_key); }
+        catch (e) { rmSync(ksTmp, { force: true }); throw new InvariantError('INV-503-CONFIG', 'Persisted keystore does not unwrap under the existing master.key — concurrent divergent persist or tamper evidence', 503, { cause: e }); }
+        renameSync(ksTmp, ksPath);
+      } else {
+        renameSync(ksTmp, ksPath);
+        // Randomized tmp name: a fixed one is a squat target and a stale
+        // leftover masquerades as an in-flight write (w48-store W48-2).
+        const mkTmp = join(this.directory, `master.key.${process.pid}.${randomBytes(8).toString('hex')}.tmp`);
+        this.#writeFileSynced(mkTmp, canonical({ format: 'IF-MASTERKEY-1', warning: 'software vault master key; custody is the operator\'s responsibility', master_key: this.vault.masterKey.toString('base64url') }) + '\n');
+        renameSync(mkTmp, masterPath);
+      }
       this.#fsyncDir();
+    } finally {
+      try { rmSync(lockPath, { recursive: true, force: true }); } catch { /* a peer cleared or took the lock */ }
     }
   }
   // Live, failure-domain-deduplicated custodian consent for a ceremony:
@@ -2314,11 +2392,14 @@ export class Fabric {
           // fake a key death (w38-store F-2).
           if (rv?.floor_derived !== true && typeof rv?.reference === 'string') {
             revokedSeen.add(rv.reference);
-            if (rv.reference.startsWith('key:')) keyDeadAt.set(rv.reference.slice(4), Math.min(keyDeadAt.get(rv.reference.slice(4)) ?? Infinity, r.seq));
+            // Carried deaths pin at orig_seq like the fold — pinning at
+            // the carrying row's seq lets the prescan accept rows the
+            // fold itself refuses (w48-crypto F-w48-3).
+            if (rv.reference.startsWith('key:')) keyDeadAt.set(rv.reference.slice(4), Math.min(keyDeadAt.get(rv.reference.slice(4)) ?? Infinity, typeof rv.orig_seq === 'number' ? rv.orig_seq : r.seq));
           }
         for (const lc of Array.isArray(meta.lifecycle_carryover) ? meta.lifecycle_carryover : [])
           if (lc?.type === 'KEY_ROTATED' && lc?.metadata?.key_class === 'audit' && typeof lc.metadata.previous_key_id === 'string') {
-            keyDeadAt.set(lc.metadata.previous_key_id, Math.min(keyDeadAt.get(lc.metadata.previous_key_id) ?? Infinity, r.seq));
+            keyDeadAt.set(lc.metadata.previous_key_id, Math.min(keyDeadAt.get(lc.metadata.previous_key_id) ?? Infinity, typeof lc.orig_seq === 'number' ? lc.orig_seq : r.seq));
             // The carried rotation's attested successor survives as a
             // repoint candidate — the seal's carry re-attests its
             // designation (w47-seal F-3).
@@ -2916,9 +2997,16 @@ export class Fabric {
       for (const rv of carryRevoked) if (rv?.floor_derived === true && typeof rv?.reference === 'string' && rv.reference.startsWith('key:')) floorKeyClaims.add(rv.reference.slice(4));
       if (configuredAudit === undefined || keyDeadAt.has(configuredAudit) || floorKeyClaims.has(configuredAudit)) {
         const needed = this._keyPurposes?.audit ?? [];
+        // The attested-succession arm is a repoint onto a VAULT key: it
+        // must satisfy the same ownership and purpose gates the
+        // un-attested fallback below requires — a chain-attested
+        // succession naming a foreign-vault or purpose-less key id is no
+        // repoint target (w48-fixverify LOW parity).
         let successor = [...auditSuccessions.keys()].reverse().find(k => {
           const e = this.vault.keys.get(k);
-          return e && !e.revoked && e.generated_inside !== false && !keyDeadAt.has(k) && !floorKeyClaims.has(k);
+          return e && !e.revoked && e.generated_inside !== false && !keyDeadAt.has(k) && !floorKeyClaims.has(k)
+            && this.ownsVaultKey(t, k)
+            && (e.purpose === 'any' || needed.every(x => (Array.isArray(e.purpose) ? e.purpose : [e.purpose]).includes(x)));
         });
         // No chain-attested succession (the key was revoked without a
         // rotation event): fall back to the newest live pending tenant-owned
@@ -3011,7 +3099,7 @@ export class Fabric {
       // A post-commit flush fault is retried on the next transaction edge —
       // the pending heads were re-buffered by restore(); the committed seal
       // is never reported back as denied (w28-store F5, w28-fixverify F5).
-      try { this._flushChainHeads(); } catch { /* pending heads re-buffered — retry lands on the next edge */ }
+      this._flushChainHeadsGuarded();
       // Post-commit durability: the repoint's ledger binding committed,
       // so the vault activation must persist now — a restart that sees the
       // config repoint but a still-pending vault key bricks every
@@ -3715,7 +3803,16 @@ export class Fabric {
       // A previous commit's head flush may have lost the lock race — land
       // it now, before this tx's own flush, so the watermark lag window
       // stays bounded to a single commit (w27-chainheads F3).
-      if (this.#pendingChainHeads?.size) try { this._flushChainHeads(); } catch { /* retry lands on the next commit edge */ }
+      if (this.#pendingChainHeads?.size) this._flushChainHeadsGuarded();
+      // A starved flush is chain evidence, not silent contention: land the
+      // witness row inside a committed tx so the unwitnessed window is
+      // attested forever, naming every tenant whose anchor froze
+      // (w48-store W48-1).
+      if (this.#headFlushStarved?.count) {
+        const starved = this.#headFlushStarved; this.#headFlushStarved = null;
+        try { this.store.tx(() => { for (const t of starved.tenants) this.store.audit(t, 'HEAD_FLUSH_STARVED', 'system', 'chain-heads', { consecutive: starved.count, code: starved.code }, this.clock()); }); }
+        catch { /* a wedged ledger keeps the counters for the next edge */ if (!(this.#headFlushStarved?.count)) this.#headFlushStarved = starved; }
+      }
       // In-session heal for failed post-commit effects: replay the same
       // idempotent ledger heal open() runs before new work attests over a
       // dataplane an earlier verdict already diverged from (w22 F6).
@@ -3740,7 +3837,14 @@ export class Fabric {
       // into an error + falsified rejection rows — pending heads are
       // re-buffered by restore() and retried on the next edge
       // (w28-store F5).
-      try { this._flushChainHeads(); } catch { /* deferred to the next append/commit edge */ }
+      this._flushChainHeadsGuarded();
+      // A nested transaction's own appends merge into the outer probe
+      // window ONLY on success: they committed inside the outer savepoint
+      // scope, so the outer fold still has to see them (w47-perf).
+      // Merging on the rolled-back arm inflates the claimed maxSeq with
+      // rows that never landed — a phantom claim that masks the
+      // watermark/commit divergence gates (w48-fixverify LOW).
+      if (prevOwnSeq && this._ownSeq) for (const [k, v] of this._ownSeq) prevOwnSeq.set(k, Math.max(prevOwnSeq.get(k) ?? 0, v));
       return txResult;
     }
     catch (error) {
@@ -3788,12 +3892,8 @@ export class Fabric {
       throw new InvariantError('INV-503-GATE', 'Internal gate failure', 503);
     }
     finally {
-      // A nested transaction's own appends must survive its exit: they
-      // committed inside the outer savepoint scope, so the outer probe
-      // window still has to see them (w47-perf). Rolled-back inner
-      // appends only cost a wasted fold retry — never a phantom anchor:
-      // the fold reads real rows, not claimed seqs.
-      if (prevOwnSeq && this._ownSeq) for (const [k, v] of this._ownSeq) prevOwnSeq.set(k, Math.max(prevOwnSeq.get(k) ?? 0, v));
+      // The merge lives on the success arm above; here only the memos
+      // restore (w48-fixverify LOW).
       this._probeMemo = prevProbeMemo; this._ownSeq = prevOwnSeq;
     }
   }
@@ -4734,7 +4834,7 @@ export class Fabric {
       requireThat(!prior && !this._auditIndex(p.tenant_id).proposedNonce.has(input.nonce), 'INV-409-REPLAY', 'Nonce is already bound to another action', 409);
       const capsule = { ...clone(input), request_intent: clone(requestIntent), capsule_id: randomUUID(), tenant_id: p.tenant_id, received_at: now };
       const record = { capsule, capsule_digest: digest(capsule), status: 'CANONICALISED', evidence: [], approvals: [], decision: null, certificate_id: null, created_at: now };
-      this.store._stmt('INSERT INTO nonces VALUES(?,?,?)').run(p.tenant_id, 'capsule:' + input.nonce, capsule.capsule_id);
+      this.store._landed(this.store._stmt('INSERT INTO nonces VALUES(?,?,?)').run(p.tenant_id, 'capsule:' + input.nonce, capsule.capsule_id), 'nonce burn');
       this.store.insert(p.tenant_id, 'capsule', capsule.capsule_id, record, now);
       this.store.audit(p.tenant_id, 'CAPSULE_PROPOSED', p.subject_id, capsule.capsule_id, { capsule_digest: record.capsule_digest, action_type: capsule.action.type, nonce: input.nonce, expires_at: capsule.expires_at, idem_key: idempotencyKey, idem_request: digest(input) }, now);
       return record;
@@ -6011,7 +6111,7 @@ export class Fabric {
     // tripping no_usage_rewind and aborting the whole finish transaction
     // with the disclosure still unattested (w42-runtime F1).
     if (!alreadyCharged)
-      this.store._stmt('INSERT INTO usage VALUES(?,?,?,?,?,?,?) ON CONFLICT(tenant,capability,request) DO UPDATE SET cost=cost+excluded.cost,at=MAX(at,excluded.at)').run(t, subject, requested.dataset, now, cost, requestKey, cert.certificate_id);
+      this.store._landed(this.store._stmt('INSERT INTO usage VALUES(?,?,?,?,?,?,?) ON CONFLICT(tenant,capability,request) DO UPDATE SET cost=cost+excluded.cost,at=MAX(at,excluded.at)').run(t, subject, requested.dataset, now, cost, requestKey, cert.certificate_id), 'usage mirror');
     // A denied egress still disclosed — the journal committed the rows
     // before this check ran. The chain must attest that honestly: the
     // DATA_ACCESSED event carries gate_denied so the denied disclosure is
@@ -7490,7 +7590,7 @@ export class Fabric {
       // mint — bound the mint RATE, not only the live window
       // (w27-fixverify W27-03).
       requireThat(minted < 256, 'INV-429-QUOTA', 'Perception mint-rate cap reached (256/hour)', 429);
-      this.store._stmt('INSERT INTO nonces VALUES(?,?,?)').run(t, 'perception:' + attestation.payload.nonce, `perception:${session.session_id}`);
+      this.store._landed(this.store._stmt('INSERT INTO nonces VALUES(?,?,?)').run(t, 'perception:' + attestation.payload.nonce, `perception:${session.session_id}`), 'nonce burn');
       const stored = { ...session, _server_private: session._server_private.export({ type: 'pkcs8', format: 'pem' }), creator: p.subject_id };
       this.store.insert(t, 'perception-session', session.session_id, stored, now);
       // The channel identity is anchored, not merely stored: creator, expiry

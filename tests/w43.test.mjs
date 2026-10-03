@@ -19,7 +19,7 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, writeFileSync, statSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID, randomBytes } from 'node:crypto';
-import { fixture, hasCode, runtimeInput, runtimeRequest } from './helpers.mjs';
+import { fixture, hasCode, runtimeInput, runtimeRequest, plantAadMarker } from './helpers.mjs';
 import { Fabric } from '../src/fabric.mjs';
 import { createServer } from '../src/server.mjs';
 
@@ -247,7 +247,7 @@ test('w43 store F-1: a rolled-back revocation poisons no key-death facts', t => 
 // --- store F-4: durable aad_migration markers attest on reopen ---
 test('w43 store F-4: a crash-surviving migration marker re-attests at the next open', t => {
   const h = fixture(t);
-  h.f.store.db.prepare("INSERT INTO meta_kv VALUES('acme','aad_migration',?)").run(JSON.stringify({ migrated: 2, transplants: 1, ambiguous: 0, skipped: 3 }));
+  plantAadMarker(h.f.store.db, 'acme', JSON.stringify({ migrated: 2, transplants: 1, ambiguous: 0, skipped: 3 }));
   h.reconfigure(() => {});
   assert.equal(h.f.store.db.prepare("SELECT COUNT(*) n FROM meta_kv WHERE tenant='acme' AND key='aad_migration'").get().n, 0, 'marker consumed');
   const events = h.f.store.db.prepare("SELECT envelope FROM audit WHERE tenant='acme' AND envelope LIKE '%AAD_MIGRATION%'").all();

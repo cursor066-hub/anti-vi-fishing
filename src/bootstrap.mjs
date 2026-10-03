@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync, existsSync, lstatSync, chmodSync, readFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, lstatSync, chmodSync, readFileSync, openSync, writeSync, fsyncSync, closeSync, renameSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomBytes, generateKeyPairSync } from 'node:crypto';
 import { generateKey, signed, encrypt } from './crypto.mjs';
@@ -191,7 +191,20 @@ export function bootstrap(directory, tenants = ['acme'], now = Date.now(), { iss
   const masterKey = randomBytes(32).toString('base64url');
   const vault = new KeyVault(masterKey);
   const setup = createConfiguration(tenants, now, { vault, issuerEndpoint: `http://127.0.0.1:${issuerPort}` });
-  const save = (path, value) => writeFileSync(path, canonical(value) + '\n', { mode: 0o600, flag: 'wx' });
+  // Bare writeFileSync leaves genesis files in page cache — a crash right
+  // after bootstrap can pair a durable chain with a never-landed master
+  // key or config. tmp+fsync+rename+dir-fsync like the vault's own write
+  // protocol (w48-store W48-5). `wx` keeps the no-clobber contract on the
+  // final rename target.
+  const save = (path, value) => {
+    const tmp = `${path}.${randomBytes(8).toString('hex')}.tmp`;
+    const fd = openSync(tmp, 'wx', 0o600);
+    try { writeSync(fd, canonical(value) + '\n'); fsyncSync(fd); } finally { closeSync(fd); }
+    // rename clobbers silently — keep the wx contract on the target.
+    requireThat(!existsSync(path), 'INV-409-CONFLICT', `Refusing to overwrite an existing bootstrap file: ${path}`, 409);
+    renameSync(tmp, path);
+    try { const dfd = openSync(directory, 'r'); try { fsyncSync(dfd); } finally { closeSync(dfd); } } catch { /* dir fsync unsupported — file fsync still landed */ }
+  };
   vault.save(join(directory, 'keystore.json'));
   // master.key is written last — it is the commit marker that proves the
   // keystore it names was fully persisted (w6-ceremony F12).

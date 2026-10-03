@@ -26,14 +26,7 @@ const legacyDekAad = (tenant, kind, id) => `${tenant}/${kind}/${id}/dek`;
   // raw-writer transplant a sealed receipt into a records row (w18-crypto F1).
 const idemAad = (tenant, scope, key) => canonical({ idempotency: true, tenant, scope, key });
 
-// Every RAISE() text this schema's own triggers may legitimately produce —
-// an errcode-1 abort outside this set is a planted trigger firing on our
-// write path (w47-fixverify M-1).
-const KNOWN_GUARD_ABORTS = new Set([
-  'append-only audit', 'audit sequence must extend the head', 'append-only nonces',
-  'append-only idempotency', 'append-only data_access', 'append-only usage',
-  'usage is monotone', 'clock is monotone', 'aad migration marker is evidence',
-]);
+
 
 
 export class Store {
@@ -148,7 +141,11 @@ export class Store {
         // row's seq, or standalone verification would accept rows signed
         // inside the carried death window (w38-fixverify F-4).
         for (const rv of Array.isArray(meta?.revocations_carryover) ? meta.revocations_carryover : [])
-          if (typeof rv?.reference === 'string' && rv.reference.startsWith('key:'))
+          // floor_derived entries are unverifiable claims — the fold
+          // exempts them from the death window and so does this sweep,
+          // or the standalone extractors would diverge from the fold on
+          // the same live chain (w48-crypto F-w48-2).
+          if (rv?.floor_derived !== true && typeof rv?.reference === 'string' && rv.reference.startsWith('key:'))
             dead.set(rv.reference.slice(4), Math.min(dead.get(rv.reference.slice(4)) ?? Infinity, typeof rv.orig_seq === 'number' ? rv.orig_seq : row.seq));
         // A doomed audit-class KEY_ROTATED rides lifecycle_carryover now —
         // its predecessor-death pin must unfold exactly like the fold's
@@ -211,12 +208,17 @@ export class Store {
       // sanctioned post-attest cleanup drops and recreates this guard
       // verbatim; an attacker's delete now aborts in-band.
       ['aad_marker_keep', "CREATE TRIGGER aad_marker_keep BEFORE DELETE ON meta_kv WHEN OLD.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END", 'aad migration marker is evidence'],
-      // INSERT OR REPLACE fires the delete guard on conflict, but a bare
-      // UPDATE rewrites the marker with no guard at all — cover the
-      // update arm identically (w47-fixverify HIGH-1). No code path ever
-      // UPDATEs the marker row; only the sanctioned drop+delete+recreate
-      // sequence may touch it.
+      // A bare UPDATE rewrites the marker with no delete firing at all —
+      // cover the update arm identically (w47-fixverify HIGH-1). No code
+      // path ever UPDATEs the marker row; only the sanctioned
+      // drop+delete+recreate sequence may touch it.
       ['aad_marker_keep_upd', "CREATE TRIGGER aad_marker_keep_upd BEFORE UPDATE ON meta_kv WHEN OLD.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END", 'aad migration marker is evidence'],
+      // INSERT OR REPLACE never fires BEFORE DELETE — recursive_triggers
+      // is off, so the implicit conflict-delete skips every guard and a
+      // REPLACE rewrote the marker silently (w48-store W48-4). The
+      // sanctioned marker write drops+recreates this guard inside its
+      // own transaction.
+      ['aad_marker_keep_ins', "CREATE TRIGGER aad_marker_keep_ins BEFORE INSERT ON meta_kv WHEN NEW.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END", 'aad migration marker is evidence'],
     ];
     const norm = s => (s ?? '').replace(/\s+/g, ' ').trim();
     for (const [name, sql] of guards) this.db.exec(`CREATE TRIGGER IF NOT EXISTS ${sql.slice('CREATE TRIGGER '.length)}`);
@@ -279,8 +281,23 @@ export class Store {
     // The marker guard fires only on the evidence key — other meta_kv rows
     // (fold_floor) must stay writable, and a WHEN-less body that aborts
     // every delete would wedge them (w46-store M-2).
-    requireThat(probe(() => { this._stmt("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', '{}')").run(pt); this._stmt("DELETE FROM meta_kv WHERE tenant=? AND key='aad_migration'").run(pt); }, 'aad migration marker is evidence'), 'INV-503-STORAGE', 'aad_migration marker delete trigger not enforced', 503);
-    requireThat(probe(() => { this._stmt("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', '{}')").run(pt); this._stmt("UPDATE meta_kv SET value='{}' WHERE tenant=? AND key='aad_migration'").run(pt); }, 'aad migration marker is evidence'), 'INV-503-STORAGE', 'aad_migration marker update trigger not enforced', 503);
+    // Seeding an aad_migration row must drop the INSERT arm first —
+    // schema DDL inside the savepoint rolls back with the probe
+    // (w48-store W48-4).
+    requireThat(probe(() => { this.db.exec('DROP TRIGGER aad_marker_keep_ins'); this._stmt("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', '{}')").run(pt); this._stmt("DELETE FROM meta_kv WHERE tenant=? AND key='aad_migration'").run(pt); }, 'aad migration marker is evidence'), 'INV-503-STORAGE', 'aad_migration marker delete trigger not enforced', 503);
+    requireThat(probe(() => { this.db.exec('DROP TRIGGER aad_marker_keep_ins'); this._stmt("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', '{}')").run(pt); this._stmt("UPDATE meta_kv SET value='{}' WHERE tenant=? AND key='aad_migration'").run(pt); }, 'aad migration marker is evidence'), 'INV-503-STORAGE', 'aad_migration marker update trigger not enforced', 503);
+    requireThat(probe(() => { this._stmt("INSERT INTO meta_kv VALUES(?, 'aad_migration', '{}')").run(pt); }, 'aad migration marker is evidence'), 'INV-503-STORAGE', 'aad_migration marker insert trigger not enforced', 503);
+    // The counter-arm: a BEFORE INSERT RAISE(IGNORE) throws nothing and
+    // fires no guard — the write just vanishes while every caller reads
+    // success (w48-fixverify CRITICAL). Probe that the ledger's most
+    // sensitive inserts LAND, not merely that forbidden writes abort.
+    const probeLanded = (run, what) => {
+      this.db.exec('SAVEPOINT integrity_probe');
+      try { requireThat(run().changes === 1, 'INV-503-STORAGE', `${what} abandoned — foreign trigger interference`, 503); }
+      finally { this.db.exec('ROLLBACK TO integrity_probe'); this.db.exec('RELEASE integrity_probe'); }
+    };
+    probeLanded(() => insAudit(1), 'audit insert');
+    probeLanded(() => this._stmt("INSERT INTO meta_kv VALUES(?, 'integrity_probe', '{}')").run(pt), 'meta_kv insert');
     // The probes above journal WAL frames even though they roll back —
     // truncate so boot-time verification leaves no residual pages behind
     // (w19-aad W19-3 measures post-migration WAL size).
@@ -443,7 +460,14 @@ export class Store {
       // (w43-store F-4).
       for (const [mtenant, ms] of stats)
         if (ms.migrated + ms.transplants + ms.ambiguous + ms.skipped > 0)
-          this._schemaGuard(() => this._stmt("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', ?)").run(mtenant, JSON.stringify(ms)));
+          this._schemaGuard(() => {
+            // The INSERT arm of the marker guard must drop for the
+            // sanctioned write — same drop+recreate-in-tx discipline the
+            // delete path uses (w48-store W48-4).
+            this.db.exec('DROP TRIGGER IF EXISTS aad_marker_keep_ins');
+            try { this._landed(this._stmt("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', ?)").run(mtenant, JSON.stringify(ms)), 'aad-migration marker'); }
+            finally { this.db.exec("CREATE TRIGGER IF NOT EXISTS aad_marker_keep_ins BEFORE INSERT ON meta_kv WHEN NEW.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END"); }
+          });
       this.db.exec('COMMIT');
       // Legacy ciphertext physically lingers in the WAL until a checkpoint
       // — truncate now so the dead form cannot be revived (w19-aad W19-3).
@@ -607,8 +631,8 @@ export class Store {
     // table or planted trigger on the write is tamper evidence, not raw
     // sqlite noise (w47-fixverify M-1).
     const pair = () => this._schemaGuard(() => {
-      this._stmt('INSERT INTO records VALUES(?,?,?,?,?) ON CONFLICT(tenant,kind,id) DO UPDATE SET value=excluded.value').run(tenant, kind, id, encrypt(value, dek, recAad(tenant, kind, id)), at);
-      this._stmt('INSERT INTO deks VALUES(?,?,?,?) ON CONFLICT(tenant,kind,id) DO UPDATE SET wrapped=excluded.wrapped').run(tenant, kind, id, encrypt(dek.toString('base64url'), this.key(tenant), dekAad(tenant, kind, id)));
+      this._landed(this._stmt('INSERT INTO records VALUES(?,?,?,?,?) ON CONFLICT(tenant,kind,id) DO UPDATE SET value=excluded.value').run(tenant, kind, id, encrypt(value, dek, recAad(tenant, kind, id)), at), 'record write');
+      this._landed(this._stmt('INSERT INTO deks VALUES(?,?,?,?) ON CONFLICT(tenant,kind,id) DO UPDATE SET wrapped=excluded.wrapped').run(tenant, kind, id, encrypt(dek.toString('base64url'), this.key(tenant), dekAad(tenant, kind, id))), 'dek write');
     });
     if (this.db.isTransaction) pair(); else this.tx(pair);
     if (!this.db.isTransaction) this.checkpoint();
@@ -745,7 +769,7 @@ export class Store {
     // regression detector, not the time source — expiry is evaluated
     // against host time either way, and an over-high `last` would wedge
     // the gate permanently after an honest rewind (VM snapshot restore).
-    this._stmt('INSERT INTO clock VALUES(1,?) ON CONFLICT(id) DO UPDATE SET last=excluded.last').run(now);
+    this._landed(this._stmt('INSERT INTO clock VALUES(1,?) ON CONFLICT(id) DO UPDATE SET last=excluded.last').run(now), 'clock ratchet');
     return now;
   }
   auditHeadSeq(tenant) {
@@ -765,6 +789,17 @@ export class Store {
     }
     return st;
   }
+  // A BEFORE ... RAISE(IGNORE) trigger abandons the statement silently —
+  // no error, COMMIT succeeds, the caller holds success, and the row
+  // never lands: audit appends, nonce burns, idempotency receipts and
+  // budget mirrors all vanish while every caller reads 'ok'
+  // (w48-fixverify CRITICAL). Security-critical writes assert their
+  // change count inside the same transaction instead of trusting the
+  // silent return.
+  _landed(result, what) {
+    requireThat(result?.changes >= 1, 'INV-409-INTEGRITY', `${what} abandoned — ledger write refused by a foreign trigger`, 409);
+    return result;
+  }
   // A dropped or rewritten table is integrity evidence inside the INV
   // taxonomy, never bare sqlite noise escaping to callers (w44-store M-2).
   _schemaGuard(run) {
@@ -773,13 +808,22 @@ export class Store {
       if (/no such table|no such column|not a database|malformed/i.test(e?.message ?? ''))
         throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e });
       // Trigger-raised aborts arrive as SQLITE_CONSTRAINT_TRIGGER
-      // (errcode 1811): a RAISE() whose text is none of this schema's own
-      // guard messages is a planted trigger's payload on our write path —
-      // our tables only refuse a write through the guards above, so any
-      // foreign abort on them is tamper evidence, not raw sqlite
-      // internals (w47-fixverify M-1).
-      if (e?.errcode === 1811 && !KNOWN_GUARD_ABORTS.has(e?.message ?? ''))
-        throw new InvariantError('INV-409-INTEGRITY', 'Ledger write refused by a foreign trigger — tamper evidence', 409, { cause: e });
+      // (errcode 1811): EVERY abort on a guarded write path is tamper
+      // evidence — a planted mimic trigger replaying a known guard's
+      // RAISE text is indistinguishable from the real guard firing, so
+      // the allowlist arm laundered planted payloads into raw errors
+      // (w48-store W48-3). Our own guards never fire on a legitimate
+      // write; anything that does is a refusal worth wedging on.
+      if (e?.errcode === 1811)
+        throw new InvariantError('INV-409-INTEGRITY', 'Ledger write refused by a trigger — tamper evidence', 409, { cause: e });
+      // Contention is not tamper evidence — busy/locked propagates for
+      // the outer layers' INV-503-LEDGER translation.
+      if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw e;
+      // Any remaining sqlite-class fault on a ledger path is likewise
+      // schema/integrity evidence, not raw internals for callers to
+      // pattern-match (w48-store W48-3).
+      if (e?.code === 'ERR_SQLITE_ERROR' || typeof e?.errcode === 'number')
+        throw new InvariantError('INV-409-INTEGRITY', `Ledger access fault: ${e?.message ?? 'sqlite error'}`, 409, { cause: e });
       throw e;
     }
   }
@@ -860,7 +904,7 @@ export class Store {
     const hash = digest(envelope.payload);
     const envText = canonical(envelope);
     try {
-      this._stmt('INSERT INTO audit VALUES(?,?,?,?,?)').run(tenant, entry.sequence, entry.previous, hash, envText);
+      this._landed(this._stmt('INSERT INTO audit VALUES(?,?,?,?,?)').run(tenant, entry.sequence, entry.previous, hash, envText), 'audit append');
     } catch (e) {
       // A peer instance appending between our head-read and this insert
       // trips the seq guard — that is a retryable conflict, not tamper
@@ -872,6 +916,10 @@ export class Store {
       // A dropped or rewritten table is integrity evidence, never raw
       // sqlite noise on the write path (w44-store M-2).
       if (/no such table|no such column|not a database|malformed/i.test(e?.message ?? '')) throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e });
+      // A planted trigger (errcode 1811), grafted-PK collision (1555) or
+      // any other sqlite-class fault on the audit append is tamper
+      // evidence, never raw internals (w48-store W48-3).
+      if (e?.code === 'ERR_SQLITE_ERROR' || typeof e?.errcode === 'number') throw new InvariantError('INV-409-INTEGRITY', `Audit append refused: ${e?.message ?? 'sqlite error'}`, 409, { cause: e });
       throw e;
     }
     // In-ledger fold marker: the signed head files are peer-facing hints
@@ -881,7 +929,7 @@ export class Store {
     // survives tail-cuts (it is not a chained row), and a fresh open can
     // attest any head/watermark pair that claims less than it
     // (w44-fixverify F-2).
-    this._schemaGuard(() => this._stmt("INSERT INTO meta_kv VALUES(?,'fold_floor',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, `${entry.sequence}:${hash}`));
+    this._schemaGuard(() => this._landed(this._stmt("INSERT INTO meta_kv VALUES(?,'fold_floor',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, `${entry.sequence}:${hash}`), 'fold-floor marker'));
     // Post-commit ordering: only a landed entry may move the anchors and
     // ratchet the detector (w23 W23-05). Our own head is the newest
     // verifiable row — mark it scanned so a later refresh skips it.
@@ -901,7 +949,7 @@ export class Store {
     // honest high-water during a halted or recovered span; the legality
     // assert runs on the pre-write row so the ratchet itself can never
     // launder a rewind.
-    this._stmt('INSERT INTO clock VALUES(1,?) ON CONFLICT(id) DO UPDATE SET last=MAX(clock.last, excluded.last)').run(now);
+    this._landed(this._stmt('INSERT INTO clock VALUES(1,?) ON CONFLICT(id) DO UPDATE SET last=MAX(clock.last, excluded.last)').run(now), 'clock ratchet');
     // End-of-chain commitment: the fabric moves its signed head watermark
     // post-commit — a truncated tail can never drag the watermark back
     // with it (w24-fixverify W24-01).
@@ -1038,7 +1086,7 @@ export class Store {
     // The receipt may carry a redacted projection — callers that want the
     // stored value minimal (shredder-safe) pass project/resolve; without
     // them the full result is receipt+response as before (w28-crypto F1).
-    this._stmt('INSERT INTO idempotency VALUES(?,?,?,?,?)').run(tenant, scope, key, requestHash, encrypt(project ? project(result) : result, this.key(tenant), idemAad(tenant, scope, key)));
+    this._landed(this._stmt('INSERT INTO idempotency VALUES(?,?,?,?,?)').run(tenant, scope, key, requestHash, encrypt(project ? project(result) : result, this.key(tenant), idemAad(tenant, scope, key))), 'idempotency receipt');
     return result;
   }
 }
@@ -1065,15 +1113,21 @@ export function verifyAudit(bundle, pinnedKeys, priorCheckpoint = null) {
     // carried by AUDIT_SEALED/AUDIT_SEAL_CARRY kills the key at the carrying
     // row (w33-export F2 parity).
     if (entry.type === 'AUDIT_SEALED' || entry.type === 'AUDIT_SEAL_CARRY') {
+      // Carried deaths pin at the death's ORIGINAL position (orig_seq),
+      // never the carrying row's seq — standalone verification must apply
+      // the same death window the fold does, or a bundle row signed inside
+      // the carried window verifies here while the fold refuses it
+      // (w48-crypto F-w48-1). floor_derived claims are exempt — they pin
+      // no death, same as the fold (w48-crypto F-w48-2).
       for (const rv of Array.isArray(meta?.revocations_carryover) ? meta.revocations_carryover : [])
-        if (typeof rv?.reference === 'string' && rv.reference.startsWith('key:'))
-          deadAt.set(rv.reference.slice(4), Math.min(deadAt.get(rv.reference.slice(4)) ?? Infinity, entry.sequence));
-      // Carried audit-class rotations pin the predecessor's death at the
-      // carrying row too — lifecycle_carryover parity with the fold's
-      // replay (w34).
+        if (rv?.floor_derived !== true && typeof rv?.reference === 'string' && rv.reference.startsWith('key:'))
+          deadAt.set(rv.reference.slice(4), Math.min(deadAt.get(rv.reference.slice(4)) ?? Infinity, typeof rv.orig_seq === 'number' ? rv.orig_seq : entry.sequence));
+      // Carried audit-class rotations pin the predecessor's death at its
+      // original position too — lifecycle_carryover parity with the
+      // fold's replay (w34, w48-crypto F-w48-1).
       for (const lc of Array.isArray(meta?.lifecycle_carryover) ? meta.lifecycle_carryover : [])
         if (lc?.type === 'KEY_ROTATED' && lc?.metadata?.key_class === 'audit' && typeof lc.metadata.previous_key_id === 'string')
-          deadAt.set(lc.metadata.previous_key_id, Math.min(deadAt.get(lc.metadata.previous_key_id) ?? Infinity, entry.sequence));
+          deadAt.set(lc.metadata.previous_key_id, Math.min(deadAt.get(lc.metadata.previous_key_id) ?? Infinity, typeof lc.orig_seq === 'number' ? lc.orig_seq : entry.sequence));
     }
     signedSeqs.push([entry.sequence, item.envelope?.protected?.key_id]);
     previous = item.hash; time = entry.time;
