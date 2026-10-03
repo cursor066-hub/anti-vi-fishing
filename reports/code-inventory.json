@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 8029,
-      "bytes": 618962
+      "lines": 8145,
+      "bytes": 627412
     },
     "src/issuerd.mjs": {
       "lines": 942,
@@ -74,8 +74,8 @@
       "bytes": 13696
     },
     "src/server.mjs": {
-      "lines": 561,
-      "bytes": 54051
+      "lines": 564,
+      "bytes": 54286
     },
     "src/shamir.mjs": {
       "lines": 91,
@@ -83,7 +83,7 @@
     },
     "src/store.mjs": {
       "lines": 1222,
-      "bytes": 90014
+      "bytes": 90032
     },
     "src/target.mjs": {
       "lines": 622,
@@ -155,7 +155,7 @@
     },
     "scripts/traceability.py": {
       "lines": 386,
-      "bytes": 32269
+      "bytes": 32270
     },
     "scripts/verify-export-webcrypto.mjs": {
       "lines": 114,
@@ -494,12 +494,16 @@
       "bytes": 6240
     },
     "tests/w50.test.mjs": {
-      "lines": 205,
-      "bytes": 12180
+      "lines": 209,
+      "bytes": 12537
     },
     "tests/w50b.test.mjs": {
       "lines": 198,
       "bytes": 12644
+    },
+    "tests/w51.test.mjs": {
+      "lines": 204,
+      "bytes": 12875
     },
     "tests/w6-fix.test.mjs": {
       "lines": 186,
@@ -558,6 +562,6 @@
       "bytes": 6499
     }
   },
-  "total_files": 139,
-  "total_lines": 36763
+  "total_files": 140,
+  "total_lines": 37090
 }

@@ -182,6 +182,10 @@ test('w50-http MEDIUM: repin evaluates the full contract — residual drift stay
   assert.ok(Array.isArray(repin.residual_drift) && repin.residual_drift.length > 0, 'the permissions escalation is named, not settled');
   const row = h.f.store.db.prepare("SELECT value FROM records WHERE tenant='acme' AND kind='issuer-drift' AND id=?").get(bankKeyId);
   assert.ok(row, 'the forensic drift row survives while quarantine persists');
+  // The residual drift must reach the enforcement plane the name-and-gate
+  // contract promises — idx.issuerDrift, not only the row (w51-http F1).
+  assert.ok(h.f._auditIndex('acme').issuerDrift.has(bankKeyId), 'the residual drift arms the chain-anchored quarantine');
+  assert.equal(repin.quarantined, true, 'the response says the suspension stands');
 });
 
 test('w50-http LOW: repin refuses a revoked issuer', async t => {

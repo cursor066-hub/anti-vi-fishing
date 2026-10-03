@@ -2279,7 +2279,14 @@ export class Fabric {
     const sections = this._configSections(tenant);
     const observed = digest({ tenant: t, sections }), existing = this.store.get(t, 'config-snapshot', 'current');
     const changed = existing?.sections ? Object.keys(sections).filter(k => existing.sections[k] !== sections[k]) : [];
-    return { drifted: this._configDrift.has(t) || this._auditIndex(t).tenantDrifted || (existing && existing.digest !== observed), expected: existing?.digest ?? null, observed, changed_sections: changed };
+    // The verdict derives from the same anchored sources the gate enforces —
+    // _configDrift (construction-detected divergence) and tenantDrifted
+    // (anchored baseline vs current) — never the mutable config-snapshot
+    // row, which a store-level tamper could rewrite into a wolf-cry
+    // (w51-http F5). `expected` prefers the anchored digest; the stored row
+    // remains only as a pre-anchor fallback and the sections preview.
+    const anchoredExpected = this._auditIndex(t).configSnapshot;
+    return { drifted: this._configDrift.has(t) || this._auditIndex(t).tenantDrifted, expected: anchoredExpected ?? existing?.digest ?? null, observed, changed_sections: changed };
   }
   // RUN-010: security re-attests a drifted configuration snapshot, restoring
   // privileges. This is the only operation allowed through during drift.
@@ -2449,10 +2456,13 @@ export class Fabric {
           if (claim.totals[cls] !== undefined)
             requireThat(claim.sums[cls] + seen.sums[cls] === claim.totals[cls], 'INV-409-INTEGRITY', `Audit seal at seq ${sealSeq} attests ${claim.totals[cls]} carried ${cls} entr(ies) but only ${claim.sums[cls] + seen.sums[cls]} survive — restore the amputated carry before remediating`, 409);
       }
-      // A surviving page bound to a seal row that does not exist at all is
-      // destruction of the seal itself. A page bound to a DOOMED seal
-      // (seal_seq >= firstBad, when a cut is running) is legitimate — its
-      // seal's content is being re-carried by this very remediation.
+      // Tripwire, unreachable while the position binding holds: carrySeen
+      // only counts prescan-verified pages (the scan breaks at firstBad),
+      // and every such page's seal_seq precedes its own position — so a
+      // page can never reference a seal the scan did not already consume,
+      // and the doomed-seal escape below can never fire either (a page at
+      // seq >= firstBad is unverified and never enters carrySeen). Kept as
+      // a hard guard should the binding rules ever change (w51-seal F-4).
       for (const [sealSeq] of carrySeen)
         requireThat(sealClaims.has(sealSeq) || (firstBad !== null && sealSeq >= firstBad), 'INV-409-INTEGRITY', 'Audit carryover page references a seal row that does not exist', 409);
     };
@@ -2470,14 +2480,13 @@ export class Fabric {
       // missing page is destroyed attested authority, not a re-anchor
       // opportunity (w36-seal F-H). Refuse before the head reconciliation
       // can attest a healed chain over the amputation.
-      checkSealResidue();
       // The ledger itself verifies but the signed watermark may not cover
       // the tip (deleted or replayed chain-heads.json — w25-clock F-4,
       // w25-fixverify W25-01). Re-anchor the verified tip under a signed
       // AUDIT_HEAD_REANCHORED event — the append's own flush writes the
       // fresh head envelope.
       const tip = rows.at(-1);
-      let headReanchored = false, wmReanchored = false, abandonedHead = null;
+      let headReanchored = false, wmReanchored = false, abandonedHead = null, headMinted = false;
       // Repairs below erase the live tamper flag — snapshot it first so
       // the report can name what the repair fixed, not just what remains
       // (w40-fv F-5: a flag cleared by its own repair must still be
@@ -2498,20 +2507,37 @@ export class Fabric {
       // and REFUSE when those claims regressed (floor rows deleted along
       // with their anchors), because the residue floor can then never be
       // honestly re-minted.
-      if (head && head !== 'corrupt' && tip && (head.seq > tip.seq || (head.seq === tip.seq && !ctEqual(head.hash, tip.hash)))) {
-        requireThat(!(head.revocations !== undefined && this.store.ids(t, 'revocation', 1_000_000).length < head.revocations), 'INV-409-INTEGRITY', 'Signed head attests a revocation floor that regressed — restore the deleted rows before re-anchoring', 409);
-        requireThat(!(head.checkpoints !== undefined && this._verifiedCheckpointCount(t) < head.checkpoints), 'INV-409-INTEGRITY', 'Signed head attests audit checkpoints that regressed — restore them before re-anchoring', 409);
-        if (head.checkpoint) requireThat(this._checkpointAttested(t, head.checkpoint), 'INV-409-INTEGRITY', 'Signed head attests an audit checkpoint that no longer verifies', 409);
-        abandonedHead = { abandoned_head_seq: head.seq, abandoned_head_hash: head.hash };
-      } else if (!tip && head && head !== 'corrupt' && head.seq > 0)
+      if (!tip && head && head !== 'corrupt' && head.seq > 0)
         // The whole attested chain is gone — there is nothing honest to
         // re-anchor to.
         requireThat(false, 'INV-409-INTEGRITY', 'Signed head attests rows that no longer exist — restore from backup', 409);
+      // The reconcile below mints signed claims ABOUT `tip` — a peer seal
+      // or append landing between the prescan and here lets those claims
+      // name a tip that no longer exists (a stale tip re-anchored the
+      // durable watermark PAST the live chain and wedged the tenant until
+      // a third seal, w51-seal F-2). Take the write lock, assert the
+      // committed shape still matches the prescan snapshot, then mint.
       // Floor rows no surviving anchor attests: a planted revocation row
       // wedges floorCheck while this path reports health — name the
       // unanchored refs so the verdict is a diagnosis, not an all-clear
       // (w34-fixverify L-6, w34-runtime F-3 C1).
       const floorDivergent = this.store.ids(t, 'revocation', 1_000_000).filter(id => !revokedSeen.has(id)).slice(0, 512);
+      if (tip) this.store.tx(() => {
+      const liveTip = this.store._stmt('SELECT seq,hash FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1').get(t);
+      const liveCount = this.store._stmt('SELECT COUNT(*) c FROM audit WHERE tenant=?').get(t)?.c ?? 0;
+      requireThat(liveTip && liveCount === rows.length && liveTip.seq === tip.seq && ctEqual(liveTip.hash, tip.hash), 'INV-503-GATE', 'Audit chain moved during the seal reconciliation — rerun sealAuditChain on a fresh prescan', 503);
+      // Carryover pages a surviving seal attested must still all exist — a
+      // missing page is destroyed attested authority, not a re-anchor
+      // opportunity (w36-seal F-H). Refuse before the head reconciliation
+      // can attest a healed chain over the amputation — judged against the
+      // asserted-fresh chain inside this transaction.
+      checkSealResidue();
+      if (head && head !== 'corrupt' && (head.seq > tip.seq || (head.seq === tip.seq && !ctEqual(head.hash, tip.hash)))) {
+        requireThat(!(head.revocations !== undefined && this.store.ids(t, 'revocation', 1_000_000).length < head.revocations), 'INV-409-INTEGRITY', 'Signed head attests a revocation floor that regressed — restore the deleted rows before re-anchoring', 409);
+        requireThat(!(head.checkpoints !== undefined && this._verifiedCheckpointCount(t) < head.checkpoints), 'INV-409-INTEGRITY', 'Signed head attests audit checkpoints that regressed — restore them before re-anchoring', 409);
+        if (head.checkpoint) requireThat(this._checkpointAttested(t, head.checkpoint), 'INV-409-INTEGRITY', 'Signed head attests an audit checkpoint that no longer verifies', 409);
+        abandonedHead = { abandoned_head_seq: head.seq, abandoned_head_hash: head.hash };
+      }
       // A durable watermark left ABOVE the committed tip — the
       // seal-window crash gap or an inflated head-watermark.json — must
       // be repairable here, or the tenant wedges INV-409 on every fold
@@ -2555,10 +2581,15 @@ export class Fabric {
         // repairing the tip can never read as a clean mint
         // (w38-fixverify F-1).
         this.store.audit(t, 'AUDIT_HEAD_REANCHORED', p.subject_id, 'audit', { reanchored_tip_seq: tip.seq, reanchored_tip_hash: tip.hash, ...(abandonedHead ?? {}), ...(head === 'corrupt' ? { prior_head_unverifiable: true } : {}) }, now);
-        // Report only what actually landed: the head write raced a peer's
-        // monotone compare before — claiming a re-anchor the file never
-        // took was the lie that let a wedged tenant report healed
-        // (w27-chainheads F0).
+        headMinted = true;
+      }
+      });
+      // Report only what actually landed: the head write raced a peer's
+      // monotone compare before — claiming a re-anchor the file never
+      // took was the lie that let a wedged tenant report healed
+      // (w27-chainheads F0). Read AFTER commit — the post-commit flush is
+      // what the file check observes.
+      if (headMinted) {
         const newTip = this.store._stmt('SELECT seq,hash FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1').get(t);
         const moved = this._chainHead(t);
         headReanchored = moved && moved !== 'corrupt' && newTip && moved.seq === newTip.seq && ctEqual(moved.hash, newTip.hash);
@@ -2658,6 +2689,17 @@ export class Fabric {
       // what existed minutes ago (w41-seal F1: a verified peer event
       // silently deleted would launder its spend authority).
       const cutRows = this.store._stmt('SELECT seq,hash,previous,envelope FROM audit WHERE tenant=? ORDER BY seq').all(t);
+      // `firstBad`, `sealClaims`, `carrySeen` and the boundary hash were
+      // derived from the PRESCAN snapshot — a peer seal or append landing
+      // between the prescan and this transaction makes the cut mint a
+      // phantom AUDIT_SEALED asserting a `sealed_at_seq` boundary that
+      // never existed (w51-seal F-3). The write lock is already held:
+      // assert the committed chain is still byte-for-byte the prescan's
+      // chain before any classification. Contention refuses honestly and
+      // the operator re-runs on a fresh prescan — an attacker surgical
+      // rewrite does NOT move this gate (rows still fail verification and
+      // are cut as doomed).
+      requireThat(cutRows.length === rows.length && cutRows.every((r, i) => r.seq === rows[i].seq && ctEqual(r.hash, rows[i].hash) && r.previous === rows[i].previous), 'INV-503-GATE', 'Audit chain moved during the seal — rerun sealAuditChain on a fresh prescan', 503);
       // livedUntil records the furthest time a SIGNATURE-VERIFIED doomed row
       // attests the gate believed it had reached. A verified payload's time
       // is signed by the vault-bound audit key — present in the table it
@@ -3523,12 +3565,16 @@ export class Fabric {
     // that mint a containment row — murder coverage binds only anchors
     // that promised a row, so a plain denial can never fabricate missing-
     // row evidence (w50-fv F-3).
-    try { this.store.audit(t, 'AUTHORIZATION_DENIED', subject_id ?? 'anonymous', null, { code, message: String(message).slice(0, 200), ...(details?.quarantine_denial ? { quarantine_denial: true } : {}) }, now); this.#denyAudit.set(key, now); } catch { /* ledger write failure does not change the verdict */ }
+    // The row binds the anchor's OWN minted time — entry.time is monotonic
+    // (max(now, priorTime)), so a rewound clock still lands the pair within
+    // the ±2s binding instead of fabricating a missing-row murder (w51).
+    let mintedAt = now;
+    try { const a = this.store.audit(t, 'AUTHORIZATION_DENIED', subject_id ?? 'anonymous', null, { code, message: String(message).slice(0, 200), ...(details?.quarantine_denial ? { quarantine_denial: true } : {}) }, now); mintedAt = a?.time ?? now; this.#denyAudit.set(key, now); } catch { /* ledger write failure does not change the verdict */ }
     // Quarantine denials land in the containment ledger too — a quarantined
     // device hammering proposals must be reconstructible, not invisible
     // (w11-lifecycle F5; NET-010 coverage of pre-transaction denials).
     if (details?.quarantine_denial) {
-      try { this.store.put(t, 'containment', `deny:${randomUUID()}`, { contained_at: now, subject_id: subject_id ?? null, device_id: details.device ?? null, capability_id: null, resource: null, destination: null, action: null, code, request_id: 'gate-deny', dropped_requests: 1 }, now); } catch { /* containment logging never masks the verdict */ }
+      try { this.store.put(t, 'containment', `deny:${randomUUID()}`, { contained_at: mintedAt, subject_id: subject_id ?? null, device_id: details.device ?? null, capability_id: null, resource: null, destination: null, action: null, code, request_id: 'gate-deny', dropped_requests: 1 }, mintedAt); } catch { /* containment logging never masks the verdict */ }
     }
   }
   // Stored-record integrity anchored in the actor's own signature: the
@@ -3873,9 +3919,11 @@ export class Fabric {
       this.authorize(principal, ['operator', 'approver', 'custodian', 'security', 'auditor', 'policy_admin', 'workload'], { auditDeny: false });
       // RUN-010: a drifting gate configuration withdraws privileges until a
       // security actor re-attests the observed config snapshot.
-      // Drift quarantine is durable (a 'config-flag' record), not just the
-      // in-memory set — a second Fabric instance on the same deployment
-      // cannot transact through a drift it never noticed (concurrency-audit M4).
+      // Drift quarantine survives restarts because every instance re-derives
+      // the verdict at construction (digest divergence → _configDrift) and
+      // the fold keeps the anchored baseline — the 'config-flag' row written
+      // alongside is forensic/operator-facing state, not the enforcement
+      // mechanism (w51-http F4; concurrency-audit M4).
       requireThat(allowDuringDrift || (!this._configDrift.has(principal.tenant_id) && !this._auditIndex(principal.tenant_id).tenantDrifted), 'INV-403-QUARANTINE', 'Configuration drift withdrew gate privileges pending security re-attestation', 403);
       // A tenant whose chain could not fold during a clock rewind stays
       // closed until sealAuditChain repairs it — proceeding would risk
@@ -3954,14 +4002,17 @@ export class Fabric {
         // Same rewind asymmetry as #denyAudit: a rewound clock produces a
         // negative diff that must mint, not suppress (w49-runtime W49-2).
         const rDiff = rNow - (this.#rejectMemo.get(rKey) ?? -Infinity);
+        let mintedAt;
         if (!(rDiff >= 0 && rDiff < 60_000)) {
-          try { this.store.tx(() => { const now = this.clock(); this.store.clock(now); this.store.audit(principal.tenant_id, 'SECURITY_OPERATION_REJECTED', principal.subject_id, 'local-gate', { code: error.code, ...(error.code === 'INV-403-QUARANTINE' && error.details?.quarantine_denial ? { quarantine_denial: true } : {}) }, now); }); this.#rejectMemo.set(rKey, rNow); } catch { /* ledger unavailable — surface the real rejection */ }
+          try { this.store.tx(() => { const now = this.clock(); this.store.clock(now); const a = this.store.audit(principal.tenant_id, 'SECURITY_OPERATION_REJECTED', principal.subject_id, 'local-gate', { code: error.code, ...(error.code === 'INV-403-QUARANTINE' && error.details?.quarantine_denial ? { quarantine_denial: true } : {}) }, now); mintedAt = a?.time ?? now; }); this.#rejectMemo.set(rKey, rNow); } catch { /* ledger unavailable — surface the real rejection */ }
         }
         // Quarantine denials land in the containment ledger too — NET-010
         // reconstruction must see denied executes/proposes, not only denied
         // consume calls (w9-network F7). Best-effort like the audit row.
+        // contained_at binds the minted anchor's own time (monotonic on
+        // rewind) — a raw clock() re-read could reopen the ±2s gap (w51).
         if (error.code === 'INV-403-QUARANTINE' && error.details?.quarantine_denial) {
-          try { const n0 = this.clock(); this.store.tx(() => this.store.put(principal.tenant_id, 'containment', `deny:${randomUUID()}`, { contained_at: n0, subject_id: principal.subject_id, device_id: error.details.device ?? null, capability_id: null, resource: null, destination: null, action: null, code: error.code, request_id: `gate-deny`, dropped_requests: 1 }, n0)); } catch { /* containment logging never masks the original denial */ }
+          try { const n0 = mintedAt ?? this.clock(); this.store.tx(() => this.store.put(principal.tenant_id, 'containment', `deny:${randomUUID()}`, { contained_at: n0, subject_id: principal.subject_id, device_id: error.details.device ?? null, capability_id: null, resource: null, destination: null, action: null, code: error.code, request_id: `gate-deny`, dropped_requests: 1 }, n0)); } catch { /* containment logging never masks the original denial */ }
         }
         throw error;
       }
@@ -4178,6 +4229,20 @@ export class Fabric {
       // must not forget that a tenant's chain could not be verified, and
       // only a signed seal/clear lifts it (w25-clock F-5).
       case 'CLOCK_RECOVERED': idx.clockUnverifiable = Array.isArray(meta.unverifiable_tenants) && meta.unverifiable_tenants.includes(t); break;
+      // A re-anchor that names an abandoned signed position is PROOF rows
+      // were destroyed under a verifiable attestation — and the destroyed
+      // tip may itself have been an AUDIT_SEALED carrying claims. The
+      // destroyed content is unrecoverable, so the honest bound is ≥1
+      // unrecoverable attested loss: wedge the reconstruction budget for
+      // the window exactly like a dropped_events claim, or murdering a tip
+      // seal silently releases INV-429 (w51-seal F-1). Only abandoned_*
+      // convicts — superseded_watermark_seq is the benign crash-gap arm.
+      case 'AUDIT_HEAD_REANCHORED': case 'AUDIT_WM_REANCHORED':
+        if (typeof meta.abandoned_head_seq === 'number' || typeof meta.abandoned_watermark_seq === 'number') {
+          idx.sealDroppedEvents = Math.max(idx.sealDroppedEvents ?? 0, 1);
+          idx.sealDroppedAt = Math.max(idx.sealDroppedAt ?? 0, pl.time ?? 0);
+        }
+        break;
       case 'AUDIT_SEALED': case 'AUDIT_WEDGE_CLEARED': case 'AUDIT_SEAL_CARRY': {
         if (pl.type === 'AUDIT_SEAL_CARRY') {
           // A carryover page replays only when it names a seal that
@@ -4186,6 +4251,10 @@ export class Fabric {
           // it preserves, so the binding is set membership, not adjacency
           // (w50-seal CRITICAL-1 — the lastSealSeq equality wedged the fold
           // permanently after any restore).
+          // Tripwire: auditPage's position binding already guarantees the
+          // referenced seal folded before this page (seal_seq < own seq and
+          // its row verified in place) — kept as a hard guard should the
+          // read-boundary rules ever change (w51-seal F-4).
           requireThat(idx.sealSeqs?.has(meta.seal_seq) === true, 'INV-409-INTEGRITY', 'Audit carryover page references no live seal', 409);
         } else {
           idx.clockUnverifiable = false;
@@ -4266,6 +4335,14 @@ export class Fabric {
         // only when this seal attests genuinely NEW loss, never on a
         // re-attestation (w50-fv F-6).
         if (Math.max(droppedNow - prevDropped, freshDrops) > 0) idx.sealDroppedAt = Math.max(idx.sealDroppedAt ?? 0, pl.time ?? 0);
+        // A seal that abandons a signed head/watermark position proves
+        // attested rows vanished beyond its own boundary — the same
+        // pessimistic ≥1 lost-attestation claim as the re-anchor arms
+        // (w51-seal F-1).
+        if (typeof meta.abandoned_head_seq === 'number' || typeof meta.abandoned_watermark_seq === 'number') {
+          idx.sealDroppedEvents = Math.max(idx.sealDroppedEvents ?? 0, 1);
+          idx.sealDroppedAt = Math.max(idx.sealDroppedAt ?? 0, pl.time ?? 0);
+        }
         break;
       }
     }
@@ -4455,6 +4532,12 @@ export class Fabric {
           // ECDSA stays bounded.
           try { verifySigned(env, recountKeys, 'audit'); } catch { continue; }
           const pl = env?.payload, m = pl?.metadata ?? {};
+          // Position binding like auditPage's: a byte-grafted signed page
+          // planted at the wrong seq must not inflate a seal's page count —
+          // the fold wedges on the graft first today, but the recount must
+          // not diverge from the fold's acceptance rules if it ever sees the
+          // row first (w51-seal F-5).
+          if (pl?.sequence !== r.seq) continue;
           if (pl?.type === 'AUDIT_SEALED') claims.set(r.seq, { pages: typeof m.carryover_pages === 'number' ? m.carryover_pages : 0, totals: m.carryover_totals ?? null, sums: { spend: Array.isArray(m.spend_carryover) ? m.spend_carryover.length : 0, access: Array.isArray(m.access_carryover) ? m.access_carryover.length : 0, revocations: Array.isArray(m.revocations_carryover) ? m.revocations_carryover.length : 0, capabilities: Array.isArray(m.capabilities_cut) ? m.capabilities_cut.length : 0, lifecycle: Array.isArray(m.lifecycle_carryover) ? m.lifecycle_carryover.length : 0 } });
           else if (pl?.type === 'AUDIT_SEAL_CARRY' && typeof m.seal_seq === 'number') {
             const pg = seen.get(m.seal_seq) ?? { count: 0, sums: { spend: 0, access: 0, revocations: 0, capabilities: 0, lifecycle: 0 } };
@@ -4477,6 +4560,9 @@ export class Fabric {
             if (claim.totals[cls] !== undefined)
               requireThat((claim.sums[cls] + pg.sums[cls]) === claim.totals[cls], 'INV-409-INTEGRITY', `Audit seal at seq ${sealSeq} attests ${claim.totals[cls]} carried ${cls} entr(ies) but only ${claim.sums[cls] + pg.sums[cls]} survive — restore the amputated carry`, 409);
         }
+        // Tripwire: a page that survived auditPage's position binding
+        // implies its seal row folded before it — kept as a hard guard
+        // should the fold's read-boundary rules ever change (w51-seal F-4).
         for (const [sealSeq] of seen)
           requireThat(claims.has(sealSeq), 'INV-409-INTEGRITY', 'Audit carryover page references a seal row that does not exist', 409);
         idx.sealRows = sealRows;
@@ -5256,6 +5342,24 @@ export class Fabric {
     const issuers = Object.entries(this.tenant(p.tenant_id).issuers).map(([key_id, v]) => { const m = this.issuerMetrics?.[key_id] ?? { calls: 0, errors: 0, total_latency_ms: 0, last_error_at: null }; return { key_id, name: v.name ?? null, channel: v.channel, failure_domain: v.failure_domain, endpoint: v.endpoint ?? null, revoked: this.revoked(p.tenant_id, 'issuer', key_id) || this.revoked(p.tenant_id, 'key', key_id), metrics: { calls: m.calls, errors: m.errors, mean_latency_ms: m.calls ? Math.round(m.total_latency_ms / m.calls) : null, last_error_at: m.last_error_at } }; });
     return { gate: this.config.gate_id, target: this.target.manifest(), issuers, profile: 'engineering' };
   }
+  // The shared drift consequence every connector-drift verdict must land:
+  // stale dependent coverage paths, mint the CONNECTOR_DRIFT conviction
+  // (the fold arm that actually arms idx.issuerDrift), and name moved paths
+  // on COVERAGE_STALED. Drift-check, unreachable and repin-residual all
+  // feed the SAME enforcement plane — a verdict that only reaches a
+  // response or a forensic row leaves evidence flowing (w51-http F1/F3).
+  _connectorDriftConsequence(t, subject_id, key_id, issuer, meta, now, reason) {
+    // Dependent paths match the drifted connector by DECLARED key_id
+    // first — a renamed issuer keeps its key so the binding survives
+    // (w31-coverage F8); the legacy name match stays for paths declared
+    // before key binding existed. Paths page past the store cap (F9).
+    const paths = this._allCoverage(t);
+    const transitioned = applyDriftToPaths(paths, path => path.connector_key_id === key_id || (path.connector_key_id === undefined && path.target === issuer.name));
+    for (const path of transitioned) this.coverageTransition(t, path, 'UNKNOWN', `${reason}:${key_id}`, now);
+    this.store.audit(t, 'CONNECTOR_DRIFT', subject_id, key_id, { ...meta, coverage_paths_staled: transitioned.length }, now);
+    if (transitioned.length) this.store.audit(t, 'COVERAGE_STALED', subject_id, key_id, { paths: transitioned.map(x => x.path_id) }, now);
+    return transitioned.length;
+  }
   async checkIssuerDrift(p, key_id) {
     this.authorize(p, ['security', 'policy_admin']);
     const issuer = this.tenant(p.tenant_id).issuers[key_id];
@@ -5274,16 +5378,8 @@ export class Fabric {
         // An unreachable issuer stales its dependent paths exactly like a
         // drifted manifest — quarantined evidence cannot keep paths
         // MONITORED (w8-composite F14).
-        // Dependent paths match the drifted connector by DECLARED key_id
-        // first — a renamed issuer keeps its key so the binding survives
-        // (w31-coverage F8); the legacy name match stays for paths declared
-        // before key binding existed. Paths page past the store cap (F9).
-        const paths = this._allCoverage(p.tenant_id);
-        const transitioned = applyDriftToPaths(paths, path => path.connector_key_id === key_id || (path.connector_key_id === undefined && path.target === issuer.name));
-        for (const path of transitioned) this.coverageTransition(p.tenant_id, path, 'UNKNOWN', `connector-unreachable:${key_id}`, now);
-        this.store.audit(p.tenant_id, 'CONNECTOR_DRIFT', p.subject_id, key_id, { drifted: 'unreachable', code: e.code ?? 'transport', coverage_paths_staled: transitioned.length }, now);
-        if (transitioned.length) this.store.audit(p.tenant_id, 'COVERAGE_STALED', p.subject_id, key_id, { paths: transitioned.map(x => x.path_id) }, now);
-        return { drifted: true, changes: [{ field: 'endpoint', detail: 'unreachable' }], checked_at: now, coverage_paths_staled: transitioned.length };
+        const staled = this._connectorDriftConsequence(p.tenant_id, p.subject_id, key_id, issuer, { drifted: 'unreachable', code: e.code ?? 'transport' }, now, 'connector-unreachable');
+        return { drifted: true, changes: [{ field: 'endpoint', detail: 'unreachable' }], checked_at: now, coverage_paths_staled: staled };
       });
     }
     let observedPayload;
@@ -5323,12 +5419,8 @@ export class Fabric {
       // COV-004/CON-006 consequence: paths depending on the drifted connector
       // lose their observation evidence and fall to UNKNOWN until revalidated.
       // Each transition emits a coverage event and an owner task (COV-005/009).
-      const paths = this._allCoverage(p.tenant_id);
-      const transitioned = applyDriftToPaths(paths, path => path.connector_key_id === key_id || (path.connector_key_id === undefined && path.target === issuer.name));
-      for (const path of transitioned) this.coverageTransition(p.tenant_id, path, 'UNKNOWN', `connector-drift:${key_id}`, now);
-      this.store.audit(p.tenant_id, 'CONNECTOR_DRIFT', p.subject_id, key_id, { changes: result.changes, configuration_digest: result.configuration_digest, coverage_paths_staled: transitioned.length }, now);
-      if (transitioned.length) this.store.audit(p.tenant_id, 'COVERAGE_STALED', p.subject_id, key_id, { paths: transitioned.map(x => x.path_id) }, now);
-      return { ...result, coverage_paths_staled: transitioned.length };
+      const staled = this._connectorDriftConsequence(p.tenant_id, p.subject_id, key_id, issuer, { changes: result.changes, configuration_digest: result.configuration_digest }, now, 'connector-drift');
+      return { ...result, coverage_paths_staled: staled };
     });
   }
   // The governed re-provisioning path the spec pin exists for: a
@@ -5354,7 +5446,14 @@ export class Fabric {
     let observed;
     const callStarted = Date.now();
     try { const res = await readWithRetry(`${issuer.endpoint}/v1/issuers/${issuer.name}/manifest?tenant=${p.tenant_id}`, { timeout_ms: 10000, retries: 2, headers: (issuer.read_token ?? issuer.issue_token) ? { Authorization: `Bearer ${issuer.read_token ?? issuer.issue_token}` } : undefined }); observed = res.data; this.recordIssuerCall(key_id, Date.now() - callStarted, false); }
-    catch (e) { this.recordIssuerCall(key_id, Date.now() - callStarted, true); throw new InvariantError('INV-503-CONNECTOR', `Issuer unreachable — cannot observe the spec to re-pin: ${e?.message ?? 'transport error'}`, 503, { cause: e }); }
+    catch (e) {
+      this.recordIssuerCall(key_id, Date.now() - callStarted, true);
+      // Parity with the drift check: an unreachable issuer convicts durably
+      // here too — a refusal that evaporates with the HTTP response leaves
+      // the same connector's evidence flowing (w51-http F3).
+      try { this.transaction(p, now => { this.store.put(p.tenant_id, 'issuer-drift', key_id, { drifted_at: now, changes: [{ field: 'endpoint', detail: 'unreachable' }] }, now); this._connectorDriftConsequence(p.tenant_id, p.subject_id, key_id, issuer, { drifted: 'unreachable', code: e?.code ?? 'transport' }, now, 'connector-unreachable'); }); } catch { /* ledger unavailable */ }
+      throw new InvariantError('INV-503-CONNECTOR', `Issuer unreachable — cannot observe the spec to re-pin: ${e?.message ?? 'transport error'}`, 503, { cause: e });
+    }
     let observedPayload;
     try {
       observedPayload = verifyManifest(observed, { [key_id]: issuer }, this.clock(), { max_age_ms: 300000 });
@@ -5364,7 +5463,13 @@ export class Fabric {
       // gate would refuse (w50-http MEDIUM).
       requireThat(observedPayload.expires_at <= this.clock() + 900000, 'INV-401-CONNECTOR', 'Connector manifest horizon too long', 401);
     } catch (e) {
-      if (e instanceof InvariantError) throw e;
+      // Parity with the drift check: an unverifiable manifest is drift
+      // evidence, not just a refusal — forged or replayed manifests are a
+      // stronger signal than downtime and convict durably (w51-http F3).
+      if (e instanceof InvariantError) {
+        try { this.store.tx(() => { const now = this.clock(); this.store.put(p.tenant_id, 'issuer-drift', key_id, { drifted_at: now, changes: [{ field: 'manifest', detail: 'invalid' }] }, now); this.store.audit(p.tenant_id, 'CONNECTOR_DRIFT', p.subject_id, key_id, { drifted: 'manifest_invalid', code: e.code }, now); }); } catch { /* ledger unavailable */ }
+        throw e;
+      }
       throw new InvariantError('INV-401-CONNECTOR', 'Issuer manifest failed verification — refusing to pin unproven content', 401, { cause: e });
     }
     const next = observedPayload.spec_digest;
@@ -5382,12 +5487,23 @@ export class Fabric {
     const residual = driftCheck(registered, observedSpec, this.clock());
     return this.transaction(p, now => {
       this.store.audit(p.tenant_id, 'ISSUER_SPEC_REPINNED', p.subject_id, key_id, { spec_digest: next, prior_digest: prior ?? null, residual_drift: residual.changes }, now);
-      // The digest drift is settled by the pin; any residual contract
-      // drift keeps the forensic row alive — deleting it while quarantine
-      // stands would hide exactly what remains unremediated.
-      if (residual.drifted) this.store.put(p.tenant_id, 'issuer-drift', key_id, { drifted_at: now, changes: residual.changes }, now);
-      else this.store.remove(p.tenant_id, 'issuer-drift', key_id);
-      return { repinned: true, key_id, prior_digest: prior ?? null, spec_digest: next, residual_drift: residual.changes };
+      if (residual.drifted) {
+        this.store.put(p.tenant_id, 'issuer-drift', key_id, { drifted_at: now, changes: residual.changes }, now);
+        // A residual contract divergence is drift in full — it must arm
+        // the same chain-anchored enforcement plane every other drift
+        // verdict feeds, not just be named in the response (w51-http F1).
+        const staled = this._connectorDriftConsequence(p.tenant_id, p.subject_id, key_id, issuer, { changes: residual.changes, configuration_digest: residual.configuration_digest, repinned_digest: next }, now, 'connector-drift');
+        return { repinned: true, key_id, prior_digest: prior ?? null, spec_digest: next, residual_drift: residual.changes, quarantined: true, coverage_paths_staled: staled };
+      }
+      // A clean repin IS the revalidation: the security principal blessed
+      // the served spec on-chain, so the pin settles the digest and lifts
+      // any standing suspension in the same transaction — claiming
+      // repinned:true while quarantine still stands would mislabel the
+      // state, and deleting the forensic row first would hide it
+      // (w51-http F2).
+      this.store.remove(p.tenant_id, 'issuer-drift', key_id);
+      this.store.audit(p.tenant_id, 'CONNECTOR_REVALIDATED', p.subject_id, key_id, { configuration_digest: residual.configuration_digest, repinned_digest: next }, now);
+      return { repinned: true, key_id, prior_digest: prior ?? null, spec_digest: next, residual_drift: residual.changes, quarantined: false };
     });
   }
   approvalChallenge(p, id, signer_id = null) {

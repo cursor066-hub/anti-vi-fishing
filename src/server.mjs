@@ -540,7 +540,10 @@ export function createServer(fabric, { port = 8080, host = '127.0.0.1', origin =
       if (!known) process.stderr.write(JSON.stringify({ level: 'error', request_id: requestId, code: 'INV-500-INTERNAL' }) + '\n');
     }
   });
-  server.requestTimeout = 15000; server.headersTimeout = 10000; server.keepAliveTimeout = 5000; server.maxRequestsPerSocket = 100;
+  // The connector remediation routes can legitimately take ~30s observing a
+  // flapping issuer (10s × 3 attempts) — a shorter cap lets repin/drift-check
+  // commit behind a dead socket (w51-http F6). headersTimeout stays tight.
+  server.requestTimeout = 40000; server.headersTimeout = 10000; server.keepAliveTimeout = 5000; server.maxRequestsPerSocket = 100;
   // Connection-count bound independent of request rate: sockets held open
   // without a completed request line never reach the rate limiter, so an
   // unbounded accept path is a raw fd-exhaustion vector (w22-http F5).

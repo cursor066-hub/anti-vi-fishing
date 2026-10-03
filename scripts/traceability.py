@@ -219,7 +219,7 @@ def _options_skip(body):
     if not rest.startswith(',') or not rest[1:].lstrip().startswith('{'): return False
     opts = rest[1:].lstrip()
     opts = opts[:opts.find('}')]
-    return bool(re.search(r'\b(?:skip|t' + 'odo)\s*:\s*true\b', opts))
+    return bool(re.search(r'\b(?:skip|t' + r'odo)\s*:\s*true\b', opts))
 def _test_title(body):
     # The first string literal after `test(` is the title — a requirement
     # ID must name the test it evidences, not merely appear somewhere in

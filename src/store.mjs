@@ -1040,7 +1040,7 @@ export class Store {
       sr.set(entry.sequence, hashBytes(envText));
       if (sr.size > 8192) sr.delete(sr.keys().next().value);
     }
-    return { hash, envelope };
+    return { hash, envelope, time: entry.time };
   }
   // Serialized-envelope digest this instance minted for (tenant, seq) —
   // consumers skip the ECDSA pass only while the stored bytes still match
