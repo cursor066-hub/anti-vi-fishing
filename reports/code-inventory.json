@@ -82,8 +82,8 @@
       "bytes": 3876
     },
     "src/store.mjs": {
-      "lines": 1273,
-      "bytes": 94102
+      "lines": 1280,
+      "bytes": 94675
     },
     "src/target.mjs": {
       "lines": 630,
@@ -521,6 +521,10 @@
       "lines": 261,
       "bytes": 17073
     },
+    "tests/w56.test.mjs": {
+      "lines": 33,
+      "bytes": 2042
+    },
     "tests/w6-fix.test.mjs": {
       "lines": 186,
       "bytes": 14384
@@ -578,6 +582,6 @@
       "bytes": 6499
     }
   },
-  "total_files": 144,
-  "total_lines": 40016
+  "total_files": 145,
+  "total_lines": 40056
 }

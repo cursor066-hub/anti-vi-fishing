@@ -1034,7 +1034,14 @@ export class Store {
       // can never brick the append path or evaporate unnamed
       // (w55-runtime F-1, w55-fv C-1/M-3).
       const prior = this._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor'").get(tenant)?.value;
-      const priorWellFormed = typeof prior === 'string' && /^\d+:/.test(prior);
+      // Well-formed means exactly what the fold reader convicts as
+      // malformed — `^\d+:` alone called '5:', '0:x' and '5:a:b' honest
+      // and let the overwrite below evaporate a planted marker unnamed:
+      // the residue must capture every shape the reader would flag
+      // (w56 self-audit).
+      const priorParts = typeof prior === 'string' ? prior.split(':') : null;
+      const priorSeq = priorParts !== null && /^\d+$/.test(priorParts[0]) ? Number(priorParts[0]) : undefined;
+      const priorWellFormed = priorParts !== null && priorParts.length === 2 && Number.isSafeInteger(priorSeq) && priorSeq >= 1 && priorParts[1] !== '';
       this._stmt("INSERT INTO meta_kv VALUES(?,'fold_floor',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value WHERE CAST(substr(meta_kv.value,1,instr(meta_kv.value,':')-1) AS INTEGER) < CAST(substr(excluded.value,1,instr(excluded.value,':')-1) AS INTEGER)").run(tenant, `${entry.sequence}:${hash}`);
       const delta = this._totalChanges() - before;
       requireThat(delta <= 1, 'INV-409-INTEGRITY', `fold-floor marker produced ${delta} row writes in one statement — foreign trigger side-effects`, 409);
