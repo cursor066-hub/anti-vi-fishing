@@ -20,12 +20,12 @@ const regen = spawnSync('python3', ['scripts/traceability.py', '--check'], { cwd
 if (regen.error || regen.status === null || regen.status === undefined) {
   // 'no status' is TWO different failures: the spawn never ran (python3
   // absent → regen recipe applies) versus the process exited by signal or
-  // the 300s timeout (a hung/killed check — regeneration cannot fix it,
+  // the 900s timeout (a hung/killed check — regeneration cannot fix it,
   // and 'install python3' misdirects the operator) (w55-ledger H-4).
   if (regen.error) {
     console.error(`traceability check could not run — python3 is required and was not spawnable: ${regen.error.message}\nInstall python3, then run node scripts/report.mjs to regenerate`);
   } else {
-    console.error(`traceability check exited abnormally${regen.signal ? ` (signal ${regen.signal})` : ' — killed by signal or the 300s timeout, no exit status'}\nInspect the failure, then run node scripts/report.mjs to regenerate`);
+    console.error(`traceability check exited abnormally${regen.signal ? ` (signal ${regen.signal})` : ' — killed by signal or the 900s timeout, no exit status'}\nInspect the failure, then run node scripts/report.mjs to regenerate`);
   }
   process.exit(2);
 }

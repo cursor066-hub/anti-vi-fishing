@@ -27,8 +27,9 @@ const wmTamper = (h, kind) => (seal => (seal.head_watermark_tampered ?? []).some
 // --- C-1/F-1 (CRITICAL, both reports): a malformed marker CAST-poisons
 // the guarded UPSERT — the append heals it instead of wedging, and the
 // divergent content is preserved on the same trust plane. The residue row
-// is one-shot: the next fold consult deletes it, so the divergent content
-// rides the conviction itself (healed_marker).
+// is one-shot: the fold consult verifies the pointer against the signed
+// chain and retires it only once the conviction reaches a report surface
+// (w56: durable-until-report, chain-anchored).
 test('w55 C-1a: a CAST-high marker self-heals and names its residue floor_marker_healed', t => {
   const h = fixture(t);
   h.ready(); h.ready();
@@ -40,7 +41,7 @@ test('w55 C-1a: a CAST-high marker self-heals and names its residue floor_marker
   const seal = h.f.sealAuditChain(h.p('security'));
   const healed = (seal.head_watermark_tampered ?? []).find(e => e.kind === 'floor_marker_healed');
   assert.ok(healed, `the residue is named once: ${JSON.stringify(seal.head_watermark_tampered)}`);
-  assert.match(healed.healed_marker ?? '', /^\d+: 999999999:x$/, 'the conviction carries the divergent content bound to the healing append');
+  assert.match(healed.healed_marker ?? '', /^ 999999999:x$/, 'the conviction carries the divergent content bound to the healing append');
   const seal2 = h.f.sealAuditChain(h.p('security'));
   assert.ok(!wmTamper(h, 'floor_marker_healed')(seal2), 'a reported residue does not re-report');
   h.close();
@@ -57,7 +58,7 @@ test('w55 C-1b: a CAST-low malformed marker also lands fold_floor_healed evidenc
   const seal = h.f.sealAuditChain(h.p('security'));
   const healed = (seal.head_watermark_tampered ?? []).find(e => e.kind === 'floor_marker_healed');
   assert.ok(healed, `the overwritten garbage is named: ${JSON.stringify(seal.head_watermark_tampered)}`);
-  assert.match(healed.healed_marker ?? '', /^\d+:abc$/, 'the conviction carries the divergent content');
+  assert.match(healed.healed_marker ?? '', /^abc$/, 'the conviction carries the divergent content');
   h.close();
 });
 

@@ -914,7 +914,25 @@ export class Store {
       requireThat(typeof head?.payload?.time === 'number' && Number.isFinite(head.payload.time), 'INV-409-AUDIT-TAMPER', 'Audit head envelope carries no valid time — ledger tamper', 409);
       priorTime = head.payload.time;
     }
-    const entry = { tenant_id: tenant, sequence: (last?.seq ?? 0) + 1, previous: last?.hash ?? '0'.repeat(64), type, actor, reference, metadata, time: Math.max(now, priorTime) };
+    // Consult the fold-floor marker BEFORE signing: a stored value no
+    // honest path emits is planted garbage the marker block below heals —
+    // and the append must carry what it SAW on the SIGNED payload, or the
+    // only durable record of the divergence sits in attacker-writable
+    // meta_kv (forgeable residue, clobberable pointer — w56). The field
+    // names the marker this append observed, whether or not the heal
+    // below overwrote it — a marker left divergent on purpose is equally
+    // documented. Well-formed means exactly what the fold reader convicts
+    // as malformed — `^\d+:` alone called '5:', '0:x' and '5:a:b' honest
+    // and let the overwrite evaporate a planted marker unnamed (w56
+    // self-audit). Read inside this same tx so the marker block sees the
+    // same snapshot.
+    const floorPrior = this._schemaGuard(() => this._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor'").get(tenant)?.value);
+    const floorPriorParts = typeof floorPrior === 'string' ? floorPrior.split(':') : null;
+    const floorPriorSeq = floorPriorParts !== null && /^\d+$/.test(floorPriorParts[0]) ? Number(floorPriorParts[0]) : undefined;
+    const floorPriorWellFormed = floorPriorParts !== null && floorPriorParts.length === 2 && Number.isSafeInteger(floorPriorSeq) && floorPriorSeq >= 1 && floorPriorParts[1] !== '';
+    const divergentMarker = floorPrior !== undefined && !floorPriorWellFormed ? String(floorPrior).slice(0, 200) : undefined;
+    const healedMeta = divergentMarker !== undefined ? (metadata !== null && typeof metadata === 'object' ? { ...metadata, fold_floor_divergent: divergentMarker } : { fold_floor_divergent: divergentMarker }) : metadata;
+    const entry = { tenant_id: tenant, sequence: (last?.seq ?? 0) + 1, previous: last?.hash ?? '0'.repeat(64), type, actor, reference, metadata: healedMeta, time: Math.max(now, priorTime) };
     // Chain anchors kept current in-process: the newest signed time IS the
     // floor the clock row is compared against, and the newest recovery
     // explains any backward clock discontinuity (w22-fixverify F1). The
@@ -1025,23 +1043,16 @@ export class Store {
     // write zero rows).
     this._schemaGuard(() => this.tx(() => {
       const before = this._totalChanges();
-      // The stored marker is consulted BEFORE the write: a value no honest
-      // path emits (' 999999999:x', 'abc', a bare hash) is planted garbage —
-      // CAST parses its prefix arbitrarily (high → the guarded UPDATE
-      // refuses and every later append wedges on the probe, remediation
-      // included; low → it is silently overwritten). Both directions heal
-      // here and bind the healed content to this commit — a planted marker
-      // can never brick the append path or evaporate unnamed
-      // (w55-runtime F-1, w55-fv C-1/M-3).
-      const prior = this._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor'").get(tenant)?.value;
-      // Well-formed means exactly what the fold reader convicts as
-      // malformed — `^\d+:` alone called '5:', '0:x' and '5:a:b' honest
-      // and let the overwrite below evaporate a planted marker unnamed:
-      // the residue must capture every shape the reader would flag
-      // (w56 self-audit).
-      const priorParts = typeof prior === 'string' ? prior.split(':') : null;
-      const priorSeq = priorParts !== null && /^\d+$/.test(priorParts[0]) ? Number(priorParts[0]) : undefined;
-      const priorWellFormed = priorParts !== null && priorParts.length === 2 && Number.isSafeInteger(priorSeq) && priorSeq >= 1 && priorParts[1] !== '';
+      // The stored marker was consulted before this append signed — a
+      // value no honest path emits (' 999999999:x', 'abc', a bare hash) is
+      // planted garbage: CAST parses its prefix arbitrarily (high → the
+      // guarded UPDATE refuses and every later append wedges on the
+      // probe, remediation included; low → it is silently overwritten).
+      // Both directions heal here and bind the healed content to this
+      // commit — a planted marker can never brick the append path or
+      // evaporate unnamed (w55-runtime F-1, w55-fv C-1/M-3). `floorPrior`
+      // was read inside this same tx before the entry signed, so the
+      // snapshot is identical.
       this._stmt("INSERT INTO meta_kv VALUES(?,'fold_floor',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value WHERE CAST(substr(meta_kv.value,1,instr(meta_kv.value,':')-1) AS INTEGER) < CAST(substr(excluded.value,1,instr(excluded.value,':')-1) AS INTEGER)").run(tenant, `${entry.sequence}:${hash}`);
       const delta = this._totalChanges() - before;
       requireThat(delta <= 1, 'INV-409-INTEGRITY', `fold-floor marker produced ${delta} row writes in one statement — foreign trigger side-effects`, 409);
@@ -1053,10 +1064,22 @@ export class Store {
         this._stmt("UPDATE meta_kv SET value=? WHERE tenant=? AND key='fold_floor'").run(`${entry.sequence}:${hash}`, tenant);
         stored = this._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor'").get(tenant)?.value;
       }
-      if (prior !== undefined && !priorWellFormed) {
-        // Evidence, not laundering: the divergent content is preserved on
-        // the marker plane, bound to the append that healed it.
-        this._stmt("INSERT INTO meta_kv VALUES(?,'fold_floor_healed',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, `${entry.sequence}:${prior}`);
+      if (floorPrior !== undefined && !floorPriorWellFormed && stored !== floorPrior) {
+        // Evidence, not laundering: the residue row is a POINTER into the
+        // signed chain — this append's own envelope already carries
+        // fold_floor_divergent, so the row can be verified against
+        // anchored bytes and a planted residue cannot mint a phantom conviction
+        // (w56-store MED). It survives until a report retires it — never
+        // deleted on first read (w56-store HIGH). Written ONLY when the
+        // marker actually changed — a well-formed-shaped but divergent
+        // marker (an unreachable seq the guarded update refuses) is left
+        // standing as evidence on purpose, not 'healed', so it writes no
+        // pointer (w56-seal parity). Landed-check it like every security
+        // write: a foreign RAISE(IGNORE) trigger eating this insert must
+        // convict (w56-store LOW).
+        this._stmt("INSERT INTO meta_kv VALUES(?,'fold_floor_healed',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, `${entry.sequence}:${floorPrior}`);
+        const landedResidue = this._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_healed'").get(tenant)?.value;
+        requireThat(landedResidue === `${entry.sequence}:${floorPrior}`, 'INV-409-INTEGRITY', 'fold-floor healed residue refused after write — foreign trigger side-effects', 409);
       }
       const storedSeq = typeof stored === 'string' && /^\d+:/.test(stored) ? Number(stored.split(':')[0]) : undefined;
       requireThat(storedSeq !== undefined && storedSeq >= entry.sequence, 'INV-409-INTEGRITY', `fold-floor marker write ${stored === undefined ? 'missing' : 'refused'} after write — foreign trigger side-effects`, 409);

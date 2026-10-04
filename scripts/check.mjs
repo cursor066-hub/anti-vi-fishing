@@ -125,16 +125,22 @@ const MARKER_LOOSE = [
 // strings inside regexes that assert their absence; this file exempts
 // itself because it hosts the rules.
 const RENDER_ONLY = [
-  ['DOM injection', /\.(?:innerHTML|outerHTML)\s*(?:=|\+=)|insertAdjacentHTML|document\.write\s*\(/]
+  // Bracket-member assignment, writeln, and the Function constructor are
+  // the same sink under a different spelling (w56-ledger F10).
+  ['DOM injection', /\.(?:innerHTML|outerHTML)\s*(?:=|\+=)|\[\s*['"](?:innerHTML|outerHTML)['"]\s*\]\s*(?:=|\+=)|insertAdjacentHTML|document\.writeln?\s*\(|new\s*\(?\s*Function\s*\)?\s*\(/]
 ];
 for (const file of textFiles) {
   if (file === 'vectors/keys.json' || !existsSync(file) || isBinary(file)) continue;
   const s = readFileSync(file, 'utf8');
+  // Zero-width/format chars embedded in a marker hide it from the
+  // pattern while a human still reads the unfinished-work word —
+  // normalize them away before the marker rules test (w56-ledger F11).
+  const snorm = s.replace(/[\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/g, '');
   // check.mjs exempts itself only from the DOM rules — its rule table
   // legitimately hosts the sink literals; sinks and markers still apply.
   const renderable = file !== 'scripts/check.mjs' && (file.startsWith('src/') || file.startsWith('web/') || /\.(?:html?|jsx|tsx)$/.test(file)) && !file.startsWith('tests/');
   const rules = [...(SINK_EXT.test(file) ? SINK_RULES : []), ...(renderable ? RENDER_ONLY : []), ...MARKER_RULES, ...(file.startsWith('reports/') ? [] : MARKER_LOOSE)];
-  for (const [name, regex] of rules) if (regex.test(s)) { console.error(`${file}: ${name}`); failed = true; }
+  for (const [name, regex] of rules) if (regex.test(name.includes('marker') ? snorm : s)) { console.error(`${file}: ${name}`); failed = true; }
 }
 
 // Route-role parity: every role list the OpenAPI generator declares must
@@ -150,8 +156,21 @@ for (const file of textFiles) {
 const isIf = l => /^\s*(?:\}\s*)?(?:else\s+)?if\s*\(/.test(l);
 // A single-statement validation guard (queryCheck/noBody) is not a
 // handler boundary — the fabric call that carries the role gate may
-// legitimately sit below it (w43-fv M1 ordering).
-const isValidationGuard = l => /^\s*if \([^)]*\)\s*(queryCheck|noBody)\s*\(/.test(l);
+// legitimately sit below it (w43-fv M1 ordering). The condition close
+// is found by balanced parens on the literal-blanked view — a nested
+// call inside the condition (`if (q.t && p.query) queryCheck(...)`)
+// fooled the first-`)` scan into missing the guard (w56-ledger G-7).
+const isValidationGuard = l => {
+  const m = /^\s*if\s*\(/.exec(l);
+  if (!m) return false;
+  const cs = codeSpan(l);
+  let d = 0, end = -1;
+  for (let i = cs.indexOf('(', m.index); i < cs.length; i++) {
+    if (cs[i] === '(') d++;
+    else if (cs[i] === ')' && --d === 0) { end = i; break; }
+  }
+  return end !== -1 && /^\s*(queryCheck|noBody)\s*\(/.test(cs.slice(end + 1));
+};
 // A route-arm `if` is the only `if` that bounds a handler scan — a
 // nested `if` inside the arm is part of the handler, not a boundary
 // (w55-ledger C4-c).
@@ -208,12 +227,16 @@ const inString = (l, pos) => {
 // to &&). A dead arm that spills past the line end keeps eating lines
 // until a statement terminator — the continuation carries the same
 // unreachable operand (w55-fv H-3 multiline).
-let deadPending = false;
+// The multi-line dead-operand continuation is per-SCAN state, not
+// module state — a `false &&` spilling past one scan's window armed the
+// NEXT scan's first lines as dead, laundering real code across caller
+// boundaries (w56-ledger G-6). Each scan builds its own `deadState()`.
+const deadState = () => ({ pending: false });
 const deadContinues = m => !/;|\{|\}|,/.test(m);
-const stripDead = l => {
-  if (deadPending) {
-    if (/^\s*(?:case\b|default\b|\}|\)|\])/.test(l)) deadPending = false;
-    else { if (!deadContinues(l)) deadPending = false; return ' '; }
+const stripDead = (l, dead = deadState()) => {
+  if (dead.pending) {
+    if (/^\s*(?:case\b|default\b|\}|\)|\])/.test(l)) dead.pending = false;
+    else { if (!deadContinues(l)) dead.pending = false; return ' '; }
   }
   let out = stripComment(l);
   const livePrefix = i => { const b = out.slice(0, i).trimEnd(); return /[=!<>]=+\s*$|[&^~%+\-*/!<>]\s*$/.test(b) && !/(?:\|\||&&|\?|:)\s*$/.test(b); };
@@ -221,12 +244,12 @@ const stripDead = l => {
   // indices the later matches were collected on.
   for (const m of [...out.matchAll(/\b(?:false|0|null|undefined|!true)\s*&&[^;{}]*/g)].reverse()) {
     if (inString(out, m.index) || livePrefix(m.index)) continue;
-    if (deadContinues(m[0])) deadPending = true;
+    if (deadContinues(m[0])) dead.pending = true;
     out = out.slice(0, m.index) + ' ' + out.slice(m.index + m[0].length);
   }
   for (const m of [...out.matchAll(/\b(?:true|!false|1)\s*\|\|[^;{}]*/g)].reverse()) {
     if (inString(out, m.index) || livePrefix(m.index)) continue;
-    if (deadContinues(m[0])) deadPending = true;
+    if (deadContinues(m[0])) dead.pending = true;
     out = out.slice(0, m.index) + ' ' + out.slice(m.index + m[0].length);
   }
   return out;
@@ -240,16 +263,31 @@ const stripDead = l => {
 // carry or grow the gate's role set (w55-fv M-5).
 const roleSets = lines => {
   const defs = new Map();
+  // Brackets inside push/concat argument lists are punctuation, not part
+  // of the role name — `B.concat(['x','y'])` split raw and kept '['x''
+  // and ''y]' (w56-fv F-3).
+  const roleArgs = s => s.replace(/[[\]]/g, '').split(',').map(x => x.trim().replace(/['"]/g, '')).filter(Boolean);
+  const dead = deadState();
   for (const l of lines) {
-    const s = stripDead(l);
+    const s = stripDead(l, dead);
     const m = /\b(?:const|let|var)?\s*([A-Za-z_$][\w$]*)\s*=\s*\[([^\]]*)\]/.exec(s);
-    if (m) { defs.set(m[1], m[2].split(',').map(x => x.trim().replace(/['"]/g, '')).filter(Boolean)); continue; }
+    if (m) { defs.set(m[1], roleArgs(m[2])); continue; }
     const alias = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\s*[;\s]/.exec(s);
     if (alias && defs.has(alias[2])) defs.set(alias[1], [...defs.get(alias[2])]);
-    for (const p of s.matchAll(/\b([A-Za-z_$][\w$]*)\s*\.\s*push\s*\(([^)]*)\)/g))
-      if (defs.has(p[1])) defs.get(p[1]).push(...p[2].split(',').map(x => x.trim().replace(/['"]/g, '')).filter(Boolean));
+    else {
+      // A bare `B = A` rebinding is the same alias — module-level lets
+      // often rebind without a declarator and the hole made
+      // authorize(p, B) invisible (w56-fv F-3).
+      const bare = /\b([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\s*[;\s]/.exec(s);
+      if (bare && defs.has(bare[2])) defs.set(bare[1], [...defs.get(bare[2])]);
+    }
     for (const c of s.matchAll(/\b(?:const|let|var)?\s*([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\s*\.\s*concat\s*\(([^)]*)\)/g))
-      if (defs.has(c[1])) defs.get(c[1]).push(...c[3].split(',').map(x => x.trim().replace(/['"]/g, '')).filter(Boolean));
+      // B = A.concat(...) binds B to A's content plus the args — reading
+      // the target made an unbound B stay empty and the set invisible
+      // (w56-fv F-3).
+      defs.set(c[1], [...(defs.get(c[2]) ?? []), ...roleArgs(c[3])]);
+    for (const p of s.matchAll(/\b([A-Za-z_$][\w$]*)\s*\.\s*push\s*\(([^)]*)\)/g))
+      if (defs.has(p[1])) defs.get(p[1]).push(...roleArgs(p[2]));
   }
   return defs;
 };
@@ -277,7 +315,20 @@ const roleSets = lines => {
     const defs = roleSets(lines);
     const found = new Set();
     let depthCur = 0;
-    let skipDepth = null;
+    const skipStack = [];
+    let skipIndent = null;
+    let ourChainDepth = null;
+    const dead = deadState();
+    // An unconditional `return` inside this row's arm ends its dispatch —
+    // an authorize placed AFTER it can never gate this verb, only
+    // sibling rows that didn't return early (w56-ledger F7). `deadArmDepth`
+    // is the statement depth inside the row's arm body; `tailDead` latches
+    // for the rest of the row's scan.
+    // Depths whose `return` dominates this row's tail: the route arm's
+    // body depth (every verb falls to it when its chain ends without
+    // exiting) plus each dispatched sub-arm's body depth (w56-ledger F7).
+    const deadDepths = new Set();
+    let tailDead = false;
     for (let i = from; i < Math.min(from + depth, lines.length); i++) {
       // Only a route-arm-shaped `if` bounds the scan — a nested `if`
       // inside the handler is part of the handler and its gate still
@@ -292,12 +343,87 @@ const roleSets = lines => {
       // an authorize inside a sibling's sub-route belongs to that row,
       // not this one. `verb` names this row's sub-route; without it
       // every gate in the arm counts (w55-ledger C4-c over-collection).
-      if (skipDepth !== null && (depthCur < skipDepth || /^\s*\}\s*else\b/.test(cs))) skipDepth = null;
-      const l = stripDead(lines[i]);
+      // Sibling interiors stack: `} else if (m[1]==='b') {` closes one
+      // sibling block and opens the next on the same line, so the new
+      // interior must re-arm at the post-close depth — a single
+      // opens>closes check left every else-arm collected and bled the
+      // sibling's roles into this row (w56-fv F-2). A `} else`
+      // continuation of a sibling chain is sibling too: it serves the
+      // chain's catch-all row, not this verb — excluding it errs toward
+      // flagging, never laundering.
+      let l = stripDead(lines[i], dead);
       const disp = verb && i !== from ? [...l.matchAll(/m\[\d+\]\s*===\s*'([^']+)'/g)].map(x => x[1]) : [];
-      const excluded = skipDepth !== null || (disp.length > 0 && !disp.includes(verb));
-      if (disp.length > 0 && !disp.includes(verb) && opens > closes) skipDepth = depthCur + opens - closes;
-      if (!excluded) {
+      const afterCloses = depthCur - closes;
+      let popped = false;
+      while (skipStack.length && afterCloses < skipStack[skipStack.length - 1].d) { skipStack.pop(); popped = true; }
+      // A braceless sibling body stays excluded while following lines
+      // keep a deeper indent than the dispatch line (blank lines ride).
+      if (skipIndent !== null && l.trim() !== '' && (/^\s*/.exec(l)[0].length <= skipIndent || /^\s*\}/.test(l))) skipIndent = null;
+      const isElse = /^\s*\}?\s*else\b/.test(l);
+      // The dispatch chain OUR verb rides ends at our arm's closing `}` —
+      // a `} else` past it serves the catch-all row, never ours. A chain
+      // with more else-arms keeps the marker until a non-else line drops
+      // below it.
+      let ourChainClosed = false;
+      if (ourChainDepth !== null && afterCloses < ourChainDepth) {
+        if (isElse) ourChainClosed = true; else ourChainDepth = null;
+      }
+      const topIsSib = skipStack.length > 0 && !skipStack[skipStack.length - 1].ours;
+      const inSib = topIsSib;
+      const sibling = disp.length > 0 && !disp.includes(verb);
+      const ours = disp.length > 0 && disp.includes(verb);
+      // A `} else` continuing a sibling chain — or our own chain once our
+      // arm closed — is sibling too: its catch-all roles must not bleed
+      // into this row. A dispatch naming THIS verb is ours even inside a
+      // sibling region: `if (m[2]==='ourverb')` nested in arm-a is this
+      // row's gate, not arm-a's.
+      const elseSibling = isElse && !ours && (popped || inSib || ourChainClosed);
+      const excluded = (inSib && !ours) || skipIndent !== null || sibling || elseSibling;
+      if (sibling || elseSibling) {
+        const lastOpen = l.lastIndexOf('{'), lastClose = l.lastIndexOf('}');
+        // An unmatched last `{` opens a block whose interior continues
+        // past this line; otherwise the body is braceless (indent-bound).
+        if (lastOpen > lastClose) skipStack.push({ d: afterCloses + opens, ours: false });
+        else if (opens === 0) skipIndent = /^\s*/.exec(l)[0].length;
+      }
+      // A dispatch carrying THIS verb opens our arm — inside a sibling
+      // region its block counts for us; at top level remember the chain
+      // depth so the trailing `} else` is recognized as a sibling. The
+      // arm's BODY sits one level past the dispatch line when a `{`
+      // opens it — but a braceless or same-line-closed dispatch still
+      // dominates: `if (m[2]==='x') return serve(...)` kills the
+      // enclosing region's tail for this verb exactly like the braced
+      // arm does (w56-ledger F7).
+      if (ours) {
+        if (l.includes('{')) deadDepths.add(depthCur + 1); else deadDepths.add(depthCur);
+        if (l.lastIndexOf('{') > l.lastIndexOf('}')) {
+          if (skipStack.length > 0) skipStack.push({ d: afterCloses + opens, ours: true });
+          else ourChainDepth = afterCloses + opens;
+        }
+      } else if (i === from && opens > 0) deadDepths.add(depthCur + 1);
+      if (!excluded && !tailDead) {
+        // A `return` at a dominating depth kills the row's tail — cut
+        // the line at it, latch dead, and stop crediting authorizes that
+        // sit past the exit (w56-ledger F7). A return nested deeper
+        // (inside its own `{`) is conditional and kills nothing.
+        if (deadDepths.size > 0) {
+          // `ld` must start at the line's opening depth — `afterCloses`
+          // already subtracted this line's `}` chars, so a self-contained
+          // `{ ... }` later on the same line would under-read the depth at
+          // the return (w56-ledger F7 self-test).
+          let ld = depthCur, cut = -1;
+          for (let ci = 0; ci < l.length; ci++) {
+            const c = l[ci];
+            if (c === '{') ld++;
+            else if (c === '}') ld--;
+            else if (deadDepths.has(ld) && l.startsWith('return', ci) && !/[\w$]/.test(l[ci - 1] ?? ' ') && !/[\w$]/.test(l[ci + 6] ?? ' ')
+              // A `return` that is the braceless body of an if/else/for/
+              // while on this line is conditional — it dominates nothing
+              // and the row's tail stays live (w56-ledger F7).
+              && !/\b(?:if|for|while)\s*\([^;{]*\)\s*$|\belse(?:\s+if\s*\([^;{]*\))?\s*$/.test(l.slice(0, ci))) { cut = ci; break; }
+          }
+          if (cut !== -1) { l = l.slice(0, cut); tailDead = true; }
+        }
         for (const m of l.matchAll(/authorize\(p,\s*\[([^\]]+)\]/g))
           for (const r of m[1].split(',')) found.add(r.trim().replace(/['"]/g, ''));
         for (const m of l.matchAll(/authorize\(p,\s*([A-Za-z_$][\w$]*)\s*\)/g))
@@ -405,7 +531,7 @@ const roleSets = lines => {
       }
       return end;
     };
-    const windowCode = hi === -1 ? '' : lines.slice(hi, windowEnd()).map(stripDead).join('\n');
+    const windowCode = hi === -1 ? '' : (() => { const d = deadState(); return lines.slice(hi, windowEnd()).map(x => stripDead(x, d)).join('\n'); })();
     if (r.roles.length === 1 && NONROLE.has(r.roles[0])) {
       // Non-role claims are still contract claims: 'unauthenticated' must
       // name a handler that runs no auth, 'token holder' must actually
@@ -446,9 +572,38 @@ const roleSets = lines => {
           if (depth < 0) depth = 0;
         }
         const armDepth = rows.at(-1)?.stmtDepth ?? 1;
+        let braceless = false;
+        const priorDead = deadState();
         for (const r of rows.slice(1, -1)) {
           const l = lines[r.i];
-          if (r.stmtDepth === armDepth && !isIf(l) && !/^\s*(?:async\s+)?function\s/.test(l)) priorCalls.push(stripDead(l));
+          if (r.stmtDepth !== armDepth) continue;
+          const cs = codeSpan(l);
+          // A braceless `if (c)`/`else`/`for`/`while` at arm depth makes
+          // ONLY the one statement after it conditional — the next
+          // arm-depth statement is its body, not an unconditional call
+          // (w56-ledger F6).
+          if (braceless && cs.trim() !== '') { braceless = false; continue; }
+          if (/^\s*(?:\}\s*)?(?:if|else\s+if|else|for|while|do)\b/.test(cs)) {
+            const bal = (cs.match(/\{/g)?.length ?? 0) - (cs.match(/\}/g)?.length ?? 0);
+            if (bal <= 0) {
+              // Locate the clause's controlling `)` — text after it on
+              // the same line is the (consumed) body, so the flag only
+              // survives when the body is due on the NEXT statement.
+              const pm = /\b(?:if|for|while)\s*\(/.exec(cs);
+              if (!pm) { const rest0 = cs.replace(/^\s*(?:\}\s*)?(?:else|do)\b/, ''); braceless = rest0.trim() === ''; }
+              else {
+                let d = 0, condEnd = -1;
+                for (let ci = cs.indexOf('(', pm.index); ci < cs.length; ci++) {
+                  if (cs[ci] === '(') d++;
+                  else if (cs[ci] === ')' && --d === 0) { condEnd = ci + 1; break; }
+                }
+                braceless = condEnd === -1 || cs.slice(condEnd).trim() === '';
+              }
+            }
+            continue;
+          }
+          if (/^\s*(?:async\s+)?function\s/.test(l)) continue;
+          priorCalls.push(stripDead(l, priorDead));
         }
       }
       if ((r.roles[0] === 'authenticated' || r.roles[0] === 'bound subject')
@@ -560,7 +715,7 @@ const roleSets = lines => {
     // switch dispatch, non-bare aliasing, path arms that serve without
     // any method arm (w51-ledger H-2).
     if (/\bswitch\s*\([^)]*(?:req\.method|req\.url|path|url\.pathname)/.test(code)) { console.error(`route-spec parity: unauditable switch dispatch — ${line.trim().slice(0, 100)}`); failed = true; }
-    else if (/(?:\bpath\b|req\.url|url\.pathname)\s*===\s*'|\.exec\((?:path|req\.url|url\.pathname)\)/.test(code) && !/req\.method/.test(eff) && /send\(|fabric\.|res\./.test(code)) { console.error(`route-spec parity: path arm with no enclosing method gate — ${line.trim().slice(0, 100)}`); failed = true; }
+    else if (/(?:\bpath\b|req\.url|url\.pathname)\s*===\s*'|\.exec\((?:path|req\.url|url\.pathname)\)/.test(code) && !/req\.method/.test(eff)) { console.error(`route-spec parity: path arm with no enclosing method gate — ${line.trim().slice(0, 100)}`); failed = true; }
     else if (/req\.method/.test(eff) && /\bpath\b|req\.url|url\.pathname/.test(eff)) routeSeen(eff, line);
     // Track enclosing conditions: an `if (` whose block stays open
     // past this line governs the lines below it; a balanced line
@@ -617,8 +772,11 @@ const roleSets = lines => {
     // pathname, request headers or a server factory is an unaudited
     // HTTP surface even when it never reads req.method — and a
     // .js/.cjs-suffixed file is no safer than .mjs (w53-fv M-4,
-    // w53-ledger HIGH-3, w54-ledger H-4).
-    if (/req\.method|req\.url|url\.pathname|req\.headers|createServer\s*\(/.test(readFileSync(p, 'utf8'))) { console.error(`route-spec parity: HTTP dispatch surface in ${p} — outside the audited file`); failed = true; }
+    // w53-ledger HIGH-3, w54-ledger H-4). Renaming the parameter hides
+    // nothing: any `X.method === 'GET'`, `X.url ===`, `X.headers[…]` or
+    // a 'request' listener is a dispatch surface under any identifier
+    // (w56-ledger F9).
+    if (/req\.method|req\.url|url\.pathname|req\.headers|createServer\s*\(|on\s*\(\s*['"]request['"]|\b[A-Za-z_$][\w$]*\.(?:method|url)\s*(?:===|!==)\s*['"`]|\b[A-Za-z_$][\w$]*\.headers\s*(?:\[\s*['"]authorization|\.authorization\b)/.test(readFileSync(p, 'utf8'))) { console.error(`route-spec parity: HTTP dispatch surface in ${p} — outside the audited file`); failed = true; }
 }
 
 // Query-parameter parity: the runtime allowlist (QUERY_ALLOW in

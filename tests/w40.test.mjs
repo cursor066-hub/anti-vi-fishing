@@ -115,23 +115,35 @@ test('w40-fv F-4: planted canonical-illegal entries can never freeze the writer'
   const parsed = JSON.parse(after);
   assert.equal(Object.hasOwn(parsed.tenants, '__proto__'), false, 'the planted key is dropped, not reserialized');
   assert.doesNotThrow(() => canonical(parsed), 'the rewritten file is canonical-clean');
-  assert.ok(typeof parsed.tenants.acme === 'object' && parsed.tenants.acme.envelope, 'the honest bump still landed');
+  // The overwrite stripped acme's live entry — the strip veto (w56-seal
+  // F-2) withholds the fresh floor until a seal names the conviction and
+  // re-anchors; only the planted content is cleared now.
+  assert.equal(parsed.tenants.acme, undefined, 'the stripped entry is vetoed, not silently repaved');
+  const seal = h.f.sealAuditChain(h.p('security'));
+  assert.ok((seal.head_watermark_tampered ?? []).some(e => e.kind === 'floor_stripped'), 'the strip is named on the report');
+  const repaved = JSON.parse(readFileSync(wmPath(h), 'utf8'));
+  assert.ok(typeof repaved.tenants.acme === 'object' && repaved.tenants.acme.envelope, 'the seal re-anchor lands the honest entry');
   assert.doesNotThrow(() => h.f._auditIndex('acme'));
 });
 
-test('w40-fv F-5: a landed write clears the tamper flag it repaired', t => {
+test('w40-fv F-5: a landed write names the conviction it repaired — once, then retires', t => {
   const h = fixture(t, ['acme']);
   h.proposed(); h.f._auditIndex('acme');
   const tip = lastSeq(h);
   // A forged entry raises the flag on the next resolution…
   writeWm(h, { acme: { seq: tip + 5000, envelope: { payload: { seq: tip + 5000 }, signatures: [{ signature: 'AA' }] } } });
   h.f._auditIndex('acme');
-  // …and the next honest landed write repairs it — the flag must not
-  // survive to be reported forever as live tamper.
+  // …and the next honest landed write repairs it. Under the old doctrine
+  // the repair edge itself erased the flag — the forged entry was
+  // laundered off every surface before any report named it (w56-seal
+  // F-2). Now the conviction is named exactly once, then retires.
   h.f.store.audit('acme', 'W40_PAD', 'operator', 'pad', {}, h.now());
   const r = h.f.sealAuditChain(h.p('security'));
   assert.equal(r.sealed, false);
-  assert.deepEqual(r.head_watermark_tampered ?? [], [], 'a repaired entry must not keep reporting as tamper');
+  assert.ok((r.head_watermark_tampered ?? []).some(e => e.kind === 'signature'),
+    'the forged entry is named once on the report');
+  const r2 = h.f.sealAuditChain(h.p('security'));
+  assert.deepEqual(r2.head_watermark_tampered ?? [], [], 'a reported conviction does not re-report as live tamper');
 });
 
 test('w40-fv F-6: an oversized watermark file is evidence and the writer recovers it', t => {
@@ -142,7 +154,15 @@ test('w40-fv F-6: an oversized watermark file is evidence and the writer recover
   const resolved = h.f._headWatermark('acme');
   assert.ok(typeof resolved === 'number' && resolved >= 0, 'the floor resolves honestly over the unreadable file');
   h.f.store.audit('acme', 'W40_PAD', 'operator', 'pad', {}, h.now());
-  assert.ok(statSync(wmPath(h)).size < 262_144, 'the bump rewrites a clean file');
+  assert.ok(statSync(wmPath(h)).size < 262_144, 'the writer recovers the bloated file');
+  // The strip destroyed the entry the signed head attested — the vetoed
+  // rewrite leaves the floor absent, so the fold wedges honestly until
+  // the seal names the conviction and re-anchors (w56-seal F-2 doctrine:
+  // repair on the seal surface, never silently on a commit edge).
+  assert.throws(() => h.f._auditIndex('acme'), e => e.code === 'INV-409-INTEGRITY');
+  const seal = h.f.sealAuditChain(h.p('security'));
+  assert.ok((seal.head_watermark_tampered ?? []).some(e => e.kind === 'floor_stripped' || e.kind === 'malformed'),
+    `the destroyed floor is named: ${JSON.stringify(seal.head_watermark_tampered)}`);
   assert.doesNotThrow(() => h.f._auditIndex('acme'));
 });
 
