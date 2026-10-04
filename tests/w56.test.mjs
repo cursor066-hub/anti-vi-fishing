@@ -35,7 +35,7 @@ test('w56-1: reader-malformed marker shapes heal with the divergent content name
   h.f.store.db.prepare("UPDATE meta_kv SET value=? WHERE tenant='acme' AND key='fold_floor'").run(huge);
   h.f.store.audit('acme', 'PROBE', 'actor', null, {}, h.f.clock());
   assert.equal(markerValue(h), huge, 'the divergent marker is left standing as evidence');
-  assert.equal(h.f.store.db.prepare("SELECT value FROM meta_kv WHERE tenant='acme' AND key='fold_floor_healed'").get()?.value, undefined,
+  assert.equal(h.f.store.db.prepare("SELECT value FROM meta_kv WHERE tenant='acme' AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.')").get()?.value, undefined,
     'no heal residue is written when nothing was overwritten');
   const seal = h.f.sealAuditChain(h.p('security'));
   assert.ok(!(seal.head_watermark_tampered ?? []).some(e => e.kind === 'floor_marker_healed'),
@@ -52,8 +52,8 @@ test('w56-store HIGH: heal residue survives a restart and still names the heal',
   h.ready(); h.ready();
   h.f.store.db.prepare("UPDATE meta_kv SET value=? WHERE tenant='acme' AND key='fold_floor'").run('planted:garbage');
   h.f.store.audit('acme', 'PROBE', 'actor', null, {}, h.f.clock());
-  assert.equal(h.f.store.db.prepare("SELECT value FROM meta_kv WHERE tenant='acme' AND key='fold_floor_healed'").get()?.value?.split(':').slice(1).join(':'), 'planted:garbage',
-    'the residue pointer landed and was not consumed by the append\'s own consults');
+  assert.equal(h.f.store.db.prepare("SELECT value FROM meta_kv WHERE tenant='acme' AND substr(key,1,18)='fold_floor_healed.'").get()?.value?.split(':').slice(1).join(':'), 'planted:garbage',
+    'the residue pointer landed keyed per heal and was not consumed by the append\'s own consults');
   h.close();
   // Re-open the deployment cold — in-memory flags are gone; the durable
   // pointer row must re-derive the conviction.
@@ -75,7 +75,9 @@ test('w56-store HIGH: heal residue survives a restart and still names the heal',
 test('w56-store MED: a planted fold_floor_healed pointer names itself, not a phantom heal', t => {
   const h = fixture(t);
   h.ready(); h.ready();
+  h.f.store.db.exec('DROP TRIGGER fold_residue_keep_ins');
   h.f.store.db.prepare("INSERT INTO meta_kv VALUES('acme','fold_floor_healed',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run('9999:forged');
+  h.f.store.db.exec("CREATE TRIGGER fold_residue_keep_ins BEFORE INSERT ON meta_kv WHEN NEW.key='fold_floor_healed' OR substr(NEW.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
   const seal = h.f.sealAuditChain(h.p('security'));
   const tampered = seal.head_watermark_tampered ?? [];
   assert.ok(!tampered.some(e => e.kind === 'floor_marker_healed'), 'a planted pointer mints no phantom heal conviction');
@@ -133,7 +135,7 @@ test('w56-fv F-2: else-arms of a multiplex sibling chain never bleed roles into 
   assert.ok(block.includes('collectAuthorize'), 'the slice carries the shipped scanner');
   const run = (lines, verb) => JSON.parse(execFileSync(process.execPath, ['-e', [
     helpers, block,
-    `globalThis.process.stdout.write(JSON.stringify(collectAuthorize(${JSON.stringify(lines)}, 0, ${lines.length + 2}, true, ${JSON.stringify(verb)}) ?? []));`
+    `globalThis.process.stdout.write(JSON.stringify(collectAuthorize(${JSON.stringify(lines)}, 0, ${lines.length + 2}, true, ${JSON.stringify(verb)})?.roles ?? []));`
   ].join('\n')], { encoding: 'utf8' }).trim());
 
   // Index 0 is the route arm the scan starts on (its own dispatch is
@@ -215,7 +217,7 @@ test('w56-ledger F7: post-return authorizes are dead; nested-if returns do not d
   const block = src.slice(src.indexOf('const NONROLE'), src.indexOf('const authorizeAt'));
   const run = (lines, verb) => JSON.parse(execFileSync(process.execPath, ['-e', [
     helpers, block,
-    `globalThis.process.stdout.write(JSON.stringify(collectAuthorize(${JSON.stringify(lines)}, 0, ${lines.length + 2}, true, ${JSON.stringify(verb)}) ?? []));`
+    `globalThis.process.stdout.write(JSON.stringify(collectAuthorize(${JSON.stringify(lines)}, 0, ${lines.length + 2}, true, ${JSON.stringify(verb)})?.roles ?? []));`
   ].join('\n')], { encoding: 'utf8' }).trim());
 
   const dead = [

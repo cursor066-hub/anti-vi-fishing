@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 8687,
-      "bytes": 665417
+      "lines": 8830,
+      "bytes": 675095
     },
     "src/issuerd.mjs": {
       "lines": 942,
@@ -82,8 +82,8 @@
       "bytes": 3876
     },
     "src/store.mjs": {
-      "lines": 1303,
-      "bytes": 96830
+      "lines": 1347,
+      "bytes": 101263
     },
     "src/target.mjs": {
       "lines": 630,
@@ -114,8 +114,8 @@
       "bytes": 1523
     },
     "scripts/check.mjs": {
-      "lines": 834,
-      "bytes": 51145
+      "lines": 966,
+      "bytes": 59987
     },
     "scripts/generate-contracts.mjs": {
       "lines": 120,
@@ -154,8 +154,8 @@
       "bytes": 269
     },
     "scripts/traceability.py": {
-      "lines": 990,
-      "bytes": 67236
+      "lines": 1224,
+      "bytes": 80644
     },
     "scripts/verify-export-webcrypto.mjs": {
       "lines": 114,
@@ -218,8 +218,8 @@
       "bytes": 33305
     },
     "tests/lifecycle.test.mjs": {
-      "lines": 135,
-      "bytes": 15145
+      "lines": 145,
+      "bytes": 15330
     },
     "tests/race-worker.mjs": {
       "lines": 10,
@@ -234,8 +234,8 @@
       "bytes": 8184
     },
     "tests/runtime-audit.test.mjs": {
-      "lines": 83,
-      "bytes": 10381
+      "lines": 87,
+      "bytes": 10515
     },
     "tests/v2-features.test.mjs": {
       "lines": 351,
@@ -479,7 +479,7 @@
     },
     "tests/w49.test.mjs": {
       "lines": 224,
-      "bytes": 14648
+      "bytes": 14657
     },
     "tests/w5-mutations.test.mjs": {
       "lines": 194,
@@ -522,8 +522,12 @@
       "bytes": 17137
     },
     "tests/w56.test.mjs": {
-      "lines": 431,
-      "bytes": 25458
+      "lines": 433,
+      "bytes": 25832
+    },
+    "tests/w57.test.mjs": {
+      "lines": 73,
+      "bytes": 4594
     },
     "tests/w6-fix.test.mjs": {
       "lines": 186,
@@ -582,6 +586,6 @@
       "bytes": 6499
     }
   },
-  "total_files": 145,
-  "total_lines": 40993
+  "total_files": 146,
+  "total_lines": 41635
 }

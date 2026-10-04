@@ -118,6 +118,7 @@ export class Fabric {
   // committed head — surfaced in the seal report as named evidence rather
   // than silently absorbed (w38 runtime-gate F-2).
   #wmTamper = new Map();
+  #wmTamperStack = [];
   // Raw-bytes → parsed memo for the durable watermark file (w28-fixverify
   // F4: the file is re-read every call, the parse is what caches).
   #headWmRaw = undefined;
@@ -260,10 +261,24 @@ export class Fabric {
     // doomed append's note clobbers the outer committed append's head and
     // the phantom check silently starves the watermark (w29-fixverify F12).
     this.store.onTxDepth = ev => {
-      if (ev === 'push') (this.#pendingHeadStack ??= []).push(new Map(this.#pendingChainHeads ?? []));
-      else if (ev === 'pop') this.#pendingHeadStack?.pop();
+      // #wmTamper is not transactional: a flag latched mid-tx on
+      // uncommitted in-tx evidence (a residue pointer whose referent row
+      // the doomed append minted) would survive the rollback as a
+      // phantom conviction. Snapshot the map per tx edge and restore on
+      // rollback — durable evidence re-derives on the next consult, so
+      // nothing real is lost (w57-seal F2).
+      const cloneFlag = e => (e === null || typeof e !== 'object') ? e
+        : { ...e,
+            ...(e.masked ? { masked: new Map([...e.masked].map(([k, v]) => [k, cloneFlag(v)])) } : {}),
+            ...(Array.isArray(e.heals) ? { heals: e.heals.map(h => ({ ...h })) } : {}) };
+      if (ev === 'push') {
+        (this.#pendingHeadStack ??= []).push(new Map(this.#pendingChainHeads ?? []));
+        (this.#wmTamperStack ??= []).push(new Map([...this.#wmTamper].map(([t, e]) => [t, cloneFlag(e)])));
+      }
+      else if (ev === 'pop') { this.#pendingHeadStack?.pop(); this.#wmTamperStack?.pop(); }
       else if (ev === 'rollback') {
         const snap = this.#pendingHeadStack?.pop(); if (snap !== undefined) this.#pendingChainHeads = snap;
+        const wsnap = this.#wmTamperStack?.pop(); if (wsnap !== undefined) this.#wmTamper = wsnap;
         // A mid-tx fold may have consumed appends the rollback just erased
         // — an index head past the committed tip is a phantom anchor that
         // would wedge every later fold on a false tamper label (w41-seal
@@ -1473,29 +1488,41 @@ export class Fabric {
   _foldFloorMarker(t, attestedFloor) {
     try {
       // The append-side heal lands a residue POINTER `${seq}:${prior}` on
-      // this plane as `fold_floor_healed` — the signed chain row it names
-      // carries healed_marker in its own envelope, so the claim verifies
-      // against anchored bytes: a planted residue row mints no phantom
-      // conviction, it is itself named (w56-store MED). The row survives
-      // every consult and is deleted only when the conviction reaches a
-      // report surface — a restart between the healing commit and the
-      // next seal can no longer evaporate the evidence unnamed, and a
-      // read-only consult never consumes it (w56-store HIGH).
-      const healed = this.store._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_healed'").get(t)?.value;
-      if (healed !== undefined) {
+      // this plane keyed per heal (`fold_floor_healed.<seq>`; the legacy
+      // un-keyed `fold_floor_healed` row reads the same) — the signed
+      // chain row it names carries healed_marker in its own envelope, so
+      // the claim verifies against anchored bytes: a planted residue row
+      // mints no phantom conviction, it is itself named (w56-store MED).
+      // Rows survive every consult and are deleted only when the
+      // conviction reaches a report surface — a restart between the
+      // healing commit and the next seal can no longer evaporate the
+      // evidence unnamed, and a read-only consult never consumes it
+      // (w56-store HIGH). Per-heal keys mean two heals before one report
+      // BOTH surface — a second heal can never overwrite the first
+      // divergent content off the report (w57-seal F1).
+      const healedRows = this.store._stmt("SELECT key,value FROM meta_kv WHERE tenant=? AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.')").all(t) ?? [];
+      for (const hr of healedRows) {
+        const healed = hr.value;
         const hp = typeof healed === 'string' ? healed.split(':') : null;
         const hs = hp !== null && /^\d+$/.test(hp[0]) ? Number(hp[0]) : undefined;
         const claimed = hp !== null && hp.length > 1 ? hp.slice(1).join(':') : null;
-        let anchored = false;
+        let anchored = false, anchorPresent = false;
         if (Number.isSafeInteger(hs) && claimed !== null) {
           const row = this.store._stmt('SELECT envelope FROM audit WHERE tenant=? AND seq=?').get(t, hs);
-          if (typeof row?.envelope === 'string') {
+          anchorPresent = typeof row?.envelope === 'string';
+          if (anchorPresent) {
             try { anchored = verifySigned(JSON.parse(row.envelope), this.auditPublicKeys(t), 'audit')?.metadata?.fold_floor_divergent === claimed; }
             catch { anchored = false; }
           }
         }
         if (anchored) this.#wmTamperSet(t, { kind: 'floor_marker_healed', seq: hs, healed_marker: claimed });
-        else this.#wmTamperSet(t, { kind: 'floor_marker_healed_unanchored', seq: Number.isSafeInteger(hs) ? hs : undefined, healed_marker: String(healed).slice(0, 200) });
+        else {
+          // The named anchor row is provably gone — a healed conviction
+          // latched before the murder can no longer stand alongside the
+          // unanchored one (w57-fv NIT-2).
+          if (!anchorPresent && Number.isSafeInteger(hs)) this.#wmTamperDropHeal(t, 'floor_marker_healed', hs);
+          this.#wmTamperSet(t, { kind: 'floor_marker_healed_unanchored', seq: Number.isSafeInteger(hs) ? hs : undefined, healed_marker: String(healed).slice(0, 200) });
+        }
       }
       const marker = this.store._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor'").get(t)?.value;
       const parts = typeof marker === 'string' ? marker.split(':') : null;
@@ -1678,8 +1705,16 @@ export class Fabric {
       // ride the attestation itself (w55-runtime F-1).
       ...(f?.healed_marker !== undefined ? { healed_marker: f.healed_marker } : {})
     });
-    return [{ tenant_id: tenant, kind: entry.kind, ...evidence(entry) },
-            ...[...(entry.masked?.entries() ?? [])].map(([k, v]) => ({ tenant_id: tenant, kind: k, ...evidence(typeof v === 'object' ? v : { seq: v }) }))];
+    // A heal flag carries EVERY heal it anchored — two heals before one
+    // report must both surface, never collapse into the newest
+    // (w57-seal F1).
+    const flat = (kind, f) => {
+      if (Array.isArray(f?.heals) && f.heals.length > 0)
+        return f.heals.map(h => ({ tenant_id: tenant, kind, ...(h.seq !== undefined ? { seq: h.seq } : {}), ...(h.healed_marker !== undefined ? { healed_marker: h.healed_marker } : {}) }));
+      return [{ tenant_id: tenant, kind, ...evidence(f) }];
+    };
+    return [...flat(entry.kind, entry),
+            ...[...(entry.masked?.entries() ?? [])].flatMap(([k, v]) => flat(k, typeof v === 'object' && v !== null ? v : { seq: v }))];
   }
   // The tamper slot records the FIRST observed flag per tenant — a later
   // distinct kind must not be laundered behind it. Secondary classes are
@@ -1688,10 +1723,22 @@ export class Fabric {
   // of the SAME kind moves the seq to the newest observed position — the
   // first divergence's seq must not shadow a later one (w54-seal L-1).
   #wmTamperSet(tenant, flag) {
+    // Heal-kind flags accumulate a heals list — every divergent content
+    // a residue pointer anchors is named on the report, so a second heal
+    // can never overwrite the first off the surface (w57-seal F1).
+    const heal = (flag.kind === 'floor_marker_healed' || flag.kind === 'floor_marker_healed_unanchored')
+      ? { seq: flag.seq, healed_marker: flag.healed_marker } : undefined;
+    const pushHeal = target => { const arr = (target.heals ??= []); if (!arr.some(h => h.seq === heal.seq && h.healed_marker === heal.healed_marker)) arr.push(heal); };
     const cur = this.#wmTamper.get(tenant);
-    if (cur === undefined) { this.#wmTamper.set(tenant, flag); return; }
-    if (cur.kind === flag.kind) { if (flag.seq !== undefined) cur.seq = flag.seq; if (flag.healed_marker !== undefined) cur.healed_marker = flag.healed_marker; return; }
-    (cur.masked ??= new Map()).set(flag.kind, { seq: flag.seq, ...(flag.healed_marker !== undefined ? { healed_marker: flag.healed_marker } : {}) });
+    if (cur === undefined) { if (heal) flag.heals = [heal]; this.#wmTamper.set(tenant, flag); return; }
+    if (cur.kind === flag.kind) { if (flag.seq !== undefined) cur.seq = flag.seq; if (flag.healed_marker !== undefined) cur.healed_marker = flag.healed_marker; if (heal) pushHeal(cur); return; }
+    const slot = (cur.masked ??= new Map());
+    const prev = slot.get(flag.kind);
+    if (prev !== undefined && typeof prev === 'object' && prev !== null) {
+      if (flag.seq !== undefined) prev.seq = flag.seq;
+      if (flag.healed_marker !== undefined) prev.healed_marker = flag.healed_marker;
+      if (heal) pushHeal(prev);
+    } else slot.set(flag.kind, { seq: flag.seq, ...(flag.healed_marker !== undefined ? { healed_marker: flag.healed_marker } : {}), ...(heal ? { heals: [heal] } : {}) });
   }
   #wmTamperHas(tenant, kind) {
     const cur = this.#wmTamper.get(tenant);
@@ -1699,15 +1746,31 @@ export class Fabric {
   }
   // Retire ONE kind — a masked flag promotes to primary, so repairing one
   // class never silences distinct evidence still standing.
-  #wmTamperRetire(tenant, kind) {
-    // A healed-residue conviction retiring means its claim reached a
+  #wmTamperRetire(tenant, kind, { keepResidue = false } = {}) {
+    // A healed-residue conviction retiring means its claims reached a
     // report surface (or the marker plane restarted over it) — the
-    // pointer row has done its once-only duty; delete it with the flag
-    // so a stale pointer cannot re-latch the same conviction forever
-    // (w56-store HIGH). The signed chain row that anchored the claim
-    // keeps its healed_marker forever.
-    if (kind === 'floor_marker_healed' || kind === 'floor_marker_healed_unanchored')
-      try { this.store._stmt("DELETE FROM meta_kv WHERE tenant=? AND key='fold_floor_healed'").run(tenant); } catch { /* meta_kv may be the dropped table — the residue consult names that separately */ }
+    // pointer rows have done their once-only duty; delete them with the
+    // flag so a stale pointer cannot re-latch the same conviction forever
+    // (w56-store HIGH). The signed chain rows that anchored the claims
+    // keep their healed_marker forever. keepResidue skips the delete —
+    // #wmTamperDropHeal retires a flag whose anchor provably died while
+    // sibling residue rows still owe an unreported conviction (w57-fv NIT-2).
+    if (!keepResidue && (kind === 'floor_marker_healed' || kind === 'floor_marker_healed_unanchored'))
+      try {
+        // The fold_residue_keep guards cover every residue row — the
+        // sanctioned retire drops them for this delete and recreates
+        // verbatim immediately, so a file-writer delete aborts in-band
+        // (w57-runtime F-1, same discipline as the aad marker's).
+        this.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
+        this.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
+        this.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
+        try { this.store._stmt("DELETE FROM meta_kv WHERE tenant=? AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.')").run(tenant); }
+        finally {
+          this.store.db.exec("CREATE TRIGGER IF NOT EXISTS fold_residue_keep BEFORE DELETE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
+          this.store.db.exec("CREATE TRIGGER IF NOT EXISTS fold_residue_keep_upd BEFORE UPDATE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
+          this.store.db.exec("CREATE TRIGGER IF NOT EXISTS fold_residue_keep_ins BEFORE INSERT ON meta_kv WHEN NEW.key='fold_floor_healed' OR substr(NEW.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
+        }
+      } catch { /* meta_kv may be the dropped table — the residue consult names that separately */ }
     const cur = this.#wmTamper.get(tenant);
     if (cur === undefined) return;
     if (cur.kind === kind) {
@@ -1719,6 +1782,31 @@ export class Fabric {
       const promoted = nxt[1] !== undefined ? { kind: nxt[0], ...pv } : { kind: nxt[0] };
       this.#wmTamper.set(tenant, masked.size ? { ...promoted, masked } : promoted);
     } else cur.masked?.delete(kind);
+  }
+  // Drop one (kind, seq) heal from a latched flag — used when the anchor
+  // row a healed conviction named is provably gone, so the flag can no
+  // longer stand next to the unanchored conviction that replaced it
+  // (w57-fv NIT-2). The residue row itself stays until a report retires
+  // the unanchored kind.
+  #wmTamperDropHeal(tenant, kind, seq) {
+    const e = this.#wmTamper.get(tenant);
+    if (!e) return;
+    const strip = f => {
+      if (!f || f.kind !== kind || !Array.isArray(f.heals)) return;
+      f.heals = f.heals.filter(h => h.seq !== seq);
+      const last = f.heals[f.heals.length - 1];
+      if (last) { f.seq = last.seq; f.healed_marker = last.healed_marker; }
+    };
+    if (e.kind === kind) {
+      strip(e);
+      if (Array.isArray(e.heals) && e.heals.length === 0) this.#wmTamperRetire(tenant, kind, { keepResidue: true });
+      return;
+    }
+    const m = e.masked?.get(kind);
+    if (m) {
+      strip(m);
+      if (Array.isArray(m.heals) && m.heals.length === 0) e.masked.delete(kind);
+    }
   }
   // Every kind a report surface just named retires — attested-once, never
   // silent: a still-standing divergence re-derives the flag on the next
@@ -2596,9 +2684,9 @@ export class Fabric {
         const seen = new Set(), attested = [];
         // Live flags first — a flag retired and re-latched mid-seal at a
         // newer seq must name the newest evidence position, not the stale
-        // snapshot's (w55-fv L-2).
+        // snapshot's (w55-fv L-2). Dedupe on kind+seq+marker (w57-seal F1).
         for (const e2 of [...(this.#wmTamperAttest(t).head_watermark_tampered ?? []), ...sealPreTamperEntries])
-          if (e2 && !seen.has(e2.kind)) { seen.add(e2.kind); attested.push(e2); }
+          if (e2 && !seen.has(`${e2.kind}:${e2.seq ?? ''}:${e2.healed_marker ?? ''}`)) { seen.add(`${e2.kind}:${e2.seq ?? ''}:${e2.healed_marker ?? ''}`); attested.push(e2); }
         e.details = { ...(e.details ?? {}), ...(attested.length ? { head_watermark_tampered: attested } : {}) };
         // A refusal is NOT an attestation surface: an attacker can induce
         // one on demand (hold the write lock, revoke the sealing identity)
@@ -2770,9 +2858,11 @@ export class Fabric {
         const seen = new Set(), out = [];
         // Newest evidence first: a flag retired and re-latched mid-seal at
         // a newer seq must name the newest position — live state, then
-        // in-tx captures, then the pre-seal snapshot (w55-fv L-2).
+        // in-tx captures, then the pre-seal snapshot (w55-fv L-2). Dedupe
+        // on kind+seq+marker: same-kind heals at different seqs are
+        // distinct convictions that must all surface (w57-seal F1).
         for (const e of [...(this.#wmTamperAttest(t).head_watermark_tampered ?? []), ...duringTamper, ...preTamperEntries])
-          if (e && !seen.has(e.kind)) { seen.add(e.kind); out.push(e); }
+          if (e && !seen.has(`${e.kind}:${e.seq ?? ''}:${e.healed_marker ?? ''}`)) { seen.add(`${e.kind}:${e.seq ?? ''}:${e.healed_marker ?? ''}`); out.push(e); }
         // Marker-kind convictions are attested-once: surfaced here, they
         // retire — a still-divergent marker re-derives the flag on the
         // next consult, while a marker rewritten or deleted after the
@@ -3613,9 +3703,10 @@ export class Fabric {
       const cutSeen = new Set(), cutTamper = [];
       // Live flags first — a flag retired and re-latched mid-seal at a
       // newer seq must name the newest evidence position, not the stale
-      // snapshot's (w55-fv L-2).
+      // snapshot's (w55-fv L-2). Dedupe on kind+seq+marker so same-kind
+      // heals at different seqs all surface (w57-seal F1).
       for (const e of [...(this.#wmTamperAttest(t).head_watermark_tampered ?? []), ...cutDuring, ...sealPreTamperEntries])
-        if (e && !cutSeen.has(e.kind)) { cutSeen.add(e.kind); cutTamper.push(e); }
+        if (e && !cutSeen.has(`${e.kind}:${e.seq ?? ''}:${e.healed_marker ?? ''}`)) { cutSeen.add(`${e.kind}:${e.seq ?? ''}:${e.healed_marker ?? ''}`); cutTamper.push(e); }
       const sealedResult = { sealed: true, sealed_at_seq: prevPlSeq + 1, seal_seq: sealSeq, removed_count: removed.length, carryover_totals: { spend: carrySpend.length, access: carryAccess.length, revocations: carryRevoked.length, capabilities: capsCut.length, lifecycle: carryLifecycle.length, mirrors_dropped: droppedMirrorCount, dropped_events: droppedEvents.length + droppedEventsOverflow, deleted_events: deletedRowsTotal, divergent_stored: divergentStored, deleted_gaps_total: deletedGapsTotal, deleted_rows_total: deletedRowsTotal }, floor_derived: floorDerived.slice(0, 512), planted_floor_refs: plantedFloor.slice(0, 512), murdered_floor_refs: murderedFloor.slice(0, 512), deleted_gaps: deletedGaps.slice(0, 64), ...(cutTamper.length ? { head_watermark_tampered: cutTamper } : {}), ...(abandonedHead ?? {}) };
       this.#wmTamperReported(t, sealedResult.head_watermark_tampered);
       return sealedResult;
@@ -4024,7 +4115,14 @@ export class Fabric {
     // The suppression window only covers a FORWARD-looking dedup: a
     // rewound clock must mint fresh evidence, not silently suppress every
     // denial until the memo's stale timestamp passes (w49-runtime W49-2).
-    if (last !== undefined && now - last >= 0 && now - last < 60_000) return;
+    if (last !== undefined && now - last >= 0 && now - last < 60_000) {
+      // Suppression parity: the dedup window ate this denial's mint, but
+      // the surviving gate-deny row's tally must still count the request
+      // — the runtime suppression arm bumps its survivor identically
+      // (w57-runtime F-5).
+      if (details?.quarantine_denial) this._bumpGateDenyRow(t, subject_id, code, now);
+      return;
+    }
     // The window is consumed only by a write that lands — a failed audit
     // insert must not suppress the next identical denial's evidence
     // (w18-fixverify F14).
@@ -4057,6 +4155,23 @@ export class Fabric {
       try { this.store.put(t, 'containment', `deny:${randomUUID()}`, { contained_at: mintedAt, subject_id: subject_id ?? null, device_id: details.device ?? null, capability_id: null, resource: null, destination: null, action: null, code, request_id: 'gate-deny', dropped_requests: 1 }, mintedAt); }
       catch { try { this.store.audit(t, 'CONTAINMENT_ROW_UNCOMMITTED', subject_id ?? 'anonymous', 'gate-deny', { code, at: mintedAt, denial_seq: denialSeq }, this.clock()); } catch { /* ledger write failure does not change the verdict */ } }
     }
+  }
+  // A dedup-suppressed quarantine denial minted no fresh row — bump the
+  // surviving gate-deny row's dropped_requests tally so the report still
+  // counts the refused request (w57-runtime F-5; mirrors runtime.mjs's
+  // kept-row bump). Best-effort: a murdered or unreadable survivor means
+  // the next unsuppressed mint lands fresh evidence anyway.
+  _bumpGateDenyRow(t, subject_id, code, now) {
+    try {
+      for (const id of this.store.ids(t, 'containment', 25)) {
+        let row;
+        try { row = this.store.get(t, 'containment', id); } catch { continue; }
+        if (row?.request_id === 'gate-deny' && row.code === code && row.subject_id === subject_id && Math.abs((row.contained_at ?? 0) - now) <= 60_000) {
+          try { this.store.put(t, 'containment', id, { ...row, dropped_requests: (Number.isInteger(row.dropped_requests) && row.dropped_requests > 0 ? row.dropped_requests : 1) + 1 }, now); } catch { /* next mint lands fresh */ }
+          return;
+        }
+      }
+    } catch { /* best effort — the chain anchors are the authority anyway */ }
   }
   // Stored-record integrity anchored in the actor's own signature: the
   // request_intent envelope covers the capsule's proposal fields, so a
@@ -4488,6 +4603,10 @@ export class Fabric {
         if (!(rDiff >= 0 && rDiff < 60_000)) {
           try { this.store.tx(() => { const now = this.clock(); this.store.clock(now); const a = this.store.audit(principal.tenant_id, 'SECURITY_OPERATION_REJECTED', principal.subject_id, 'local-gate', { code: error.code, ...(error.code === 'INV-403-QUARANTINE' && error.details?.quarantine_denial ? { quarantine_denial: true } : {}) }, now); mintedAt = a?.time ?? now; denialSeq = a?.seq ?? null; }); this.#rejectMemo.set(rKey, { at: rNow }); } catch { /* ledger unavailable — surface the real rejection */ }
         }
+        // Suppression parity: the dedup window suppressed this rejection's
+        // own mint — bump the surviving gate-deny row so the report still
+        // counts the request (w57-runtime F-5).
+        else if (error.code === 'INV-403-QUARANTINE' && error.details?.quarantine_denial) this._bumpGateDenyRow(principal?.tenant_id, principal?.subject_id, error.code, rNow);
         // Quarantine denials land in the containment ledger too — NET-010
         // reconstruction must see denied executes/proposes, not only denied
         // consume calls (w9-network F7). Best-effort like the audit row.
@@ -7986,13 +8105,34 @@ export class Fabric {
     // denial's payload time are two different clock reads (n0 before the
     // tx, now inside it) — strict equality marks honestly-anchored rows
     // unanchored, indistinguishable from murdered ones (w49-runtime W49-5).
-    const denials = this.store.list(t, 'containment', 10000).map(c => ({ kind: 'denied_consume', at: c.contained_at, code: c.code, subject_id: c.subject_id, capability_id: c.capability_id, unverified_capability_id: c.unverified_capability_id ?? null, resource: c.resource, request_id: c.request_id, dropped_requests: c.dropped_requests, anchored: (idx.denialsByReq?.get(c.request_id) ?? []).some(d => d.code === c.code && d.actor === c.subject_id && d.capability_id === (c.capability_id ?? null) && Math.abs(d.at - c.contained_at) <= 2_000) }));
+    // Tolerant enumeration: one undecryptable or planted row must name
+    // itself, not wedge the forensic surface that reports the murders
+    // (w57-runtime F-4) — same skip-and-name doctrine as
+    // prior_row_unreadable and the jit-grant replay's catch-continue.
+    const unreadable = [];
+    const readRows = (kind, maxRows = Infinity) => {
+      const out = [];
+      for (let off = 0; out.length < maxRows; ) {
+        const pageIds = this.store.ids(t, kind, 10000, off);
+        if (!pageIds.length) break;
+        off += pageIds.length;
+        for (const id of pageIds) {
+          if (out.length >= maxRows) break;
+          try { const v = this.store.get(t, kind, id); if (v !== null) out.push(v); }
+          catch (e) { if (e instanceof InvariantError) unreadable.push({ kind, id, code: e.code }); else throw e; }
+        }
+        if (pageIds.length < 10000) break;
+      }
+      return out;
+    };
+    const containmentRows = readRows('containment');
+    const denials = containmentRows.slice(0, 10000).map(c => ({ kind: 'denied_consume', at: c.contained_at, code: c.code, subject_id: c.subject_id, capability_id: c.capability_id, unverified_capability_id: c.unverified_capability_id ?? null, resource: c.resource, request_id: c.request_id, dropped_requests: c.dropped_requests, anchored: (idx.denialsByReq?.get(c.request_id) ?? []).some(d => d.code === c.code && d.actor === c.subject_id && d.capability_id === (c.capability_id ?? null) && Math.abs(d.at - c.contained_at) <= 2_000) }));
     // The anchored digest is vault-keyed (w15-timing F3): the cross-check
     // must recompute the same MAC — a plain digest() compares against a
     // different construction and the flag is always 'identity-only', i.e.
     // dead code that hid row tampering (w17-fixverify).
     const metaMac = v => createHmac('sha256', this.vault.masterKey).update(canonical(v)).digest('base64url');
-    const quarantines = this.store.list(t, 'revocation', 10000).filter(r => ['subject', 'device'].includes(r.kind) && idx.revoked.has(`${r.kind}:${r.id}`)).map(r => ({ kind: 'revocation', at: r.revoked_at, revoked: `${r.kind}:${r.id}`, by: r.actor, anchored: idx.revocationDigests.has(`${r.kind}:${r.id}`) && ctEqual(idx.revocationDigests.get(`${r.kind}:${r.id}`), metaMac(r)) ? true : 'identity-only' }));
+    const quarantines = readRows('revocation', 10000).filter(r => ['subject', 'device'].includes(r.kind) && idx.revoked.has(`${r.kind}:${r.id}`)).map(r => ({ kind: 'revocation', at: r.revoked_at, revoked: `${r.kind}:${r.id}`, by: r.actor, anchored: idx.revocationDigests.has(`${r.kind}:${r.id}`) && ctEqual(idx.revocationDigests.get(`${r.kind}:${r.id}`), metaMac(r)) ? true : 'identity-only' }));
     const sequence = [...denials, ...quarantines].sort((a, b) => a.at - b.at);
     // Murdered denial evidence runs the other direction too: every
     // anchored RUNTIME_DENIED event must still find its mutable
@@ -8013,16 +8153,10 @@ export class Fabric {
     // and the bound only absorbs clock granularity), making the murdered
     // occurrence itself the named victim (w46-fixverify M-1).
     const rowsByTriple = new Map();
-    for (let off = 0; ;) {
-      const pageRows = this.store.list(t, 'containment', 10000, off);
-      if (!pageRows.length) break;
-      off += pageRows.length;
-      for (const c of pageRows) {
-        const k = `${c.request_id}|${c.code}|${c.subject_id}`;
-        let arr = rowsByTriple.get(k); if (!arr) { arr = []; rowsByTriple.set(k, arr); }
-        arr.push(c.contained_at);
-      }
-      if (pageRows.length < 10000) break;
+    for (const c of containmentRows) {
+      const k = `${c.request_id}|${c.code}|${c.subject_id}`;
+      let arr = rowsByTriple.get(k); if (!arr) { arr = []; rowsByTriple.set(k, arr); }
+      arr.push(c.contained_at);
     }
     for (const arr of rowsByTriple.values()) arr.sort((a, b) => a - b);
     // Name the NEWEST victims first — a >512-row murder must always
@@ -8057,17 +8191,26 @@ export class Fabric {
       if (missingDenials.length < 512) missingDenials.push({ request_id: d.request_id, code: d.code, subject_id: d.actor, at: d.at });
     }
     this._auditAccess(t, p.subject_id, 'containment', { denials: denials.length, revocations: quarantines.length });
-    // The counter sums each row's dropped_requests tally — the 60s dedup
-    // collapses a burst into one row whose counter the writer still
-    // increments, so the report counts requests, not surviving rows
-    // (w43-runtime dropped_requests LOW). A malformed or planted tally
-    // degrades to one request per row, never a crash. The tally lives on
-    // mutable ciphertext: it is a CLAIMED counter, not an anchored one —
-    // a captured (value,wrapped) replay rewinds it silently, so the
-    // report must name it unanchored and publish the chain-derived floor
+    // The counter counts refused REQUESTS, not minted rows: one refused
+    // consume mints companion rows (the runtime deny row plus the two
+    // gate-deny rows), so rows sharing (subject, code) within the ±2s
+    // mint window are ONE request — each cluster contributes its largest
+    // tally, which is where a dedup-suppressed burst's bump lands
+    // (w57-runtime F-5). A malformed or planted tally degrades to one
+    // request per cluster, never a crash. The tally lives on mutable
+    // ciphertext: it is a CLAIMED counter, not an anchored one — a
+    // captured (value,wrapped) replay rewinds it silently, so the report
+    // must name it unanchored and publish the chain-derived floor
     // alongside (w44-runtime F1).
-    const droppedRequests = denials.reduce((n, d) => n + (Number.isInteger(d.dropped_requests) && d.dropped_requests > 0 ? d.dropped_requests : 1), 0);
-    return { sequence, dropped_requests: droppedRequests, dropped_requests_unanchored: droppedRequests, anchored_denial_events: idx.denials.length, unanchored_fields: ['dropped_requests', 'contained_at', 'device_id', 'resource', 'destination', 'unverified_capability_id'], unanchored_rows: sequence.filter(x => x.anchored !== true).length, anchored_denials_missing_rows: missingDenials, anchored_denials_missing_total: missingTotal, anchored_denials_rows_uncommitted: uncommittedDenials, affected_capabilities: [...new Set(denials.map(d => d.capability_id).filter(Boolean))], quarantined: quarantines.map(q => q.revoked), limitation: 'Software dataplane telemetry only; packet-level counters require a real network path.' };
+    const clusters = [];
+    for (const d of [...denials].sort((a, b) => String(a.subject_id ?? '').localeCompare(String(b.subject_id ?? '')) || String(a.code ?? '').localeCompare(String(b.code ?? '')) || (a.at ?? 0) - (b.at ?? 0))) {
+      const tally = Number.isInteger(d.dropped_requests) && d.dropped_requests > 0 ? d.dropped_requests : 1;
+      const c = clusters[clusters.length - 1];
+      if (c && c.subject_id === (d.subject_id ?? null) && c.code === (d.code ?? null) && (d.at ?? 0) - c.lastAt <= 2_000) { c.lastAt = d.at ?? 0; c.tally = Math.max(c.tally, tally); }
+      else clusters.push({ subject_id: d.subject_id ?? null, code: d.code ?? null, lastAt: d.at ?? 0, tally });
+    }
+    const droppedRequests = clusters.reduce((n, c) => n + c.tally, 0);
+    return { sequence, dropped_requests: droppedRequests, dropped_requests_unanchored: droppedRequests, anchored_denial_events: idx.denials.length, unanchored_fields: ['dropped_requests', 'contained_at', 'device_id', 'resource', 'destination', 'unverified_capability_id'], unanchored_rows: sequence.filter(x => x.anchored !== true).length, unreadable_rows: unreadable, unreadable_rows_total: unreadable.length, anchored_denials_missing_rows: missingDenials, anchored_denials_missing_total: missingTotal, anchored_denials_rows_uncommitted: uncommittedDenials, affected_capabilities: [...new Set(denials.map(d => d.capability_id).filter(Boolean))], quarantined: quarantines.map(q => q.revoked), limitation: 'Software dataplane telemetry only; packet-level counters require a real network path.' };
   }
   retention(p, input) {
     this.authorize(p, ['security']); fields(input, ['evidence_id', 'legal_hold']); identifier(input.evidence_id); requireThat(typeof input.legal_hold === 'boolean', 'INV-400-SCHEMA', 'Legal hold must be boolean');

@@ -219,5 +219,5 @@ test('w49 F2: every live server route is declared in openapi.json', t => {
 // counts as citing evidence for a VERIFIED row ---
 test('w49 HIGH-1: traceability requires the citing test to assert', t => {
   const src = readFileSync('scripts/traceability.py', 'utf8');
-  assert.ok(src.includes("and _asserts(b, _file_assert_names(p))}"), 'the citing-titles comprehension demands an asserting body');
+  assert.ok(src.includes("and _asserts_evidence(b, _file_assert_names(p))}"), 'the citing-titles comprehension demands an asserting body');
 });

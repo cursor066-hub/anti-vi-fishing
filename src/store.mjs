@@ -223,6 +223,15 @@ export class Store {
       // sanctioned marker write drops+recreates this guard inside its
       // own transaction.
       ['aad_marker_keep_ins', "CREATE TRIGGER aad_marker_keep_ins BEFORE INSERT ON meta_kv WHEN NEW.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END", 'aad migration marker is evidence'],
+      // The heal-residue rows are the only durable signal between a
+      // divergent-marker heal and its attestation — a bare DELETE +
+      // restart erased the whole conviction unnamed (w57-runtime F-1).
+      // The sanctioned write/retire paths drop+recreate these verbatim
+      // inside their own transactions; an attacker's delete now aborts
+      // in-band like the aad marker's.
+      ['fold_residue_keep', "CREATE TRIGGER fold_residue_keep BEFORE DELETE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END", 'fold-floor residue is evidence'],
+      ['fold_residue_keep_upd', "CREATE TRIGGER fold_residue_keep_upd BEFORE UPDATE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END", 'fold-floor residue is evidence'],
+      ['fold_residue_keep_ins', "CREATE TRIGGER fold_residue_keep_ins BEFORE INSERT ON meta_kv WHEN NEW.key='fold_floor_healed' OR substr(NEW.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END", 'fold-floor residue is evidence'],
     ];
     const norm = s => (s ?? '').replace(/\s+/g, ' ').trim();
     for (const [name, sql] of guards) this.db.exec(`CREATE TRIGGER IF NOT EXISTS ${sql.slice('CREATE TRIGGER '.length)}`);
@@ -291,6 +300,10 @@ export class Store {
     requireThat(probe(() => { this.db.exec('DROP TRIGGER aad_marker_keep_ins'); this._stmt("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', '{}')").run(pt); this._stmt("DELETE FROM meta_kv WHERE tenant=? AND key='aad_migration'").run(pt); }, 'aad migration marker is evidence'), 'INV-503-STORAGE', 'aad_migration marker delete trigger not enforced', 503);
     requireThat(probe(() => { this.db.exec('DROP TRIGGER aad_marker_keep_ins'); this._stmt("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', '{}')").run(pt); this._stmt("UPDATE meta_kv SET value='{}' WHERE tenant=? AND key='aad_migration'").run(pt); }, 'aad migration marker is evidence'), 'INV-503-STORAGE', 'aad_migration marker update trigger not enforced', 503);
     requireThat(probe(() => { this._stmt("INSERT INTO meta_kv VALUES(?, 'aad_migration', '{}')").run(pt); }, 'aad migration marker is evidence'), 'INV-503-STORAGE', 'aad_migration marker insert trigger not enforced', 503);
+    // Same three arms for the heal-residue plane (w57-runtime F-1).
+    requireThat(probe(() => { this.db.exec('DROP TRIGGER fold_residue_keep_ins'); this._stmt("INSERT OR REPLACE INTO meta_kv VALUES(?, 'fold_floor_healed.1', '{}')").run(pt); this._stmt("DELETE FROM meta_kv WHERE tenant=? AND key='fold_floor_healed.1'").run(pt); }, 'fold-floor residue is evidence'), 'INV-503-STORAGE', 'fold-floor residue delete trigger not enforced', 503);
+    requireThat(probe(() => { this.db.exec('DROP TRIGGER fold_residue_keep_ins'); this._stmt("INSERT OR REPLACE INTO meta_kv VALUES(?, 'fold_floor_healed.1', '{}')").run(pt); this._stmt("UPDATE meta_kv SET value='{}' WHERE tenant=? AND key='fold_floor_healed.1'").run(pt); }, 'fold-floor residue is evidence'), 'INV-503-STORAGE', 'fold-floor residue update trigger not enforced', 503);
+    requireThat(probe(() => { this._stmt("INSERT INTO meta_kv VALUES(?, 'fold_floor_healed.1', '{}')").run(pt); }, 'fold-floor residue is evidence'), 'INV-503-STORAGE', 'fold-floor residue insert trigger not enforced', 503);
     // The counter-arm: a BEFORE INSERT RAISE(IGNORE) throws nothing and
     // fires no guard — the write just vanishes while every caller reads
     // success (w48-fixverify CRITICAL). Probe that the ledger's most
@@ -931,7 +944,20 @@ export class Store {
     const floorPriorSeq = floorPriorParts !== null && /^\d+$/.test(floorPriorParts[0]) ? Number(floorPriorParts[0]) : undefined;
     const floorPriorWellFormed = floorPriorParts !== null && floorPriorParts.length === 2 && Number.isSafeInteger(floorPriorSeq) && floorPriorSeq >= 1 && floorPriorParts[1] !== '';
     const divergentMarker = floorPrior !== undefined && !floorPriorWellFormed ? String(floorPrior).slice(0, 200) : undefined;
-    const healedMeta = divergentMarker !== undefined ? (metadata !== null && typeof metadata === 'object' ? { ...metadata, fold_floor_divergent: divergentMarker } : { fold_floor_divergent: divergentMarker }) : metadata;
+    // The key is reserved evidence: a caller-supplied fold_floor_divergent
+    // must never ride the signed envelope verbatim when no divergence was
+    // observed — it would let a file-writer pair planted residue with a
+    // forged 'anchor' (w57-fv NIT-1). Strip it unconditionally, then set
+    // the observed value.
+    const healedMeta = (() => {
+      if (metadata !== null && typeof metadata === 'object') {
+        const m = { ...metadata };
+        delete m.fold_floor_divergent;
+        if (divergentMarker !== undefined) m.fold_floor_divergent = divergentMarker;
+        return m;
+      }
+      return divergentMarker !== undefined ? { fold_floor_divergent: divergentMarker } : metadata;
+    })();
     const entry = { tenant_id: tenant, sequence: (last?.seq ?? 0) + 1, previous: last?.hash ?? '0'.repeat(64), type, actor, reference, metadata: healedMeta, time: Math.max(now, priorTime) };
     // Chain anchors kept current in-process: the newest signed time IS the
     // floor the clock row is compared against, and the newest recovery
@@ -1076,10 +1102,28 @@ export class Store {
         // standing as evidence on purpose, not 'healed', so it writes no
         // pointer (w56-seal parity). Landed-check it like every security
         // write: a foreign RAISE(IGNORE) trigger eating this insert must
-        // convict (w56-store LOW).
-        this._stmt("INSERT INTO meta_kv VALUES(?,'fold_floor_healed',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, `${entry.sequence}:${floorPrior}`);
-        const landedResidue = this._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_healed'").get(tenant)?.value;
-        requireThat(landedResidue === `${entry.sequence}:${floorPrior}`, 'INV-409-INTEGRITY', 'fold-floor healed residue refused after write — foreign trigger side-effects', 409);
+        // convict (w56-store LOW). The row is keyed PER HEAL — two heals
+        // before a report must both reach the surface, never overwrite
+        // each other into a single conviction (w57-seal F1). The claim
+        // binds the envelope's own 200-char bound — a divergent marker
+        // longer than the bound would otherwise verify as unanchored
+        // forever (w57-runtime F-2). The fold_residue_keep guards are
+        // dropped verbatim for this sanctioned write and recreated
+        // immediately — a file-writer delete aborts in-band instead of
+        // erasing the conviction (w57-runtime F-1).
+        const residueKey = `fold_floor_healed.${entry.sequence}`;
+        const residueClaim = `${entry.sequence}:${String(floorPrior).slice(0, 200)}`;
+        this.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
+        this.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
+        this.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
+        try { this._stmt("INSERT INTO meta_kv VALUES(?,?,?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, residueKey, residueClaim); }
+        finally {
+          this.db.exec("CREATE TRIGGER IF NOT EXISTS fold_residue_keep BEFORE DELETE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
+          this.db.exec("CREATE TRIGGER IF NOT EXISTS fold_residue_keep_upd BEFORE UPDATE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
+          this.db.exec("CREATE TRIGGER IF NOT EXISTS fold_residue_keep_ins BEFORE INSERT ON meta_kv WHEN NEW.key='fold_floor_healed' OR substr(NEW.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
+        }
+        const landedResidue = this._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key=?").get(tenant, residueKey)?.value;
+        requireThat(landedResidue === residueClaim, 'INV-409-INTEGRITY', 'fold-floor healed residue refused after write — foreign trigger side-effects', 409);
       }
       const storedSeq = typeof stored === 'string' && /^\d+:/.test(stored) ? Number(stored.split(':')[0]) : undefined;
       requireThat(storedSeq !== undefined && storedSeq >= entry.sequence, 'INV-409-INTEGRITY', `fold-floor marker write ${stored === undefined ? 'missing' : 'refused'} after write — foreign trigger side-effects`, 409);

@@ -20,7 +20,11 @@ test('DAT-003: server-controlled sensitivity weight increases information charge
   const h = fixture(t); installPolicy(h, p => { p.runtime.classifications.push('confidential'); }); const ds = h.f.target.state('acme', 'dataset-1').material_fields; ds.classification = 'confidential'; h.f.target.seed('acme', 'dataset-1', ds);
   const cap = h.f.runtime.issue(h.p(), runtimeInput({ classification: 'confidential' })); assert.equal(h.f.runtime.consume(h.p(), runtimeRequest(cap)).cost, 10);
 });
-for (const [field, value] of [['destination', 'evil-vault'], ['device_id', 'stolen-device'], ['resource', 'dataset-2'], ['purpose', 'marketing']]) test(`RUN-002 DAT-004: ${field} binding cannot be broadened`, t => { const h = fixture(t), cap = h.f.runtime.issue(h.p(), runtimeInput()); assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap, { [field]: value }))); });
+for (const [field, value] of [['destination', 'evil-vault'], ['device_id', 'stolen-device'], ['resource', 'dataset-2'], ['purpose', 'marketing']]) test(`RUN-002 DAT-004: ${field} binding cannot be broadened`, t => {
+  const h = fixture(t), cap0 = h.f.runtime.issue(h.p(), runtimeInput()), cap = h.f.runtime.issue(h.p(), runtimeInput());
+  assert.equal(h.f.runtime.consume(h.p(), runtimeRequest(cap0)).rows.length, 1);
+  assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap, { [field]: value })));
+});
 test('DAT-006: SQL-shaped columns and unrestricted row sets rejected', t => { const h = fixture(t); assert.throws(() => h.f.runtime.issue(h.p(), runtimeInput({ columns: ['name; DROP TABLE resources'] })), hasCode('INV-403-SCOPE')); const cap = h.f.runtime.issue(h.p(), runtimeInput()); assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap, { columns: ['passport'] })), hasCode('INV-403-SCOPE')); });
 test('RUN-007: cross-tenant capability cannot be consumed', t => { const h = fixture(t), cap = h.f.runtime.issue(h.p(), runtimeInput()); assert.throws(() => h.f.runtime.consume(h.p('operator', 'globex'), runtimeRequest(cap)), hasCode('INV-401-SIGNATURE')); });
 test('RUN-004 IDN-008: device quarantine rejects issued capability immediately while audit remains readable', t => {

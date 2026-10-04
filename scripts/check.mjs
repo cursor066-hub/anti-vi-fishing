@@ -13,7 +13,9 @@ process.chdir(new URL('..', import.meta.url).pathname);
 // tarball) the walk covers everything except package manager and runtime
 // state; a hidden dir cannot shelter code either way (w8-tooling F6).
 const SKIP = new Set(['node_modules', '.git', 'var', '__pycache__']);
-const CODE_EXT = /\.(mjs|js|cjs)$/;
+// .ts/.mts/.cts are live code on Node 24 type-stripping — a dispatch
+// file renamed that way escaped the audit silently (w57-ledger F6).
+const CODE_EXT = /\.(mjs|js|cjs|ts|mts|cts)$/;
 const ANY_EXT = /\.(mjs|js|cjs|ts)$/;
 let files = [];
 // Every spawned helper gets a wall-clock ceiling — a hung subprocess must
@@ -89,7 +91,10 @@ const SINK_EXT = /\.(mjs|js|cjs|ts|jsx|tsx|py|sh|bash|zsh|ps1|yml|yaml|html|htm|
 const SINK_RULES = [
   // The vm specifier is spelled in pieces so this file does not flag its
   // own rule table (w49-ledger F-1).
-  ['dynamic eval', new RegExp(`\\beval\\s*\\(|new\\s+Function\\s*\\(|eval\\s*\\/\\*\\*\\/\\s*\\(|\\bFunction\\s*\\(|Reflect\\.apply\\s*\\(\\s*eval|node:${'v'}m|from\\s+['"](?:node:)?${'v'}m['"]|require\\s*\\(\\s*['"](?:node:)?${'v'}m['"]|import\\s*\\(\\s*['"](?:node:)?${'v'}m['"]|runIn(?:This|New)?Context`)],
+  // Member-invoked, parenthesized and concatenated spellings of the
+  // same sink are equally unforgeable — plain identifier patterns could
+  // not see them (w57-ledger F7).
+  ['dynamic eval', new RegExp(`\\beval\\s*\\(|new\\s+Function\\s*\\(|eval\\s*\\/\\*\\*\\/\\s*\\(|\\bFunction\\s*\\(|eval\\s*\\.\\s*(?:call|apply)\\s*\\(|new\\s*\\(\\s*Function\\s*\\)|\\(\\s*Function\\s*\\)\\s*\\(|['"]ev['"]\\s*\\+\\s*['"]al['"]|['"]e['"]\\s*\\+\\s*['"]val['"]|Reflect\\.(?:apply|construct)\\s*\\(\\s*(?:eval|Function)|node:${'v'}m|from\\s+['"](?:node:)?${'v'}m['"]|require\\s*\\(\\s*['"](?:node:)?${'v'}m['"]|import\\s*\\(\\s*['"](?:node:)?${'v'}m['"]|runIn(?:This|New)?Context`)],
   ['string-timed code', /\bset(?:Timeout|Interval)\s*\(\s*['"`]/],
   ['embedded private key', /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
   ['cloud credential pattern', /\bAKIA[0-9A-Z]{16}\b/]
@@ -127,7 +132,7 @@ const MARKER_LOOSE = [
 const RENDER_ONLY = [
   // Bracket-member assignment, writeln, and the Function constructor are
   // the same sink under a different spelling (w56-ledger F10).
-  ['DOM injection', /\.(?:innerHTML|outerHTML)\s*(?:=|\+=)|\[\s*['"](?:innerHTML|outerHTML)['"]\s*\]\s*(?:=|\+=)|insertAdjacentHTML|document\.writeln?\s*\(|new\s*\(?\s*Function\s*\)?\s*\(/]
+  ['DOM injection', /\.(?:innerHTML|outerHTML)\s*(?:=|\+=)|\[\s*['"](?:innerHTML|outerHTML)['"]\s*\]\s*(?:=|\+=)|\[\s*['"](?:inner|outer)['"]\s*\+\s*['"]HTML['"]\s*\]\s*(?:=|\+=)|Reflect\.set\s*\([^)]*['"](?:inner|outer)HTML['"]|insertAdjacentHTML|(?:document|doc|d|el|target|element|node)\s*\.\s*write(?:ln)?\s*\(|new\s*\(?\s*Function\s*\)?\s*\(/]
 ];
 for (const file of textFiles) {
   if (file === 'vectors/keys.json' || !existsSync(file) || isBinary(file)) continue;
@@ -135,7 +140,7 @@ for (const file of textFiles) {
   // Zero-width/format chars embedded in a marker hide it from the
   // pattern while a human still reads the unfinished-work word —
   // normalize them away before the marker rules test (w56-ledger F11).
-  const snorm = s.replace(/[\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/g, '');
+  const snorm = s.replace(/[\u00AD\u034F\u061C\u180E\u200B-\u200F\u202A-\u202F\u2060\u2063-\u2064\u3000\uFE0F\uFEFF]/g, '');
   // check.mjs exempts itself only from the DOM rules — its rule table
   // legitimately hosts the sink literals; sinks and markers still apply.
   const renderable = file !== 'scripts/check.mjs' && (file.startsWith('src/') || file.startsWith('web/') || /\.(?:html?|jsx|tsx)$/.test(file)) && !file.startsWith('tests/');
@@ -231,7 +236,7 @@ const inString = (l, pos) => {
 // module state — a `false &&` spilling past one scan's window armed the
 // NEXT scan's first lines as dead, laundering real code across caller
 // boundaries (w56-ledger G-6). Each scan builds its own `deadState()`.
-const deadState = () => ({ pending: false });
+const deadState = () => ({ pending: false, block: false });
 const deadContinues = m => !/;|\{|\}|,/.test(m);
 const stripDead = (l, dead = deadState()) => {
   if (dead.pending) {
@@ -239,6 +244,22 @@ const stripDead = (l, dead = deadState()) => {
     else { if (!deadContinues(l)) dead.pending = false; return ' '; }
   }
   let out = stripComment(l);
+  // A /* */ run is dead text too — its authorize-shaped content minted
+  // evidence exactly like a //-comment did (w57-ledger F2). Block
+  // comments span lines through `dead.block`.
+  {
+    const chars = out.split('');
+    for (let i = 0; i < chars.length; i++) {
+      const c = chars[i];
+      if (dead.block) {
+        if (c === '*' && chars[i + 1] === '/') { chars[i] = ' '; chars[i + 1] = ' '; i++; dead.block = false; }
+        else chars[i] = ' ';
+        continue;
+      }
+      if (c === '/' && chars[i + 1] === '*' && !inString(chars.join(''), i)) { chars[i] = ' '; chars[i + 1] = ' '; i++; dead.block = true; }
+    }
+    out = chars.join('');
+  }
   const livePrefix = i => { const b = out.slice(0, i).trimEnd(); return /[=!<>]=+\s*$|[&^~%+\-*/!<>]\s*$/.test(b) && !/(?:\|\||&&|\?|:)\s*$/.test(b); };
   // Splice right-to-left: replacing earlier spans first would drift the
   // indices the later matches were collected on.
@@ -254,6 +275,44 @@ const stripDead = (l, dead = deadState()) => {
   }
   return out;
 };
+// `maskStrings` blanks the CONTENTS of quoted literals on an already
+// stripped line — call-detection runs on it so evidence inside a string
+// can never mint; positions are preserved so the unmasked line still
+// supplies argument text (w57-ledger F2). A template literal left open
+// at line end tracks `dead.str` so line two is not treated as code.
+const maskStrings = (text, dead) => {
+  const out = text.split('');
+  let q = dead.str ?? null;
+  for (let i = 0; i < out.length; i++) {
+    const c = out[i];
+    if (q) { if (c === '\\') { out[i] = ' '; if (i + 1 < out.length) out[++i] = ' '; } else { out[i] = ' '; if (c === q) q = null; } continue; }
+    if (c === "'" || c === '"' || c === '`') { q = c; out[i] = ' '; }
+  }
+  dead.str = q === '`' ? q : null;
+  return out.join('');
+};
+// A call guarded by `cond &&`, `x ||`, a ternary or an inline `if` on
+// its own statement resolves only some requests — it cannot satisfy an
+// unconditional 'authenticated' or role claim, though it still breaks
+// 'unauthenticated' (w57-ledger F3). A call sitting INSIDE the control
+// keyword's own parentheses — `if (!auth(req)) return 401` — is the
+// condition itself: it evaluates unconditionally, and the operators
+// before it (`x && auth`) are what condition it (w57 h-3 parity).
+const guardedPrefix = (masked, callStart) => {
+  const stmt = masked.slice(Math.max(masked.lastIndexOf(';', callStart - 1), masked.lastIndexOf('}', callStart - 1), masked.lastIndexOf('{', callStart - 1)) + 1, callStart);
+  const open = [];
+  for (let i = 0; i < stmt.length; i++) { if (stmt[i] === '(') open.push(i); else if (stmt[i] === ')') open.pop(); }
+  for (let i = open.length - 1; i >= 0; i--) {
+    if (/(?:^|[^\w$])(?:if|for|while|switch|catch)\s*$/.test(stmt.slice(0, open[i])))
+      return /&&|\|\||\?/.test(stmt.slice(open[i] + 1));
+  }
+  return /&&|\|\||\?|(?:^|[^\w$])if\s*\(|(?:^|[^\w$])(?:else|for|while|do)(?:\s|$)/.test(stmt);
+};
+// A verb-dispatch `m[N]` under any index spelling: `m['2']`, `m[+2]`,
+// `m[02]`, `m[2 ]` all dispatch exactly like `m[2]` — the sibling-arm
+// boundary must see every spelling (w57-ledger F4).
+const DISPATCH_IDX = "m\\s*\\[\\s*['\"]?\\s*\\+?\\s*\\d+\\s*['\"]?\\s*\\]";
+const DISPATCH_2 = new RegExp("m\\s*\\[\\s*['\"]?\\s*\\+?\\s*2\\s*['\"]?\\s*\\]");
 // A role gate may name its set through a module-scope constant —
 // `authorize(p, ADMIN_SET)` gates exactly as honestly as the literal
 // array, and treating it as no gate turns a real role check into a
@@ -271,7 +330,9 @@ const roleSets = lines => {
   for (const l of lines) {
     const s = stripDead(l, dead);
     const m = /\b(?:const|let|var)?\s*([A-Za-z_$][\w$]*)\s*=\s*\[([^\]]*)\]/.exec(s);
-    if (m) { defs.set(m[1], roleArgs(m[2])); continue; }
+    // No early continue: a compact line like `const A=['x']; B=A;` must
+    // bind BOTH — the array arm and the alias arms below (w57-fv NEW-5).
+    if (m) defs.set(m[1], roleArgs(m[2]));
     const alias = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\s*[;\s]/.exec(s);
     if (alias && defs.has(alias[2])) defs.set(alias[1], [...defs.get(alias[2])]);
     else {
@@ -329,6 +390,10 @@ const roleSets = lines => {
     // exiting) plus each dispatched sub-arm's body depth (w56-ledger F7).
     const deadDepths = new Set();
     let tailDead = false;
+    // Any authorize call seen (guarded or not) is reported via `.any` — a
+    // conditional gate still breaks an 'unauthenticated' claim even
+    // though it cannot satisfy a role claim (w57-ledger F3).
+    const sawAny = { v: false };
     for (let i = from; i < Math.min(from + depth, lines.length); i++) {
       // Only a route-arm-shaped `if` bounds the scan — a nested `if`
       // inside the handler is part of the handler and its gate still
@@ -352,7 +417,13 @@ const roleSets = lines => {
       // chain's catch-all row, not this verb — excluding it errs toward
       // flagging, never laundering.
       let l = stripDead(lines[i], dead);
-      const disp = verb && i !== from ? [...l.matchAll(/m\[\d+\]\s*===\s*'([^']+)'/g)].map(x => x[1]) : [];
+      // `lm` is the string-blanked twin: call detection runs on it so an
+      // authorize/dispatch/return inside a string literal mints nothing;
+      // the verb argument is read back from `l` at the same position
+      // (w57-ledger F2/F4).
+      const lm = maskStrings(l, dead);
+      const disp = verb && i !== from ? [...lm.matchAll(new RegExp(DISPATCH_IDX + '\\s*===', 'g'))]
+        .map(x => { const v = new RegExp(DISPATCH_IDX + "\\s*===\\s*'([^']+)'").exec(l.slice(x.index)); return v ? v[1] : null; }).filter(Boolean) : [];
       const afterCloses = depthCur - closes;
       let popped = false;
       while (skipStack.length && afterCloses < skipStack[skipStack.length - 1].d) { skipStack.pop(); popped = true; }
@@ -412,41 +483,65 @@ const roleSets = lines => {
           // `{ ... }` later on the same line would under-read the depth at
           // the return (w56-ledger F7 self-test).
           let ld = depthCur, cut = -1;
-          for (let ci = 0; ci < l.length; ci++) {
-            const c = l[ci];
+          for (let ci = 0; ci < lm.length; ci++) {
+            const c = lm[ci];
             if (c === '{') ld++;
             else if (c === '}') ld--;
-            else if (deadDepths.has(ld) && l.startsWith('return', ci) && !/[\w$]/.test(l[ci - 1] ?? ' ') && !/[\w$]/.test(l[ci + 6] ?? ' ')
-              // A `return` that is the braceless body of an if/else/for/
-              // while on this line is conditional — it dominates nothing
-              // and the row's tail stays live (w56-ledger F7).
-              && !/\b(?:if|for|while)\s*\([^;{]*\)\s*$|\belse(?:\s+if\s*\([^;{]*\))?\s*$/.test(l.slice(0, ci))) { cut = ci; break; }
+            else if (deadDepths.has(ld) && /^(?:return|throw)\b/.test(lm.slice(ci)) && !/[\w$]/.test(lm[ci - 1] ?? ' ')
+              // A `return`/`throw` that is the braceless body of an
+              // if/else/for/while on this line is conditional — it
+              // dominates nothing and the row's tail stays live
+              // (w56-ledger F7) — UNLESS the braceless if is THIS verb's
+              // own dispatch: an `if (m[N]==='ourverb') return send(...)`
+              // is unconditional for this row and its tail is dead
+              // (w57-fv NEW-1). Statements after an unconditional throw
+              // are the same dead evidence (w57-ledger F3/F13).
+              && (ours || !/\b(?:if|for|while)\s*\([^;{]*\)\s*$|\belse(?:\s+if\s*\([^;{]*\))?\s*$/.test(lm.slice(0, ci)))) { cut = ci; break; }
           }
           if (cut !== -1) { l = l.slice(0, cut); tailDead = true; }
         }
-        for (const m of l.matchAll(/authorize\(p,\s*\[([^\]]+)\]/g))
-          for (const r of m[1].split(',')) found.add(r.trim().replace(/['"]/g, ''));
-        for (const m of l.matchAll(/authorize\(p,\s*([A-Za-z_$][\w$]*)\s*\)/g))
-          for (const r of defs.get(m[1]) ?? []) found.add(r);
+        const lmx = maskStrings(l, { pending: false, block: dead.block });
+        for (const m of lmx.matchAll(/authorize\(\s*p\s*,\s*[^\s)]/g)) {
+          sawAny.v = true;
+          if (guardedPrefix(lmx, m.index)) continue;  // conditional gate — cannot satisfy a role claim (w57-ledger F3)
+          const args = l.slice(m.index);
+          const am = /authorize\(\s*p\s*,\s*\[([^\]]+)\]/.exec(args);
+          if (am) { for (const r of am[1].split(',')) found.add(r.trim().replace(/['"]/g, '')); continue; }
+          const nm = /authorize\(\s*p\s*,\s*([A-Za-z_$][\w$]*)\s*\)/.exec(args);
+          if (nm) for (const r of defs.get(nm[1]) ?? []) found.add(r);
+        }
       }
       depthCur += opens - closes;
     }
-    return found.size ? [...found] : null;
+    return { roles: found.size ? [...found] : null, any: sawAny.v };
   };
-  const authorizeAt = (lines, from, depth = 6, verb = null) => collectAuthorize(lines, from, depth, true, verb);
+  const authorizeAt = (lines, from, depth = 6, verb = null) => collectAuthorize(lines, from, depth, true, verb).roles;
   const fabricRoles = name => {
     const idx = fabric.findIndex(l => new RegExp(`^\\s{2}(async )?${name}\\(`).test(l));
     if (idx === -1) return null;
     const defs = roleSets(fabric);
     const found = new Set();
+    const fdead = deadState();
     for (let i = idx; i < Math.min(idx + 140, fabric.length); i++) {
       if (i !== idx && /^\s{2}(async )?[a-zA-Z_]+\(/.test(fabric[i])) break;
-      for (const m of fabric[i].matchAll(/this\.authorize\(p,\s*\[([^\]]+)\]/g))
-        for (const r of m[1].split(',')) found.add(r.trim().replace(/['"]/g, ''));
-      for (const m of fabric[i].matchAll(/this\.authorize\(p,\s*([A-Za-z_$][\w$]*)\s*\)/g))
-        for (const r of defs.get(m[1]) ?? []) found.add(r);
-      const r = /roles\?*\.includes\('([^']+)'\)/.exec(fabric[i]);
-      if (r && /requireThat/.test(fabric[i])) found.add(r[1]);
+      const fl = stripDead(fabric[i], fdead), fm = maskStrings(fl, fdead);
+      // Comments and string literals carry no gate — the call is found on
+      // the masked view, its argument read back from the stripped line,
+      // and a same-statement `cond && authorize` is a conditional gate
+      // that cannot satisfy a role claim (w57-ledger F2/F3).
+      for (const m of fm.matchAll(/this\.authorize\(\s*p\s*,\s*[^\s)]/g)) {
+        if (guardedPrefix(fm, m.index)) continue;
+        const args = fl.slice(m.index);
+        const am = /this\.authorize\(\s*p\s*,\s*\[([^\]]+)\]/.exec(args);
+        if (am) { for (const r of am[1].split(',')) found.add(r.trim().replace(/['"]/g, '')); continue; }
+        const nm = /this\.authorize\(\s*p\s*,\s*([A-Za-z_$][\w$]*)\s*\)/.exec(args);
+        if (nm) for (const r of defs.get(nm[1]) ?? []) found.add(r);
+      }
+      const rm = /roles\?*\.includes\(/.exec(fm);
+      if (rm && /requireThat/.test(fm)) {
+        const rv = /roles\?*\.includes\('([^']+)'\)/.exec(fl.slice(rm.index));
+        if (rv) found.add(rv[1]);
+      }
     }
     return found.size ? [...found] : null;
   };
@@ -480,7 +575,10 @@ const roleSets = lines => {
     // (w54-ledger H-3). The boundary is an `if` at the arm's own depth.
     const windowEnd = () => {
       if (hi === -1) return hi;
-      const end = Math.min(hi + 40, lines.length);
+      // The arm-bounded window: 40 lines truncated long handlers and let
+      // a late authorize hide behind a lying 'unauthenticated' claim
+      // (w57-ledger F5).
+      const end = Math.min(hi + 160, lines.length);
       let depth = 0;
       // A multi-line `if (` condition continues until its block opens, and
       // a brace-less arm's body is the next statement — neither may close
@@ -495,7 +593,7 @@ const roleSets = lines => {
         const lead = (cs.match(/^\s*\}+/)?.[0].match(/\}/g)?.length ?? 0);
         const opens = (cs.match(/\{/g)?.length ?? 0), closes = (cs.match(/\}/g)?.length ?? 0);
         if (i !== hi && !condOpen && !braceless && depth - lead <= 0) {
-          if (isIf(l) && !/m\[2\]/.test(l) && !isValidationGuard(l)) return i;
+          if (isIf(l) && !DISPATCH_2.test(l) && !isValidationGuard(l)) return i;
           // The arm's own `else` is its complement — the else body never
           // runs for this route, so a credential there cannot launder the
           // claim (w55-ledger C4-b).
@@ -531,7 +629,23 @@ const roleSets = lines => {
       }
       return end;
     };
-    const windowCode = hi === -1 ? '' : (() => { const d = deadState(); return lines.slice(hi, windowEnd()).map(x => stripDead(x, d)).join('\n'); })();
+    const wEnd = windowEnd();
+    const windowCode = hi === -1 ? '' : (() => { const d = deadState(); return lines.slice(hi, wEnd).map(x => stripDead(x, d)).join('\n'); })();
+    // Evidence regexes run on the STRING-BLANKED twin: a 'auth(req)' or
+    // authorize-shaped literal inside a string or /* */ comment mints
+    // nothing (w57-ledger F2).
+    const windowMasked = hi === -1 ? '' : (() => { const d = deadState(); return lines.slice(hi, wEnd).map(x => maskStrings(stripDead(x, d), d)).join('\n'); })();
+    // An unconditional claim ('authenticated', 'token holder',
+    // 'issuer bearer token') needs at least one UNGUARDED credential
+    // call — `flag && auth(req)` serves unauthenticated traffic and is
+    // not a gate (w57-ledger F3). Each masked line is checked per
+    // call position.
+    const AUTH_CALL = /auth\(req|authenticateToken|authBreakglass\(|authorize\(|anyBearer\(|bearerMatches\(|issuerAuthOk\(|bearerDigest\(/g;
+    const unguardedAuth = hi === -1 ? false : (() => {
+      const d = deadState();
+      return lines.slice(hi, wEnd).map(x => maskStrings(stripDead(x, d), d))
+        .some(ml => [...ml.matchAll(AUTH_CALL)].some(m => !guardedPrefix(ml, m.index)));
+    })();
     if (r.roles.length === 1 && NONROLE.has(r.roles[0])) {
       // Non-role claims are still contract claims: 'unauthenticated' must
       // name a handler that runs no auth, 'token holder' must actually
@@ -539,11 +653,14 @@ const roleSets = lines => {
       // issuerd bearer machinery — and no non-role row may hide a role
       // gate (w51-ledger H-3, w52-ledger M-6).
       if (hi === -1) { console.error(`route-role parity: ${r.method} ${r.path} — cannot resolve the handler behind a '${r.roles[0]}' claim`); failed = true; continue; }
-      const gate = collectAuthorize(lines, hi, 12);
-      if (r.roles[0] === 'unauthenticated' && (gate || /auth\(req|authenticateToken/.test(windowCode))) { console.error(`route-role parity: ${r.method} ${r.path} — claims unauthenticated but the handler authenticates`); failed = true; continue; }
-      if (r.roles[0] === 'token holder' && !/authenticateToken|auth\(req/.test(windowCode)) { console.error(`route-role parity: ${r.method} ${r.path} — claims token holder but no credential resolves`); failed = true; continue; }
-      if (r.roles[0] === 'issuer bearer token' && !/anyBearer\(|bearerMatches\(|issuerAuthOk\(|bearerDigest\(/.test(windowCode)) { console.error(`route-role parity: ${r.method} ${r.path} — claims issuer bearer token but no bearer gate resolves`); failed = true; continue; }
-      if (r.roles[0] !== 'unauthenticated' && gate) { console.error(`route-role parity: ${r.method} ${r.path} — claims '${r.roles[0]}' but a role gate [${gate}] resolves`); failed = true; continue; }
+      // The claim window spans the whole arm, not a fixed 12 lines — a
+      // handler longer than the window hid its authorize behind a lying
+      // 'unauthenticated' row (w57-ledger F5).
+      const gate = collectAuthorize(lines, hi, Math.max(2, wEnd - hi));
+      if (r.roles[0] === 'unauthenticated' && (gate.any || /auth\(req|authenticateToken/.test(windowMasked))) { console.error(`route-role parity: ${r.method} ${r.path} — claims unauthenticated but the handler authenticates`); failed = true; continue; }
+      if (r.roles[0] === 'token holder' && !unguardedAuth) { console.error(`route-role parity: ${r.method} ${r.path} — claims token holder but no credential resolves`); failed = true; continue; }
+      if (r.roles[0] === 'issuer bearer token' && !unguardedAuth) { console.error(`route-role parity: ${r.method} ${r.path} — claims issuer bearer token but no bearer gate resolves`); failed = true; continue; }
+      if (r.roles[0] !== 'unauthenticated' && gate.any) { console.error(`route-role parity: ${r.method} ${r.path} — claims '${r.roles[0]}' but a role gate [${gate.roles ?? []}] resolves`); failed = true; continue; }
       // 'authenticated' / 'bound subject' claims still mean a credential
       // resolves — inline in the handler window or via the shared
       // dispatch auth above the arm (server.mjs authenticates once for
@@ -560,6 +677,7 @@ const roleSets = lines => {
       // (w54-ledger H-1). The depth is measured, not assumed: the arms
       // sit inside a try{} so their level is whatever the braces say.
       const priorCalls = [];
+      let priorAuthed = false;
       if (dispatchStart !== -1) {
         let depth = 0;
         const rows = [];
@@ -603,12 +721,15 @@ const roleSets = lines => {
             continue;
           }
           if (/^\s*(?:async\s+)?function\s/.test(l)) continue;
-          priorCalls.push(stripDead(l, priorDead));
+          const pl = stripDead(l, priorDead), pm = maskStrings(pl, priorDead);
+          priorCalls.push(pl);
+          for (const am of pm.matchAll(/auth\(req|authenticateToken|authBreakglass\(|authorize\(/g))
+            if (!guardedPrefix(pm, am.index)) priorAuthed = true;
         }
       }
       if ((r.roles[0] === 'authenticated' || r.roles[0] === 'bound subject')
-          && !/auth\(req|authenticateToken|authBreakglass\(/.test(windowCode)
-          && !/auth\(req|authenticateToken|authBreakglass\(|authorize\(/.test(priorCalls.join('\n'))) {
+          && !unguardedAuth
+          && !priorAuthed) {
         console.error(`route-role parity: ${r.method} ${r.path} — claims '${r.roles[0]}' but no credential resolves on or above the handler`); failed = true; continue;
       }
       continue;
@@ -617,10 +738,12 @@ const roleSets = lines => {
     let code = null;
     if (hi !== -1) {
       const lastSeg = segs[segs.length - 1];
-      code = authorizeAt(lines, hi, 6, !lastSeg.startsWith('{') ? lastSeg : null);
+      // The role-row window spans the whole arm too — the fixed 6-line
+      // bound let a long handler hide its gate (w57-ledger F5).
+      code = authorizeAt(lines, hi, Math.max(6, wEnd - hi), !lastSeg.startsWith('{') ? lastSeg : null);
       if (!code) {
-        for (let i = hi; i < Math.min(hi + 12, lines.length); i++) {
-          if (i !== hi && isRouteArmIf(lines[i]) && !/m\[2\]/.test(lines[i]) && !isValidationGuard(lines[i])) break;
+        for (let i = hi; i < Math.min(hi + Math.max(12, wEnd - hi), lines.length); i++) {
+          if (i !== hi && isRouteArmIf(lines[i]) && !DISPATCH_2.test(lines[i]) && !isValidationGuard(lines[i])) break;
           const verb = segs[segs.length - 1];
           if (param && !verb.startsWith('{') && !lines[i].includes(verb)) continue;
           const names = [...lines[i].matchAll(/fabric\.([a-zA-Z_]+)\(p[\s,)]/g)].map(x => x[1]);
@@ -714,8 +837,17 @@ const roleSets = lines => {
     // Dispatch shapes this gate cannot see are failures, not skips:
     // switch dispatch, non-bare aliasing, path arms that serve without
     // any method arm (w51-ledger H-2).
-    if (/\bswitch\s*\([^)]*(?:req\.method|req\.url|path|url\.pathname)/.test(code)) { console.error(`route-spec parity: unauditable switch dispatch — ${line.trim().slice(0, 100)}`); failed = true; }
-    else if (/(?:\bpath\b|req\.url|url\.pathname)\s*===\s*'|\.exec\((?:path|req\.url|url\.pathname)\)/.test(code) && !/req\.method/.test(eff)) { console.error(`route-spec parity: path arm with no enclosing method gate — ${line.trim().slice(0, 100)}`); failed = true; }
+    // Computed-member and destructured dispatch spellings are the same
+    // route under a name the audit cannot read — `req['url']`, `const
+    // { url } = req`, a renamed handler param (`u.pathname`), and
+    // `.once('request', …)` listeners all flag unauditable rather than
+    // skip silently (w57-ledger F6). `url`/`meta` receivers are URL
+    // objects (`url.pathname`, `import.meta.url`), not renamed requests.
+    if (/\b(?:const|let|var)\s*\{[^}]*\}\s*=\s*(?:req|request)\b|\b(?:req|request)\s*\[\s*['"](?:method|url)['"]\s*\]|\b(?!req\b|request\b|res\b|response\b|url\b|meta\b|import\b)(?<!\.)[A-Za-z_$][\w$]*\.(?:method|url|pathname)\s*(?:===|!==)\s*['"`]|\b(?:once|on)\s*\(\s*['"]request['"]/.test(code)
+        && !/req\.method\s*===\s*'[A-Z]+'.*(?:\bpath\b|req\.url|url\.pathname)\s*===\s*'|\b(?:const|let|var)\s+\w+\s*=\s*(?:req\.method|req\.url|path|url\.pathname)\b/.test(code))
+      { console.error(`route-spec parity: unauditable dispatch form — ${line.trim().slice(0, 100)}`); failed = true; }
+    else if (/\bswitch\s*\([^)]*(?:req\.method|req\.url|path|url\.pathname|['"]method['"]|['"]url['"])/.test(code)) { console.error(`route-spec parity: unauditable switch dispatch — ${line.trim().slice(0, 100)}`); failed = true; }
+    else if (/(?:\bpath\b|req\.url|req\s*\[\s*['"]url['"]\s*\]|\w+\.pathname)\s*===\s*'|\.exec\((?:path|req\.url|url\.pathname|\w+\.pathname)\)/.test(code) && !/req\.method|req\s*\[\s*['"]method['"]\s*\]/.test(eff)) { console.error(`route-spec parity: path arm with no enclosing method gate — ${line.trim().slice(0, 100)}`); failed = true; }
     else if (/req\.method/.test(eff) && /\bpath\b|req\.url|url\.pathname/.test(eff)) routeSeen(eff, line);
     // Track enclosing conditions: an `if (` whose block stays open
     // past this line governs the lines below it; a balanced line
@@ -776,7 +908,7 @@ const roleSets = lines => {
     // nothing: any `X.method === 'GET'`, `X.url ===`, `X.headers[…]` or
     // a 'request' listener is a dispatch surface under any identifier
     // (w56-ledger F9).
-    if (/req\.method|req\.url|url\.pathname|req\.headers|createServer\s*\(|on\s*\(\s*['"]request['"]|\b[A-Za-z_$][\w$]*\.(?:method|url)\s*(?:===|!==)\s*['"`]|\b[A-Za-z_$][\w$]*\.headers\s*(?:\[\s*['"]authorization|\.authorization\b)/.test(readFileSync(p, 'utf8'))) { console.error(`route-spec parity: HTTP dispatch surface in ${p} — outside the audited file`); failed = true; }
+    if (/req\.method|req\.url|url\.pathname|req\.headers|\b(?:req|request)\s*\[\s*['"](?:method|url)['"]\s*\]|\b\w+\.pathname\s*===\s*['"`]|createServer\s*\(|(?:on|once)\s*\(\s*['"]request['"]|\b[A-Za-z_$][\w$]*\.(?:method|url)\s*(?:===|!==)\s*['"`]|\b[A-Za-z_$][\w$]*\.headers\s*(?:\[\s*['"]authorization|\.authorization\b)/.test(readFileSync(p, 'utf8'))) { console.error(`route-spec parity: HTTP dispatch surface in ${p} — outside the audited file`); failed = true; }
 }
 
 // Query-parameter parity: the runtime allowlist (QUERY_ALLOW in
