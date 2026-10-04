@@ -657,11 +657,21 @@ _assert_names_memo = {}
 def _file_assert_names(p):
     if p not in _assert_names_memo: _assert_names_memo[p] = _assert_names(p)
     return _assert_names_memo[p]
+# evidence_blocks is deterministic per file — recomputing it inside the
+# per-row loop paid _prod_binds+_test_bodies (full-file live-code analysis)
+# once per REQUIREMENT per FILE (~211×~95 full passes; the ~4-minute wall
+# clock that timed python3 out under test-file concurrency). Memoize:
+# identical output, one pass per file (w56 CI: both runs cancelled at the
+# 90-minute workflow ceiling on this cost alone).
+_evidence_memo = {}
+def _file_blocks(p):
+    if p not in _evidence_memo: _evidence_memo[p] = evidence_blocks(p)
+    return _evidence_memo[p]
 for row in rows:
     prefix = row['id'].rsplit('-', 1)[0]
     owner, baseline, implementation, limitation = by_prefix[prefix]
     matches = [str(p.relative_to(root)) for p in tests
-               if any((_cites(_test_title(b), row['id']) if p.name.endswith('.test.mjs') else row['id'] in b) and (_asserts(b, _file_assert_names(p)) or not p.name.endswith('.test.mjs')) for b in evidence_blocks(p))]
+               if any((_cites(_test_title(b), row['id']) if p.name.endswith('.test.mjs') else row['id'] in b) and (_asserts(b, _file_assert_names(p)) or not p.name.endswith('.test.mjs')) for b in _file_blocks(p))]
     # A VERIFIED row must carry at least one asserting-test citation — the
     # docs sentinel is honest evidence for PARTIAL/BLOCKED rows only
     # (w39-ledger F6).
@@ -673,7 +683,7 @@ for row in rows:
         # test titled 'POL-001' prints `ok` in TAP and launders the gate
         # while the real asserting test sits skipped (w49-fixverify HIGH-1).
         citing_titles = {_test_title(b).strip() for p in tests if p.name.endswith('.test.mjs')
-                         for b in evidence_blocks(p) if _cites(_test_title(b), row['id']) and _asserts(b, _file_assert_names(p))}
+                         for b in _file_blocks(p) if _cites(_test_title(b), row['id']) and _asserts(b, _file_assert_names(p))}
         assert any(_title_ran(t) for t in citing_titles), f"{row['id']} is VERIFIED but none of its citing tests passed in reports/tests.tap (skip/defer is not evidence)"
     # Evidence lists only the files that literally name the requirement —
     # corpus-level artifacts would be boilerplate on every row (w6-ledger S3).
