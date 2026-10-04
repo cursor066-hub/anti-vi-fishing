@@ -32,7 +32,7 @@ test('w20-fv F-4: a sweep wedge clears on the clean seal path once rows verify',
   const row = h.f.store.must(T, 'certificate', cid);
   // Forward clock jump + a missing anchored certificate row isolates the
   // tenant at recovery — the wedge is meant to lift via sealAuditChain.
-  h.f.store.tx(() => h.f.store.clock(h.now() + 3600000));
+  h.livedForward(h.now() + 3600000);
   h.f.store.db.prepare("DELETE FROM records WHERE tenant=? AND kind='certificate' AND id=?").run(T, cid);
   const rec = h.f.recoverClock(h.p('security'));
   assert.ok(rec.unverifiable_tenants.includes(T), 'missing anchored cert wedges the tenant');
@@ -50,7 +50,7 @@ test('w20-fv F-4: a sweep wedge clears on the clean seal path once rows verify',
 test('w20-fv F-4b: the clean seal path never clears a wedge that still fails', t => {
   const h = fixture(t);
   const { certificate } = certifyExport(h);
-  h.f.store.tx(() => h.f.store.clock(h.now() + 3600000));
+  h.livedForward(h.now() + 3600000);
   h.f.store.db.prepare("DELETE FROM records WHERE tenant=? AND kind='certificate' AND id=?").run(T, certificate.payload.certificate_id);
   const rec = h.f.recoverClock(h.p('security'));
   assert.ok(rec.unverifiable_tenants.includes(T));
@@ -68,7 +68,9 @@ test('w20-fv F-5: a vault persist fault on seal surfaces without un-repointing',
   h.f.store.audit(T, 'KEY_ROTATED', 'security', prepB.key_id, { key_class: 'audit', previous_key_id: keyA, ceremony_id: 'cer-b', revoke_old: false }, h.now());
   const last = h.f.store.db.prepare('SELECT seq,hash FROM audit WHERE tenant=? ORDER BY seq DESC LIMIT 1').get(T);
   const payload = { tenant_id: T, sequence: last.seq + 1, previous: last.hash, type: 'AUDIT_ACCESSED', actor: 'mallory', reference: 'x', metadata: {}, time: h.now() };
-  const env = h.f.signAudit(T, payload, 'audit', keyA);
+  // signAudit refuses dead keys (w39 F4): the dead-signed row is minted at
+  // the vault primitive — the compromised-key scenario the fold must catch.
+  const env = h.f.vault.envelope(keyA, 'audit', payload, { tenant_id: T });
   h.f.store.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run(T, last.seq + 1, last.hash, digest(env.payload), JSON.stringify(env));
   const realPersist = h.f.persistVault.bind(h.f);
   h.f.persistVault = () => { throw new Error('disk full'); };
@@ -108,19 +110,28 @@ test('w20-fv F-7/F-8: a mid-chain edit refuses boot; a valid prefix resumes', as
   const spec = { issuer: 'bank', tenant: T, version: '1.0.0', channel: 'authoritative', key: generateKey(), kinds: ISSUER_RULES.bank, records: issuerRecords().bank };
   writeIssuer(dir, spec);
   const logPath = join(dir, 'issuance.log');
-  const srv = createIssuerServer(loadIssuers(dir), { port: 0, host: '127.0.0.1', allow_insecure_loopback: true, logPath });
+  // Unauthenticated refusals aggregate per (principal,route,code) into one
+  // line per 60s window (w48-issuerd M3), so the two probes must cross a
+  // window boundary to mint two lines — a controllable clock does it.
+  let probeClock = 1700000000000;
+  const srv = createIssuerServer(loadIssuers(dir), { port: 0, host: '127.0.0.1', allow_insecure_loopback: true, logPath, clock: () => probeClock });
   await srv.listen();
   const port = srv.server.address().port;
-  // Two refused probes mint two chained log lines.
   for (const _ of [1, 2]) {
     await new Promise((resolve, reject) => {
       const req = httpRequest({ host: '127.0.0.1', port, path: '/v1/issuers/bank/issue', method: 'POST', headers: { 'Content-Type': 'application/json' } }, r => { r.resume(); r.on('end', resolve); });
       req.on('error', reject); req.end('x'.repeat(300 * 1024));
     });
+    probeClock += 61000;
   }
   await srv.close();
   const lines = readFileSync(logPath, 'utf8').trim().split('\n');
-  assert.equal(lines.length, 2);
+  // The second windowed probe first closes the expired window — its
+  // trailing tally is chained evidence, not a memory loss (w49-ledger F5).
+  assert.equal(lines.length, 3);
+  const closeLine = JSON.parse(lines[1]);
+  assert.equal(closeLine.type, 'probe_burst_close');
+  assert.equal(closeLine.prior_window_probes, 1, 'the close line carries the first window tally');
   // A mid-chain edit (first line tampered) must refuse boot.
   const tampered = JSON.parse(lines[0]); tampered.malformed = false;
   writeFileSync(logPath, JSON.stringify(tampered) + '\n' + lines[1] + '\n');

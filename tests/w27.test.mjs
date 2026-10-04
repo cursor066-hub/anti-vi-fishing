@@ -79,7 +79,10 @@ test('w27 F2: a durable watermark catches a replayed signed head on a cold open'
   h.proposed();
   h.f._auditIndex('acme'); // consume to the new tip — bumps the durable watermark
   const wm = JSON.parse(readFileSync(WMARK(h), 'utf8')).tenants.acme;
-  assert.ok(wm > JSON.parse(stale).tenants.acme.payload.seq, 'durable watermark advanced past the captured head');
+  // w38: entries are signed {seq, envelope} pairs — the seq is what the
+  // rollback must stay below.
+  const wmSeq = typeof wm === 'object' ? wm.seq : wm;
+  assert.ok(wmSeq > JSON.parse(stale).tenants.acme.payload.seq, 'durable watermark advanced past the captured head');
   const staleSeq = JSON.parse(stale).tenants.acme.payload.seq;
   // Attacker replays a consistent TWO-file rollback: the signed heads file
   // AND the ledger rows beyond it — a partial replay the durable watermark

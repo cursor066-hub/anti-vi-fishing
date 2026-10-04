@@ -33,21 +33,26 @@ test('w22 F1: journaled dispatch without its anchor settles DISPATCH_UNATTESTED'
   assert.equal(h.f.reconcile(h.p('security'), c.certificate.payload.certificate_id).payload.status, 'FAILED');
 });
 
-// F2: a reserved child whose dispatch never journaled is released back to
-// free authority inside the parent's terminal write.
-test('w22 F2: journal-less wedged child is released, not burned', t => {
+// F2 doctrine (w44): a reserved child whose dispatch anchored intent and
+// then threw stays wedged — 'reserved + no journal + no dispatch anchor'
+// can never mint a release, because EXECUTION_INTENT lands before every
+// dispatch and a murdered journal is indistinguishable from never-ran.
+// The reservation stays spent; the child reconciles or stays wedged, it
+// is never silently freed for a second dispatch.
+test('w22 F2: intent-anchored wedged child is never released for a second dispatch', t => {
   const h = fixture(t);
   const c1 = jitChild(h), c2 = beneChild(h, 2);
   const r = composite(h, [c1.record.capsule.capsule_id, c2.record.capsule.capsule_id]);
   const parentCert = h.f.certificate(h.p(), r.capsule.capsule_id);
   killNthDispatch(h, 2);
   h.f.execute(h.p(), parentCert);
-  assert.equal(h.f.store.must('acme', 'certificate', c2.certificate.payload.certificate_id).consumed, false);
-  assert.ok(h.f._auditIndex('acme').released.has(c2.certificate.payload.certificate_id));
-  // The released cert spends its one slot again — a new capsule is not
-  // needed to use the still-live authority.
-  const second = h.f.execute(h.p(), c2.certificate);
-  assert.equal(second.payload.status, 'VERIFIED');
+  const c2cert = c2.certificate.payload.certificate_id;
+  assert.equal(h.f.store.must('acme', 'certificate', c2cert).consumed, true, 'the reservation stands — never silently freed');
+  assert.ok(!h.f._auditIndex('acme').released?.has(c2cert), 'no EXECUTION_RELEASED minted');
+  assert.ok(h.f._auditIndex('acme').intended?.has(c2cert), 'the anchored intent is what pins the wedge');
+  // The consumed cert cannot spend its slot again — a second dispatch
+  // would be a double-fire of possibly-committed effects.
+  assert.throws(() => h.f.execute(h.p(), c2.certificate));
 });
 
 // F3a: reconcile(child) refuses while the composite parent is still live —

@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fixture, hasCode, runtimeInput, runtimeRequest } from './helpers.mjs';
 import { Fabric } from '../src/fabric.mjs';
-import { digest } from '../src/canonical.mjs';
+import { digest, clone } from '../src/canonical.mjs';
 
 const dropAuditTriggers = db => { for (const tr of db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all()) db.exec(`DROP TRIGGER "${String(tr.name).replace(/"/g, '""')}"`); };
 const restoreAuditTriggers = db => db.exec(`
@@ -123,10 +123,12 @@ test('w32 seal F6: a seal over still-divergent rows does not claim wedge_cleared
   assert.ok(typeof res.integrity_detail === 'string', 'the surviving divergence is named');
 });
 
-// store F-2/F-3: a durable watermark above the committed tip (crash gap or
-// inflated file) is repaired by the seal's no-cut branch — never wedged
-// forever while the chain itself verifies.
-test('w32 store F2/F3: seal repairs a durable watermark stranded above the committed tip', t => {
+// store F-2/F-3 + w38 runtime-gate F-2: watermark entries are signed — an
+// unsigned entry planted above the committed tip is clamped to the head
+// (a forged floor can no longer wedge the fold) and named as tamper; a
+// genuinely SIGNED watermark stranded above the tip still wedges and the
+// seal's no-cut branch repairs it.
+test('w32 store F2/F3: an unsigned inflated watermark clamps instead of wedging', t => {
   const h = fixture(t, ['acme']);
   h.proposed();
   const tip = h.f.store.db.prepare("SELECT seq FROM audit WHERE tenant='acme' ORDER BY seq DESC LIMIT 1").get().seq;
@@ -134,11 +136,39 @@ test('w32 store F2/F3: seal repairs a durable watermark stranded above the commi
   const file = JSON.parse(readFileSync(wpath, 'utf8'));
   file.tenants.acme = tip + 50;
   writeFileSync(wpath, JSON.stringify(file));
-  assert.throws(() => h.f._auditIndex('acme'), hasCode('INV-409-INTEGRITY'), 'inflated watermark wedges the fold');
+  assert.doesNotThrow(() => h.f._auditIndex('acme'), 'a forged unsigned floor cannot pin above the committed head');
   const res = h.f.sealAuditChain(h.p('security'));
   assert.equal(res.sealed, false, 'chain verifies — no cut needed');
-  assert.equal(h.f._headWatermark('acme'), tip, 'watermark re-anchored at the verified tip');
-  assert.doesNotThrow(() => h.f._auditIndex('acme'), 'fold works again post-repair');
+  assert.ok((res.head_watermark_tampered ?? []).some(e => e.tenant_id === 'acme' && e.kind === 'unsigned_above_head'), 'the planted floor must be named in the seal report');
+});
+
+test('w32 store F2/F3: a signed watermark stranded above the committed tip still wedges and is repaired', t => {
+  const h = fixture(t, ['acme']);
+  h.proposed();
+  // Advance the chain so the signed watermark bumps to the new tip, then
+  // roll back rows + chain-heads together — the signed floor now sits
+  // legitimately above the committed tip (the crash-gap shape).
+  const headsPath = join(h.directory, 'chain-heads.json');
+  const staleHeads = readFileSync(headsPath, 'utf8');
+  const staleSeq = JSON.parse(staleHeads).tenants.acme.payload.seq;
+  h.proposed(); h.f._auditIndex('acme');
+  const entry = JSON.parse(readFileSync(join(h.directory, 'head-watermark.json'), 'utf8')).tenants.acme;
+  assert.equal(typeof entry, 'object', 'watermark entries are signed envelopes');
+  assert.ok(entry.seq > staleSeq);
+  dropAuditTriggers(h.f.store.db);
+  h.f.store.db.prepare("DELETE FROM audit WHERE tenant='acme' AND seq>?").run(staleSeq);
+  restoreAuditTriggers(h.f.store.db);
+  writeFileSync(headsPath, staleHeads);
+  // Cold fabric: no in-memory consumed index — the signed watermark is
+  // the only catch between this and a clean verify (w27 F-2 shape).
+  h.close();
+  const cold = new Fabric(clone(h.setup.config), h.directory, () => h.now());
+  t.after(() => cold.close());
+  assert.throws(() => cold._auditIndex('acme'), hasCode('INV-409-INTEGRITY'), 'a signed floor above the committed tip must still wedge');
+  const res = cold.sealAuditChain(h.p('security'));
+  assert.equal(res.sealed, false, 'chain verifies — no cut needed');
+  assert.equal(cold._headWatermark('acme'), staleSeq + 1, 'the floor now covers the committed re-anchor row');
+  assert.doesNotThrow(() => cold._auditIndex('acme'), 'fold works again post-repair');
 });
 
 // fixverify F-2: a baseline that once anchored but verifies no more must
@@ -247,9 +277,12 @@ test('w32 composite F2: a wedged child whose journal was deleted over a committe
   assert.ok(!h.f._auditIndex('acme').released?.has(wcertId), 'no EXECUTION_RELEASED was minted');
 });
 
-// composite F-2 control: a child genuinely never dispatched (nothing
-// committed, state untouched) still releases honestly.
-test('w32 composite F2: a never-dispatched wedged child still releases', t => {
+// composite F-2 doctrine (w44): a child whose dispatch was ATTEMPTED — intent
+// anchored, then the journal murdered in the commit window — stays WEDGED
+// forever. 'Reserved + no dispatch anchor' can no longer mint a release now
+// that every dispatch anchors EXECUTION_INTENT first; the only releasable
+// shape left is a wedged child on a pre-intent legacy chain.
+test('w32 composite F2: an intent-anchored wedged child stays wedged — no release over a thrown dispatch', t => {
   const h = fixture(t, ['acme']);
   const c1 = jitChild(h), c2 = beneChild(h, 33);
   const parent = composite(h, [c1.record.capsule.capsule_id, c2.record.capsule.capsule_id]);
@@ -259,8 +292,10 @@ test('w32 composite F2: a never-dispatched wedged child still releases', t => {
   h.f.target.execute = (capsule, id, now, fault) => { calls++; if (calls === 2) throw new Error('lost before journal'); return orig(capsule, id, now, fault); };
   const out = h.f.execute(h.p(), parentCert);
   const c2cert = h.f._auditIndex('acme').issuedCert.get(c2.record.capsule.capsule_id);
-  assert.equal(out.payload.child_outcomes[c2.record.capsule.capsule_id], 'RELEASED', 'untouched wedged child releases honestly');
-  assert.ok(h.f._auditIndex('acme').released?.has(c2cert));
+  assert.equal(out.payload.child_outcomes[c2.record.capsule.capsule_id], 'WEDGED', 'attempted dispatch — intent anchored — never releases');
+  assert.ok(!h.f._auditIndex('acme').released?.has(c2cert), 'no EXECUTION_RELEASED minted');
+  const out2 = h.f.reconcile(h.p('security'), parentCert.payload.certificate_id);
+  assert.equal(out2.payload.status, 'FAILED', 'terminal FAILED verdict — wedge is honest but unrecoverable');
 });
 
 // composite F-3: a child-side integrity verdict is tamper evidence, never a

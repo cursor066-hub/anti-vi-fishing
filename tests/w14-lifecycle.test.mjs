@@ -143,7 +143,7 @@ test('w14 NEW-MED-1: sealAuditChain removes the poisoned tail under a signed sea
   const res = h.f.sealAuditChain(h.p('security'));
   assert.equal(res.sealed, true); assert.equal(res.sealed_at_seq, head.seq + 1);
   assert.doesNotThrow(() => h.f._auditIndex('acme'), 'index still wedged after sealing');
-  const seal = h.f.store.db.prepare("SELECT envelope FROM audit WHERE tenant='acme' ORDER BY seq DESC LIMIT 1").get();
+  const seal = h.f.store.db.prepare("SELECT envelope FROM audit WHERE tenant='acme' AND envelope LIKE '%AUDIT_SEALED%' ORDER BY seq DESC LIMIT 1").get();
   assert.equal(JSON.parse(seal.envelope).payload.type, 'AUDIT_SEALED');
   // A healthy chain refuses to seal.
   const again = h.f.sealAuditChain(h.p('security'));

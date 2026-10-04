@@ -76,6 +76,17 @@ export function fixture(t, tenants = ['acme', 'globex']) {
     return { record, certificate: f.certificate(p('operator', record.capsule.tenant_id), record.capsule.capsule_id) };
   }
   const api = { f, setup, directory, p, actor, proposed, evidence, approve, approvalEnvelope, ready, close, now: () => time, advance: ms => { time += ms; }, set: t => { time = t; }, clone };
+  // Attest that the gate honestly believed it lived forward to `at`: a
+  // vault-signed audit row is the only carrier a file-writer cannot mint.
+  // Inside the fold's 60s tolerance the row folds directly; beyond it the
+  // seal cuts the row but carries its signed time as the attested lived
+  // horizon — either way the clock-recovery veto grounds on chain
+  // evidence, never on the forgeable clock row (w42-runtime F2).
+  api.livedForward = (at, tenant = 'acme') => {
+    f.store.tx(() => { f.store.clock(at); f.store.audit(tenant, 'HEALTH_ASSERTION', 'fixture', 'lived-span', {}, at); });
+    f.invalidateAuditIndex(tenant);
+    if (at > time + 60_000) f.sealAuditChain(p('security', tenant));
+  };
   // Issuer endpoints are frozen trust anchors (w12-provenance F15): the
   // sanctioned update is a config reload — reopen the fabric on a cloned
   // configuration carrying the new endpoint. Helpers see the new instance
@@ -105,6 +116,14 @@ export function fixture(t, tenants = ['acme', 'globex']) {
   return api;
 }
 export const hasCode = code => e => e?.code === code;
+// Plant an aad_migration marker the way the migration writer itself does:
+// the INSERT arm is guarded on both DBs (w48-fixverify LOW), so seeding
+// evidence state means disarming and re-arming the guard around the write.
+export const plantAadMarker = (db, tenant, value) => {
+  db.exec('DROP TRIGGER IF EXISTS aad_marker_keep_ins');
+  try { db.prepare('INSERT INTO meta_kv VALUES(?,?,?)').run(tenant, 'aad_migration', value); }
+  finally { db.exec("CREATE TRIGGER IF NOT EXISTS aad_marker_keep_ins BEFORE INSERT ON meta_kv WHEN NEW.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END"); }
+};
 // A live constitution can only change through the governed policy.change
 // pipeline — the active row is anchored to its ledger-signed activation
 // (w12 red-team), so tests that need a different policy must certify one.

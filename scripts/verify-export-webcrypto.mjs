@@ -94,7 +94,7 @@ async function main() {
     const kid = row.envelope?.protected?.key_id;
     check(!(kid !== undefined && deadAt.has(kid) && n > deadAt.get(kid)), 'Audit row signed by a key past its ledger death');
     const meta = e.metadata;
-    if (e.type === 'AUTHORITY_REVOKED' && meta?.kind === 'key') kill(meta.id, n);
+    if (e.type === 'AUTHORITY_REVOKED' && typeof e.reference === 'string' && e.reference.startsWith('key:')) kill(e.reference.slice(4), n);
     if (e.type === 'KEY_ROTATED' && meta?.key_class === 'audit') kill(meta.previous_key_id, n);
     if (e.type === 'AUDIT_SEALED' || e.type === 'AUDIT_SEAL_CARRY') {
       for (const rv of Array.isArray(meta?.revocations_carryover) ? meta.revocations_carryover : []) if (typeof rv?.reference === 'string' && rv.reference.startsWith('key:')) kill(rv.reference.slice(4), n);

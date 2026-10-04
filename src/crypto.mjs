@@ -1,4 +1,4 @@
-import { generateKeyPairSync, createPrivateKey, createPublicKey, sign, verify, randomBytes, createCipheriv, createDecipheriv, timingSafeEqual } from 'node:crypto';
+import { generateKeyPairSync, createPrivateKey, createPublicKey, sign, verify, randomBytes, createCipheriv, createDecipheriv, timingSafeEqual, createHash } from 'node:crypto';
 import { canonical, digest } from './canonical.mjs';
 import { requireThat } from './errors.mjs';
 
@@ -17,10 +17,28 @@ export const SUITES = {
 // P-256 group order n: ECDSA (r, s) and (r, n-s) are equivalent; canonical
 // low-s is enforced on both sign and verify so signatures are non-malleable.
 const P256_ORDER = BigInt('0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551');
+// KeyObject materialization is a pure function of the PEM — a rotated key
+// always arrives as different text, so the object cannot go stale. The
+// cache is bounded and self-evicting (oldest-insertion first) (w43-perf).
+const KEY_OBJECTS = new Map();
+const keyObject = (ctor) => (pem) => {
+  // The cache key is a DIGEST of the PEM, never the text itself — keying
+  // the map by raw private material retains every decrypted PKCS8 in
+  // module-global strings for process lifetime (w44-store M-3).
+  const k = `${ctor.name}:${createHash('sha256').update(pem).digest('hex')}`;
+  let obj = KEY_OBJECTS.get(k);
+  if (obj === undefined) {
+    obj = ctor(pem);
+    KEY_OBJECTS.set(k, obj);
+    if (KEY_OBJECTS.size > 512) KEY_OBJECTS.delete(KEY_OBJECTS.keys().next().value);
+  }
+  return obj;
+};
+const privateKeyOf = keyObject(createPrivateKey), publicKeyOf = keyObject(createPublicKey);
 export function signSuite(suite, message, privatePem) {
   const s = Object.hasOwn(SUITES, suite) ? SUITES[suite] : undefined;
   requireThat(s, 'INV-400-SCHEMA', 'Unsupported algorithm suite');
-  const key = s.dsaEncoding ? { key: createPrivateKey(privatePem), dsaEncoding: s.dsaEncoding } : createPrivateKey(privatePem);
+  const key = s.dsaEncoding ? { key: privateKeyOf(privatePem), dsaEncoding: s.dsaEncoding } : privateKeyOf(privatePem);
   const sig = sign(s.hash, message, key);
   if (s.dsaEncoding === 'ieee-p1363' && sig.length === 64) {
     const scalar = BigInt('0x' + sig.subarray(32).toString('hex'));
@@ -41,7 +59,7 @@ export function verifySuite(suite, message, publicPem, signature) {
     const scalar = BigInt('0x' + signature.subarray(32).toString('hex'));
     if (scalar > P256_HALF_ORDER) return false;
   }
-  const key = s.dsaEncoding ? { key: createPublicKey(publicPem), dsaEncoding: s.dsaEncoding } : createPublicKey(publicPem);
+  const key = s.dsaEncoding ? { key: publicKeyOf(publicPem), dsaEncoding: s.dsaEncoding } : publicKeyOf(publicPem);
   return verify(s.hash, message, key, signature);
 }
 export function generateKey(suite = 'Ed25519') {

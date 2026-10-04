@@ -12,7 +12,9 @@ export function canonical(value, depth = 0) {
     return String(value);
   }
   if (typeof value === 'string') {
-    if (value !== value.normalize('NFC') || /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(value)) throw invalid('Strings must be valid NFC Unicode');
+    // ASCII fast path: a pure-ASCII string is always NFC and surrogate-free,
+    // so the normalization allocation is provably a no-op (w44-perf).
+    if (!/^[\x00-\x7F]*$/.test(value) && (value !== value.normalize('NFC') || /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(value))) throw invalid('Strings must be valid NFC Unicode');
     if (value.length > 65536) throw invalid('String too long');
     return JSON.stringify(value);
   }

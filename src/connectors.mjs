@@ -45,7 +45,7 @@ export const ISSUER_MANIFEST_COVERAGE = ['evidence-source'];
 
 export function verifyManifest(envelope, issuers, now, { max_age_ms } = {}) {
   const m = verifySigned(envelope, issuers, 'connector-manifest');
-  fields(m, ['connector_id', 'version', 'domain', 'actions', 'permissions', 'limitations', 'idempotency', 'coverage_implications', 'issued_at', 'expires_at'], ['lifecycle']);
+  fields(m, ['connector_id', 'version', 'domain', 'actions', 'permissions', 'limitations', 'idempotency', 'coverage_implications', 'issued_at', 'expires_at'], ['lifecycle', 'spec_digest']);
   requireThat(m.expires_at > now, 'INV-401-CONNECTOR', 'Connector manifest expired', 401);
   if (m.lifecycle) requireThat(m.lifecycle.end_of_support_at > now, 'INV-410-CONNECTOR', `Connector end of support reached; migrate to ${m.lifecycle.superseded_by}`, 410);
   integer(m.issued_at, 'issued', 1, now + 300000);
@@ -181,6 +181,13 @@ export function driftCheck(registered, observed, now) {
     if (registered[f] !== undefined) cmp(f, registered[f], observed[f]);
     else if (observed[f] !== undefined) changes.push({ field: `${f}_undeclared_baseline`, now: observed[f], informational: true });
   }
+  // The spec-content anchor: when registration pins a spec_digest, the
+  // daemon's signed claim about its own records/kinds must match it — a
+  // file-level edit of the issuer's record store is invisible to every
+  // custody bit but diverges here (w48-issuerd H1). Undeclared baselines
+  // follow the same informational rule as the other fields.
+  if (registered.spec_digest !== undefined) cmp('spec_digest', registered.spec_digest, observed.spec_digest);
+  else if (observed.spec_digest !== undefined) changes.push({ field: 'spec_digest_undeclared_baseline', now: observed.spec_digest, informational: true });
   const configDigest = digest({ connector_id: observed.connector_id ?? null, version: observed.version ?? null, actions: observed.actions ?? [], permissions: observed.permissions ?? [] });
   const drifted = changes.some(c => !c.informational);
   return { drifted, changes, configuration_digest: configDigest, checked_at: now, action: drifted ? 'coverage->UNKNOWN pending compatibility, security and bypass revalidation' : 'none' };
