@@ -98,8 +98,8 @@ test('w18-fv F5: deleting a certificate row cannot bypass the rewind veto', t =>
   const h = fixture(t);
   const { certificate } = h.ready(h.proposed());
   const exp = certificate.payload.expires_at;
+  h.livedForward(exp + 1);
   h.f.store.db.prepare("DELETE FROM records WHERE tenant='acme' AND kind='certificate'").run();
-  h.f.store.db.prepare('UPDATE clock SET last=? WHERE id=1').run(exp + 1);
   // w19-lifecycle F3: the tampered tenant lands in unverifiable_tenants —
   // recovery proceeds for the rest of the deployment while the tampered
   // tenant stays wedged until a chain seal.
@@ -115,7 +115,7 @@ test('w18-fv F12: a poisoned tenant chain blocks itself, not the healthy tenants
   h.f.store.db.prepare("INSERT INTO audit (tenant,seq,previous,hash,envelope) VALUES ('globex',?,?,'deadbeef','{}')").run((ghead?.seq ?? 0) + 1, ghead?.hash ?? '0'.repeat(64));
   h.f.invalidateAuditIndex('globex');
   h.f.store.clock(h.now()); // seed the clock row the rewind is measured against
-  h.f.store.db.prepare('UPDATE clock SET last=? WHERE id=1').run(h.now() + 120000);
+  h.livedForward(h.now() + 120000);
   const out = h.f.recoverClock(h.p('security'));
   assert.ok(out.recovered_at, 'recovery proceeds for the healthy tenant');
   assert.ok(out.unverifiable_tenants.includes('globex'), 'the poisoned tenant is reported, not silently skipped');

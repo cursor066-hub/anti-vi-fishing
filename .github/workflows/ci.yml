@@ -21,7 +21,13 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The suite runs twice per job — once under `npm test`, once inside
+    # `report.mjs --check-only` (regeneration is the staleness evidence). At
+    # 1183 tests a cold runner crossed the old 30m ceiling (w50 CI); at
+    # ~1250 tests with the w54 copy-tree regressions (~5 × 2min check.mjs
+    # passes) a sequential run is ~28min — two runs plus the rest of the
+    # pipeline approach 75min (w54 CI).
+    timeout-minutes: 90
     steps:
       # Actions are pinned by commit SHA — a moved or hijacked tag cannot
       # substitute different code into the job that produces attestation

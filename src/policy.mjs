@@ -304,9 +304,14 @@ export function emergencyWeakening(base, next, now = 0) {
     if (!(next.algorithms.deprecation ?? []).some(n => canonical(n) === canonical(e))) return 'algorithms.deprecation';
   return null;
 }
-export function evaluatePolicy({ capsule, policy, evidence = [], approvals = [], identities, quarantined = false, now }) {
+export function evaluatePolicy({ capsule, policy, evidence = [], approvals = [], identities, quarantined = false, now, digests = null }) {
   const p = capsule, type = p.action.type, rule = policy.rules[type];
-  const result = (decision, reasons, extra = {}) => ({ decision, reasons, explanation: reasons.map(r => r.message).join(' '), policy_id: policy.policy_id, policy_version: policy.version, policy_digest: digest(policy), capsule_digest: digest(p), evaluated_at: now, owner: p.actor.subject_id, expires_at: p.expires_at, ...extra });
+  // Digests may arrive precomputed from the caller's object-bound memos —
+  // a digest of the same object is a pure function, so a supplied value is
+  // identical to recomputing (w47-perf). Callers without a memo still pay
+  // the canonical+sha256 here.
+  const pd = () => digests?.policy_digest ?? digest(policy), cd = () => digests?.capsule_digest ?? digest(p);
+  const result = (decision, reasons, extra = {}) => ({ decision, reasons, explanation: reasons.map(r => r.message).join(' '), policy_id: policy.policy_id, policy_version: policy.version, policy_digest: pd(), capsule_digest: cd(), evaluated_at: now, owner: p.actor.subject_id, expires_at: p.expires_at, ...extra });
   const reason = (code, message) => ({ code, message });
   if (!rule) return result('DENY', [reason('UNSUPPORTED_ACTION', 'Action type is not authorised.')]);
   if (quarantined) return result('DENY', [reason('QUARANTINED', 'The subject or device is quarantined.')]);

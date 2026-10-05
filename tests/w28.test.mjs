@@ -61,7 +61,9 @@ function rawRequest(port, { path, method = 'GET', headers = {}, payload } = {}) 
 const HEADS = h => join(h.directory, 'chain-heads.json');
 const WMARK = h => join(h.directory, 'head-watermark.json');
 const headEntry = h => JSON.parse(readFileSync(HEADS(h), 'utf8')).tenants.acme;
-const wmSeq = h => JSON.parse(readFileSync(WMARK(h), 'utf8')).tenants.acme;
+// w38: watermark entries are signed {seq, envelope} objects (legacy files
+// may still hold a bare seq).
+const wmSeq = h => { const e = JSON.parse(readFileSync(WMARK(h), 'utf8')).tenants.acme; return typeof e === 'object' ? e.seq : e; };
 const tip = h => h.f.store.db.prepare("SELECT seq FROM audit WHERE tenant='acme' ORDER BY seq DESC LIMIT 1").get().seq;
 const dropAuditTriggers = db => { for (const tr of db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all()) db.exec(`DROP TRIGGER ${tr.name}`); };
 const restoreAuditTriggers = db => db.exec(`
@@ -170,9 +172,10 @@ test('w28-fixverify F4: the watermark file is re-read every call — a peer adva
   const h = fixture(t);
   h.ready();
   h.f._auditIndex('acme');
-  const wm = JSON.parse(readFileSync(WMARK(h), 'utf8'));
-  const peerSeq = wm.tenants.acme + 5;
-  wm.tenants.acme = peerSeq; writeFileSync(WMARK(h), JSON.stringify(wm));
+  // Peers write SIGNED entries (w38): an advance lands as {seq, envelope}
+  // the re-read must verify and observe — an unsigned bump would clamp.
+  const peerSeq = wmSeq(h) + 5;
+  h.f._bumpHeadWatermark('acme', peerSeq, { force: true });
   assert.equal(h.f._headWatermark('acme'), peerSeq, 'file-fresh read sees the peer write without reopen');
 });
 

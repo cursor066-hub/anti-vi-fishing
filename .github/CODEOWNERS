@@ -5,7 +5,10 @@
 # (w11-supply SC-05).
 /.gitignore              @cursor066-hub
 /.gitattributes          @cursor066-hub
-.github/workflows/       @cursor066-hub
+# The whole .github tree is owner-gated — including this CODEOWNERS file
+# itself, so weakening review policy requires owner review too (w48-ledger
+# F-2).
+.github/                 @cursor066-hub
 scripts/check.mjs        @cursor066-hub
 scripts/manifest.mjs     @cursor066-hub
 scripts/traceability.py  @cursor066-hub
@@ -46,6 +49,8 @@ src/target.mjs           @cursor066-hub
 src/schema.mjs           @cursor066-hub
 src/errors.mjs           @cursor066-hub
 src/cli.mjs              @cursor066-hub
+src/coverage.mjs         @cursor066-hub
+src/merkle.mjs           @cursor066-hub
 tests/                   @cursor066-hub
 vectors/                 @cursor066-hub
 deploy/                  @cursor066-hub

@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { fixture, hasCode, installPolicy, setTenant, runtimeInput, runtimeRequest, coverageIdentity } from './helpers.mjs';
 import { signed, verifySigned, generateKey } from '../src/crypto.mjs';
 import { digest, clone } from '../src/canonical.mjs';
 import { signAcknowledgement } from '../src/ceremony.mjs';
 import { proposal } from '../src/schema.mjs';
+import { createServer } from '../src/server.mjs';
 
 // ---- H2: the cumulative reconstruction control is actually triggered ----
 test('DAT-009: touching every row crosses the coverage threshold and denies', t => {
@@ -382,7 +384,7 @@ test('COV-001 COV-005 COV-009 COV-010: path classes, owner tasks, history replay
   assert.throws(() => h.f.technicalValidation(h.p('security'), 'path-b', envelope), hasCode('INV-400-SCHEMA'));
 });
 
-test('UX-010: digest-only scoping hides payload bodies from unprivileged roles', t => {
+test('UX-010: digest-only scoping hides payload bodies from unprivileged roles', async t => {
   const h = fixture(t); h.ready();
   // Operators read the audit as digests+metadata only; privileged roles get
   // the full verified envelopes.
@@ -392,6 +394,32 @@ test('UX-010: digest-only scoping hides payload bodies from unprivileged roles',
   assert.ok(scoped.entries.every(e => e.digest_only === true && e.envelope === undefined));
   const full = h.f.auditPageScoped(h.p('auditor'), { limit: 5 });
   assert.ok(full.entries.every(e => e.envelope?.payload?.type));
+
+  // The requirement's core slice: error responses must not disclose
+  // internals to unauthorised callers while a privileged operator still
+  // reads the reason. Same rejection, two audiences — the unprivileged
+  // principal gets code+request_id only (w51-ledger L-2).
+  const app = createServer(h.f, { port: 0, origin: 'http://127.0.0.1:17777' });
+  await app.listen(); t.after(() => app.close());
+  const port = app.server.address().port;
+  const request = (path, token) => new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, path, method: 'POST', headers: { Host: '127.0.0.1:17777', Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Content-Length': 2 } }, response => {
+      const chunks = []; response.on('data', c => chunks.push(c)); response.on('end', () => resolve({ status: response.statusCode, data: JSON.parse(Buffer.concat(chunks).toString('utf8')) }));
+    }); req.on('error', reject); req.end('{}');
+  });
+  // operator is route-authorised elsewhere but holds no security/auditor/
+  // policy_admin role — the same 403 both sides trigger must differ in
+  // disclosed content, not in status.
+  const denied = await request('/v1/revocations', h.setup.credentials.acme.operator);
+  assert.equal(denied.status, 403);
+  assert.match(denied.data.error.code, /^INV-40[13]/);
+  assert.equal(denied.data.error.message, 'Rejected; security or auditor roles can read the detail');
+  assert.equal(denied.data.error.details, undefined);
+  assert.ok(denied.data.error.request_id, 'the request id is the out-of-band handle');
+  const privileged = await request('/v1/revocations', h.setup.credentials.acme.auditor);
+  assert.equal(privileged.status, 403);
+  assert.equal(privileged.data.error.code, denied.data.error.code, 'the reason code is stable contract for both audiences');
+  assert.notEqual(privileged.data.error.message, denied.data.error.message, 'the privileged caller reads the real reason');
 });
 
 test('COV-002: the UNCOVERED label is representable, creates an owner task and never reads as observed', t => {

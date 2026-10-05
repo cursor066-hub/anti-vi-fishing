@@ -1,5 +1,5 @@
 import { createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify, randomBytes, createHmac } from 'node:crypto';
-import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync, renameSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync, renameSync, rmSync, openSync, closeSync, fsyncSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { canonical, digest } from './canonical.mjs';
 import { encrypt, decrypt, SUITES, verifySuite, signSuite, verifySigned, ctEqual } from './crypto.mjs';
@@ -16,6 +16,19 @@ const stateMac = (masterKey, state) => createHmac('sha256', masterKey).update(ca
 // This is NOT a real HSM: the attestation says so (KEY-003 honest profile).
 
 export { SUITES };
+// Tighten to owner-only only when the current mode actually leaks —
+// read-only mounts (k8s secret topology) answer chmod with EROFS even on
+// files already at 0400, so a compliant file must never pay the syscall
+// (w45-ledger HIGH-2).
+export const tightenOwnerOnly = (path, name = path) => {
+  // A delete between existsSync and statSync produces a bare ENOENT off
+  // the boot path — the taxonomy covers the stat, not just the chmod
+  // (w52-store L1).
+  let mode;
+  try { mode = statSync(path).mode; } catch (e) { throw new InvariantError('INV-503-CONFIG', `${name} cannot be stat'ed for the owner-only check`, 503, { cause: e }); }
+  if ((mode & 0o077) === 0) return;
+  try { chmodSync(path, 0o600); } catch (e) { throw new InvariantError('INV-503-CONFIG', `${name} permissions cannot be tightened to owner-only`, 503, { cause: e }); }
+};
 export const FIRMWARE = 'if-softhsm-1.0.0';
 export const STORE_FORMAT = 'IF-SOFTHSM-STORE-1';
 
@@ -52,7 +65,7 @@ export class KeyVault {
     // The vault is process-global — every entry carries its owning tenant so
     // no tenant-scoped path can sign, rotate, revoke or list another
     // tenant's material (w6-tenancy F2/F3/F4).
-    this.keys.set(id, { key_id: id, tenant_id, public_key: raw.public_key, purpose, suite, exportable, revoked: false, pending, generated_inside: true, wrapped: encrypt(raw.private_key, this.masterKey, `vault/${id}`), created_firmware: this.firmware });
+    this.keys.set(id, { key_id: id, tenant_id, public_key: raw.public_key, purpose: Array.isArray(purpose) ? [...purpose] : purpose, suite, exportable, revoked: false, pending, generated_inside: true, wrapped: encrypt(raw.private_key, this.masterKey, `vault/${id}`), created_firmware: this.firmware });
     return { key_id: id, public_key: raw.public_key, suite, purpose, exportable, pending };
   }
   // A pending key cannot sign until a verified key.rotate action activates it.
@@ -93,7 +106,7 @@ export class KeyVault {
     for (const p of Array.isArray(purpose) ? purpose : [purpose]) text(p, 'key purpose', 64);
     requireThat(tenant_id === null || (typeof tenant_id === 'string' && tenant_id.length <= 128), 'INV-400-SCHEMA', 'Invalid tenant binding', 400);
     requireThat(!this.keys.has(key.key_id), 'INV-409-CONFLICT', 'Key id already exists', 409);
-    this.keys.set(key.key_id, { key_id: key.key_id, tenant_id, public_key: key.public_key, purpose, suite, exportable, revoked: false, generated_inside: false, wrapped: encrypt(key.private_key, this.masterKey, `vault/${key.key_id}`), created_firmware: 'imported' });
+    this.keys.set(key.key_id, { key_id: key.key_id, tenant_id, public_key: key.public_key, purpose: Array.isArray(purpose) ? [...purpose] : purpose, suite, exportable, revoked: false, generated_inside: false, wrapped: encrypt(key.private_key, this.masterKey, `vault/${key.key_id}`), created_firmware: 'imported' });
     return { key_id: key.key_id, public_key: key.public_key, suite, purpose, exportable };
   }
   _private(key_id, entry = null) { return decrypt((entry ?? this.entry(key_id)).wrapped, this.masterKey, `vault/${key_id}`); }
@@ -154,13 +167,26 @@ export class KeyVault {
     // public_key metadata without breaking authentication (crypto-audit H-2).
     state.mac = stateMac(this.masterKey, state);
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    // Atomic write: temp + rename so a crash mid-save cannot leave a torn
-    // vault file that fails MAC/parse at next open (concurrency-audit L5).
+    // Atomic write: temp + fsync + rename + dir-fsync — write+rename
+    // alone leaves the rename in page cache while the caller believes the
+    // vault state is durable; a crash in that window either tears the
+    // file (INV-503-CONFIG on every open) or loses the whole rename,
+    // silently un-revoking keys just committed by a ceremony (w44-store
+    // H-2, same discipline as the watermark pair at fabric.mjs).
     const tmp = `${path}.${randomBytes(6).toString('hex')}.tmp`;
-    try { writeFileSync(tmp, canonical(state) + '\n', { mode: 0o600 }); chmodSync(tmp, 0o600); renameSync(tmp, path); }
-    catch (e) { rmSync(tmp, { force: true }); throw e; }
+    try {
+      const fd = openSync(tmp, 'w', 0o600);
+      try { writeFileSync(fd, canonical(state) + '\n'); fsyncSync(fd); } finally { closeSync(fd); }
+      chmodSync(tmp, 0o600); renameSync(tmp, path);
+      const dfd = openSync(dirname(path), 'r');
+      try { fsyncSync(dfd); } finally { closeSync(dfd); }
+    } catch (e) { rmSync(tmp, { force: true }); throw e; }
   }
   static load(path, masterKey) {
+    // The vault file is private material at rest — tighten before
+    // reading, never after: permissive bits healed post-read still
+    // leaked the window (w44-store L-1, same ordering as _openVault).
+    tightenOwnerOnly(path, 'keystore.json');
     // A hostile or truncated vault file must classify inside the INV
     // taxonomy like every other store corruption — never a raw
     // SyntaxError off the boot path (w30-store F2).
@@ -191,6 +217,9 @@ export class KeyVault {
     // not silently re-key (w9-schema F-4).
     if (!existsSync(storePath) && existsSync(masterPath)) throw new InvariantError('INV-503-CONFIG', 'Master key exists but keystore is missing — refusing to silently re-key', 503);
     if (existsSync(storePath) && existsSync(masterPath)) {
+      // Tighten before reading — the daemon path (KeyVault.open/load) must
+      // heal perms here, not rely on the Fabric sweep (w44-store L-1).
+      tightenOwnerOnly(masterPath, 'master.key');
       // A corrupt master file is a config failure with an INV code, not a
       // raw parser exception escaping the taxonomy (w11-fixverify R4).
       const master = (() => { try { return JSON.parse(readFileSync(masterPath, 'utf8')); } catch { throw new InvariantError('INV-503-CONFIG', 'master.key is unreadable or corrupt', 503); } })();

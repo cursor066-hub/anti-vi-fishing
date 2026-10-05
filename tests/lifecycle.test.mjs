@@ -43,7 +43,12 @@ test('POL-007: denied nonce cannot be revived or re-evaluated', t => {
 });
 test('POL-006 COM-013: cooldown defers exact bank change', t => { const h = fixture(t), r = h.proposed('finance.bank.change', { bank_account: 'TESTBANK000002', currency: 'EUR' }); assert.equal(h.f.evaluate(h.p(), r.capsule.capsule_id).decision, 'DEFER'); h.advance(60001); assert.equal(h.f.evaluate(h.p(), r.capsule.capsule_id).decision, 'ESCROW'); });
 test('COM-003: consumed certificate is never replayed', t => { const h = fixture(t), { certificate } = h.ready(); h.f.execute(h.p(), certificate); assert.throws(() => h.f.execute(h.p(), certificate), hasCode('INV-409-REPLAY')); });
-test('COM-004 ACT-004: stale target state invalidates certificate', t => { const h = fixture(t), { record, certificate } = h.ready(); h.f.target.seed('acme', record.capsule.action.target_resource, { altered: true }); assert.throws(() => h.f.execute(h.p(), certificate), hasCode('INV-409-STATE')); });
+test('COM-004 ACT-004: stale target state invalidates certificate', t => {
+  const h = fixture(t), a = h.ready(), b = h.ready();
+  assert.equal(h.f.execute(h.p(), a.certificate).payload.status, 'VERIFIED');
+  h.f.target.seed('acme', b.record.capsule.action.target_resource, { altered: true });
+  assert.throws(() => h.f.execute(h.p(), b.certificate), hasCode('INV-409-STATE'));
+});
 test('COM-004: expired certificate fails closed', t => { const h = fixture(t), { certificate } = h.ready(); h.advance(60001); assert.throws(() => h.f.execute(h.p(), certificate), hasCode('INV-401-CERTIFICATE')); });
 test('COM-011: dry-run does not mutate or consume certificate', t => { const h = fixture(t), { record, certificate } = h.ready(); assert.equal(h.f.execute(h.p(), certificate, { dryRun: true }).no_mutation, true); assert.equal(h.f.target.state('acme', record.capsule.action.target_resource).version, 0); assert.equal(h.f.execute(h.p(), certificate).payload.status, 'VERIFIED'); });
 test('COM-012: post-commit timeout becomes UNCERTAIN; reconciliation finds one durable mutation', t => {
@@ -76,7 +81,12 @@ test('EVD-001 EVD-002: correlated issuer and derivative evidence cannot satisfy 
   assert.equal(decision.decision, 'ESCROW', 'the reason code must accompany a real withholding, not decorate an ALLOW');
   assert.ok(decision.reasons.some(x => x.code === 'EVIDENCE_INDEPENDENCE'));
 });
-test('EVD-005 AIG-006: email/advisory evidence cannot confer authority', t => { const h = fixture(t), r = h.proposed(); h.evidence(r, { issuer: 'email' }); h.evidence(r, { issuer: 'bank', advisory: true }); h.approve(r); assert.equal(h.f.evaluate(h.p(), r.capsule.capsule_id).decision, 'ESCROW'); });
+test('EVD-005 AIG-006: email/advisory evidence cannot confer authority', t => {
+  const h = fixture(t), r = h.proposed();
+  h.evidence(r, { issuer: 'email' }); h.evidence(r, { issuer: 'bank', advisory: true }); h.approve(r);
+  assert.equal(h.f.evaluate(h.p(), r.capsule.capsule_id).decision, 'ESCROW');
+  assert.throws(() => h.f.certificate(h.p(), r.capsule.capsule_id), hasCode('INV-412-EVIDENCE'));
+});
 test('EVD-009: conflicting evidence remains escrow despite sufficient positive sources', t => { const h = fixture(t), r = h.proposed(); h.evidence(r); h.evidence(r, { issuer: 'registry' }); h.evidence(r, { issuer: 'governance', kind: 'governance_review', claim: 'conflict' }); h.approve(r); const decision = h.f.evaluate(h.p(), r.capsule.capsule_id); assert.equal(decision.decision, 'ESCROW'); assert.ok(decision.reasons.some(x => x.code === 'EVIDENCE_CONFLICT')); });
 test('EVD-008 POL-014: evidence revocation invalidates pending certificate immediately and survives in audit', t => {
   const h = fixture(t), { record, certificate } = h.ready(), r = h.f.getCapsule(h.p(), record.capsule.capsule_id);

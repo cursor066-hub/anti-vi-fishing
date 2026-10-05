@@ -113,9 +113,10 @@ test('w24 W24-4b: an expired parent releases the anchored child binding', t => {
   assert.equal(out.payload.status, 'VERIFIED');
 });
 
-// W24-5: composite_child_of is derived from the anchored reservation/
-// dispatch folds — a released child that executes solo reports no lineage.
-test('w24 W24-5: a released child executing solo claims no composite lineage', t => {
+// W24-5 doctrine (w44): composite_child_of is derived from the anchored
+// reservation/dispatch folds — a wedged child keeps its anchored lineage
+// and can never be freed into a solo dispatch.
+test('w24 W24-5: an intent-anchored wedged child keeps its anchored lineage — never freed solo', t => {
   const h = fixture(t);
   const c1 = jitChild(h), c2 = beneChild(h, 2);
   const r = composite(h, [c1.record.capsule.capsule_id, c2.record.capsule.capsule_id]);
@@ -124,10 +125,10 @@ test('w24 W24-5: a released child executing solo claims no composite lineage', t
   let calls = 0;
   h.f.target.execute = (capsule, id, now, fault) => { calls += 1; if (calls === 2) throw new Error('child dispatch lost mid-flight'); return orig(capsule, id, now, fault); };
   h.f.execute(h.p(), parentCert);
-  assert.ok(h.f._auditIndex('acme').released.has(c2.certificate.payload.certificate_id));
-  const out = h.f.execute(h.p(), c2.certificate);
-  assert.equal(out.payload.status, 'VERIFIED');
-  assert.equal(h.f.store.must('acme', 'outcome', c2.certificate.payload.certificate_id).payload.composite_child_of, null);
+  const c2cert = c2.certificate.payload.certificate_id;
+  assert.ok(!h.f._auditIndex('acme').released?.has(c2cert), 'no EXECUTION_RELEASED');
+  assert.equal(h.f._auditIndex('acme').intendedMeta?.get(c2cert), parentCert.payload.certificate_id, 'the intent fold pins the composite lineage');
+  assert.throws(() => h.f.execute(h.p(), c2.certificate), 'a consumed wedged cert cannot dispatch solo');
 });
 
 // W24-6: the anchored CANCELLED verdict outranks a stale UNCERTAIN row —

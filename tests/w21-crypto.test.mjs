@@ -109,12 +109,16 @@ test('w21-crypto F-3: a dead key cannot mint the anchored config snapshot', t =>
   designateSuccessor(h, 'audit');
   h.f.revoke(h.p('security'), { kind: 'key', id: auditKey.key_id, reason: 'leaked' });
   // Plant a self-consistent CONFIG_SNAPSHOT signed by the DEAD key — the
-  // scan must skip it instead of adopting a poisoned drift baseline.
+  // scan must refuse to serve it as the drift baseline (fail-closed: a
+  // dead-signed row is fold-level tamper, never silently adopted
+  // (w21-crypto F-3, w37 F-C page-verifier parity).
   const head = h.f.store.db.prepare("SELECT seq,hash FROM audit WHERE tenant='acme' ORDER BY seq DESC LIMIT 1").get();
   const payload = { tenant_id: 'acme', sequence: head.seq + 1, previous: head.hash, type: 'CONFIG_SNAPSHOT', actor: 'mallory', reference: 'config', metadata: { config_digest: 'deadbeef'.repeat(8) }, time: h.now() };
   const envelope = signed(payload, { key_id: auditKey.key_id, private_key: auditKey.private_key }, 'audit');
   h.f.store.db.prepare('INSERT INTO audit VALUES(?,?,?,?,?)').run('acme', head.seq + 1, head.hash, digest(payload), canonical(envelope));
-  assert.deepEqual(h.f._anchoredConfigSnapshot(T), before, 'dead-key snapshot never reaches the baseline');
+  const poisoned = h.f._anchoredConfigSnapshot(T);
+  assert.equal(poisoned.digest, null, 'dead-signed row poisons the baseline scan — it is never adopted');
+  assert.notDeepEqual(poisoned, before, 'the dead-key snapshot must not mint a baseline');
 });
 
 // ─── w21-store: append-only triggers actually fire at runtime ───────────────

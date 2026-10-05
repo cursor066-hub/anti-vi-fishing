@@ -53,6 +53,11 @@ if (typeof document !== 'undefined') {
     if (!response.ok) { if (response.status === 401 && value.error?.code === 'INV-401-AUTH') { state.me = null; state.csrf = null; $('login-panel').hidden = false; $('workspace').hidden = true; $('logout').hidden = true; $('identity').textContent = 'Session expired'; } throw new Error(`${value.error?.code ?? response.status}: ${value.error?.message ?? 'Request failed'}`); }
     return value;
   }
+  // Path-segment ids use the identifier alphabet ([A-Za-z0-9_.:-]) —
+  // encodeURIComponent percent-escapes ':' which route regexes accept
+  // literally, so decode it back or colon-named ids 404 forever
+  // (w45-http M-2).
+  const pathId = v => encodeURIComponent(v).replaceAll('%3A', ':');
   function handle(id, event, fn) {
     $(id).addEventListener(event, async e => {
       e.preventDefault(); $('notice').hidden = true; const buttons = event === 'submit' ? [...e.currentTarget.querySelectorAll('button')] : [e.currentTarget]; const wasDisabled = buttons.map(b => b.disabled); buttons.forEach(b => { b.disabled = true; b.setAttribute('aria-busy', 'true'); });
@@ -142,7 +147,7 @@ if (typeof document !== 'undefined') {
   document.querySelectorAll('nav button').forEach(button => button.addEventListener('click', async () => { show(button.dataset.view); try { if (button.dataset.view === 'coverage') await loadCoverage(); if (button.dataset.view === 'actions') await loadList(); } catch (e) { notify(e.message, true); } }));
   handle('refresh', 'click', loadList); handle('previous', 'click', async () => { state.offset = Math.max(0, state.offset - 25); await loadList(); }); handle('next', 'click', async () => { state.offset += 25; await loadList(); }); handle('back-actions', 'click', async () => { show('actions'); await loadList(); });
   $('action-type').addEventListener('change', renderRequested); $('resource').addEventListener('input', () => { state.currentState = null; state.currentResource = null; });
-  handle('load-state', 'click', async () => { if (!$('resource').checkValidity() || !$('resource').value) throw new Error('Enter a valid target resource identifier.'); const resource = $('resource').value; state.currentState = await api(`/v1/resources/${encodeURIComponent(resource)}`); state.currentResource = resource; $('state-preview').textContent = JSON.stringify(state.currentState, null, 2); });
+  handle('load-state', 'click', async () => { if (!$('resource').checkValidity() || !$('resource').value) throw new Error('Enter a valid target resource identifier.'); const resource = $('resource').value; state.currentState = await api(`/v1/resources/${pathId(resource)}`); state.currentResource = resource; $('state-preview').textContent = JSON.stringify(state.currentState, null, 2); });
   handle('identity-key-file', 'change', async e => {
     const file = e.target.files[0]; if (!file) { state.identityKey = null; return; }
     const key = JSON.parse(await file.text());
@@ -200,7 +205,7 @@ if (typeof document !== 'undefined') {
       const tr = node('tr'), title = node('td', `${k.key_id.slice(0, 12)}… ${k.purpose}`); title.append(node('span', `${k.suite} · ${k.exportable ? 'exportable' : 'non-exportable'}`, 'resource'));
       const status = node('td', k.revoked ? 'revoked' : k.pending ? 'pending' : 'active');
       const cell = node('td'), button = node('button', 'Attest', 'secondary');
-      button.addEventListener('click', async () => { $('attest-result').textContent = JSON.stringify(await api(`/v1/keys/${k.key_id}/attest`), null, 2); });
+      button.addEventListener('click', async () => { $('attest-result').textContent = JSON.stringify(await api(`/v1/keys/${pathId(k.key_id)}/attest?nonce=${encodeURIComponent(crypto.randomUUID())}`), null, 2); });
       cell.append(button); tr.append(title, status, cell); $('key-rows').append(tr);
     }
   }
@@ -232,7 +237,14 @@ if (typeof document !== 'undefined') {
       if (!i.endpoint) { button.disabled = true; button.title = 'No live endpoint registered'; }
       button.hidden = !(state.me?.roles ?? []).some(r => ['security', 'policy_admin'].includes(r));
       button.addEventListener('click', async () => { try { $('drift-result').textContent = JSON.stringify(await api(`/v1/connectors/${i.key_id}/drift-check`, { method: 'POST', body: {} }), null, 2); } catch (error) { notify(error.message || 'Drift check failed.', true); } });
-      cell.append(button); tr.append(title, node('td', `${i.channel} / ${i.failure_domain}`), node('td', i.endpoint ?? 'offline envelope only'), node('td', i.revoked ? 'revoked' : 'trusted'), cell); $('connector-rows').append(tr);
+      // The governed remediation path for a real spec_digest change lives
+      // next to the check that convicts it — security-only, matching the
+      // route's role set (w50-http LOW).
+      const repin = node('button', 'Re-pin spec', 'secondary');
+      if (!i.endpoint) { repin.disabled = true; repin.title = 'No live endpoint registered'; }
+      repin.hidden = !(state.me?.roles ?? []).includes('security');
+      repin.addEventListener('click', async () => { try { $('drift-result').textContent = JSON.stringify(await api(`/v1/connectors/${i.key_id}/repin`, { method: 'POST', body: {} }), null, 2); } catch (error) { notify(error.message || 'Re-pin failed.', true); } });
+      cell.append(button, repin); tr.append(title, node('td', `${i.channel} / ${i.failure_domain}`), node('td', i.endpoint ?? 'offline envelope only'), node('td', i.revoked ? 'revoked' : 'trusted'), cell); $('connector-rows').append(tr);
     }
   }
   handle('refresh-connectors', 'click', loadConnectors);

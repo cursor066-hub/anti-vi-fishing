@@ -19,7 +19,7 @@ import { proposal } from '../src/schema.mjs';
 import { validatePolicy } from '../src/policy.mjs';
 import { clone } from '../src/canonical.mjs';
 import { createIssuerServer, writeIssuer, loadIssuers } from '../src/issuerd.mjs';
-import { ISSUER_RULES } from '../src/bootstrap.mjs';
+import { ISSUER_RULES, issuerRecords } from '../src/bootstrap.mjs';
 
 const declarePath = (h, path_id, status = 'UNCOVERED', extra = {}) =>
   h.f.declareCoverage(h.p('security'), { path_id, action_type: 'data.read', target: 'dataset-1', environment: 'prod', connector_version: '1.0', owner: 'op', status, path_class: 'api', max_age_ms: 60000, configuration_digest: digest({ cfg: 1 }), ...extra });
@@ -281,7 +281,7 @@ test('w31 coverage F8: drift stales paths pinned by connector_key_id', async t =
   const h = fixture(t, ['acme']);
   const [bankKeyId, bank] = Object.entries(h.f.tenant('acme').issuers).find(([, v]) => v.name === 'bank');
   const dir = mkdtempSync(join(tmpdir(), 'if-w31drift-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
-  writeIssuer(dir, { issuer: 'bank', tenant: 'acme', channel: 'authoritative', version: '1.0.0', key: h.setup.issuerKeys.acme['bank'], kinds: ISSUER_RULES.bank, records: {}, issue_token: bank.issue_token, read_token: bank.read_token });
+  writeIssuer(dir, { issuer: 'bank', tenant: 'acme', channel: 'authoritative', version: '1.0.0', key: h.setup.issuerKeys.acme['bank'], kinds: ISSUER_RULES.bank, records: issuerRecords().bank, issue_token: bank.issue_token, read_token: bank.read_token });
   const srv = createIssuerServer(loadIssuers(dir), { port: 0, host: '127.0.0.1', clock: () => h.now() });
   await srv.listen();
   h.repoint(bankKeyId, `http://127.0.0.1:${srv.server.address().port}`);

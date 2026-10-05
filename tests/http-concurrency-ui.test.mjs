@@ -88,12 +88,27 @@ test('PER-007 PER-009: Secure Perception is dev-attested: forged attestations fa
 function runWorker(data) { return new Promise((resolve, reject) => { const worker = new Worker(new URL('./race-worker.mjs', import.meta.url), { workerData: data }); worker.once('message', resolve); worker.once('error', reject); worker.once('exit', code => { if (code) reject(new Error(`Worker exit ${code}`)); }); }); }
 test('COM-003 NFR-TST-002: eight independent gate workers race; exactly one certificate is consumed', async t => {
   const h = fixture(t), { certificate, record } = h.ready(), data = { config: h.setup.config, directory: h.directory, now: h.now(), principal: h.p(), certificate };
-  const results = await Promise.all(Array.from({ length: 8 }, () => runWorker(data))); assert.equal(results.filter(r => r.success).length, 1, JSON.stringify(results)); assert.ok(results.filter(r => !r.success).every(r => r.code === 'INV-409-REPLAY')); assert.equal(h.f.target.state('acme', record.capsule.action.target_resource).version, 1);
+  const results = await Promise.all(Array.from({ length: 8 }, () => runWorker(data))); assert.equal(results.filter(r => r.success).length, 1, JSON.stringify(results));
+  // A loser folding after the winner's commit is convicted INV-409-REPLAY;
+  // a loser that never reached the ledger writer is refused INV-503-LEDGER
+  // — but ONLY the writer-contention shape: the same code also covers
+  // engine faults (store.mjs Ledger engine fault), and absorbing a real
+  // integrity failure as scheduling noise would hide exactly the class an
+  // operator must see (w55-fv M-4). Both prevent double-consumption —
+  // any third code, or a non-contention INV-503, is a real failure
+  // (same doctrine as DAT-002 above).
+  assert.ok(results.filter(r => !r.success).every(r => r.code === 'INV-409-REPLAY' || (r.code === 'INV-503-LEDGER' && /contention/i.test(r.message ?? ''))), JSON.stringify(results)); assert.equal(h.f.target.state('acme', record.capsule.action.target_resource).version, 1);
 });
 test('DAT-002: concurrent gates cannot overspend shared rolling budget', async t => {
   const h = fixture(t); installPolicy(h, p => { p.runtime.windows[0].limit = 2; }); const cap = h.f.runtime.issue(h.p(), runtimeInput());
   const results = await Promise.all(Array.from({ length: 8 }, () => runWorker({ config: h.setup.config, directory: h.directory, now: h.now(), principal: h.p(), runtime: runtimeRequest(cap) })));
-  assert.equal(results.filter(r => r.success).length, 1, JSON.stringify(results)); assert.ok(results.filter(r => !r.success).every(r => r.code === 'INV-429-BUDGET'));
+  assert.equal(results.filter(r => r.success).length, 1, JSON.stringify(results));
+  // All eight workers present the SAME signed request: a loser that folds
+  // after the winner's commit is convicted as a replay (the precise name
+  // for a re-presented request); one that folds before is convicted by the
+  // rolling budget the winner just spent. Both denials prevent overspend —
+  // any third code (a wedge, a 500) is a real failure.
+  assert.ok(results.filter(r => !r.success).every(r => r.code === 'INV-429-BUDGET' || r.code === 'INV-409-REPLAY'), JSON.stringify(results));
 });
 test('NFR-SEC-004: bootstrap creates random credentials, private files and refuses overwrite', t => {
   const h = fixture(t), directory = join(h.directory, 'new-deployment'); bootstrap(directory); const config = loadConfiguration(directory); assert.equal(config.profile, 'engineering'); assert.ok(readFileSync(join(directory, 'access-tokens.json'), 'utf8').length > 100); assert.throws(() => bootstrap(directory), hasCode('INV-409-CONFLICT')); assert.throws(() => new h.f.constructor({ ...config, profile: 'production' }, directory), hasCode('INV-503-RELEASE'));
@@ -227,9 +242,14 @@ test('w5-M8: a wrong method on a documented path is a 405 on every route', async
   const h = await httpFixture(t), spec = JSON.parse(readFileSync('docs/openapi.json', 'utf8'));
   for (const template of Object.keys(ROUTE_METHODS)) assert.ok(spec.paths[template], `route ${template} missing from openapi.json`);
   for (const [template, ops] of Object.entries(spec.paths)) {
+    // Issuerd-listener paths are contracted on the daemon's own port — the
+    // main gate has no route for them and honestly answers 404 (w51b).
+    if (Object.values(ops).every(op => op['x-listener'] === 'issuerd')) continue;
     const wrong = ['GET', 'POST'].find(m => !Object.keys(ops).includes(m.toLowerCase()));
     if (!wrong) continue;
-    const path = template.replaceAll(/\{[^}]+\}/g, 'x-1');
+    // Substitute within each param's dispatch charset — a value outside it
+    // is correctly a 404, not a 405 (w50-http template/dispatch parity).
+    const path = template.replaceAll('{sequence}', '42').replaceAll(/\{[^}]+\}/g, 'x-1');
     const r = await h.request(path, { method: wrong });
     assert.equal(r.status, 405, `${wrong} ${path}`); assert.equal(r.data.error.code, 'INV-405-METHOD');
   }

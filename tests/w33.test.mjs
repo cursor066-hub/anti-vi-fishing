@@ -90,10 +90,12 @@ test('w33 seal F2: a planted mirror request id does not burn the real request', 
   // silently what it refused to re-attest.
   assert.ok(sealMeta(h).carryover_totals.mirrors_dropped >= 1, 'the mirror residue is counted in the signed record');
   assert.ok(sealMeta(h).dropped_mirrors.some(m => m.table === 'usage' && m.request === victimId), 'the dropped mirror row is named as evidence');
-  // The request id was never genuinely spent — a fresh capability must still
-  // accept it (a new cap: the doomed issuance was cut).
+  // The request id was never genuinely spent — but the seal dropped an
+  // unverifiable anchor, so consume budgets the residue at worst-case
+  // coverage (w38-runtime F-1): the denial is INV-429, never a
+  // request-already-spent shadow of the planted mirror.
   const cap2 = h.f.runtime.issue(h.p(), runtimeInput({ max_cost: 1000 }));
-  assert.equal(h.f.runtime.consume(h.p(), runtimeRequest(cap2, { request_id: victimId })).decision, 'ALLOW');
+  assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap2, { request_id: victimId })), hasCode('INV-429-BUDGET'));
 });
 
 // w33-seal F-4: carryover is bounded by construction — a doomed span carrying
@@ -188,7 +190,7 @@ test('w33 FV F5: a shredded capsule tombstone passes the wedge sweep', t => {
 
 // w33-seal O-3: the offline verifier's signer-death window unfolds carried
 // 'key:' revocations — a key killed only inside a seal still counts dead.
-test('w33 seal O3: a carried key revocation kills the key for offline verification', t => {
+test('w33 seal O3: a carried key revocation kills the key — floor-derived claims enforce but never pin a window', t => {
   const h = fixture(t, ['acme']);
   h.ready();
   // Revoke the audit key's actor binding via a key revocation, then corrupt
@@ -198,13 +200,21 @@ test('w33 seal O3: a carried key revocation kills the key for offline verificati
   h.f.revoke(h.p('security'), { kind: 'key', id: auditKid, reason: 'suspect' });
   corruptAt(h, seqOf(h, '%AUTHORITY_REVOKED%'));
   assert.equal(h.f.sealAuditChain(h.p('security')).sealed, true);
+  // The destroyed anchor means the claim carries no attested time: pinning a
+  // death seq would let a planted floor fake a key-death window, so the
+  // fold and the offline extractor both exempt floor-derived 'key:' refs
+  // from the death window (w40-fv F-13, w48-crypto F-w48-2 parity).
   const dead = h.f.store._auditKeyDeaths('acme');
-  assert.ok(dead.has(auditKid), 'the carried key revocation reaches the offline death window');
+  assert.equal(dead.has(auditKid), false, 'a floor-derived key claim never manufactures a death window — planted floors cannot fake signer death');
+  // Fail closed: the unverifiable claim still enforces as a revocation
+  // everywhere the row level consults it — only the window pin is withheld.
+  assert.equal(h.f.revoked('acme', 'key', auditKid), true, 'the floor-derived claim still enforces as revoked');
 });
 
-// w33-fixverify F-5 detail: a floor-derived 'key:' carry is what feeds the
-// death window — the offline and fold verdicts must agree for the same
-// destroyed-revocation state.
+// w33-fixverify F-5 detail: a floor-derived 'key:' carry enforces through
+// idx.revoked (fail closed — the claim may be a real orphaned revocation)
+// while the death window deliberately ignores it — the offline and fold
+// verdicts must agree for the same destroyed-revocation state.
 
 // ---- w33-export findings (export/proof surface) ----
 // F-1: the signed head's residue claims convict deletions of unguarded rows.
@@ -237,7 +247,7 @@ test('w33 export F2: webcrypto verifier rejects a posthumously-signed bundle', a
   const row = payload => ({ hash: digest(payload), envelope: h.f.vault.envelope(auditKid, 'audit', payload) });
   // A revocation that kills the audit key, then a row signed by that same key
   // one sequence later — every envelope verifies; the death window must not.
-  const r1 = row({ tenant_id: 'acme', sequence: 1, previous: '0'.repeat(64), type: 'AUTHORITY_REVOKED', actor: 'mallory', reference: null, time: 1, metadata: { kind: 'key', id: auditKid } });
+  const r1 = row({ tenant_id: 'acme', sequence: 1, previous: '0'.repeat(64), type: 'AUTHORITY_REVOKED', actor: 'mallory', reference: `key:${auditKid}`, time: 1, metadata: {} }); // canonical key-death encoding (w37 F-C)
   const r2 = row({ tenant_id: 'acme', sequence: 2, previous: r1.hash, type: 'AUDIT_ACCESSED', actor: 'mallory', reference: 'tenant-log', time: 2, metadata: {} });
   const bundle = { format: 'IF-AUDIT-1', prior_checkpoint: null, checkpoint: h.f.vault.envelope(auditKid, 'checkpoint', { tenant_id: 'acme', size: 2, head: r2.hash, tree_head: merkleRoot([r1.hash, r2.hash]) }), entries: [r1, r2] };
   const dir = mkdtempSync(join(tmpdir(), 'w33-exp-'));
