@@ -1,5 +1,5 @@
 import { randomUUID, randomBytes, createHmac, createPrivateKey, createPublicKey } from 'node:crypto';
-import { Store } from './store.mjs';
+import { Store, RESIDUE_KEEP_TRIGGERS } from './store.mjs';
 import { SimulatedTarget } from './target.mjs';
 import { RuntimeGate } from './runtime.mjs';
 import { digest, clone, canonical, hashBytes } from './canonical.mjs';
@@ -61,6 +61,11 @@ export class Fabric {
   #residueScan = new Map();
   #residueShapeStmt = null;
   #residueLikeStmt = null;
+  // Claims of a FOLD_RESIDUE_RETIRED retire still in flight — the mint's
+  // own post-insert consult unions them into scan.retired before the
+  // drain runs, so the retired-echo arm must skip them or every honest
+  // retire self-convicts (w61-seal F-3).
+  #retireInFlight = new Map();
   // In-tx revocation-write flag feeding the floor check's probe skip
   // (w43-perf): set by the store record hook, cleared when the check runs.
   #floorDirty = null;
@@ -1515,22 +1520,48 @@ export class Fabric {
       db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
       db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
       db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
+      if (Array.isArray(retired) && retired.length) {
+        // The consumption record lands BEFORE the value delete: a wedged
+        // marker write aborts the whole savepoint, leaving the residue
+        // rows standing for the leftover probe to name instead of
+        // silently losing the binding (w61-fv F-3). The marker is guarded
+        // by the keep triggers, but a file-writer can still plant or
+        // rewrite the row without firing them — an unsigned marker was a
+        // write-to-retire oracle for any heal claim (w61-seal F-1), so
+        // the claim set now lives inside an audit-signed envelope.
+        const prev = db.prepare("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(tenant)?.value;
+        let prior = [];
+        try { prior = this.#retiredClaimsOf(tenant, JSON.parse(prev ?? 'null')) ?? []; } catch { prior = []; }
+        const merged = [...new Set([...prior, ...retired])].slice(-4096);
+        const env = this.#auditSigners[tenant].sign({ tenant_id: tenant, fold_floor_retired: merged }, 'audit');
+        db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES (?, 'fold_floor_retired', ?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, JSON.stringify({ claims: merged, env }));
+        // Landed probe: the UPSERT is the only write in the drain that
+        // was never re-read — a foreign RAISE(IGNORE) or splice eating it
+        // left claims bound to the mint alone (w61-runtime F-4).
+        const back = db.prepare("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(tenant)?.value;
+        const backClaims = (() => { try { return this.#retiredClaimsOf(tenant, JSON.parse(back ?? 'null')); } catch { return null; } })();
+        requireThat(Array.isArray(backClaims) && retired.every(c => backClaims.includes(c)), 'INV-409-INTEGRITY', 'fold-floor retired marker refused after write — foreign trigger side-effects', 409);
+      }
       for (let ci = 0; ci < values.length; ci += 500) {
         const chunk = values.slice(ci, ci + 500);
         db.prepare(`DELETE FROM meta_kv WHERE tenant=? AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.') AND value IN (${chunk.map(() => '?').join(',')})`).run(tenant, ...chunk);
       }
-      if (Array.isArray(retired) && retired.length) {
-        const prev = db.prepare("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(tenant)?.value;
-        let prior = [];
-        try { const p = JSON.parse(prev ?? '[]'); prior = Array.isArray(p) ? p : []; } catch { prior = []; }
-        const merged = [...new Set([...prior, ...retired])].slice(-4096);
-        db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES (?, 'fold_floor_retired', ?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, JSON.stringify(merged));
-      }
-      db.exec("CREATE TRIGGER fold_residue_keep BEFORE DELETE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' OR OLD.key='fold_floor_retired' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
-      db.exec("CREATE TRIGGER fold_residue_keep_upd BEFORE UPDATE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' OR OLD.key='fold_floor_retired' OR NEW.key='fold_floor_healed' OR substr(NEW.key,1,18)='fold_floor_healed.' OR NEW.key='fold_floor_retired' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
-      db.exec("CREATE TRIGGER fold_residue_keep_ins BEFORE INSERT ON meta_kv WHEN NEW.key='fold_floor_healed' OR substr(NEW.key,1,18)='fold_floor_healed.' OR NEW.key='fold_floor_retired' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
+      for (const [, sql] of RESIDUE_KEEP_TRIGGERS) db.exec(sql);
     } catch (e) { try { db.exec('ROLLBACK TO residue_drain'); } catch { /* savepoint may already be gone */ } throw e; }
     finally { try { db.exec('RELEASE residue_drain'); } catch { /* rolled back or never opened */ } }
+  }
+  // The `fold_floor_retired` claim list, iff the marker row carries it
+  // inside an audit-signed envelope bound to this tenant. A bare array or
+  // an envelope that does not verify returns null — the consult names
+  // that content instead of consulting it (w61-seal F-1).
+  #retiredClaimsOf(tenant, parsed) {
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    if (!Array.isArray(parsed.claims) || parsed.env === undefined) return null;
+    try {
+      const pl = verifySigned(parsed.env, this.auditPublicKeys(tenant), 'audit');
+      if (pl?.tenant_id !== tenant || !Array.isArray(pl?.fold_floor_retired)) return null;
+      return pl.fold_floor_retired.filter(c => typeof c === 'string').slice(0, 8192);
+    } catch { return null; }
   }
   _foldFloorMarker(t, attestedFloor) {
     try {
@@ -1620,12 +1651,24 @@ export class Fabric {
       // The durable consumption marker on the residue plane: a murdered
       // retire mint cannot un-consume its claims while this row stands —
       // three records (retire mint, seal fold, this marker) must all die
-      // for a claim to re-fire (w60-seal F-1).
+      // for a claim to re-fire (w60-seal F-1). Only signature-verified
+      // content unions — an unsigned marker row was a write-to-retire
+      // oracle that muted real convictions (w61-seal F-1).
       try {
         const mv = this.store._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(t)?.value;
-        const prior = JSON.parse(mv ?? '[]');
-        if (Array.isArray(prior)) for (const c of prior) if (typeof c === 'string') scan.retired.add(c);
-      } catch { /* a malformed marker adds nothing — the claims it was bound to re-latch */ }
+        let parsed = null, malformed = false;
+        try { parsed = JSON.parse(mv ?? 'null'); } catch { malformed = mv !== undefined; }
+        if (malformed) this.#wmTamperSet(t, { kind: 'floor_marker_retired_malformed', seq: 0 });
+        else if (parsed !== null) {
+          const authed = this.#retiredClaimsOf(t, parsed);
+          if (authed !== null) {
+            for (const c of authed) {
+              if (!/^\d+:\S/.test(c)) this.#wmTamperSet(t, { kind: 'floor_marker_retired_malformed', seq: 0 });
+              else scan.retired.add(c);
+            }
+          } else this.#wmTamperSet(t, { kind: Array.isArray(parsed) ? 'floor_marker_retired_unauthenticated' : 'floor_marker_retired_forged', seq: 0 });
+        }
+      } catch (e) { if (e instanceof InvariantError) throw e; /* stmt failure — the residue consult names dropped meta_kv below */ }
       this.#residueScan.set(t, scan);
       // A residue row that survived its own anchored retirement is not
       // benign dust — the sanctioned delete was defeated or never ran.
@@ -1637,7 +1680,10 @@ export class Fabric {
         // A claim already consumed by an anchored FOLD_RESIDUE_RETIRED
         // must never re-fire — a residue row that outlived its own
         // retirement is dead weight, not fresh evidence (w59-seal F-1).
-        if (scan.retired.has(healed)) { retiredEcho.add(healed); continue; }
+        // Claims of a retire still in flight skip the arm: the mint's own
+        // post-insert consult used to latch the echo on every honest
+        // retire before the drain could run (w61-seal F-3).
+        if (scan.retired.has(healed) && !(this.#retireInFlight?.get(t)?.has(healed))) { retiredEcho.add(healed); continue; }
         const hp = typeof healed === 'string' ? healed.split(':') : null;
         const hs = hp !== null && /^\d+$/.test(hp[0]) ? Number(hp[0]) : undefined;
         const claimed = hp !== null && hp.length > 1 ? hp.slice(1).join(':') : null;
@@ -1749,7 +1795,14 @@ export class Fabric {
       // flag, and the sanctioned re-anchor path retires it inside the
       // same commit that attests the abandoned position (w54-runtime
       // F-1, w54-seal L-5).
-    } catch { /* marker read failure — the file-side gates still stand */ }
+    } catch (e) {
+      // A bare swallow muted the whole consult on any throw — a dropped
+      // or mutated meta_kv used to silence the marker plane with no
+      // record anywhere (w61-runtime F-3). Schema-level failures surface
+      // in the ledger taxonomy; InvariantErrors keep their own verdict.
+      if (e instanceof InvariantError) throw e;
+      throw new InvariantError('INV-409-INTEGRITY', 'Residue marker consult failed (meta_kv dropped or diverged) — tamper evidence', 409, { cause: e });
+    }
   }
   _headWatermark(tenant) {
     // The durable file is authoritative when present — always consulted,
@@ -1991,21 +2044,37 @@ export class Fabric {
         // report consumed are written to the signed chain, so a later
         // consult can tell a retired residue row (report reached) from a
         // wiped one (file-level delete) — without this the chain-side
-        // enumeration would re-convict every reported heal forever.
-        if (claims.length) this.store.audit(tenant, 'FOLD_RESIDUE_RETIRED', 'seal', 'audit', { retired_claims: claims.slice(0, 512), retired_total: claims.length }, this.clock());
+        // enumeration would re-convict every reported heal forever. The
+        // mint pages at 512 claims per row — the first-512 cap used to
+        // leave claims 513+ bound to the marker alone, a single-object
+        // kill set (w61-seal F-4 / w61-fv F-2).
         if (claims.length) {
-          this.#residueValueDelete(tenant, claims, claims);
-          // The delete is probed, not trusted: a retired-claim value row
-          // still standing afterwards means a splice or a re-grafted
-          // guard defeated the drain — name it instead of reporting a
-          // clean retire (w60-fv F-10).
-          for (let ci = 0; ci < claims.length; ci += 500) {
-            const chunk = claims.slice(ci, ci + 500);
-            const left = this.store._stmt(`SELECT COUNT(*) c FROM meta_kv WHERE tenant=? AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.') AND value IN (${chunk.map(() => '?').join(',')})`).get(tenant, ...chunk)?.c ?? 0;
-            if (left > 0) { this.#wmTamperSet(tenant, { kind: 'floor_marker_residue_retired_echo', seq: 0 }); break; }
-          }
+          const inflight = this.#retireInFlight.get(tenant) ?? new Set();
+          this.#retireInFlight.set(tenant, inflight);
+          for (const c of claims) inflight.add(c);
+          try {
+            const pages = Math.ceil(claims.length / 512);
+            for (let pg = 0; pg < pages; pg++)
+              this.store.audit(tenant, 'FOLD_RESIDUE_RETIRED', 'seal', 'audit', { retired_claims: claims.slice(pg * 512, pg * 512 + 512), retired_page: pg + 1, retired_pages: pages, retired_total: claims.length }, this.clock());
+            this.#residueValueDelete(tenant, claims, claims);
+            // The delete is probed, not trusted: a retired-claim value row
+            // still standing afterwards means a splice or a re-grafted
+            // guard defeated the drain — name it instead of reporting a
+            // clean retire (w60-fv F-10).
+            for (let ci = 0; ci < claims.length; ci += 500) {
+              const chunk = claims.slice(ci, ci + 500);
+              const left = this.store._stmt(`SELECT COUNT(*) c FROM meta_kv WHERE tenant=? AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.') AND value IN (${chunk.map(() => '?').join(',')})`).get(tenant, ...chunk)?.c ?? 0;
+              if (left > 0) { this.#wmTamperSet(tenant, { kind: 'floor_marker_residue_retired_echo', seq: 0 }); break; }
+            }
+          } finally { for (const c of claims) inflight.delete(c); if (!inflight.size) this.#retireInFlight.delete(tenant); }
         }
-      } catch { /* meta_kv may be the dropped table — the residue consult names that separately */ }
+      } catch (e) {
+        // A dropped meta_kv mutes the consult separately; a drain failure
+        // WITH the table standing means the marker write or the value
+        // delete was defeated — name it instead of swallowing it as the
+        // dropped-table case (w61-fv F-3).
+        try { if (this.store._stmt("SELECT 1 FROM meta_kv LIMIT 1").get() !== undefined) this.#wmTamperSet(tenant, { kind: 'floor_marker_retired_marker_defeated', seq: 0 }); } catch { /* table really is gone */ }
+      }
     const cur = cur0;
     if (cur === undefined) return;
     if (cur.kind === kind) {
@@ -2059,12 +2128,14 @@ export class Fabric {
     // Kinds latched DURING retirement — the residue probe naming a
     // defeated delete — surfaced after the enumeration built `entries`:
     // they are appended to the same report rather than waiting a cycle
-    // to speak (w60-fv F-10). They stay latched and will re-derive on
-    // the next consult if the evidence still stands.
+    // to speak (w60-fv F-10). An appended kind retires with the report
+    // that names it — staying latched made every late-latched flag
+    // report a second time on the next seal (w61-seal F-3); a conviction
+    // whose evidence still stands re-derives on the next consult.
     if (Array.isArray(entries)) {
       const named = new Set(entries.map(e => e?.kind));
       for (const e of this.#wmTamperAttest(tenant).head_watermark_tampered ?? [])
-        if (!named.has(e.kind)) entries.push(e);
+        if (!named.has(e.kind)) { entries.push(e); this.#wmTamperRetire(tenant, e.kind); }
     }
   }
   // The 'signed' half of an abandoned-watermark attestation must mean the
@@ -4862,7 +4933,11 @@ export class Fabric {
         const rDiff = rNow - (rMemo?.at ?? -Infinity);
         let mintedAt, denialSeq = null;
         if (!(rDiff >= 0 && rDiff < 60_000)) {
-          try { this.store.tx(() => { const now = this.clock(); this.store.clock(now); const a = this.store.audit(principal.tenant_id, 'SECURITY_OPERATION_REJECTED', principal.subject_id, 'local-gate', { code: error.code, ...(error.code === 'INV-403-QUARANTINE' && error.details?.quarantine_denial ? { quarantine_denial: true } : {}) }, now); mintedAt = a?.time ?? now; denialSeq = a?.seq ?? null; }); this.#rejectMemo.set(rKey, { at: rNow }); } catch { /* ledger unavailable — surface the real rejection */ }
+          // The pin pair is taken from tx()'s return, which only exists
+          // after COMMIT — assigning inside the callback pinned the seq
+          // of a doomed mint whose anchor the rollback erased
+          // (w61-runtime F-5).
+          try { const committed = this.store.tx(() => { const now = this.clock(); this.store.clock(now); const a = this.store.audit(principal.tenant_id, 'SECURITY_OPERATION_REJECTED', principal.subject_id, 'local-gate', { code: error.code, ...(error.code === 'INV-403-QUARANTINE' && error.details?.quarantine_denial ? { quarantine_denial: true } : {}) }, now); return { at: a?.time ?? now, seq: a?.seq ?? null }; }); mintedAt = committed.at; denialSeq = committed.seq; this.#rejectMemo.set(rKey, { at: rNow }); } catch { /* ledger unavailable — surface the real rejection */ }
         }
         // Suppression parity: the dedup window suppressed this rejection's
         // own mint — bump the surviving gate-deny row so the report still
@@ -6336,6 +6411,16 @@ export class Fabric {
     const registered = { connector_id: `issuer:${issuer.name}`, version: issuer.version ?? '1.0.0', actions: issuer.kinds, channel: issuer.channel, key_id, permissions: issuer.permissions, limitations: issuer.limitations, idempotency: issuer.idempotency, coverage_implications: issuer.coverage_implications, spec_digest: this._auditIndex(p.tenant_id).issuerRepins?.get(key_id) ?? issuer.spec_digest };
     const result = driftCheck(registered, { connector_id: observedPayload.connector_id, version: observedPayload.version, actions: observedPayload.actions, channel: observedPayload.domain, key_id: observed.protected.key_id, permissions: observedPayload.permissions, limitations: observedPayload.limitations, idempotency: observedPayload.idempotency, coverage_implications: observedPayload.coverage_implications, spec_digest: observedPayload.spec_digest }, this.clock());
     return this.transaction(p, now => {
+      // The egress gate's revocation check is pre-await — a revocation
+      // that committed while the manifest was in flight must not watch a
+      // CONNECTOR_REVALIDATED mint for dead authority inside this tx; a
+      // mid-flight revoke re-derives as drift, never as revalidation
+      // (w61-fv F-4).
+      if (this.revoked(p.tenant_id, 'issuer', key_id) || this.revoked(p.tenant_id, 'key', key_id)) {
+        this.store.put(p.tenant_id, 'issuer-drift', key_id, { drifted_at: now, changes: [{ field: 'authority', detail: 'revoked-mid-flight' }] }, now);
+        const staled = this._connectorDriftConsequence(p.tenant_id, p.subject_id, key_id, issuer, { drifted: 'revoked_mid_flight' }, now, 'connector-revoked-mid-flight');
+        return { drifted: true, changes: [{ field: 'authority', detail: 'revoked-mid-flight' }], checked_at: now, coverage_paths_staled: staled };
+      }
       // A clean re-check clears the suspension; a drifted one records it and
       // stops the issuer's evidence until then (MED-2).
       this.store.remove(p.tenant_id, 'issuer-drift', key_id);
@@ -6414,6 +6499,15 @@ export class Fabric {
     const observedSpec = { connector_id: observedPayload.connector_id, version: observedPayload.version, actions: observedPayload.actions, channel: observedPayload.domain, key_id: observed.protected.key_id, permissions: observedPayload.permissions, limitations: observedPayload.limitations, idempotency: observedPayload.idempotency, coverage_implications: observedPayload.coverage_implications, spec_digest: next };
     const residual = driftCheck(registered, observedSpec, this.clock());
     return this.transaction(p, now => {
+      // Same mid-flight revoke re-check as the drift check's closing tx:
+      // a revocation landing between the egress gate and this commit
+      // must not watch an ISSUER_SPEC_REPINNED mint for dead authority —
+      // it re-derives as drift (w61-fv F-4).
+      if (this.revoked(p.tenant_id, 'issuer', key_id) || this.revoked(p.tenant_id, 'key', key_id)) {
+        this.store.put(p.tenant_id, 'issuer-drift', key_id, { drifted_at: now, changes: [{ field: 'authority', detail: 'revoked-mid-flight' }] }, now);
+        const staled = this._connectorDriftConsequence(p.tenant_id, p.subject_id, key_id, issuer, { drifted: 'revoked_mid_flight' }, now, 'connector-revoked-mid-flight');
+        return { repinned: false, drifted: true, key_id, changes: [{ field: 'authority', detail: 'revoked-mid-flight' }], quarantined: true, coverage_paths_staled: staled };
+      }
       this.store.audit(p.tenant_id, 'ISSUER_SPEC_REPINNED', p.subject_id, key_id, { spec_digest: next, prior_digest: prior ?? null, residual_drift: residual.changes }, now);
       if (residual.drifted) {
         this.store.put(p.tenant_id, 'issuer-drift', key_id, { drifted_at: now, changes: residual.changes }, now);
@@ -7753,6 +7847,10 @@ export class Fabric {
       requireThat(this.policy(p.tenant_id).runtime.remediation_services.includes(input.remediation_service), 'INV-403-SCOPE', 'Remediation service is not in the policy allowlist', 403);
     }
     requireThat(['certificate', 'evidence', 'issuer', 'key', 'subject', 'device', 'capability', 'grant', 'token', 'perception-session'].includes(input.kind), 'INV-400-SCHEMA', 'Unsupported revocation type');
+    // Hoisted out of the transaction callback: the dataplane flip below
+    // needs to know whether the grant resolved through its chain anchor
+    // only (w61-runtime F-2).
+    let grantAnchoredOnly = false;
     const env = this.transaction(p, now => {
       // Revocation must name a live authority — revoking a nonexistent id
       // would be silent record pollution.
@@ -7781,7 +7879,10 @@ export class Fabric {
         // revocation over the gap instead of refusing on a bare 404
         // (w42-runtime F5).
         capability: () => this.store.get(t, 'capability', input.id) ?? (this._auditIndex(t).capabilities?.has(input.id) ? { anchored_only: true } : null),
-        grant: () => this.target.allGrants(t).some(g => g.grant_id === input.id),
+        // Same doctrine as capability: an anchored JIT_GRANT_ISSUED whose
+        // mutable grant row was murdered stays revocable through the
+        // chain — the anchor is the authority (w61-runtime F-2).
+        grant: () => this.target.allGrants(t).some(g => g.grant_id === input.id) || (this._auditIndex(t).grants?.has(input.id) ? { anchored_only: true } : null),
         token: () => Object.hasOwn(this.tenant(t).auth, input.id) ? this.tenant(t).auth[input.id] : null,
         // A session resolves through the chain — its mutable row is a
         // cache, the anchored PERCEPTION_SESSION event is the authority
@@ -7790,7 +7891,9 @@ export class Fabric {
         // `exists` itself is a table lookup — the prototype chain must not
         // shadow a kind either.
       }[Object.hasOwn({ certificate:1, evidence:1, issuer:1, key:1, subject:1, device:1, capability:1, grant:1, token:1, 'perception-session':1 }, input.kind) ? input.kind : ''];
-      requireThat(exists?.(), 'INV-404-NOT-FOUND', `No live ${input.kind} authority with that id`, 404);
+      const resolved = exists?.();
+      requireThat(resolved, 'INV-404-NOT-FOUND', `No live ${input.kind} authority with that id`, 404);
+      grantAnchoredOnly = resolved?.anchored_only === true;
       // Re-revocation is refused: the first revocation's `revoked_at` is the
       // forensically important fact and must never be rewritten (w11 F6).
       // Exception: a ref that survives ONLY as a floor_derived seal carry —
@@ -7853,7 +7956,12 @@ export class Fabric {
     // fails its ledger write must never silently kill the grant anyway, and
     // a ledger-confirmed revoke that can't reach the dataplane is healed by
     // _reconcileLedger on the next open (w9-network F5).
-    if (input.kind === 'grant') this.target.revokeGrant(p.tenant_id, input.id);
+    // When the grant resolved through its anchor only, the mutable mirror
+    // row is already gone — revokeGrant's own 'Grant not found' then names
+    // a corpse, not a live grant: the dataplane is already consistent with
+    // the anchored revocation (w61-runtime F-2). Any other dataplane
+    // failure still propagates.
+    if (input.kind === 'grant') { try { this.target.revokeGrant(p.tenant_id, input.id); } catch (e) { if (!(grantAnchoredOnly && e?.code === 'INV-404-NOT-FOUND')) throw e; } }
     // A ledger revocation on a vault key also flips the vault flag — the
     // ledger stays authoritative (post-commit), and vault-level APIs that
     // consult only their own entry map cannot sign under a revoked key

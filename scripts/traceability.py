@@ -585,11 +585,30 @@ _CONST_UNDEF = object()
 _CONST_OBJ = object()
 _CONST_NUMERIC = re.compile(r'[+-]?(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|(?:\d[\d_]*(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)[nN]?')
 def _truthy(v):
-    if v is _CONST_UNKNOWN or v is _CONST_UNDEF or v is None or v is False: return False
+    # Three-valued: an unknown-fold is neither provably truthy nor
+    # falsy — before, UNKNOWN read as falsy and classified a
+    # truthy-bound name into the falsy set, killing its `if` arms
+    # (w61-fv F-6). Callers either gate on UNKNOWN first or test
+    # `is True`/`is False` explicitly.
+    if v is _CONST_UNKNOWN: return _CONST_UNKNOWN
+    if v is _CONST_UNDEF or v is None or v is False: return False
     if isinstance(v, (int, float)) and not isinstance(v, bool):
         return v != 0 and v == v  # NaN and zero are falsy
     if isinstance(v, str): return len(v) > 0
     return True
+def _js_loose_eq(a, b):
+    # JS `==`: null==undefined only with each other; cross-type operands
+    # coerce through ToNumber — `'1' == 1` and `0 == false` are TRUE
+    # where Python's `==` answers False (w61-ledger F-1).
+    if a is _CONST_UNKNOWN or b is _CONST_UNKNOWN or a is _CONST_OBJ or b is _CONST_OBJ: return _CONST_UNKNOWN
+    an = a is _CONST_UNDEF or a is None
+    bn = b is _CONST_UNDEF or b is None
+    if an or bn: return an and bn
+    if type(a) == type(b): return a == b
+    na, nb = _tonum(a), _tonum(b)
+    if na is _CONST_UNKNOWN or nb is _CONST_UNKNOWN: return _CONST_UNKNOWN
+    if na != na or nb != nb: return False  # NaN equals nothing
+    return na == nb
 def _tonum(v):
     if v is _CONST_UNKNOWN or v is _CONST_OBJ: return _CONST_UNKNOWN
     if v is _CONST_UNDEF or v is None: return float('nan')
@@ -729,9 +748,16 @@ def _const_val(e, known):
         return len(v) if isinstance(v, str) else _CONST_UNKNOWN
     t = _ternary_split(e)
     if t:
+        # `c ? a : a` folds to `a` even when `c` is unknowable — the
+        # branches agree so the result is definite (w61-ledger F-4).
+        a = _const_val(t[1], known)
+        b = _const_val(t[2], known)
+        if (a is not _CONST_UNKNOWN and b is not _CONST_UNKNOWN
+            and a is not _CONST_OBJ and b is not _CONST_OBJ
+            and type(a) == type(b) and a == b): return a
         c = _const_val(t[0], known)
         if c is _CONST_UNKNOWN: return _CONST_UNKNOWN
-        return _const_val(t[1], known) if _truthy(c) else _const_val(t[2], known)
+        return a if _truthy(c) else b
     for op in (',', '??', '||', '&&'):
         parts = _split_top(e, op)
         if not parts: continue
@@ -743,15 +769,19 @@ def _const_val(e, known):
                 return v
             return vals[-1]
         if op == '||':
+            # A provably-truthy operand decides the whole chain —
+            # `x || 's'` is truthy whatever `x` folds to (w61-ledger F-4).
+            saw_unknown = False
             for v in vals:
-                if v is _CONST_UNKNOWN: return _CONST_UNKNOWN
-                if _truthy(v): return v
-            return vals[-1]
+                if v is _CONST_UNKNOWN: saw_unknown = True; continue
+                if _truthy(v) is True: return v
+            return _CONST_UNKNOWN if saw_unknown else vals[-1]
         # &&
+        saw_unknown = False
         for v in vals:
-            if v is _CONST_UNKNOWN: return _CONST_UNKNOWN
-            if not _truthy(v): return v
-        return vals[-1]
+            if v is _CONST_UNKNOWN: saw_unknown = True; continue
+            if _truthy(v) is False: return v
+        return _CONST_UNKNOWN if saw_unknown else vals[-1]
     # Comparison binds tighter than &&/||/?? but looser than arithmetic —
     # `false === true && x` folds through this arm so the && sees the
     # comparison's value, not the `true` shard (w59-ledger F-11/F-16).
@@ -782,8 +812,10 @@ def _const_val(e, known):
             for b in vals[1:]:
                 if op == '===': acc = type(acc) == type(b) and acc == b
                 elif op == '!==': acc = not (type(acc) == type(b) and acc == b)
-                elif op == '==': acc = acc == b
-                elif op == '!=': acc = acc != b
+                elif op == '==' or op == '!=':
+                    r = _js_loose_eq(acc, b)
+                    if r is _CONST_UNKNOWN: return _CONST_UNKNOWN
+                    acc = r if op == '==' else not r
                 elif op == '>=': acc = acc >= b
                 elif op == '<=': acc = acc <= b
                 elif op == '>': acc = acc > b
@@ -1017,8 +1049,8 @@ def _live_code(text, raw=None):
     # alias chains all evaluate, not just single-token literals
     # (w58-ledger F8).
     known = _const_bindings(text)
-    falsy = '|'.join(re.escape(n) for n, v in known.items() if not _truthy(v))
-    truthy = '|'.join(re.escape(n) for n, v in known.items() if _truthy(v))
+    falsy = '|'.join(re.escape(n) for n, v in known.items() if _truthy(v) is False)
+    truthy = '|'.join(re.escape(n) for n, v in known.items() if _truthy(v) is True)
     dead_lit = _FALSY_LIT + (f'|(?:{falsy})' if falsy else '')
     live_lit = _TRUTHY_LIT + (f'|(?:{truthy})' if truthy else '')
     # Folded-condition kills — `if (1 && 0)`, `if (new Boolean(false))`,
@@ -1314,9 +1346,19 @@ def _live_code(text, raw=None):
     # `for (x of [])`, `[].forEach(cb)`, `[].map(cb)` (w56-ledger F2). A
     # const bound to `[]` iterates identically empty — `const a = []`;
     # `for (x of a)` runs zero times (w57-ledger F9).
-    empties = {n for n in re.findall(r'\b(?:const|let|var)\s+(\w+)\s*=\s*\[\s*\]', text)}
-    empty_lit = r'\[\s*\]' + (r'|' + '|'.join(re.escape(n) for n in sorted(empties)) if empties else '')
-    for m in re.finditer(r'\bfor\s*\([^)]*\bof\s*(?:' + empty_lit + r')\s*\)', text):
+    empties = {n for n in re.findall(r'\b(?:const|let|var)\s+(\w+)\s*=\s*(?:\[\s*\]|\{\s*\}|new\s+(?:Set|Map|WeakSet|WeakMap|Array|Object)\s*\(\s*(?:\[\s*\])?\s*\))', text)}
+    empty_lit = (r'\[\s*\]|\{\s*\}|\'\'|""|``|new\s+(?:Set|Map|WeakSet|WeakMap|Array|Object)\s*\(\s*(?:\[\s*\])?\s*\)'
+                 + (r'|' + '|'.join(re.escape(n) for n in sorted(empties)) if empties else ''))
+    for m in re.finditer(r'\bfor\s*\([^)]*\bof\s*(?:' + empty_lit + r'|\d+(?:\.\d+)?[nN]?|false|true|null|undefined)\s*\)', text):
+        j = m.end()
+        while j < len(text) and text[j] in ' \t\n': j += 1
+        if j < len(text) and text[j] == '{': spans.append((j, _paren_end(text, j)))
+        else:
+            e = text.find(';', j); spans.append((j, len(text) if e == -1 else e + 1))
+    # `for..in` over an empty/non-object operand iterates zero times —
+    # `{}`, `0`, `null`, `''` (w61-ledger F-4). Non-empty strings DO
+    # enumerate indices and stay live.
+    for m in re.finditer(r'\bfor\s*\([^)]*\bin\s*(?:' + empty_lit + r'|\d+(?:\.\d+)?[nN]?|false|true|null|undefined)\s*\)', text):
         j = m.end()
         while j < len(text) and text[j] in ' \t\n': j += 1
         if j < len(text) and text[j] == '{': spans.append((j, _paren_end(text, j)))
@@ -1629,8 +1671,14 @@ def _asserts(body, names=('assert', 'requireThat')):
         # A destructured parameter may carry its own default —
         # `{ x } = {}`, `[y] = []` — without one the arms refused and
         # `assert({x}={}) {}` read as an assert call (w60-fv F-5).
-        PARAM = r'(?:\.\.\.\s*)?(?:[\w$]+(?:\s*=\s*(?:[^,()]|\([^()]*\)|\{[^{}]*\}|\[[^\[\]]*\])*)?|\{[^{}]*\}|\[[^\[\]]*\])(?:\s*=\s*(?:[^,()]|\([^()]*\)|\{[^{}]*\}|\[[^\[\]]*\])*)?'
-        if j < len(live) and live[j] == '{' and re.fullmatch(r'\s*(?:' + PARAM + r'(?:\s*,\s*' + PARAM + r')*)?\s*', live[p0 + 1:p1 - 1]): continue
+        # Param grammar via a top-level comma split — `{[^{}]*}` used to
+        # refuse nested destructure defaults like `{x:{y}}` and read
+        # `assert({x:{y}}){}` as a CALL (w61-fv F-5). `_split_top`
+        # balances `()[]{}` and skips strings.
+        PARAM = re.compile(r'\s*(?:\.\.\.\s*)?(?:[\w$]+|\{.*\}|\[.*\])\s*(?:=\s*\S.*)?\s*$', re.S)
+        params_txt = live[p0 + 1:p1 - 1]
+        pseg = _split_top(params_txt, ',') or [params_txt]
+        if j < len(live) and live[j] == '{' and all(PARAM.fullmatch(p) for p in pseg): continue
         hits.append(m)
     return len(hits)
 # A title citing N distinct requirement IDs owes N real assert calls —

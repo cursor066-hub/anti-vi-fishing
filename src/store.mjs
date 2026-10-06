@@ -26,6 +26,17 @@ const legacyDekAad = (tenant, kind, id) => `${tenant}/${kind}/${id}/dek`;
   // previous slash form sat inside the legacy records-AAD space and let a
   // raw-writer transplant a sealed receipt into a records row (w18-crypto F1).
 const idemAad = (tenant, scope, key) => canonical({ idempotency: true, tenant, scope, key });
+// The fold-residue keep triggers — canonical CREATE text shared by every
+// emitter (guards install, heal-path recreate, fabric drain recreate).
+// A heal that re-created the pre-w60 text used to silently drop the
+// `fold_floor_retired` arms for the rest of the process lifetime, and
+// _installIntegrityGuards' legacy map accepted the downgrade as expected
+// legacy text (w61-runtime F-1 / w61-seal F-2): one emitter, one source.
+export const RESIDUE_KEEP_TRIGGERS = [
+  ['fold_residue_keep', "CREATE TRIGGER fold_residue_keep BEFORE DELETE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' OR OLD.key='fold_floor_retired' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END"],
+  ['fold_residue_keep_upd', "CREATE TRIGGER fold_residue_keep_upd BEFORE UPDATE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' OR OLD.key='fold_floor_retired' OR NEW.key='fold_floor_healed' OR substr(NEW.key,1,18)='fold_floor_healed.' OR NEW.key='fold_floor_retired' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END"],
+  ['fold_residue_keep_ins', "CREATE TRIGGER fold_residue_keep_ins BEFORE INSERT ON meta_kv WHEN NEW.key='fold_floor_healed' OR substr(NEW.key,1,18)='fold_floor_healed.' OR NEW.key='fold_floor_retired' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END"],
+];
 
 
 
@@ -233,11 +244,7 @@ export class Store {
       // in-band like the aad marker's.
       // `fold_floor_retired` joins the family (w60-seal F-1): the durable
       // consumption marker is evidence exactly like the heal rows.
-      ['fold_residue_keep', "CREATE TRIGGER fold_residue_keep BEFORE DELETE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' OR OLD.key='fold_floor_retired' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END", 'fold-floor residue is evidence'],
-      // NEW.key arms the rename-in attack — renaming an innocent row
-      // onto a residue key forges evidence without any INSERT (w58-fv F-2).
-      ['fold_residue_keep_upd', "CREATE TRIGGER fold_residue_keep_upd BEFORE UPDATE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' OR OLD.key='fold_floor_retired' OR NEW.key='fold_floor_healed' OR substr(NEW.key,1,18)='fold_floor_healed.' OR NEW.key='fold_floor_retired' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END", 'fold-floor residue is evidence'],
-      ['fold_residue_keep_ins', "CREATE TRIGGER fold_residue_keep_ins BEFORE INSERT ON meta_kv WHEN NEW.key='fold_floor_healed' OR substr(NEW.key,1,18)='fold_floor_healed.' OR NEW.key='fold_floor_retired' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END", 'fold-floor residue is evidence'],
+      ...RESIDUE_KEEP_TRIGGERS.map(([name, sql]) => [name, sql, 'fold-floor residue is evidence']),
     ];
     // Pre-w58 verbatim texts of the triggers we have since hardened — a
     // database written by the previous build stores THAT text, so the
@@ -1157,10 +1164,11 @@ export class Store {
         finally {
           // Plain CREATE, not IF NOT EXISTS — a planted impostor under
           // our name must not keep the recreate a no-op (w58-fv F-1);
-          // the drops above already cleared any same-named row.
-          this.db.exec("CREATE TRIGGER fold_residue_keep BEFORE DELETE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
-          this.db.exec("CREATE TRIGGER fold_residue_keep_upd BEFORE UPDATE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' OR NEW.key='fold_floor_healed' OR substr(NEW.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
-          this.db.exec("CREATE TRIGGER fold_residue_keep_ins BEFORE INSERT ON meta_kv WHEN NEW.key='fold_floor_healed' OR substr(NEW.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
+          // the drops above already cleared any same-named row. Emitted
+          // from the shared RESIDUE_KEEP_TRIGGERS text — a local stale
+          // copy once downgraded the `fold_floor_retired` arms invisibly
+          // for the rest of the process lifetime (w61-runtime F-1).
+          for (const [, sql] of RESIDUE_KEEP_TRIGGERS) this.db.exec(sql);
         }
         const landedResidue = this._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key=?").get(tenant, residueKey)?.value;
         requireThat(landedResidue === residueClaim, 'INV-409-INTEGRITY', 'fold-floor healed residue refused after write — foreign trigger side-effects', 409);

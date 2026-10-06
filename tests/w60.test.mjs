@@ -33,11 +33,12 @@ const liveBank = async (t, h) => {
 test('w60 F-1: drift-check refuses an issuer-revoked connector before egress', async t => {
   const h = fixture(t, ['acme']);
   const { bankKeyId } = await liveBank(t, h);
+  const revalidated = () => h.f.store.db.prepare("SELECT COUNT(*) c FROM audit WHERE tenant='acme' AND json_extract(envelope,'$.payload.type')='CONNECTOR_REVALIDATED' AND json_extract(envelope,'$.payload.reference')=?").get(bankKeyId).c;
+  const mintedBefore = revalidated();
   h.f.revoke(h.p('security'), { kind: 'issuer', id: bankKeyId, reason: 'compromised' });
   await assert.rejects(() => h.f.checkIssuerDrift(h.p('security'), bankKeyId), hasCode('INV-401-EVIDENCE'),
     'a revoked issuer earns no credentialed drift-check — the endpoint stays live so a missing gate would resolve instead of rejecting');
-  assert.ok(!h.f.store.db.prepare("SELECT 1 FROM audit WHERE tenant='acme' AND json_extract(envelope,'$.payload.type')='CONNECTOR_REVALIDATED' AND json_extract(envelope,'$.payload.object')=?").get(bankKeyId),
-    'no revalidation evidence mints under dead authority');
+  assert.equal(revalidated(), mintedBefore, 'no revalidation evidence mints under dead authority');
   h.close();
 });
 
@@ -94,7 +95,10 @@ test('w60-seal F-1: the retire binds the consumed claim set redundantly', t => {
   // The durable consumption marker lives on the residue plane — a
   // murdered retire mint cannot un-consume the claim while it stands.
   const marker = h.f.store.db.prepare("SELECT value FROM meta_kv WHERE tenant='acme' AND key='fold_floor_retired'").get()?.value;
-  assert.ok(JSON.parse(marker ?? '[]').includes(claimVal), 'the durable marker binds the consumed claim');
+  const parsed = JSON.parse(marker ?? '{}');
+  assert.ok(Array.isArray(parsed.claims) && parsed.claims.includes(claimVal)
+    && parsed.env?.signature && Array.isArray(parsed.env?.payload?.fold_floor_retired) && parsed.env.payload.fold_floor_retired.includes(claimVal),
+    'the durable marker binds the consumed claim under a signed envelope');
   h.close();
 });
 
@@ -273,10 +277,20 @@ test('w60-fv F-2/F-6: dead fn decls die, used decls live', t => {
     const r = collectRun([HEAD, `  if (m[1] === 'a') { ${decl}`, "    authorize(p, ['live']); }", '}'], 'a');
     assert.deepEqual(r.roles, ['live'], `${decl}: an uncalled declaration minted`);
   }
-  // Live — every real use spelling revives the decl.
-  for (const use of ['g()', 'g.call(null)', 'g?.()', 'foo(g)', 'setTimeout(g, 0)', 'g`x`', 'x = g']) {
+  // Live — every PROVABLE invocation spelling revives the decl: direct
+  // calls, .call/.apply/.bind, tagged templates, `new`, and callback args
+  // to known consumers (w61-ledger F-2: mentions and unprovable flows —
+  // `x = g`, `foo(g)` — must NOT resurrect a body nothing calls).
+  for (const use of ['g()', 'g.call(null)', 'g?.()', 'setTimeout(g, 0)', 'g`x`', 'new g()', '(g)(1)', 'promise.then(g)', 'ee.on("ev", g)']) {
     const r = collectRun([HEAD, `  if (m[1] === 'a') { function g() { authorize(p, ['revived']); } ${use};`, "    authorize(p, ['live']); }", '}'], 'a');
     assert.ok((r.roles ?? []).includes('revived'), `${use}: a live invocation left its body dead`);
+  }
+  // Dead — mentions and unprovable flows leave the body dead (a planted
+  // `const alias = g` laundered a dead helper's authorize as live
+  // evidence, w61-ledger F-2).
+  for (const mention of ['x = g', 'foo(g)', 'g === null', 'typeof g', 'const h = () => { return g };', '!g', 'arr.push(g); arr[0]()']) {
+    const r = collectRun([HEAD, `  if (m[1] === 'a') { function g() { authorize(p, ['stilldead']); } ${mention};`, "    authorize(p, ['live']); }", '}'], 'a');
+    assert.deepEqual(r.roles, ['live'], `${mention}: a non-invoking mention resurrected the body`);
   }
 });
 
