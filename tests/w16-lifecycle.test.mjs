@@ -86,7 +86,11 @@ test('w12-lifecycle F6: a deleted anchored evidence row revokes, not wedges', t 
   const g = h.f.graph('acme', h.f.store.must('acme', 'capsule', r.capsule.capsule_id));
   const dead = g.items.find(i => i.payload.evidence_id === attached[0]);
   assert.equal(dead.revoked, true, 'missing row counts as revoked');
-  assert.equal(dead.issuer.failure_domain, 'deleted');
+  // A murdered anchored row (no tombstone) is labeled for what it is —
+  // 'deleted' is reserved for a ledger-shredded member whose tombstone
+  // stands (w59-runtime F-2).
+  assert.equal(dead.issuer.failure_domain, 'missing_under_anchor');
+  assert.equal(dead.missing_under_anchor, true);
   // Evaluation is a clean verdict, not an INV-404 — and the revoked item
   // cannot satisfy the ownership requirement, so the honest outcome is
   // denial/escrow, never a silent pass.

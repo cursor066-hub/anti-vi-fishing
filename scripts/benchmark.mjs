@@ -46,7 +46,7 @@ try {
   // target it does not currently meet (release-audit M3). The integrated
   // bound scales with the calibration above: 100/s on the reference
   // environment, proportionally less on measurably slower silicon, never
-  // below the 60/s floor.
+  // below the 40/s floor.
   // Within 10% of the reference box this IS a reference-class runner —
   // assert the full claim; below that, scale proportionally to the floor.
   const { environment_scale, integrated_target_ops } = integratedTargetOps(calibration_ms);

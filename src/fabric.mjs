@@ -1514,34 +1514,13 @@ export class Fabric {
       // (w56-store HIGH). Per-heal keys mean two heals before one report
       // BOTH surface — a second heal can never overwrite the first
       // divergent content off the report (w57-seal F1).
-      const healedRows = this.store._stmt("SELECT key,value FROM meta_kv WHERE tenant=? AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.')").all(t) ?? [];
+      // Bounded enumeration: a file-level planter cannot make every
+      // consult parse/verify an unbounded row set — past the cap the
+      // overflow is itself attested, and the value-matched retire still
+      // drains planted rows one report batch at a time (w59-seal F-6).
+      const healedRows = this.store._stmt("SELECT key,value FROM meta_kv WHERE tenant=? AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.') LIMIT 4096").all(t) ?? [];
+      if (healedRows.length >= 4096) this.#wmTamperSet(t, { kind: 'floor_marker_residue_capped' });
       const residueClaims = new Set(healedRows.map(hr => hr.value));
-      for (const hr of healedRows) {
-        const healed = hr.value;
-        const hp = typeof healed === 'string' ? healed.split(':') : null;
-        const hs = hp !== null && /^\d+$/.test(hp[0]) ? Number(hp[0]) : undefined;
-        const claimed = hp !== null && hp.length > 1 ? hp.slice(1).join(':') : null;
-        // Anchor presence is probed independent of the claim's shape — a
-        // malformed residue value must not launder an anchor murder into
-        // a heal-drop on a live anchor (w58-seal F-3).
-        const row = Number.isSafeInteger(hs)
-          ? this.store._stmt('SELECT envelope FROM audit WHERE tenant=? AND seq=?').get(t, hs)
-          : undefined;
-        const anchorPresent = typeof row?.envelope === 'string';
-        let anchored = false;
-        if (anchorPresent && claimed !== null) {
-          try { anchored = verifySigned(JSON.parse(row.envelope), this.auditPublicKeys(t), 'audit')?.metadata?.fold_floor_divergent === claimed; }
-          catch { anchored = false; }
-        }
-        if (anchored) this.#wmTamperSet(t, { kind: 'floor_marker_healed', seq: hs, healed_marker: claimed });
-        else {
-          // The named anchor row is provably gone — a healed conviction
-          // latched before the murder can no longer stand alongside the
-          // unanchored one (w57-fv NIT-2).
-          if (!anchorPresent && Number.isSafeInteger(hs)) this.#wmTamperDropHeal(t, 'floor_marker_healed', hs);
-          this.#wmTamperSet(t, { kind: 'floor_marker_healed_unanchored', seq: Number.isSafeInteger(hs) ? hs : undefined, healed_marker: String(healed).slice(0, 200) });
-        }
-      }
       // Chain-anchored enumeration: EVERY signed envelope carrying
       // fold_floor_divergent names a heal the residue plane must carry.
       // A file-level wipe (drop the keep triggers, delete the rows,
@@ -1560,23 +1539,77 @@ export class Fabric {
       // row mints no standing claim (w43-store F-1 phantom class).
       const scan = (this.#residueScan ??= new Map()).get(t)
         ?? { seq: 0, count: 0, claims: new Set(), retired: new Set() };
-      const scanShape = (this.#residueShapeStmt ??= this.store._stmt('SELECT COUNT(*) c, COALESCE(MAX(seq),0) m FROM audit WHERE tenant=?')).get(t);
+      const shapeStmt = (this.#residueShapeStmt ??= this.store._stmt('SELECT COUNT(*) c, COALESCE(MAX(seq),0) m FROM audit WHERE tenant=?'));
       const absorb = row => {
         let env; try { env = JSON.parse(row.envelope); } catch { return; }
-        try { verifySigned(env, this.auditPublicKeys(t), 'audit'); }
+        let pl;
+        try { pl = verifySigned(env, this.auditPublicKeys(t), 'audit'); }
         catch { /* unverifiable row — its own verifier names it elsewhere */ return; }
-        if (env?.payload?.type === 'FOLD_RESIDUE_RETIRED')
-          for (const c of env.payload?.metadata?.retired_claims ?? []) if (typeof c === 'string') scan.retired.add(c);
-        const marker = env?.payload?.metadata?.fold_floor_divergent;
+        // Position + tenant binding: a verbatim replay of a real divergent
+        // envelope verifies but names its OWN seq — a claim latched off a
+        // planted position attests a heal that never happened there
+        // (w59-seal F-5).
+        if (pl?.sequence !== row.seq || pl?.tenant_id !== t) return;
+        if (pl?.type === 'FOLD_RESIDUE_RETIRED')
+          for (const c of pl?.metadata?.retired_claims ?? []) if (typeof c === 'string') scan.retired.add(c);
+        // A cut over a retire mint carries it only as an inert lifecycle
+        // entry — its consumed claims re-apply off the signature-verified
+        // carry content, or any honest cut would revive them (w59-seal F-2).
+        for (const lc of pl?.metadata?.lifecycle_carryover ?? [])
+          if (lc?.type === 'FOLD_RESIDUE_RETIRED')
+            for (const c of lc?.metadata?.retired_claims ?? []) if (typeof c === 'string') scan.retired.add(c);
+        const marker = pl?.metadata?.fold_floor_divergent;
         if (typeof marker === 'string') scan.claims.add(`${row.seq}:${marker}`);
       };
-      if (scanShape.m !== scan.seq || scanShape.c !== scan.count) {
+      // The shape probe and the LIKE rescan share no snapshot on an
+      // outside-tx consult — re-probe the shape after the scan so a peer
+      // commit between the two reads cannot pin a torn (count,seq) pair
+      // (w59-runtime F-3). Bounded retries; a perpetually racing shape
+      // leaves the cursor un-advanced so the next consult rescans.
+      for (let guard = 0; ; guard++) {
+        const scanShape = shapeStmt.get(t);
+        if (scanShape.m === scan.seq && scanShape.c === scan.count) break;
         const appendOnly = scanShape.m > scan.seq && scanShape.c === scan.count + (scanShape.m - scan.seq);
         if (!appendOnly) { scan.claims.clear(); scan.retired.clear(); scan.seq = 0; scan.count = 0; }
         for (const row of (this.#residueLikeStmt ??= this.store._stmt("SELECT seq,envelope FROM audit WHERE tenant=? AND seq>? AND (envelope LIKE '%fold_floor_divergent%' OR envelope LIKE '%FOLD_RESIDUE_RETIRED%')")).all(t, scan.seq)) absorb(row);
-        scan.seq = scanShape.m; scan.count = scanShape.c;
+        const after = shapeStmt.get(t);
+        if (after.m === scanShape.m && after.c === scanShape.c) { scan.seq = scanShape.m; scan.count = scanShape.c; break; }
+        scan.claims.clear(); scan.retired.clear(); scan.seq = 0; scan.count = 0;
+        if (guard >= 3) break;
       }
       this.#residueScan.set(t, scan);
+      for (const hr of healedRows) {
+        const healed = hr.value;
+        // A claim already consumed by an anchored FOLD_RESIDUE_RETIRED
+        // must never re-fire — a residue row that outlived its own
+        // retirement is dead weight, not fresh evidence (w59-seal F-1).
+        if (scan.retired.has(healed)) continue;
+        const hp = typeof healed === 'string' ? healed.split(':') : null;
+        const hs = hp !== null && /^\d+$/.test(hp[0]) ? Number(hp[0]) : undefined;
+        const claimed = hp !== null && hp.length > 1 ? hp.slice(1).join(':') : null;
+        // Anchor presence is probed independent of the claim's shape — a
+        // malformed residue value must not launder an anchor murder into
+        // a heal-drop on a live anchor (w58-seal F-3).
+        const row = Number.isSafeInteger(hs)
+          ? this.store._stmt('SELECT envelope FROM audit WHERE tenant=? AND seq=?').get(t, hs)
+          : undefined;
+        const anchorPresent = typeof row?.envelope === 'string';
+        let anchored = false;
+        if (anchorPresent && claimed !== null) {
+          try { const pl = verifySigned(JSON.parse(row.envelope), this.auditPublicKeys(t), 'audit'); anchored = pl?.sequence === hs && pl?.tenant_id === t && pl?.metadata?.fold_floor_divergent === claimed; }
+          catch { anchored = false; }
+        }
+        if (anchored) this.#wmTamperSet(t, { kind: 'floor_marker_healed', seq: hs, healed_marker: claimed, claim: healed });
+        else {
+          // The named anchor row is provably gone — or grafted in place
+          // with bytes that no longer attest this claim — so a healed
+          // conviction latched while it lived can no longer stand
+          // alongside the unanchored one (w57-fv NIT-2, w59-seal F-4).
+          const anchorDead = !anchorPresent || (claimed !== null && !anchored);
+          if (anchorDead && Number.isSafeInteger(hs)) this.#wmTamperDropHeal(t, 'floor_marker_healed', hs);
+          this.#wmTamperSet(t, { kind: 'floor_marker_healed_unanchored', seq: Number.isSafeInteger(hs) ? hs : undefined, healed_marker: String(healed).slice(0, 200), claim: healed });
+        }
+      }
       const standingMarker = this.store._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor'").get(t)?.value;
       // Heals a previous report already consumed retire with an anchored
       // FOLD_RESIDUE_RETIRED record — the signed envelope carries the
@@ -1586,13 +1619,27 @@ export class Fabric {
       for (const claim of scan.claims) {
         const cut = claim.indexOf(':');
         const claimSeq = Number(claim.slice(0, cut)), marker = claim.slice(cut + 1);
+        // A latched claim re-validates its anchor before anything else —
+        // a same-(count,max) slot rewrite keeps a stale claim alive in
+        // the cursor, and a murdered or grafted anchor means the graft's
+        // own naming convicts it instead of a phantom heal (w59-seal
+        // F-4). The check runs before the standing-marker guard too: the
+        // marker can never move while its anchor row is dead. Same
+        // position binding as absorb().
+        const anchorRow = this.store._stmt('SELECT envelope FROM audit WHERE tenant=? AND seq=?').get(t, claimSeq);
+        let anchorLive = false;
+        if (typeof anchorRow?.envelope === 'string') {
+          try { const pl = verifySigned(JSON.parse(anchorRow.envelope), this.auditPublicKeys(t), 'audit'); anchorLive = pl?.sequence === claimSeq && pl?.tenant_id === t && pl?.metadata?.fold_floor_divergent === marker; }
+          catch { anchorLive = false; }
+        }
+        if (!anchorLive) { scan.claims.delete(claim); this.#wmTamperDropHeal(t, 'floor_marker_healed', claimSeq); continue; }
         // A divergent claim names a heal only when the marker actually
         // moved — a refused guarded update leaves the divergent marker
         // standing (the malformed arm below convicts it), so no
         // residue row was ever owed (w56-1).
         if (marker === standingMarker) continue;
         if (!residueClaims.has(claim) && !scan.retired.has(claim))
-          this.#wmTamperSet(t, { kind: 'floor_marker_healed', seq: claimSeq, healed_marker: marker });
+          this.#wmTamperSet(t, { kind: 'floor_marker_healed', seq: claimSeq, healed_marker: marker, claim });
       }
       const marker = standingMarker;
       const parts = typeof marker === 'string' ? marker.split(':') : null;
@@ -1802,7 +1849,7 @@ export class Fabric {
     // a residue pointer anchors is named on the report, so a second heal
     // can never overwrite the first off the surface (w57-seal F1).
     const heal = (flag.kind === 'floor_marker_healed' || flag.kind === 'floor_marker_healed_unanchored')
-      ? { seq: flag.seq, healed_marker: flag.healed_marker } : undefined;
+      ? { seq: flag.seq, healed_marker: flag.healed_marker, ...(flag.claim !== undefined ? { claim: flag.claim } : {}) } : undefined;
     // Planted residue rows are unbounded — the dedupe scan and the
     // report build must stay linear and bounded. Past the cap the
     // heals_dropped counter still attests every heal was observed
@@ -1852,27 +1899,48 @@ export class Fabric {
         const flag = cur0 === undefined ? undefined : (cur0.kind === kind ? cur0 : cur0.masked?.get(kind));
         const seqs = new Set([flag?.seq, ...(flag?.heals ?? []).map(h => h.seq)].filter(Number.isSafeInteger));
         const keys = [...seqs].map(s => `fold_floor_healed.${s}`);
+        // The claims a delivered report consumed are reconstructible from
+        // the flag's own heals — a residue row wiped before the first
+        // report still yields its claim and the retire mint lands anyway
+        // (w59-seal F-3): the mint is the consumption record, not a
+        // byproduct of deletion.
+        const claimSet = new Set();
+        for (const h of flag?.heals ?? []) {
+          if (typeof h?.claim === 'string') claimSet.add(h.claim);
+          else if (Number.isSafeInteger(h?.seq) && typeof h?.healed_marker === 'string') claimSet.add(`${h.seq}:${h.healed_marker}`);
+        }
         // The legacy un-keyed row names its seq in the value — it joins
         // the delete only when a retired heal claims that seq.
         const bare = this.store._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_healed'").get(tenant)?.value;
         const bareSeq = typeof bare === 'string' && /^\d+:/.test(bare) ? Number(bare.split(':')[0]) : undefined;
         if (Number.isSafeInteger(bareSeq) && seqs.has(bareSeq)) keys.push('fold_floor_healed');
+        // Any still-standing residue row whose value names a retiring
+        // claim joins the mint — a planted row at a non-claim key can no
+        // longer outlive the conviction it echoes (w59-seal F-1).
+        if (keys.length)
+          for (const r of this.store._stmt(`SELECT value FROM meta_kv WHERE tenant=? AND key IN (${keys.map(() => '?').join(',')})`).all(tenant, ...keys))
+            if (typeof r.value === 'string') claimSet.add(r.value);
+        const claims = [...claimSet];
         const db = this.store.db;
         // Anchor the retirement BEFORE the delete: the claims a delivered
         // report consumed are written to the signed chain, so a later
         // consult can tell a retired residue row (report reached) from a
         // wiped one (file-level delete) — without this the chain-side
         // enumeration would re-convict every reported heal forever.
-        if (keys.length) {
-          const claims = this.store._stmt(`SELECT value FROM meta_kv WHERE tenant=? AND key IN (${keys.map(() => '?').join(',')})`).all(tenant, ...keys).map(r => r.value).filter(v => typeof v === 'string');
-          if (claims.length) this.store.audit(tenant, 'FOLD_RESIDUE_RETIRED', 'seal', 'audit', { retired_claims: claims.slice(0, 512), retired_total: claims.length }, this.clock());
-        }
+        if (claims.length) this.store.audit(tenant, 'FOLD_RESIDUE_RETIRED', 'seal', 'audit', { retired_claims: claims.slice(0, 512), retired_total: claims.length }, this.clock());
         db.exec('SAVEPOINT residue_retire');
         try {
           db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
           db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
           db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
-          if (keys.length) db.prepare(`DELETE FROM meta_kv WHERE tenant=? AND key IN (${keys.map(() => '?').join(',')})`).run(tenant, ...keys);
+          // Delete by claim VALUE under the residue prefix, not by the
+          // rebuilt key — a planted row at a non-claim key carrying a
+          // retired claim dies with the conviction it echoes
+          // (w59-seal F-1).
+          for (let ci = 0; ci < claims.length; ci += 500) {
+            const chunk = claims.slice(ci, ci + 500);
+            db.prepare(`DELETE FROM meta_kv WHERE tenant=? AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.') AND value IN (${chunk.map(() => '?').join(',')})`).run(tenant, ...chunk);
+          }
           db.exec("CREATE TRIGGER fold_residue_keep BEFORE DELETE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
           db.exec("CREATE TRIGGER fold_residue_keep_upd BEFORE UPDATE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' OR NEW.key='fold_floor_healed' OR substr(NEW.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
           db.exec("CREATE TRIGGER fold_residue_keep_ins BEFORE INSERT ON meta_kv WHEN NEW.key='fold_floor_healed' OR substr(NEW.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
@@ -4275,7 +4343,14 @@ export class Fabric {
   // the next unsuppressed mint lands fresh evidence anyway.
   _bumpGateDenyRow(t, subject_id, code, now) {
     try {
-      for (const id of this.store.ids(t, 'containment', 25)) {
+      // Scan EVERY containment row newest-first — never a bounded window:
+      // the suppressed-denial tally lives only on the surviving gate-deny
+      // row, and a capped newest-N lets an honest deny burst — or a
+      // handful of attacker-planted/'created'-bumped rows — crowd that
+      // row out of the window and silently lose the count (w59-runtime
+      // F-1). The scan stops at the first row that still matches, so the
+      // honest cost is bounded by the row's position, not the table size.
+      for (const { id } of this.store._stmt('SELECT id FROM records WHERE tenant=? AND kind=? ORDER BY created DESC,id').all(t, 'containment')) {
         let row;
         try { row = this.store.get(t, 'containment', id); } catch { continue; }
         if (row?.request_id === 'gate-deny' && row.code === code && row.subject_id === subject_id && Math.abs((row.contained_at ?? 0) - now) <= 60_000) {
@@ -5894,9 +5969,14 @@ export class Fabric {
       if (!e) {
         // A deleted member whose tombstone row is also gone still counts as
         // revoked — anchored membership must never wedge the whole capsule
-        // into INV-404 forever (delete-as-DoS, w12-lifecycle F6).
+        // into INV-404 forever (delete-as-DoS, w12-lifecycle F6). But the
+        // tombstone distinguishes a ledger-shredded member from a murdered
+        // one: 'deleted' implies a retention shred landed, while an anchored
+        // row that vanished with no tombstone is evidence destruction —
+        // the label must say so (w59-runtime F-2).
         const tombstone = this.store.get(t, 'evidence-tombstone', id);
-        return { payload: { evidence_id: id, expires_at: 0 }, envelope: { retained_digest: tombstone?.original_digest ?? null }, revoked: true, superseded_by: superseded.get(id) ?? null, issuer: { failure_domain: 'deleted' } };
+        const murdered = tombstone === null;
+        return { payload: { evidence_id: id, expires_at: 0 }, envelope: { retained_digest: tombstone?.original_digest ?? null }, revoked: true, superseded_by: superseded.get(id) ?? null, ...(murdered ? { missing_under_anchor: true } : {}), issuer: { failure_domain: murdered ? 'missing_under_anchor' : 'deleted' } };
       }
       const iss = this.tenant(t).issuers[e.envelope.protected.key_id];
       // The stored payload is a clone of the SIGNED envelope — divergence

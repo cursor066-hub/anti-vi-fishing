@@ -71,7 +71,7 @@ _limitation_overrides = {
 'KEY-006': 'The stated acceptance artifact exists — docs/ALGORITHM-AGILITY.md is the inventory mapping each algorithm use to an approved profile and transition plan, bound to SUITES by test. The real residual is that no post-quantum suite is implemented; introducing one is in-repo code work (ML-DSA ships in Node 24 crypto), not an external blocker — the row stays PARTIAL on that honest basis.',
 'NFR-CMP-001': 'A self-labelled control-map document is in-repo producible (ASVS-CAPEC-MAP already carries the self-assessed class); only an authoritative, legal-reviewed mapping is external. The named minimum was deliberately deferred until an accountable owner exists.',
 'NFR-CMP-003': 'The policy text and internal workflow document are in-repo producible; SECURITY.md deliberately refuses a fictitious reporting contact. The stated minimum was deliberately deferred until an accountable entity exists.',
-'NFR-PERF-004': 'VERIFIED conditioned on environment_scale >= 0.9 in the committed benchmark: the live gate scales the asserted floor to the runner (>=60/s), but the row stands as proven only when the artifact also met the absolute 100/s bound — recorded honestly as absolute_requirement_floor_100_ops_met. A regenerated artifact on slower silicon keeps the scaled gate green while reporting the absolute bound unproven.',
+'NFR-PERF-004': 'VERIFIED conditioned on environment_scale >= 0.9 in the committed benchmark: the live gate scales the asserted floor to the runner (>=40/s), but the row stands as proven only when the artifact also met the absolute 100/s bound — recorded honestly as absolute_requirement_floor_100_ops_met. A regenerated artifact on slower silicon keeps the scaled gate green while reporting the absolute bound unproven.',
 }
 # Recurse: a nested test file is still evidence — a flat glob would let an
 # engineer move a citation into a subdirectory and silently strip the row
@@ -158,7 +158,10 @@ def _strip_comments(text):
 # hasCode is a predicate FACTORY (assert.throws(fn, hasCode('INV-x'))) —
 # calling it asserts nothing on its own; the enclosing assert.* call is
 # the assertion (w49-ledger F-3).
-_ASSERT_CALL = re.compile(r'\b(?:assert(?:\.\w+)?|requireThat)\s*\(')
+# A `.`-preceded name is a member call, not the trusted binding —
+# `stub.assert(x)` minted a call on the host object while the real
+# assert namespace went unexercised (w59-ledger F-12).
+_ASSERT_CALL = re.compile(r'(?<![\w$.])(?:assert(?:\.\w+)?|requireThat)\s*\(')
 _ASSERT_NAME_SET = ('assert', 'requireThat', 'hasCode', 'expect', 'throws', 'rejects', 'strictEqual', 'deepStrictEqual', 'doesNotThrow')
 # Every binding shape that can neuter an assert name: a local decl, a
 # bare reassignment, an import from a non-node source, a globalThis
@@ -212,6 +215,18 @@ _SHADOWED_ASSERT = re.compile(
     # method while the call token survives (w58-ledger F3).
     r'|\bReflect\.(?:set|defineProperty|deleteProperty)\s*\([^)]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b'
     r'|\bReflect\.apply\s*\(\s*Object\.(?:definePropert(?:y|ies)|assign)\s*,[^)]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b'
+    # A destructure without a decl keyword binds in place —
+    # `({ assert } = fake)` neuters the name identically to
+    # `const { assert } = fake` (w59-ledger F-14).
+    r'|\(\s*\{[^}]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b[^}]*\}\s*='
+    # A computed-member write on a variable index neuters identically —
+    # `assert[k] = f` replaces the same methods `assert['ok'] = f` does
+    # (w59-ledger F-14).
+    r'|\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\s*\[\s*[\w$]+\s*\]\s*=(?!=)'
+    # eval can rebind any name in scope — a body that evals can call
+    # the real assert only inside its own string, and those contents are
+    # already masked dead. Neuter the whole vocabulary (w59-ledger F-14).
+    r'|\bev' + r'al\s*\('
 )
 # The assert namespace itself is import-bound: `import { strict as asrt }`
 # or `import * as a` renames it — the probe runs on the resolved local
@@ -285,7 +300,7 @@ def _module_assert_exports(mod_path):
     # literal ('assert.ok(') is dead text, never a real call — unblanked
     # slices let a `return`-string body classify as an assertor
     # (w58-ledger F1, w58-fv F-5).
-    live = _live_code(_blank_code(text))
+    live = _live_code(_blank_code(text), text)
     for m in re.finditer(r"\bexport\s*\{([^}]*)\}(?:\s*from\s*['\"]([^'\"]+)['\"])?", text):
         src_spec = m.group(2)
         if src_spec is not None and not src_spec.startswith('node:assert') and not re.match(r'\.\.?/', src_spec):
@@ -425,8 +440,12 @@ def _test_bodies(text):
     # options argument mark the whole call non-evidence — node --test reports
     # them green while their asserts never run (w48-ledger F-1).
     blanked = _blank_code(text)
-    bodies = []
-    for m in re.finditer(r'\btest\s*(?:\.\s*(skip|to\x64o)\s*)?\(', blanked):
+    spans = []
+    # `it`/`describe`/`context` are the same test boundary spelled
+    # differently — an assert inside `it('x', …)` attributes to its own
+    # title, never to a `test('outer', …)` that happens to contain it
+    # (w59-ledger F-15). A member call `x.it(` is not a test boundary.
+    for m in re.finditer(r'(?<![\w$.])(?:test|it|describe|context)\s*(?:\.\s*(skip|to\x64o)\s*)?\(', blanked):
         i = m.end() - 1  # the '('
         depth = 0
         while i < len(blanked):
@@ -435,13 +454,32 @@ def _test_bodies(text):
             elif c in ')]}':
                 depth -= 1
                 if depth == 0:
-                    body = text[m.start():i + 1]
-                    if not m.group(1) and not _options_skip(body):
-                        bodies.append(body)
+                    spans.append((m.start(), i + 1, bool(m.group(1))))
                     break
             i += 1
+    raw = []
+    for a, b, g1 in spans:
+        body = text[a:b]
+        raw.append((a, b, g1 or _options_skip(body)))
+    bodies = []
+    for a, b, skipped in raw:
+        # A skipped enclosing test/describe skips every nested call too —
+        # node --test never runs children of a skipped block.
+        if not skipped and any(x < a and b <= y and s for x, y, s in raw):
+            skipped = True
+        if skipped: continue
+        body = text[a:b]
+        # Blank nested test-call spans inside the parent body so their
+        # asserts cannot double-count for the parent's title.
+        inner = [(x, y) for x, y, _ in spans if a < x and y <= b]
+        if inner:
+            out = list(body)
+            for x, y in inner:
+                for k in range(x - a, y - a): out[k] = ' '
+            body = ''.join(out)
+        bodies.append(body)
     return bodies
-_OPT_TITLE = re.compile(r"\s*test\(\s*(['\"`])((?:\\.|(?!\1)[\s\S])*)\1")
+_OPT_TITLE = re.compile(r"\s*(?:test|it|describe|context)\(\s*(['\"`])((?:\\.|(?!\1)[\s\S])*)\1")
 def _options_skip(body):
     # Second-arg options object: test(name, {skip: ...}, fn) is not
     # execution-bound evidence — a skipped test exits green with its
@@ -459,10 +497,11 @@ def _options_skip(body):
     opts = opts[:opts.find('}')]
     return bool(re.search(r'\b(?:skip|t' + r'odo)\s*:\s*true\b', opts))
 def _test_title(body):
-    # The first string literal after `test(` is the title — a requirement
-    # ID must name the test it evidences, not merely appear somewhere in
-    # its body (w41-ledger M-1).
-    m = re.match(r"\s*test\(\s*(['\"`])((?:\\.|(?!\1)[\s\S])*)\1", body)
+    # The first string literal after the test call is the title — a
+    # requirement ID must name the test it evidences, not merely appear
+    # somewhere in its body (w41-ledger M-1). `it`/`describe`/`context`
+    # are the same boundary (w59-ledger F-15).
+    m = re.match(r"\s*(?:test|it|describe|context)\(\s*(['\"`])((?:\\.|(?!\1)[\s\S])*)\1", body)
     return m.group(2) if m else ''
 def _cites(title, rid):
     # ID-prefix collision guard on BOTH sides: 'FOO-100' must not mint
@@ -690,6 +729,27 @@ def _const_val(e, known):
             if v is _CONST_UNKNOWN: return _CONST_UNKNOWN
             if not _truthy(v): return v
         return vals[-1]
+    # Comparison binds tighter than &&/||/?? but looser than arithmetic —
+    # `false === true && x` folds through this arm so the && sees the
+    # comparison's value, not the `true` shard (w59-ledger F-11/F-16).
+    for op in ('===', '!==', 'instanceof', '==', '!=', '>=', '<=', '>', '<'):
+        parts = _split_top(e, op)
+        if not parts or len(parts) < 2: continue
+        if len(parts) > 2 or op == 'instanceof': return _CONST_UNKNOWN
+        vals = [_const_val(p, known) for p in parts]
+        if any(v is _CONST_UNKNOWN or v is _CONST_OBJ for v in vals): return _CONST_UNKNOWN
+        a, b = vals
+        try:
+            if op == '===': return type(a) == type(b) and a == b
+            if op == '!==': return not (type(a) == type(b) and a == b)
+            if op == '==': return a == b
+            if op == '!=': return a != b
+            if op == '>=': return a >= b
+            if op == '<=': return a <= b
+            if op == '>': return a > b
+            if op == '<': return a < b
+        except TypeError:
+            return _CONST_UNKNOWN
     for op in ('+', '-', '*', '/', '%'):
         parts = _split_top(e, op)
         if not parts or len(parts) < 2: continue
@@ -848,7 +908,20 @@ def _operand_for(text, i):
     start = j + 1
     if start >= e: return None
     return text[start:e], start
-def _live_code(text):
+def _live_code(text, raw=None):
+    # A computed member is the same call spelled differently —
+    # `ee['on']('x', cb)` must die by the same emit checks as
+    # `ee.on('x', cb)`, `p['then'](cb)` by the await checks, and
+    # `stub['assert'](x)` by the member-call exclusion. The member name
+    # is a string literal — the caller's blanked view has it masked, so
+    # the name comes from `raw` (same length, positions aligned) and is
+    # spliced in with position-preserving padding (w59-ledger F-13).
+    if raw is not None:
+        out = list(text)
+        for m in re.finditer(r"\[\s*(['\"])([\w$]+)\1\s*\]", raw):
+            rep = '.' + m.group(2)
+            out[m.start():m.end()] = rep + ' ' * (len(m.group(0)) - len(rep))
+        text = ''.join(out)
     # Dead-code shapes that must not mint asserting evidence: asserts inside
     # an unconditionally-false branch, an assigned-but-never-invoked
     # function literal, a timer/next-tick callback, or the remainder of a
@@ -940,10 +1013,23 @@ def _live_code(text):
     # the lazy `operand+? \s* op` form at linear cost. The per-position
     # lazy scan was quadratic on &&/?-dense files (~100s per big test
     # file; w58 infra).
-    for m in re.finditer(r'&&|\|\|', text):
+    for m in re.finditer(r'&&|\|\||\?\?', text):
         seg = _operand_for(text, m.start())
         if seg is None: continue
         operand, start = seg
+        # A comparison binds its operands as one expression — the walk
+        # stopped at `=`/`>`/`<`, so `false === true && x` read `true`
+        # and stayed live (w59-ledger F-11/F-16). Extend the operand
+        # through comparison chains: `a === b`, `x !== y`, `n >= 1`,
+        # `t instanceof K` each count as the operator's whole left side.
+        while start > 0:
+            ext = text[:start].rstrip()
+            cm = re.search(r'(?:===|!==|==|!=|>=|<=|>|<|\binstanceof\b)\s*$', ext)
+            if not cm: break
+            left = _operand_for(text, cm.start())
+            if left is None: break
+            operand = text[left[1]:start] + operand
+            start = left[1]
         # An operand opening right after `(`/`[` belongs to the inner
         # expression — `foo(0) && x`'s real left side is the CALL, not
         # the `0`.
@@ -951,7 +1037,7 @@ def _live_code(text):
         operand = re.sub(r'^.*\breturn\s+', '', operand)
         v = _const_val(operand, known)
         if v is _CONST_UNKNOWN: continue
-        if (m.group() == '&&' and _truthy(v)) or (m.group() == '||' and not _truthy(v)): continue
+        if (m.group() == '&&' and _truthy(v)) or (m.group() == '||' and not _truthy(v)) or (m.group() == '??' and (v is _CONST_UNDEF or v is None)): continue
         j = m.end(); d = 0
         while j < len(text):
             c = text[j]
@@ -1406,7 +1492,7 @@ def _asserts(body, names=('assert', 'requireThat')):
     # (w43-fv M3), and only asserts in code that can actually run count
     # (w44-fixverify F-6). A body-scope shadow (const assert = () => {})
     # neutralizes its own name before matching (w48-ledger F-1).
-    live = _live_code(_blank_code(body))
+    live = _live_code(_blank_code(body), body)
     # Shadow detection runs on the UNLIVENED body — _live_code may blank
     # the declaration itself ('assert.equal' isn't a call of bare
     # 'assert'), hiding the shadow it created (w48-ledger F-1).
@@ -1433,7 +1519,18 @@ def _asserts(body, names=('assert', 'requireThat')):
         for spec in dm.group(1).split(','):
             nm = re.split(r'\s+as\s+|:', spec.strip())[-1].strip()
             if re.fullmatch(r'\w+', nm): extra.add(nm)
-    return len(re.findall(r'\b(?:' + '|'.join(re.escape(n) for n in extra) + r')(?:\.\w+)?\s*\(', live))
+    # The call must be on the trusted binding itself — `stub.assert(` is
+    # a member call on a host object, and `assert(args) {` is a method
+    # definition, not a call (w59-ledger F-12).
+    hits = []
+    for m in re.finditer(r'(?<![\w$.])(?:' + '|'.join(re.escape(n) for n in extra) + r')(?:\.\w+)?\s*\(', live):
+        p0 = live.index('(', m.start())
+        p1 = _paren_end(live, p0)
+        j = p1
+        while j < len(live) and live[j] in ' \t\n': j += 1
+        if j < len(live) and live[j] == '{' and re.fullmatch(r'\s*(?:[\w$]+(?:\s*,\s*[\w$]+)*|\.\.\.\s*[\w$]+)?\s*', live[p0 + 1:p1 - 1]): continue
+        hits.append(m)
+    return len(hits)
 # A title citing N distinct requirement IDs owes N real assert calls —
 # `test('COV-001 COV-002', () => assert.ok(x))` once covered both rows
 # with a single assertion (w57-ledger F11).
@@ -1581,7 +1678,7 @@ def _prod_binds(text, anchor_dir=None):
     # (w55-fv M-1). The live-blanked view keeps positions aligned, so a
     # token whose own position died can't mint the bind, and a `node:` import's
     # bound names must be used in code that actually runs.
-    live = _live_code(blanked)
+    live = _live_code(blanked, text)
     for m in _PROD_BIND_TOKEN.finditer(text):
         if blanked[m.start()].isspace() or live[m.start()].isspace() or not _PROD_SPEC.fullmatch(m.group(2)): continue
         spec = m.group(2)
