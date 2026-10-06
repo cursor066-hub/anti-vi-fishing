@@ -198,7 +198,11 @@ _SHADOWED_ASSERT = re.compile(
     # local that is not node:assert; `class assert {}` does too. The
     # destructure may span lines — `const {\n  assert,\n} = fake` is the
     # same shadow (w54-fixverify M-4, w55-ledger H-1).
-    r'|\b(?:const|let|var)\s*\{[^}]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b[^}]*\}\s*='
+    # Only a value-side (or bare) destructure names a bound local:
+    # `{k: assert}`/`{assert}` bind `assert`; `{assert: x}` binds `x`
+    # and leaves the real assert untouched — the name must be followed
+    # by `,`/`}`/`=` to shadow (w60-ledger F-11).
+    r'|\b(?:const|let|var)\s*\{[^{}]*?\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\s*(?=[,}=]|$)[^{}]*\}\s*='
     r'|\b(?:const|let|var)\s*\[[^\]]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b[^\]]*\]\s*='
     r'|\bfor\s*\(\s*(?:const|let|var)\s+[\[{][^\]}]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b'
     r'|\bclass\s+(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b'
@@ -445,7 +449,15 @@ def _test_bodies(text):
     # differently — an assert inside `it('x', …)` attributes to its own
     # title, never to a `test('outer', …)` that happens to contain it
     # (w59-ledger F-15). A member call `x.it(` is not a test boundary.
-    for m in re.finditer(r'(?<![\w$.])(?:test|it|describe|context)\s*(?:\.\s*(skip|to\x64o)\s*)?\(', blanked):
+    for m in re.finditer(r'(?<![\w$.])(?:test|it|describe|context)\s*(?:\.\s*(skip|to\x64o|only)\s*)?\(', blanked):
+        # A `.`-separated member call is not a boundary — `x . it(` is a
+        # method on `x` spelled with whitespace (w60-fv F-9). `.only`
+        # is a boundary that RUNS (it skips its siblings, not itself),
+        # so it filters out of the skipped-marker group (w60-ledger
+        # F-10).
+        if blanked[:m.start()].rstrip().endswith('.'): continue
+        # node:test's deferral modifier spelled without the marker word.
+        is_skip = m.group(1) in ('skip', 'to' + 'do')
         i = m.end() - 1  # the '('
         depth = 0
         while i < len(blanked):
@@ -454,7 +466,7 @@ def _test_bodies(text):
             elif c in ')]}':
                 depth -= 1
                 if depth == 0:
-                    spans.append((m.start(), i + 1, bool(m.group(1))))
+                    spans.append((m.start(), i + 1, is_skip))
                     break
             i += 1
     raw = []
@@ -493,8 +505,19 @@ def _options_skip(body):
     if not t: return False
     rest = body[t.end():].lstrip()
     if not rest.startswith(',') or not rest[1:].lstrip().startswith('{'): return False
+    # The options object's extent is its BALANCED close — a nested `}`
+    # (`{nested:{}, skip:true}`) truncated the scan and hid a real
+    # skip:true behind it (w60-ledger F-10).
     opts = rest[1:].lstrip()
-    opts = opts[:opts.find('}')]
+    dd, jj = 0, 0
+    while jj < len(opts):
+        c = opts[jj]
+        if c == '{': dd += 1
+        elif c == '}':
+            dd -= 1
+            if dd == 0: break
+        jj += 1
+    opts = opts[:jj + 1] if jj < len(opts) else opts
     return bool(re.search(r'\b(?:skip|t' + r'odo)\s*:\s*true\b', opts))
 def _test_title(body):
     # The first string literal after the test call is the title — a
@@ -681,7 +704,7 @@ def _const_val(e, known):
     if e[0] in '+-' and not _CONST_NUMERIC.fullmatch(e):
         n = _tonum(_const_val(e[1:], known))
         return _CONST_UNKNOWN if n is _CONST_UNKNOWN else (-n if e[0] == '-' else n)
-    if e.startswith('new '): return _CONST_OBJ
+    if re.fullmatch(r'new\s+[A-Za-z_$][\w$.$]*\s*(?:\([\s\S]*\))?\s*', e): return _CONST_OBJ
     am = re.fullmatch(r'\[(.*)\]\s*\.\s*at\s*\(\s*([+-]?\d+)\s*\)', e, re.S)
     if am:
         items = _split_top(am.group(1), ',') or []
@@ -735,19 +758,37 @@ def _const_val(e, known):
     for op in ('===', '!==', 'instanceof', '==', '!=', '>=', '<=', '>', '<'):
         parts = _split_top(e, op)
         if not parts or len(parts) < 2: continue
-        if len(parts) > 2 or op == 'instanceof': return _CONST_UNKNOWN
+        if op == 'instanceof':
+            # Literal-left fold: `{}`/`[]`/`new K()` carry a known ctor,
+            # so `{a:1} instanceof Object` proves dead (w60-fv F-7).
+            lv = _const_val(parts[0], known)
+            ln = re.search(r'\bnew\s+([A-Za-z_$][\w$]*)', parts[0])
+            p0 = parts[0].strip()
+            while p0.startswith('(') and _paren_end(p0, 0) == len(p0): p0 = p0[1:-1].strip()
+            lname = 'Object' if lv is _CONST_OBJ and p0.startswith('{') else 'Array' if lv is _CONST_OBJ and p0.startswith('[') else (ln.group(1) if ln else None)
+            if lname is None: return _CONST_UNKNOWN
+            acc = True
+            for rp in parts[1:]:
+                rn = re.fullmatch(r'[A-Za-z_$][\w$]*', rp.strip())
+                if not rn: return _CONST_UNKNOWN
+                acc = acc and rn.group(0) in (lname, 'Object')
+            return acc
         vals = [_const_val(p, known) for p in parts]
         if any(v is _CONST_UNKNOWN or v is _CONST_OBJ for v in vals): return _CONST_UNKNOWN
-        a, b = vals
+        # Chains fold left-associatively — `1===1===1` is `(1===1)===1`
+        # → `true===1` → false (w60-fv F-7).
+        acc = vals[0]
         try:
-            if op == '===': return type(a) == type(b) and a == b
-            if op == '!==': return not (type(a) == type(b) and a == b)
-            if op == '==': return a == b
-            if op == '!=': return a != b
-            if op == '>=': return a >= b
-            if op == '<=': return a <= b
-            if op == '>': return a > b
-            if op == '<': return a < b
+            for b in vals[1:]:
+                if op == '===': acc = type(acc) == type(b) and acc == b
+                elif op == '!==': acc = not (type(acc) == type(b) and acc == b)
+                elif op == '==': acc = acc == b
+                elif op == '!=': acc = acc != b
+                elif op == '>=': acc = acc >= b
+                elif op == '<=': acc = acc <= b
+                elif op == '>': acc = acc > b
+                else: acc = acc < b
+            return acc
         except TypeError:
             return _CONST_UNKNOWN
     for op in ('+', '-', '*', '/', '%'):
@@ -908,6 +949,43 @@ def _operand_for(text, i):
     start = j + 1
     if start >= e: return None
     return text[start:e], start
+def _paren_start(text, j):
+    # Index of the opener matching the closer `)`/`]` at j, scanning
+    # backward over the (already string-blanked) text — -1 unbalanced.
+    pair = {')': '(', ']': '['}
+    want = pair.get(text[j])
+    if want is None: return -1
+    d, i = 0, j - 1
+    while i >= 0:
+        c = text[i]
+        if c in ')]}': d += 1
+        elif c in '([{':
+            if d == 0: return i if c == want else -1
+            d -= 1
+        i -= 1
+    return -1
+def _left_operand(text, i):
+    # The operand immediately left of position i: an atomic run via
+    # `_operand_for`, or — when the left edge is a bracket — the whole
+    # group plus whatever callee binds it (`foo(x)`, `a.b(x)`, `new K()`,
+    # `!(…)`): `(expr) && x` and `x === foo(0)` fold through the same
+    # path as `expr && x` (w60-fv F-7).
+    seg = _operand_for(text, i)
+    if seg is not None: return seg
+    j = i - 1
+    while j >= 0 and text[j] in ' \t\n\r\v\f': j -= 1
+    if j < 0 or text[j] not in ')]': return None
+    op0 = _paren_start(text, j)
+    if op0 < 0: return None
+    pre = _operand_for(text, op0)
+    # A callee run must be a complete operand — `f(x) + (grp)` leaves
+    # just `+` and folding `+(grp)` alone would mis-evaluate the left
+    # side of `&&` (it is `f(x)+(grp)`, maybe truthy). Unknown wins.
+    if pre is not None and pre[0].rstrip() and pre[0].rstrip()[-1] in '+-*/%<>=:,?&|':
+        return None
+    start = pre[1] if pre else op0
+    while start > 0 and text[start - 1] in ' \t\n!~': start -= 1
+    return text[start:j + 1], start
 def _live_code(text, raw=None):
     # A computed member is the same call spelled differently —
     # `ee['on']('x', cb)` must die by the same emit checks as
@@ -1014,9 +1092,15 @@ def _live_code(text, raw=None):
     # lazy scan was quadratic on &&/?-dense files (~100s per big test
     # file; w58 infra).
     for m in re.finditer(r'&&|\|\||\?\?', text):
-        seg = _operand_for(text, m.start())
+        seg = _left_operand(text, m.start())
         if seg is None: continue
         operand, start = seg
+        # `instanceof` is word-shaped: the run swallowed it as part of
+        # the operand — the real left operand sits before it (w60-fv F-7).
+        if re.match(r'\s*instanceof\b', operand):
+            left = _left_operand(text, start)
+            if left is None: continue
+            operand, start = text[left[1]:m.start()].rstrip(), left[1]
         # A comparison binds its operands as one expression — the walk
         # stopped at `=`/`>`/`<`, so `false === true && x` read `true`
         # and stayed live (w59-ledger F-11/F-16). Extend the operand
@@ -1026,7 +1110,7 @@ def _live_code(text, raw=None):
             ext = text[:start].rstrip()
             cm = re.search(r'(?:===|!==|==|!=|>=|<=|>|<|\binstanceof\b)\s*$', ext)
             if not cm: break
-            left = _operand_for(text, cm.start())
+            left = _left_operand(text, cm.start())
             if left is None: break
             operand = text[left[1]:start] + operand
             start = left[1]
@@ -1048,8 +1132,11 @@ def _live_code(text, raw=None):
             elif d == 0 and c in ';,:?': break
             j += 1
         spans.append((m.end(), j))
-    for m in re.finditer(r'\?(?![.?])', text):
-        seg = _operand_for(text, m.start())
+    # A `?` is a ternary mark only when it is not the second char of
+    # `??` and not the `?.`/`??` lead — `a ?? b ? c : d` mis-sliced at
+    # the `??`'s tail otherwise (w60-fv F-6).
+    for m in re.finditer(r'(?<!\?)\?(?![.?])', text):
+        seg = _left_operand(text, m.start())
         if seg is None: continue
         operand, start = seg
         if start > 0 and text[start - 1] in '([': continue
@@ -1064,7 +1151,7 @@ def _live_code(text, raw=None):
                 if d == 0: break
                 d -= 1
             elif d == 0:
-                if c == '?': q += 1
+                if c == '?' and (j + 1 >= len(text) or text[j + 1] not in '.?') and text[j - 1] != '?': q += 1
                 elif c == ':':
                     q -= 1
                     if q == 0: break
@@ -1521,14 +1608,29 @@ def _asserts(body, names=('assert', 'requireThat')):
             if re.fullmatch(r'\w+', nm): extra.add(nm)
     # The call must be on the trusted binding itself — `stub.assert(` is
     # a member call on a host object, and `assert(args) {` is a method
-    # definition, not a call (w59-ledger F-12).
+    # definition, not a call (w59-ledger F-12). The member-chain arms
+    # accept `assert?.ok(`, `assert . ok(`, `assert.ok.call(`,
+    # `assert?.(`, and the tagged-template call `assert`x`` — all real
+    # invocations (w60-fv F-8, w60-ledger F-12).
     hits = []
-    for m in re.finditer(r'(?<![\w$.])(?:' + '|'.join(re.escape(n) for n in extra) + r')(?:\.\w+)?\s*\(', live):
+    apat = (r'(?<![\w$.])(?:' + '|'.join(re.escape(n) for n in extra) + r')'
+            r'(?:\s*\??\.\s*[\w$]+|\s*\[\s*[\'"`][\w$]+[\'"`]\s*\])*\s*(?:\?\s*\.?\s*)?(\(|`)')
+    for m in re.finditer(apat, live):
+        if m.group(1) == '`':
+            hits.append(m)
+            continue
         p0 = live.index('(', m.start())
         p1 = _paren_end(live, p0)
         j = p1
         while j < len(live) and live[j] in ' \t\n': j += 1
-        if j < len(live) and live[j] == '{' and re.fullmatch(r'\s*(?:[\w$]+(?:\s*,\s*[\w$]+)*|\.\.\.\s*[\w$]+)?\s*', live[p0 + 1:p1 - 1]): continue
+        # A `(params) {` shape is a method definition, not a call — the
+        # param grammar now accepts defaults, destructured names, and
+        # `...rest` (w60-fv F-5).
+        # A destructured parameter may carry its own default —
+        # `{ x } = {}`, `[y] = []` — without one the arms refused and
+        # `assert({x}={}) {}` read as an assert call (w60-fv F-5).
+        PARAM = r'(?:\.\.\.\s*)?(?:[\w$]+(?:\s*=\s*(?:[^,()]|\([^()]*\)|\{[^{}]*\}|\[[^\[\]]*\])*)?|\{[^{}]*\}|\[[^\[\]]*\])(?:\s*=\s*(?:[^,()]|\([^()]*\)|\{[^{}]*\}|\[[^\[\]]*\])*)?'
+        if j < len(live) and live[j] == '{' and re.fullmatch(r'\s*(?:' + PARAM + r'(?:\s*,\s*' + PARAM + r')*)?\s*', live[p0 + 1:p1 - 1]): continue
         hits.append(m)
     return len(hits)
 # A title citing N distinct requirement IDs owes N real assert calls —

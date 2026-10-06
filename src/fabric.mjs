@@ -1499,6 +1499,39 @@ export class Fabric {
     }
     return wrote;
   }
+  // Guarded value-matched drain of fold_floor_healed* rows: drops the
+  // keep triggers, deletes by VALUE (a planted row at a non-claim key
+  // dies with the conviction it echoes), recreates the guards — all
+  // inside a savepoint so a crash cannot leave the guards absent
+  // (w58-store F-2; shared by the retire and the echo drain w60-seal F-2).
+  // `retired` also persists the consumption record to the residue plane
+  // — the `fold_floor_retired` marker means a claim must be murdered
+  // three times (retire mint, seal fold, marker) before it can re-fire
+  // (w60-seal F-1).
+  #residueValueDelete(tenant, values, retired) {
+    const db = this.store.db;
+    db.exec('SAVEPOINT residue_drain');
+    try {
+      db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
+      db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
+      db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
+      for (let ci = 0; ci < values.length; ci += 500) {
+        const chunk = values.slice(ci, ci + 500);
+        db.prepare(`DELETE FROM meta_kv WHERE tenant=? AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.') AND value IN (${chunk.map(() => '?').join(',')})`).run(tenant, ...chunk);
+      }
+      if (Array.isArray(retired) && retired.length) {
+        const prev = db.prepare("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(tenant)?.value;
+        let prior = [];
+        try { const p = JSON.parse(prev ?? '[]'); prior = Array.isArray(p) ? p : []; } catch { prior = []; }
+        const merged = [...new Set([...prior, ...retired])].slice(-4096);
+        db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES (?, 'fold_floor_retired', ?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, JSON.stringify(merged));
+      }
+      db.exec("CREATE TRIGGER fold_residue_keep BEFORE DELETE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' OR OLD.key='fold_floor_retired' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
+      db.exec("CREATE TRIGGER fold_residue_keep_upd BEFORE UPDATE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' OR OLD.key='fold_floor_retired' OR NEW.key='fold_floor_healed' OR substr(NEW.key,1,18)='fold_floor_healed.' OR NEW.key='fold_floor_retired' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
+      db.exec("CREATE TRIGGER fold_residue_keep_ins BEFORE INSERT ON meta_kv WHEN NEW.key='fold_floor_healed' OR substr(NEW.key,1,18)='fold_floor_healed.' OR NEW.key='fold_floor_retired' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
+    } catch (e) { try { db.exec('ROLLBACK TO residue_drain'); } catch { /* savepoint may already be gone */ } throw e; }
+    finally { try { db.exec('RELEASE residue_drain'); } catch { /* rolled back or never opened */ } }
+  }
   _foldFloorMarker(t, attestedFloor) {
     try {
       // The append-side heal lands a residue POINTER `${seq}:${prior}` on
@@ -1552,6 +1585,13 @@ export class Fabric {
         if (pl?.sequence !== row.seq || pl?.tenant_id !== t) return;
         if (pl?.type === 'FOLD_RESIDUE_RETIRED')
           for (const c of pl?.metadata?.retired_claims ?? []) if (typeof c === 'string') scan.retired.add(c);
+        // The seal row itself also carries the consumed-claim set
+        // (`retired_claims_fold`) — a report that deleted both the
+        // retire mints AND the healed rows but kept the seal still
+        // binds the retirement, so an echo row stays convicted
+        // (w60-seal F-1).
+        if (pl?.type === 'AUDIT_SEALED')
+          for (const c of pl?.metadata?.retired_claims_fold ?? []) if (typeof c === 'string') scan.retired.add(c);
         // A cut over a retire mint carries it only as an inert lifecycle
         // entry — its consumed claims re-apply off the signature-verified
         // carry content, or any honest cut would revive them (w59-seal F-2).
@@ -1571,19 +1611,33 @@ export class Fabric {
         if (scanShape.m === scan.seq && scanShape.c === scan.count) break;
         const appendOnly = scanShape.m > scan.seq && scanShape.c === scan.count + (scanShape.m - scan.seq);
         if (!appendOnly) { scan.claims.clear(); scan.retired.clear(); scan.seq = 0; scan.count = 0; }
-        for (const row of (this.#residueLikeStmt ??= this.store._stmt("SELECT seq,envelope FROM audit WHERE tenant=? AND seq>? AND (envelope LIKE '%fold_floor_divergent%' OR envelope LIKE '%FOLD_RESIDUE_RETIRED%')")).all(t, scan.seq)) absorb(row);
+        for (const row of (this.#residueLikeStmt ??= this.store._stmt("SELECT seq,envelope FROM audit WHERE tenant=? AND seq>? AND (envelope LIKE '%fold_floor_divergent%' OR envelope LIKE '%FOLD_RESIDUE_RETIRED%' OR envelope LIKE '%AUDIT_SEALED%')")).all(t, scan.seq)) absorb(row);
         const after = shapeStmt.get(t);
         if (after.m === scanShape.m && after.c === scanShape.c) { scan.seq = scanShape.m; scan.count = scanShape.c; break; }
         scan.claims.clear(); scan.retired.clear(); scan.seq = 0; scan.count = 0;
         if (guard >= 3) break;
       }
+      // The durable consumption marker on the residue plane: a murdered
+      // retire mint cannot un-consume its claims while this row stands —
+      // three records (retire mint, seal fold, this marker) must all die
+      // for a claim to re-fire (w60-seal F-1).
+      try {
+        const mv = this.store._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(t)?.value;
+        const prior = JSON.parse(mv ?? '[]');
+        if (Array.isArray(prior)) for (const c of prior) if (typeof c === 'string') scan.retired.add(c);
+      } catch { /* a malformed marker adds nothing — the claims it was bound to re-latch */ }
       this.#residueScan.set(t, scan);
+      // A residue row that survived its own anchored retirement is not
+      // benign dust — the sanctioned delete was defeated or never ran.
+      // Name it and drain it through the same guarded delete the retire
+      // uses (w60-seal F-2).
+      const retiredEcho = new Set();
       for (const hr of healedRows) {
         const healed = hr.value;
         // A claim already consumed by an anchored FOLD_RESIDUE_RETIRED
         // must never re-fire — a residue row that outlived its own
         // retirement is dead weight, not fresh evidence (w59-seal F-1).
-        if (scan.retired.has(healed)) continue;
+        if (scan.retired.has(healed)) { retiredEcho.add(healed); continue; }
         const hp = typeof healed === 'string' ? healed.split(':') : null;
         const hs = hp !== null && /^\d+$/.test(hp[0]) ? Number(hp[0]) : undefined;
         const claimed = hp !== null && hp.length > 1 ? hp.slice(1).join(':') : null;
@@ -1609,6 +1663,11 @@ export class Fabric {
           if (anchorDead && Number.isSafeInteger(hs)) this.#wmTamperDropHeal(t, 'floor_marker_healed', hs);
           this.#wmTamperSet(t, { kind: 'floor_marker_healed_unanchored', seq: Number.isSafeInteger(hs) ? hs : undefined, healed_marker: String(healed).slice(0, 200), claim: healed });
         }
+      }
+      if (retiredEcho.size) {
+        this.#wmTamperSet(t, { kind: 'floor_marker_residue_retired_echo', seq: 0 });
+        try { this.#residueValueDelete(t, [...retiredEcho]); }
+        catch { /* residue plane may be dropped — the flag stands */ }
       }
       const standingMarker = this.store._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor'").get(t)?.value;
       // Heals a previous report already consumed retire with an anchored
@@ -1920,32 +1979,32 @@ export class Fabric {
         if (keys.length)
           for (const r of this.store._stmt(`SELECT value FROM meta_kv WHERE tenant=? AND key IN (${keys.map(() => '?').join(',')})`).all(tenant, ...keys))
             if (typeof r.value === 'string') claimSet.add(r.value);
+        // A consult that dropped heals by cap left the surviving rows
+        // live — their values join the consumed set so the retire mint
+        // covers every claim the flag's span touched, dropped or not
+        // (w60-seal F-3).
+        if ((flag?.heals_dropped ?? 0) > 0)
+          for (const r of this.store._stmt("SELECT value FROM meta_kv WHERE tenant=? AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.')").all(tenant))
+            if (typeof r.value === 'string') claimSet.add(r.value);
         const claims = [...claimSet];
-        const db = this.store.db;
         // Anchor the retirement BEFORE the delete: the claims a delivered
         // report consumed are written to the signed chain, so a later
         // consult can tell a retired residue row (report reached) from a
         // wiped one (file-level delete) — without this the chain-side
         // enumeration would re-convict every reported heal forever.
         if (claims.length) this.store.audit(tenant, 'FOLD_RESIDUE_RETIRED', 'seal', 'audit', { retired_claims: claims.slice(0, 512), retired_total: claims.length }, this.clock());
-        db.exec('SAVEPOINT residue_retire');
-        try {
-          db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
-          db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
-          db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
-          // Delete by claim VALUE under the residue prefix, not by the
-          // rebuilt key — a planted row at a non-claim key carrying a
-          // retired claim dies with the conviction it echoes
-          // (w59-seal F-1).
+        if (claims.length) {
+          this.#residueValueDelete(tenant, claims, claims);
+          // The delete is probed, not trusted: a retired-claim value row
+          // still standing afterwards means a splice or a re-grafted
+          // guard defeated the drain — name it instead of reporting a
+          // clean retire (w60-fv F-10).
           for (let ci = 0; ci < claims.length; ci += 500) {
             const chunk = claims.slice(ci, ci + 500);
-            db.prepare(`DELETE FROM meta_kv WHERE tenant=? AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.') AND value IN (${chunk.map(() => '?').join(',')})`).run(tenant, ...chunk);
+            const left = this.store._stmt(`SELECT COUNT(*) c FROM meta_kv WHERE tenant=? AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.') AND value IN (${chunk.map(() => '?').join(',')})`).get(tenant, ...chunk)?.c ?? 0;
+            if (left > 0) { this.#wmTamperSet(tenant, { kind: 'floor_marker_residue_retired_echo', seq: 0 }); break; }
           }
-          db.exec("CREATE TRIGGER fold_residue_keep BEFORE DELETE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
-          db.exec("CREATE TRIGGER fold_residue_keep_upd BEFORE UPDATE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' OR NEW.key='fold_floor_healed' OR substr(NEW.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
-          db.exec("CREATE TRIGGER fold_residue_keep_ins BEFORE INSERT ON meta_kv WHEN NEW.key='fold_floor_healed' OR substr(NEW.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
-        } catch (e) { try { db.exec('ROLLBACK TO residue_retire'); } catch { /* savepoint may already be gone */ } throw e; }
-        finally { try { db.exec('RELEASE residue_retire'); } catch { /* rolled back or never opened */ } }
+        }
       } catch { /* meta_kv may be the dropped table — the residue consult names that separately */ }
     const cur = cur0;
     if (cur === undefined) return;
@@ -1997,6 +2056,16 @@ export class Fabric {
   // conviction before any surface names it).
   #wmTamperReported(tenant, entries) {
     for (const e of entries ?? []) if (typeof e?.kind === 'string') this.#wmTamperRetire(tenant, e.kind);
+    // Kinds latched DURING retirement — the residue probe naming a
+    // defeated delete — surfaced after the enumeration built `entries`:
+    // they are appended to the same report rather than waiting a cycle
+    // to speak (w60-fv F-10). They stay latched and will re-derive on
+    // the next consult if the evidence still stands.
+    if (Array.isArray(entries)) {
+      const named = new Set(entries.map(e => e?.kind));
+      for (const e of this.#wmTamperAttest(tenant).head_watermark_tampered ?? [])
+        if (!named.has(e.kind)) entries.push(e);
+    }
   }
   // The 'signed' half of an abandoned-watermark attestation must mean the
   // envelope actually verifies under this tenant's audit keys — a
@@ -3857,7 +3926,12 @@ export class Fabric {
       // stored-column value: a row with a rewritten stored seq must not
       // shape the seal's own attestation (w49-seal F2). On a contiguous
       // honest chain the two are identical.
-      const sealWrite = this.store.audit(t, 'AUDIT_SEALED', p.subject_id, 'audit', { sealed_at_seq: prevPlSeq + 1, removed_count: removed.length, removed_head: removed[0] ?? null, removed_tail: removed.at(-1) ?? null, lived_until: livedUntil || null, spend_carryover: carrySpend.slice(0, CARRY_PAGE), access_carryover: carryAccess.slice(0, CARRY_PAGE), capabilities_cut: capsCut.slice(0, CARRY_PAGE), revocations_carryover: carryRevoked.slice(0, CARRY_PAGE), lifecycle_carryover: carryLifecycle.slice(0, CARRY_PAGE), carryover_pages: carryPages.length, carryover_totals: { spend: carrySpend.length, access: carryAccess.length, revocations: carryRevoked.length, capabilities: capsCut.length, lifecycle: carryLifecycle.length, mirrors_dropped: droppedMirrorCount, dropped_events: droppedEvents.length + droppedEventsOverflow, deleted_events: deletedRowsTotal, divergent_stored: divergentStored, deleted_gaps_total: deletedGapsTotal }, dropped_mirrors: droppedMirrors, dropped_events: droppedEvents.slice(0, CARRY_PAGE), deleted_gaps: deletedGaps.slice(0, 64), planted_floor_refs: plantedFloor.slice(0, 512), floor_derived: floorDerived.slice(0, 512), murdered_floor_refs: murderedFloor.slice(0, 512), ...(abandonedHead ?? {}) }, now);
+      // The seal carries the residue claims this report consumed — a
+      // report that deleted both the retire mints AND the residue rows
+      // still cannot drop the retirement binding while the seal stands
+      // (w60-seal F-1).
+      const retiredFold = this.#residueScan.get(t)?.retired ?? new Set();
+      const sealWrite = this.store.audit(t, 'AUDIT_SEALED', p.subject_id, 'audit', { sealed_at_seq: prevPlSeq + 1, removed_count: removed.length, removed_head: removed[0] ?? null, removed_tail: removed.at(-1) ?? null, lived_until: livedUntil || null, spend_carryover: carrySpend.slice(0, CARRY_PAGE), access_carryover: carryAccess.slice(0, CARRY_PAGE), capabilities_cut: capsCut.slice(0, CARRY_PAGE), revocations_carryover: carryRevoked.slice(0, CARRY_PAGE), lifecycle_carryover: carryLifecycle.slice(0, CARRY_PAGE), carryover_pages: carryPages.length, carryover_totals: { spend: carrySpend.length, access: carryAccess.length, revocations: carryRevoked.length, capabilities: capsCut.length, lifecycle: carryLifecycle.length, mirrors_dropped: droppedMirrorCount, dropped_events: droppedEvents.length + droppedEventsOverflow, deleted_events: deletedRowsTotal, divergent_stored: divergentStored, deleted_gaps_total: deletedGapsTotal }, dropped_mirrors: droppedMirrors, dropped_events: droppedEvents.slice(0, CARRY_PAGE), deleted_gaps: deletedGaps.slice(0, 64), planted_floor_refs: plantedFloor.slice(0, 512), floor_derived: floorDerived.slice(0, 512), murdered_floor_refs: murderedFloor.slice(0, 512), retired_claims_fold: [...retiredFold].slice(0, 512), ...(abandonedHead ?? {}) }, now);
       sealSeq = sealWrite?.envelope?.payload?.sequence ?? firstBad;
       for (let i = 0; i < carryPages.length; i++)
         this.store.audit(t, 'AUDIT_SEAL_CARRY', p.subject_id, 'audit', { seal_seq: sealSeq, page: i + 1, ...carryPages[i] }, now);
@@ -6203,7 +6277,15 @@ export class Fabric {
   async checkIssuerDrift(p, key_id) {
     this.authorize(p, ['security', 'policy_admin']);
     const issuer = this.tenant(p.tenant_id).issuers[key_id];
-    requireThat(issuer?.endpoint, 'INV-404-NOT-FOUND', 'Issuer endpoint not found', 404);
+    requireThat(issuer, 'INV-404-NOT-FOUND', 'Issuer not found', 404);
+    requireThat(issuer.endpoint, 'INV-404-NOT-FOUND', 'Issuer endpoint not found', 404);
+    // A revoked connector earns no privileged remediation spend — the
+    // refusal lands before any socket opens, same as every other issuer
+    // egress gate; revocation is a terminal conviction, not a drift state
+    // to remediate (w60-http F-1: without this, the route sent the Bearer
+    // credential to a convicted host, cleared its quarantine row, and
+    // minted CONNECTOR_REVALIDATED naming dead authority).
+    requireThat(!this.revoked(p.tenant_id, 'issuer', key_id) && !this.revoked(p.tenant_id, 'key', key_id), 'INV-401-EVIDENCE', 'Evidence source revoked', 401);
     // Egress gates run BEFORE the socket opens — a config-tampered endpoint
     // must never see the Bearer credential (w50-http HIGH). issuerDrift is
     // deliberately NOT gated here: this method is the remediation that
@@ -6276,7 +6358,8 @@ export class Fabric {
   async repinIssuerSpec(p, key_id) {
     this.authorize(p, ['security']);
     const issuer = this.tenant(p.tenant_id).issuers[key_id];
-    requireThat(issuer?.endpoint, 'INV-404-NOT-FOUND', 'Issuer endpoint not found', 404);
+    requireThat(issuer, 'INV-404-NOT-FOUND', 'Issuer not found', 404);
+    requireThat(issuer.endpoint, 'INV-404-NOT-FOUND', 'Issuer endpoint not found', 404);
     // A revoked connector earns no privileged remediation spend — and the
     // refusal must land before the socket opens, same as every other
     // issuer egress gate (w50-http LOW/HIGH).
