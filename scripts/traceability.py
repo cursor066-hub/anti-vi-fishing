@@ -833,7 +833,7 @@ def _backward_ref_live(text, name, decl_start, hoisted):
             continue
         if _arrow_defers(text, rm.start()) and _ref_used(text, rm.end()): return True
     return False
-_OPERAND_STOP = frozenset('\n;{},=!<>()[\]&|')
+_OPERAND_STOP = frozenset('\n;{},=!<>()[\\]&|')
 def _operand_for(text, i):
     # The left operand of the operator at i is the maximal contiguous run
     # of operand-class characters ending (after whitespace) just before i
