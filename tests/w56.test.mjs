@@ -382,7 +382,7 @@ test('w56-fv F-7: spawn contacts must resolve inside the repo', t => {
   const post = "\ntest('REQ-X', t => { assert.ok(1) })";
   assert.equal(binds(pre + "ex('node', ['/etc/passwd']);" + post), false, 'an absolute path outside the repo is not a contact');
   assert.equal(binds(pre + "ex('node', ['plain-arg']);" + post), false, 'a slash-less argument names no file');
-  assert.equal(binds(pre + "ex('node', ['./scripts/run.mjs']);" + post), true, 'a repo-relative literal still contacts');
+  assert.equal(binds(pre + "ex('node', ['./scripts/check.mjs']);" + post), true, 'a repo-relative literal that resolves and exists still contacts');
   assert.equal(binds(pre + "ex('node', ['../outside']);" + post), false, 'a literal escaping the repo root contacts nothing');
 });
 

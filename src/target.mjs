@@ -103,15 +103,27 @@ export class SimulatedTarget {
       // off) — all three arms carry the same abort (w47-fv HIGH-1 +
       // w48-store W48-4, parity with the ledger store).
       const expected = "CREATE TRIGGER aad_marker_keep BEFORE DELETE ON meta_kv WHEN OLD.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END";
-      const expectedUpd = "CREATE TRIGGER aad_marker_keep_upd BEFORE UPDATE ON meta_kv WHEN OLD.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END";
+      // NEW.key arms the rename-in attack — an UPDATE can mint the marker
+      // on an innocent row without any INSERT (w58-fv F-2, parity with
+      // the ledger store).
+      const expectedUpd = "CREATE TRIGGER aad_marker_keep_upd BEFORE UPDATE ON meta_kv WHEN OLD.key='aad_migration' OR NEW.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END";
       const expectedIns = "CREATE TRIGGER aad_marker_keep_ins BEFORE INSERT ON meta_kv WHEN NEW.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END";
+      const norm = s => (s ?? '').replace(/\s+/g, ' ').trim();
+      // A pre-w58 database stores the OLD verbatim upd body — recreate it
+      // to current text on open; every other shape is tamper evidence
+      // and still fails (w58-fv F-2).
+      const legacyUpd = "CREATE TRIGGER aad_marker_keep_upd BEFORE UPDATE ON meta_kv WHEN OLD.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END";
       this.db.exec(`CREATE TRIGGER IF NOT EXISTS ${expected.slice('CREATE TRIGGER '.length)}`);
       this.db.exec(`CREATE TRIGGER IF NOT EXISTS ${expectedUpd.slice('CREATE TRIGGER '.length)}`);
       this.db.exec(`CREATE TRIGGER IF NOT EXISTS ${expectedIns.slice('CREATE TRIGGER '.length)}`);
-      const norm = s => (s ?? '').replace(/\s+/g, ' ').trim();
       const stored = new Map(this._stmt("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name IN ('aad_marker_keep','aad_marker_keep_upd','aad_marker_keep_ins')").all().map(r => [r.name, r.sql ?? '']));
       requireThat(norm(stored.get('aad_marker_keep')) === norm(expected), 'INV-503-STORAGE', 'integrity trigger missing or tampered: aad_marker_keep', 503);
-      requireThat(norm(stored.get('aad_marker_keep_upd')) === norm(expectedUpd), 'INV-503-STORAGE', 'integrity trigger missing or tampered: aad_marker_keep_upd', 503);
+      if (norm(stored.get('aad_marker_keep_upd')) !== norm(expectedUpd)) {
+        if (norm(stored.get('aad_marker_keep_upd')) === norm(legacyUpd)) {
+          this.db.exec('DROP TRIGGER aad_marker_keep_upd');
+          this.db.exec(`CREATE TRIGGER ${expectedUpd.slice('CREATE TRIGGER '.length)}`);
+        } else throw new InvariantError('INV-503-STORAGE', 'integrity trigger missing or tampered: aad_marker_keep_upd', 503);
+      }
       requireThat(norm(stored.get('aad_marker_keep_ins')) === norm(expectedIns), 'INV-503-STORAGE', 'integrity trigger missing or tampered: aad_marker_keep_ins', 503);
       for (const stray of this._stmt("SELECT name FROM sqlite_master WHERE type='trigger'").all().map(r => r.name).filter(n => !['aad_marker_keep', 'aad_marker_keep_upd', 'aad_marker_keep_ins'].includes(n))) {
         this.db.exec(`DROP TRIGGER "${String(stray).replace(/"/g, '""')}"`);
@@ -145,6 +157,12 @@ export class SimulatedTarget {
       requireThat(probeOk(() => {
         this._stmt("INSERT INTO meta_kv VALUES(?, 'aad_migration', '{}')").run(pt);
       }), 'INV-503-STORAGE', 'aad_migration marker insert trigger not enforced', 503);
+      // The rename-in arm mints the marker on an innocent row (w58-fv F-2).
+      requireThat(probeOk(() => {
+        this.db.exec('DROP TRIGGER aad_marker_keep_ins');
+        this._stmt("INSERT INTO meta_kv VALUES(?, 'aad_probe', 'x')").run(pt);
+        this._stmt("UPDATE meta_kv SET key='aad_migration' WHERE tenant=? AND key='aad_probe'").run(pt);
+      }), 'INV-503-STORAGE', 'aad_migration rename-in not enforced', 503);
       // Counter-arm probe: a BEFORE INSERT RAISE(IGNORE) fires no guard —
       // writes must be proven to LAND (w48-fixverify CRITICAL).
       const probeLanded = (run, what) => {

@@ -92,7 +92,7 @@ const stableTap = tapText.replace(/ \([\d.]+ms\)/g, '').replace(/(duration_ms: )
 // outlive the runner's own summary (w23-supply F8). The four summary
 // counters must also be internally consistent.
 const numLast = (re, s) => { const m = [...s.matchAll(new RegExp(re.source, 'g'))].at(-1); return m ? Number(m[1]) : 0; };
-const rawFail = numLast(/# fail (\d+)/, tapText), rawCancel = numLast(/# cancelled (\d+)/, tapText), rawSkip = numLast(/# skipped (\d+)/, tapText), rawTodo = numLast(/# to[d]o (\d+)/, tapText), rawTests = numLast(/# tests (\d+)/, tapText);
+const rawFail = numLast(/# fail (\d+)/, tapText), rawCancel = numLast(/# cancelled (\d+)/, tapText), rawSkip = numLast(/# skipped (\d+)/, tapText), rawTodo = numLast(/# to\x64o (\d+)/, tapText), rawTests = numLast(/# tests (\d+)/, tapText);
 // # fail already equals the 'not ok' result count — adding them
 // double-counted every failure and inflated tests=pass+fail past the
 // runner's own # tests figure (w51-ledger M-5).

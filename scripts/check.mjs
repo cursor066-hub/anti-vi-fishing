@@ -94,7 +94,7 @@ const SINK_RULES = [
   // Member-invoked, parenthesized and concatenated spellings of the
   // same sink are equally unforgeable — plain identifier patterns could
   // not see them (w57-ledger F7).
-  ['dynamic eval', new RegExp(`\\beval\\s*\\(|new\\s+Function\\s*\\(|eval\\s*\\/\\*\\*\\/\\s*\\(|\\bFunction\\s*\\(|eval\\s*\\.\\s*(?:call|apply)\\s*\\(|new\\s*\\(\\s*Function\\s*\\)|\\(\\s*Function\\s*\\)\\s*\\(|['"]ev['"]\\s*\\+\\s*['"]al['"]|['"]e['"]\\s*\\+\\s*['"]val['"]|Reflect\\.(?:apply|construct)\\s*\\(\\s*(?:eval|Function)|node:${'v'}m|from\\s+['"](?:node:)?${'v'}m['"]|require\\s*\\(\\s*['"](?:node:)?${'v'}m['"]|import\\s*\\(\\s*['"](?:node:)?${'v'}m['"]|runIn(?:This|New)?Context`)],
+  ['dynamic eval', new RegExp(`\\beval\\s*\\(|eval\\s*\\?\\s*\\.\\s*\\(|eval\\s*\\?\\s*\\.\\s*(?:call|apply|bind)\\s*\\(|\\(\\s*0\\s*,\\s*eval\\s*\\)\\s*\\(|eval\\s*\\/\\*[^*]*\\*\\/\\s*\\(|eval\\s*\\.\\s*bind\\s*\\(|eval\\s*\\[['"](?:call|apply|bind)['"]\\]|new\\s+Function\\s*\\(|eval\\s*\\/\\*\\*\\/\\s*\\(|\\bFunction\\s*\\(|eval\\s*\\.\\s*(?:call|apply)\\s*\\(|new\\s*\\([^)]*\\bFunction\\b|\\(\\s*Function\\s*\\)\\s*\\(|\\b[A-Za-z_$][\\w$]*\\s*=\\s*Function\\s*;|Function\\s*\\.\\s*(?:call|apply|bind)\\s*\\(|\\.constructor\\s*(?:\\.\\s*constructor\\s*)+\\(|globalThis\\s*\\[[^\\]]*['"][^\\]]*\\]\\s*\\(|globalThis\\s*\\.\\s*eval|import\\s*\\(\\s*['"\`]data:|['"]ev['"]\\s*\\+\\s*['"]al['"]|['"]e['"]\\s*\\+\\s*['"]val['"]|Reflect\\.(?:apply|construct)\\s*\\(\\s*(?:eval|Function)|node:${'v'}m|from\\s+['"](?:node:)?${'v'}m['"]|require\\s*\\(\\s*['"](?:node:)?${'v'}m['"]|import\\s*\\(\\s*['"](?:node:)?${'v'}m['"]|runIn(?:This|New)?Context`)],
   ['string-timed code', /\bset(?:Timeout|Interval)\s*\(\s*['"`]/],
   ['embedded private key', /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
   ['cloud credential pattern', /\bAKIA[0-9A-Z]{16}\b/]
@@ -105,24 +105,24 @@ const SINK_RULES = [
 // dotted two-word spellings are the same marker — the alternation could
 // not see them (w54-ledger M-1).
 const MARKER_RULES = [
-  // Multi-char separators, letter-spacing, NBSP/tab and fullwidth
-  // spellings are the same marker — a separated or widened spelling
-  // still names an unfinished plant (w55-ledger H-2). The separator
-  // classes live inside the pattern so this comment names none of them.
-  ['unfinished code marker', new RegExp(`\\b(?:${'T'}[ \\t\\u00A0._-]*${'O'}[ \\t\\u00A0._-]*${'D'}[ \\t\\u00A0._-]*${'O'}|${'Ｔ'}[ \\t\\u00A0._-]*${'Ｏ'}[ \\t\\u00A0._-]*${'Ｄ'}[ \\t\\u00A0._-]*${'Ｏ'}|${'F'}[ \\t\\u00A0._-]*${'I'}[ \\t\\u00A0._-]*${'X'}[ \\t\\u00A0._-]*${'M'}[ \\t\\u00A0._-]*${'E'}|${'Ｆ'}[ \\t\\u00A0._-]*${'Ｉ'}[ \\t\\u00A0._-]*${'Ｘ'}[ \\t\\u00A0._-]*${'Ｍ'}[ \\t\\u00A0._-]*${'Ｅ'}|${'T' + 'BD'}|${'W' + 'IP'}|${'HA' + 'CK'})\\b`)],
+  // ANY non-alphanumeric run between marker letters is a separator —
+  // slashes, pluses, dashes, pipes, stars, spaces, em/en dashes all
+  // spell the same unfinished plant (w58-fv F-7). The letters are split
+  // literals so this table does not flag itself.
+  ['unfinished code marker', new RegExp(`\\b(?:${'T'}[^A-Za-z0-9]{0,3}${'O'}[^A-Za-z0-9]{0,3}${'D'}[^A-Za-z0-9]{0,3}${'O'}|${'Ｔ'}[^A-Za-z0-9]{0,3}${'Ｏ'}[^A-Za-z0-9]{0,3}${'Ｄ'}[^A-Za-z0-9]{0,3}${'Ｏ'}|${'F'}[^A-Za-z0-9]{0,3}${'I'}[^A-Za-z0-9]{0,3}${'X'}[^A-Za-z0-9]{0,3}${'M'}[^A-Za-z0-9]{0,3}${'E'}|${'Ｆ'}[^A-Za-z0-9]{0,3}${'Ｉ'}[^A-Za-z0-9]{0,3}${'Ｘ'}[^A-Za-z0-9]{0,3}${'Ｍ'}[^A-Za-z0-9]{0,3}${'Ｅ'}|${'T'}[^A-Za-z0-9]{0,3}${'B'}[^A-Za-z0-9]{0,3}${'D'}|${'W'}[^A-Za-z0-9]{0,3}${'I'}[^A-Za-z0-9]{0,3}${'P'}|${'H'}[^A-Za-z0-9]{0,3}${'A'}[^A-Za-z0-9]{0,3}${'C'}[^A-Za-z0-9]{0,3}${'K'})\\b`)],
   // The triple-X word followed by a colon is a planted unfinished-marker
   // label, not the ISO-4217 fixture value — the bare word stays exempt
-  // (w54-fv M-5).
-  ['unfinished code marker (xxx label)', new RegExp(`\\b${'XX' + 'X'}\\s*:`)]
+  // (w54-fv M-5); separated letter spellings are the same marker.
+  ['unfinished code marker (xxx label)', new RegExp(`\\b${'X'}[^A-Za-z0-9]{0,3}${'X'}[^A-Za-z0-9]{0,3}${'X'}\\s*:`)]
 ];
 // Case-insensitive on authored files: a lowercase marker is the same
-// unfinished code (w49-ledger F-1). reports/ is exempt — '# to'+'do N'
-// lines are generated TAP protocol fields, not authored markers; the few
-// files that legitimately name node:test's skip/defer vocabulary dodge
-// the literal word instead.
+// unfinished code (w49-ledger F-1). reports/ is exempt — its generated
+// TAP summary lines name the deferred-count protocol field, not authored
+// markers; the few files that legitimately name node:test's skip/defer
+// vocabulary dodge the literal word instead.
 const MARKER_LOOSE = [
-  ['unfinished code marker (any case)', new RegExp(`\\b(?:${'T'}[ \\t\\u00A0._-]*${'O'}[ \\t\\u00A0._-]*${'D'}[ \\t\\u00A0._-]*${'O'}|${'Ｔ'}[ \\t\\u00A0._-]*${'Ｏ'}[ \\t\\u00A0._-]*${'Ｄ'}[ \\t\\u00A0._-]*${'Ｏ'}|${'F'}[ \\t\\u00A0._-]*${'I'}[ \\t\\u00A0._-]*${'X'}[ \\t\\u00A0._-]*${'M'}[ \\t\\u00A0._-]*${'E'}|${'Ｆ'}[ \\t\\u00A0._-]*${'Ｉ'}[ \\t\\u00A0._-]*${'Ｘ'}[ \\t\\u00A0._-]*${'Ｍ'}[ \\t\\u00A0._-]*${'Ｅ'}|${'T' + 'BD'}|${'W' + 'IP'}|${'HA' + 'CK'})\\b`, 'i')],
-  ['unfinished code marker (xxx label any case)', new RegExp(`\\b${'XX' + 'X'}\\s*:`, 'i')]
+  ['unfinished code marker (any case)', new RegExp(`\\b(?:${'T'}[^A-Za-z0-9]{0,3}${'O'}[^A-Za-z0-9]{0,3}${'D'}[^A-Za-z0-9]{0,3}${'O'}|${'Ｔ'}[^A-Za-z0-9]{0,3}${'Ｏ'}[^A-Za-z0-9]{0,3}${'Ｄ'}[^A-Za-z0-9]{0,3}${'Ｏ'}|${'F'}[^A-Za-z0-9]{0,3}${'I'}[^A-Za-z0-9]{0,3}${'X'}[^A-Za-z0-9]{0,3}${'M'}[^A-Za-z0-9]{0,3}${'E'}|${'Ｆ'}[^A-Za-z0-9]{0,3}${'Ｉ'}[^A-Za-z0-9]{0,3}${'Ｘ'}[^A-Za-z0-9]{0,3}${'Ｍ'}[^A-Za-z0-9]{0,3}${'Ｅ'}|${'T'}[^A-Za-z0-9]{0,3}${'B'}[^A-Za-z0-9]{0,3}${'D'}|${'W'}[^A-Za-z0-9]{0,3}${'I'}[^A-Za-z0-9]{0,3}${'P'}|${'H'}[^A-Za-z0-9]{0,3}${'A'}[^A-Za-z0-9]{0,3}${'C'}[^A-Za-z0-9]{0,3}${'K'})\\b`, 'i')],
+  ['unfinished code marker (xxx label any case)', new RegExp(`\\b${'X'}[^A-Za-z0-9]{0,3}${'X'}[^A-Za-z0-9]{0,3}${'X'}\\s*:`, 'i')]
 ];
 // DOM-injection sinks matter in ANY code that renders — not only src/ and
 // web/: an .html asset or script-generated page outside those roots could
@@ -132,7 +132,7 @@ const MARKER_LOOSE = [
 const RENDER_ONLY = [
   // Bracket-member assignment, writeln, and the Function constructor are
   // the same sink under a different spelling (w56-ledger F10).
-  ['DOM injection', /\.(?:innerHTML|outerHTML)\s*(?:=|\+=)|\[\s*['"](?:innerHTML|outerHTML)['"]\s*\]\s*(?:=|\+=)|\[\s*['"](?:inner|outer)['"]\s*\+\s*['"]HTML['"]\s*\]\s*(?:=|\+=)|Reflect\.set\s*\([^)]*['"](?:inner|outer)HTML['"]|insertAdjacentHTML|(?:document|doc|d|el|target|element|node)\s*\.\s*write(?:ln)?\s*\(|new\s*\(?\s*Function\s*\)?\s*\(/]
+  ['DOM injection', /\.(?:innerHTML|outerHTML|srcdoc)\s*(?:=|\+=|\?\?=)|\[\s*['"](?:innerHTML|outerHTML|srcdoc)['"]\s*\]\s*(?:=|\+=|\?\?=)|\[\s*['"](?:inner|outer|srcdoc)['"]\s*\+\s*['"](?:HTML)?['"]\s*\]\s*(?:=|\+=|\?\?=)|Reflect\.set\s*\([^)]*['"](?:inner|outer|srcdoc)|Object\.assign\s*\([^)]*\binnerHTML\b|insertAdjacentHTML|(?:document|doc|d|el|target|element|node)\s*\.\s*write(?:ln)?\s*\(|document\s*\[[^\]]*writ[^\]]*\]|new\s*\(?\s*Function\s*\)?\s*\(/]
 ];
 for (const file of textFiles) {
   if (file === 'vectors/keys.json' || !existsSync(file) || isBinary(file)) continue;
@@ -283,10 +283,31 @@ const stripDead = (l, dead = deadState()) => {
 const maskStrings = (text, dead) => {
   const out = text.split('');
   let q = dead.str ?? null;
+  let rx = false, rxClass = false;
   for (let i = 0; i < out.length; i++) {
     const c = out[i];
+    if (rx) {
+      if (c === '\\') { out[i] = ' '; if (i + 1 < out.length) out[++i] = ' '; continue; }
+      if (c === '[') rxClass = true;
+      else if (c === ']') rxClass = false;
+      else if (c === '/' && !rxClass) rx = false;
+      out[i] = ' ';
+      continue;
+    }
     if (q) { if (c === '\\') { out[i] = ' '; if (i + 1 < out.length) out[++i] = ' '; } else { out[i] = ' '; if (c === q) q = null; } continue; }
-    if (c === "'" || c === '"' || c === '`') { q = c; out[i] = ' '; }
+    if (c === "'" || c === '"' || c === '`') { q = c; out[i] = ' '; continue; }
+    if (c === '/') {
+      // A `/` right after an operator, keyword or statement edge opens a
+      // regex literal — `/auth/` must not mint an auth call inside its
+      // body (w58-ledger F4). A `/` after a value (identifier, `)`, `]`,
+      // digit) is division.
+      let j = i - 1;
+      while (j >= 0 && out[j] === ' ') j--;
+      const prev = j < 0 ? '' : out[j];
+      const word = /([A-Za-z_$][\w$]*)\s*$/.exec(text.slice(0, i))?.[1] ?? '';
+      if (j < 0 || '=(:,[!&|?{};~^*%<>+-'.includes(prev) || /^(?:return|typeof|case|in|of|do|else|throw|delete|void|yield|await|new|instanceof)$/.test(word))
+        { rx = true; out[i] = ' '; continue; }
+    }
   }
   dead.str = q === '`' ? q : null;
   return out.join('');
@@ -306,13 +327,107 @@ const guardedPrefix = (masked, callStart) => {
     if (/(?:^|[^\w$])(?:if|for|while|switch|catch)\s*$/.test(stmt.slice(0, open[i])))
       return /&&|\|\||\?/.test(stmt.slice(open[i] + 1));
   }
-  return /&&|\|\||\?|(?:^|[^\w$])if\s*\(|(?:^|[^\w$])(?:else|for|while|do)(?:\s|$)/.test(stmt);
+  return /&&|\|\||\?|=>|(?:^|[^\w$])if\s*\(|(?:^|[^\w$])(?:else|for|while|do|case|default)(?:\s|$)/.test(stmt);
 };
-// A verb-dispatch `m[N]` under any index spelling: `m['2']`, `m[+2]`,
-// `m[02]`, `m[2 ]` all dispatch exactly like `m[2]` — the sibling-arm
-// boundary must see every spelling (w57-ledger F4).
-const DISPATCH_IDX = "m\\s*\\[\\s*['\"]?\\s*\\+?\\s*\\d+\\s*['\"]?\\s*\\]";
-const DISPATCH_2 = new RegExp("m\\s*\\[\\s*['\"]?\\s*\\+?\\s*2\\s*['\"]?\\s*\\]");
+// A call inside a conditional BODY gates only a slice of requests and
+// cannot satisfy an unconditional 'authenticated' or role claim —
+// `if (x) { authorize }`, an else/case/catch/try arm, an arrow body, a
+// braceless `if (x)\n  authorize()`, a line broken after `&&`/`||`/`?`
+///`:` (w58-fv F-3, w58-ledger F5). The tracker walks masked lines:
+// parens carry their owner keyword across lines, `{`s after a control
+// `)` or conditional keyword open conditional depths, and a dangling
+// opener makes the next statement conditional.
+const condTracker = () => {
+  const condDepths = [];
+  const parens = [];
+  let lastParen = 'other';
+  let pending = false;
+  // Only if/catch bodies gate a slice of requests — for/while/switch
+  // bodies are the handler's own loop logic and always count as its
+  // scope (w58 doctrine: `for (i<1) { authorize }` is unconditional;
+  // `switch` case bodies are still covered by the case/default arm).
+  const ownerOf = (lm, ci) => {
+    const w = /([A-Za-z_$][\w$]*)\s*$/.exec(lm.slice(0, ci))?.[1] ?? '';
+    return /^(?:if|catch)$/.test(w) ? 'branch' : w === 'function' ? 'fn' : 'other';
+  };
+  // `line` walks one masked line at start depth `sd`. `mode` 'ours'
+  // marks the row's own dispatch `{` — its body is the row's entry
+  // scope and is unconditional even though its opener is an `if`;
+  // 'sibling' marks a dispatch arm for a DIFFERENT verb — that arm is
+  // dead for this row rather than conditional, so an own-verb arm
+  // nested inside it still mints unconditionally (w56-fv F-2).
+  const line = (lm, sd, mode) => {
+    const condPos = new Uint8Array(lm.length);
+    let ld = sd, pendingUsed = pending, armBraceTaken = false;
+    pending = false;
+    for (let ci = 0; ci < lm.length; ci++) {
+      const c = lm[ci];
+      if (c === '(') parens.push(ownerOf(lm, ci));
+      else if (c === ')') lastParen = parens.pop() ?? 'other';
+      else if (c === '{') {
+        const prev = lm.slice(0, ci);
+        let cond;
+        if (mode === 'ours' && !armBraceTaken && /\)\s*$/.test(prev)) { cond = false; armBraceTaken = true; }
+        else if (/\)\s*$/.test(prev)) cond = mode === 'sibling' ? false : lastParen === 'branch';
+        // try/finally bodies run unconditionally — only else/catch/
+        // arrow/case/default bodies gate a slice of requests (w58: a
+        // `try {` arm wrongly marked authenticateToken conditional).
+        else if (/(?:\b(?:else|catch)\b|=>\s*$|\bcase\b[^;]*:\s*$|\bdefault\s*:\s*$)/.test(prev)) cond = mode !== 'sibling';
+        else if (pendingUsed) cond = mode !== 'sibling';
+        else cond = false;
+        ld++;
+        if (cond) condDepths.push(ld);
+      } else if (c === '}') {
+        while (condDepths.length && condDepths[condDepths.length - 1] >= ld) condDepths.pop();
+        ld--;
+      } else if (c === ';') pendingUsed = false;
+      condPos[ci] = condDepths.length > 0 || pendingUsed ? 1 : 0;
+    }
+    // A line ending on a conditional opener or a short-circuit/ternary
+    // edge makes the NEXT statement conditional (braceless body or a
+    // broken expression operand).
+    const tail = lm.trimEnd();
+    if (!/[;{}]\s*$/.test(tail)
+        && /(?:\b(?:if|for|while|switch|catch)\s*(?:\([^()]*\)\s*)?|\belse\b|\bcatch\b|=>|&&|\|\||\?|:)\s*$/.test(tail)) pending = true;
+    return { condPos, endDepth: ld };
+  };
+  return { line };
+};
+// A verb-dispatch `m[N]` under every index spelling — quoted, hex,
+// octal, binary, float, unary-plus, optional-chain, `.at()` — and
+// aliases bound by `sub = m[2]` / `const {2: sub} = m` all dispatch
+// exactly like `m[2]` (w58-fv F-4). The index expression is parsed, not
+// regex-spelled.
+const DISP_IDX_EVAL = expr => {
+  const t = expr.trim().replace(/^\++/, '');
+  const q = /^['"`]([^'"`]+)['"`]?$/.exec(t);
+  const raw = (q ? q[1] : t).trim();
+  return /^\d+$/.test(raw) ? parseInt(raw, 10)
+    : /^0x[0-9a-f]+$/i.test(raw) ? parseInt(raw, 16)
+    : /^0o[0-7]+$/i.test(raw) ? parseInt(raw, 8)
+    : /^0b[01]+$/i.test(raw) ? parseInt(raw, 2)
+    : /^\d*\.\d+$/.test(raw) ? Math.trunc(parseFloat(raw))
+    : null;
+};
+// Index-bearing member access on `m` — `m[…]`/`m?.[…]`/`m.at(…)` — plus
+// the alias spellings (`sub === 'verb'` where `sub` was bound to
+// `m[N]`). Matches run on the UNMASKED line so quoted digits survive;
+// the caller rejects positions the masked twin proves are inside a
+// literal (w58-fv F-4).
+const DISP_MEMBER = /\bm\s*(?:\?\s*\.\s*)?(?:\[\s*([^\]]+)\]|\.?\s*at\s*\?\s*\.?\s*\(\s*([^)]*)\))/g;
+const dispAliases = lines => {
+  const out = new Set();
+  const dead = deadState();
+  for (const l0 of lines) {
+    const s = maskStrings(stripDead(l0, dead), dead);
+    for (const m of s.matchAll(/\b(?:const|let|var)?\s*([A-Za-z_$][\w$]*)\s*=\s*m\s*(?:\?\s*\.\s*)?(?:\[\s*([^\]]+)\]|\.?\s*at\s*\?\s*\.?\s*\(\s*([^)]*)\))/g))
+      if (DISP_IDX_EVAL(m[2] ?? m[3] ?? '') !== null) out.add(m[1]);
+    const d = /\b(?:const|let|var)\s*\{([^}]*)\}\s*=\s*m\b/.exec(s);
+    if (d) for (const mm of d[1].matchAll(/['"`]?(\d+)['"`]?\s*:\s*([A-Za-z_$][\w$]*)/g)) out.add(mm[2]);
+  }
+  return out;
+};
+const DISPATCH_2 = new RegExp("m\\s*(?:\\?\\s*\\.\\s*)?(?:\\[|\\.?\\s*at\\s*\\?\\s*\\.?\\s*\\()");
 // A role gate may name its set through a module-scope constant —
 // `authorize(p, ADMIN_SET)` gates exactly as honestly as the literal
 // array, and treating it as no gate turns a real role check into a
@@ -349,6 +464,18 @@ const roleSets = lines => {
       defs.set(c[1], [...(defs.get(c[2]) ?? []), ...roleArgs(c[3])]);
     for (const p of s.matchAll(/\b([A-Za-z_$][\w$]*)\s*\.\s*push\s*\(([^)]*)\)/g))
       if (defs.has(p[1])) defs.get(p[1]).push(...roleArgs(p[2]));
+    // Membership-changing mutations the declarator/alias arms cannot
+    // read: `S[i] = 'r'` may carry a role, and splice/pop/shift/fill/
+    // sort/unshift/reverse or a `.length` write leaves the set
+    // unenumerable — drop it rather than guess (fail closed —
+    // authorize(p, S) then resolves no roles and the row flags,
+    // w58-ledger F11).
+    for (const p of s.matchAll(/\b([A-Za-z_$][\w$]*)\s*\[\s*[^\]]+\]\s*=(?!=)\s*([^;]+)/g))
+      if (defs.has(p[1])) defs.get(p[1]).push(...roleArgs(p[2]));
+    for (const p of s.matchAll(/\b([A-Za-z_$][\w$]*)\s*\.\s*(?:splice|pop|shift|unshift|fill|sort|reverse|copyWithin)\s*\(/g))
+      defs.delete(p[1]);
+    const lenm = /\b([A-Za-z_$][\w$]*)\s*\.\s*length\s*=\s*([^;]+)/.exec(s);
+    if (lenm && defs.has(lenm[1])) { if (lenm[2].trim() === '0') defs.set(lenm[1], []); else defs.delete(lenm[1]); }
   }
   return defs;
 };
@@ -374,6 +501,7 @@ const roleSets = lines => {
   const sortR = r => [...r].sort().join(',');
   const collectAuthorize = (lines, from, depth, breakIf = true, verb = null) => {
     const defs = roleSets(lines);
+    const aliases = dispAliases(lines);
     const found = new Set();
     let depthCur = 0;
     const skipStack = [];
@@ -390,6 +518,10 @@ const roleSets = lines => {
     // exiting) plus each dispatched sub-arm's body depth (w56-ledger F7).
     const deadDepths = new Set();
     let tailDead = false;
+    // Conditional bodies (`if/else/case/catch/try/=>`/braceless/
+    // line-broken operands) cannot satisfy unconditional claims
+    // (w58-fv F-3) — the tracker persists across the scanned lines.
+    const tracker = condTracker();
     // Any authorize call seen (guarded or not) is reported via `.any` — a
     // conditional gate still breaks an 'unauthenticated' claim even
     // though it cannot satisfy a role claim (w57-ledger F3).
@@ -420,10 +552,29 @@ const roleSets = lines => {
       // `lm` is the string-blanked twin: call detection runs on it so an
       // authorize/dispatch/return inside a string literal mints nothing;
       // the verb argument is read back from `l` at the same position
-      // (w57-ledger F2/F4).
+      // (w57-ledger F2/F4). `deadPre` snapshots the line-entry string
+      // state so the return-cut re-mask starts from the same template
+      // context instead of a fresh object (w58-ledger F4).
+      const deadPre = { pending: false, block: dead.block, str: dead.str };
       const lm = maskStrings(l, dead);
-      const disp = verb && i !== from ? [...lm.matchAll(new RegExp(DISPATCH_IDX + '\\s*===', 'g'))]
-        .map(x => { const v = new RegExp(DISPATCH_IDX + "\\s*===\\s*'([^']+)'").exec(l.slice(x.index)); return v ? v[1] : null; }).filter(Boolean) : [];
+      // Dispatch verbs are read from the UNMASKED `l` (the masked twin
+      // blanks quoted digits), each position checked against `lm` so a
+      // dispatch spelling inside a string literal mints nothing
+      // (w58-fv F-4).
+      const disp = verb && i !== from ? (() => {
+        const out = [];
+        for (const x of l.matchAll(DISP_MEMBER)) {
+          if (lm[x.index] === ' ') continue;
+          if (DISP_IDX_EVAL(x[1] ?? x[2] ?? '') === null) continue;
+          const v = /={2,3}\s*'([^']+)'/.exec(l.slice(x.index + x[0].length));
+          if (v) out.push(v[1]);
+        }
+        for (const nm of aliases) {
+          const v = new RegExp(`\\b${nm.replace(/\$/g, '\\$')}\\s*={2,3}\\s*'([^']+)'`).exec(l);
+          if (v && lm[v.index] !== ' ') out.push(v[1]);
+        }
+        return out;
+      })() : [];
       const afterCloses = depthCur - closes;
       let popped = false;
       while (skipStack.length && afterCloses < skipStack[skipStack.length - 1].d) { skipStack.pop(); popped = true; }
@@ -450,6 +601,13 @@ const roleSets = lines => {
       // row's gate, not arm-a's.
       const elseSibling = isElse && !ours && (popped || inSib || ourChainClosed);
       const excluded = (inSib && !ours) || skipIndent !== null || sibling || elseSibling;
+      // Walk the masked line for conditional-body state on EVERY line
+      // (sibling `if{` blocks still open/close depths). The row's own
+      // dispatch `{` is the unconditional entry scope; a sibling arm's
+      // block is dead scope for this row — not conditional — so an
+      // own-verb arm nested inside it still mints (w58-fv F-3,
+      // w56-fv F-2).
+      const scan = tracker.line(lm, depthCur, i === from || ours ? 'ours' : (sibling || elseSibling) ? 'sibling' : null);
       if (sibling || elseSibling) {
         const lastOpen = l.lastIndexOf('{'), lastClose = l.lastIndexOf('}');
         // An unmatched last `{` opens a block whose interior continues
@@ -500,10 +658,13 @@ const roleSets = lines => {
           }
           if (cut !== -1) { l = l.slice(0, cut); tailDead = true; }
         }
-        const lmx = maskStrings(l, { pending: false, block: dead.block });
+        const lmx = maskStrings(l, deadPre);
         for (const m of lmx.matchAll(/authorize\(\s*p\s*,\s*[^\s)]/g)) {
           sawAny.v = true;
-          if (guardedPrefix(lmx, m.index)) continue;  // conditional gate — cannot satisfy a role claim (w57-ledger F3)
+          // A conditional gate — guarded statement prefix or a body
+          // under if/else/case/catch/try/=> — cannot satisfy a role
+          // claim (w57-ledger F3, w58-fv F-3).
+          if (scan.condPos[m.index] || guardedPrefix(lmx, m.index)) continue;
           const args = l.slice(m.index);
           const am = /authorize\(\s*p\s*,\s*\[([^\]]+)\]/.exec(args);
           if (am) { for (const r of am[1].split(',')) found.add(r.trim().replace(/['"]/g, '')); continue; }
@@ -522,15 +683,20 @@ const roleSets = lines => {
     const defs = roleSets(fabric);
     const found = new Set();
     const fdead = deadState();
+    const ftrack = condTracker();
+    let fdepth = 1;
     for (let i = idx; i < Math.min(idx + 140, fabric.length); i++) {
       if (i !== idx && /^\s{2}(async )?[a-zA-Z_]+\(/.test(fabric[i])) break;
       const fl = stripDead(fabric[i], fdead), fm = maskStrings(fl, fdead);
+      const fscan = ftrack.line(fm, i === idx ? 1 : fdepth, false);
+      fdepth = fscan.endDepth;
       // Comments and string literals carry no gate — the call is found on
       // the masked view, its argument read back from the stripped line,
-      // and a same-statement `cond && authorize` is a conditional gate
-      // that cannot satisfy a role claim (w57-ledger F2/F3).
+      // and a same-statement `cond && authorize` or a conditional body
+      // is a conditional gate that cannot satisfy a role claim
+      // (w57-ledger F2/F3, w58-fv F-3).
       for (const m of fm.matchAll(/this\.authorize\(\s*p\s*,\s*[^\s)]/g)) {
-        if (guardedPrefix(fm, m.index)) continue;
+        if (fscan.condPos[m.index] || guardedPrefix(fm, m.index)) continue;
         const args = fl.slice(m.index);
         const am = /this\.authorize\(\s*p\s*,\s*\[([^\]]+)\]/.exec(args);
         if (am) { for (const r of am[1].split(',')) found.add(r.trim().replace(/['"]/g, '')); continue; }
@@ -575,10 +741,10 @@ const roleSets = lines => {
     // (w54-ledger H-3). The boundary is an `if` at the arm's own depth.
     const windowEnd = () => {
       if (hi === -1) return hi;
-      // The arm-bounded window: 40 lines truncated long handlers and let
-      // a late authorize hide behind a lying 'unauthenticated' claim
-      // (w57-ledger F5).
-      const end = Math.min(hi + 160, lines.length);
+      // The arm-bounded window runs to the route boundary or file end —
+      // any fixed cap truncates long handlers and lets a late authorize
+      // hide behind a lying 'unauthenticated' claim (w58-ledger F12).
+      const end = lines.length;
       let depth = 0;
       // A multi-line `if (` condition continues until its block opens, and
       // a brace-less arm's body is the next statement — neither may close
@@ -640,11 +806,23 @@ const roleSets = lines => {
     // call — `flag && auth(req)` serves unauthenticated traffic and is
     // not a gate (w57-ledger F3). Each masked line is checked per
     // call position.
-    const AUTH_CALL = /auth\(req|authenticateToken|authBreakglass\(|authorize\(|anyBearer\(|bearerMatches\(|issuerAuthOk\(|bearerDigest\(/g;
+    // Every spelling requires a real CALL — `typeof authenticateToken`
+    // or a bare member-read minted on the unparenthesized arm
+    // (w58-ledger F6); custom credential helpers count too
+    // (w58-ledger F13).
+    const AUTH_CALL = /\b(?:auth|authenticateToken|authBreakglass|authorize|anyBearer|bearerMatches|issuerAuthOk|bearerDigest|verifyJwt|bearer|verifyBearer|checkAuth)\s*\(\s*(?:req\b|p\b|request\b)?/g;
     const unguardedAuth = hi === -1 ? false : (() => {
       const d = deadState();
-      return lines.slice(hi, wEnd).map(x => maskStrings(stripDead(x, d), d))
-        .some(ml => [...ml.matchAll(AUTH_CALL)].some(m => !guardedPrefix(ml, m.index)));
+      const tr = condTracker();
+      let sd = 0;
+      for (let i = hi; i < wEnd; i++) {
+        const ml = maskStrings(stripDead(lines[i], d), d);
+        const scan = tr.line(ml, sd, i === hi ? 'ours' : null);
+        sd = scan.endDepth;
+        for (const m of ml.matchAll(AUTH_CALL))
+          if (!scan.condPos[m.index] && !guardedPrefix(ml, m.index)) return true;
+      }
+      return false;
     })();
     if (r.roles.length === 1 && NONROLE.has(r.roles[0])) {
       // Non-role claims are still contract claims: 'unauthenticated' must
@@ -657,7 +835,7 @@ const roleSets = lines => {
       // handler longer than the window hid its authorize behind a lying
       // 'unauthenticated' row (w57-ledger F5).
       const gate = collectAuthorize(lines, hi, Math.max(2, wEnd - hi));
-      if (r.roles[0] === 'unauthenticated' && (gate.any || /auth\(req|authenticateToken/.test(windowMasked))) { console.error(`route-role parity: ${r.method} ${r.path} — claims unauthenticated but the handler authenticates`); failed = true; continue; }
+      if (r.roles[0] === 'unauthenticated' && (gate.any || /\b(?:auth|authenticateToken|authBreakglass|authorize|verifyJwt|bearer)\s*\(/.test(windowMasked))) { console.error(`route-role parity: ${r.method} ${r.path} — claims unauthenticated but the handler authenticates`); failed = true; continue; }
       if (r.roles[0] === 'token holder' && !unguardedAuth) { console.error(`route-role parity: ${r.method} ${r.path} — claims token holder but no credential resolves`); failed = true; continue; }
       if (r.roles[0] === 'issuer bearer token' && !unguardedAuth) { console.error(`route-role parity: ${r.method} ${r.path} — claims issuer bearer token but no bearer gate resolves`); failed = true; continue; }
       if (r.roles[0] !== 'unauthenticated' && gate.any) { console.error(`route-role parity: ${r.method} ${r.path} — claims '${r.roles[0]}' but a role gate [${gate.roles ?? []}] resolves`); failed = true; continue; }
@@ -692,8 +870,11 @@ const roleSets = lines => {
         const armDepth = rows.at(-1)?.stmtDepth ?? 1;
         let braceless = false;
         const priorDead = deadState();
+        const ptrack = condTracker();
         for (const r of rows.slice(1, -1)) {
           const l = lines[r.i];
+          const pl0 = stripDead(l, priorDead), pm = maskStrings(pl0, priorDead);
+          const pscan = ptrack.line(pm, r.stmtDepth, false);
           if (r.stmtDepth !== armDepth) continue;
           const cs = codeSpan(l);
           // A braceless `if (c)`/`else`/`for`/`while` at arm depth makes
@@ -721,10 +902,9 @@ const roleSets = lines => {
             continue;
           }
           if (/^\s*(?:async\s+)?function\s/.test(l)) continue;
-          const pl = stripDead(l, priorDead), pm = maskStrings(pl, priorDead);
-          priorCalls.push(pl);
-          for (const am of pm.matchAll(/auth\(req|authenticateToken|authBreakglass\(|authorize\(/g))
-            if (!guardedPrefix(pm, am.index)) priorAuthed = true;
+          priorCalls.push(pl0);
+          for (const am of pm.matchAll(/\b(?:auth|authenticateToken|authBreakglass|authorize|verifyJwt|bearer)\s*\(\s*(?:req\b|p\b|request\b)?/g))
+            if (!pscan.condPos[am.index] && !guardedPrefix(pm, am.index)) priorAuthed = true;
         }
       }
       if ((r.roles[0] === 'authenticated' || r.roles[0] === 'bound subject')
@@ -832,6 +1012,16 @@ const roleSets = lines => {
     // switch, an includes-set) stays invisible and is flagged when it
     // reaches a serving line (w51-ledger H-2).
     for (const m of code.matchAll(/\b(?:const|let|var)\s+(\w+)\s*=\s*(req\.method|req\.url|path|url\.pathname)\b/g)) if (m[1] !== 'path' && !aliases.has(m[1])) aliases.set(m[1], m[2]);
+    // Rebound RECEIVERS dispatch the same requests under a name the
+    // audit cannot read — `const request = req` makes `request.method`/
+    // `request.url`/`request.headers` invisible to both the
+    // unauditable-flag arm and routeSeen (w58-ledger F2). Alias the
+    // receiver so `X.method` resolves to `req.method`. A createServer
+    // callback's first parameter is the request object by definition.
+    for (const m of code.matchAll(/\b(?:const|let|var)?\s*([A-Za-z_$][\w$]*)\s*=\s*(req|request)\b(?!\s*[.\[])/g))
+      if (!['req', 'request'].includes(m[1]) && !aliases.has(m[1])) aliases.set(m[1], 'req');
+    const cbp = /createServer\s*\((?:[^(),]*,\s*)?(?:async\s+)?\(\s*([A-Za-z_$][\w$]*)\s*,/.exec(code);
+    if (cbp && !['req', 'request', 'res', 'response'].includes(cbp[1]) && !aliases.has(cbp[1])) aliases.set(cbp[1], 'req');
     let eff = pending.map(c => c.text).join(' ') + (tentative ? tentative.text : '') + code;
     for (const [n, tok] of aliases) eff = eff.replace(new RegExp(`\\b${n}\\b`, 'g'), tok === 'url.pathname' ? 'path' : tok);
     // Dispatch shapes this gate cannot see are failures, not skips:
@@ -887,10 +1077,11 @@ const roleSets = lines => {
   // second handler file is undocumented live code (w50-ledger H-2). The
   // scan is recursive: a nested file or a helper script cannot slip a
   // handler past the audit (w51-ledger H-2).
-  // issuerd.mjs is exempt from THIS outside-scan because auditDispatch()
-  // above already audits its dispatch — it is declared in openapi under
-  // x-listener (w52-ledger M-6). cli.mjs only imports the audited
-  // server.mjs surface; check.mjs is this file.
+  // issuerd.mjs and cli.mjs are exempt from THIS outside-scan because
+  // auditDispatch() already audits their dispatch — issuerd is declared
+  // in openapi under x-listener, cli only instantiates the audited
+  // server factory (w58-ledger F2). check.mjs is this file.
+  auditDispatch(readFileSync('src/cli.mjs', 'utf8').split('\n'));
   const auditExempt = new Set(['src/server.mjs', 'src/issuerd.mjs', 'src/cli.mjs', 'scripts/check.mjs']);
   // The scan rides the TRACKED-file enumeration, not a directory walk: a
   // .cjs helper, a dispatch file outside src|scripts|web, or a symlink

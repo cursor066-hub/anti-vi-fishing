@@ -54,6 +54,13 @@ export class Fabric {
   // private fields because every in-process object mutation is in threat
   // scope — a reachable cache is a forged cache (w13-store F9/F11).
   #auditIdx = new Map();
+  // Per-tenant residue-claim enumeration cursor — {seq, count, claims,
+  // retired} — so the anchored fold_floor_divergent/FOLD_RESIDUE_RETIRED
+  // scans stay incremental on pure appends instead of re-reading the
+  // whole table on every fold consult.
+  #residueScan = new Map();
+  #residueShapeStmt = null;
+  #residueLikeStmt = null;
   // In-tx revocation-write flag feeding the floor check's probe skip
   // (w43-perf): set by the store record hook, cleared when the check runs.
   #floorDirty = null;
@@ -291,6 +298,11 @@ export class Fabric {
         // folds uncommitted rows too. Evict on rollback so the cache can
         // never outlive the rows that produced it (w43-store F-1).
         this._keyDeathCache.clear();
+        // The residue-claim cursor latches anchored divergent/heal claims
+        // from rows it scanned mid-tx — a doomed append's claim must die
+        // with it or the next consult convicts a heal that never
+        // committed (same phantom class as _keyDeathCache above).
+        this.#residueScan?.clear();
         // The tx-window facts memo lives outside _keyDeathCache: its hit
         // key still matches because _auditAppends is not decremented by a
         // rollback, so without this eviction the window keeps serving
@@ -405,7 +417,7 @@ export class Fabric {
     // (w46-store M-2). The marker row is never deletable in-band on a
     // live deployment.
     const markerGuardSql = "CREATE TRIGGER aad_marker_keep BEFORE DELETE ON meta_kv WHEN OLD.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END";
-    const markerGuardUpdSql = "CREATE TRIGGER aad_marker_keep_upd BEFORE UPDATE ON meta_kv WHEN OLD.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END";
+    const markerGuardUpdSql = "CREATE TRIGGER aad_marker_keep_upd BEFORE UPDATE ON meta_kv WHEN OLD.key='aad_migration' OR NEW.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END";
     const markerGuardInsSql = "CREATE TRIGGER aad_marker_keep_ins BEFORE INSERT ON meta_kv WHEN NEW.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END";
     const dropAadMarker = (db, t) => {
       db.exec('DROP TRIGGER IF EXISTS aad_marker_keep');
@@ -414,9 +426,11 @@ export class Fabric {
       try { db.prepare("DELETE FROM meta_kv WHERE tenant=? AND key='aad_migration'").run(t); }
       catch (e) { if (/no such (table|column)|malformed|not a database/i.test(e?.message ?? '')) throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e }); throw e; }
       finally {
-        db.exec(`CREATE TRIGGER IF NOT EXISTS ${markerGuardSql.slice('CREATE TRIGGER '.length)}`);
-        db.exec(`CREATE TRIGGER IF NOT EXISTS ${markerGuardUpdSql.slice('CREATE TRIGGER '.length)}`);
-        db.exec(`CREATE TRIGGER IF NOT EXISTS ${markerGuardInsSql.slice('CREATE TRIGGER '.length)}`);
+        // Plain CREATE — an impostor under our name must not survive the
+        // recreate as a no-op; the drops above already cleared it.
+        db.exec(`CREATE TRIGGER ${markerGuardSql.slice('CREATE TRIGGER '.length)}`);
+        db.exec(`CREATE TRIGGER ${markerGuardUpdSql.slice('CREATE TRIGGER '.length)}`);
+        db.exec(`CREATE TRIGGER ${markerGuardInsSql.slice('CREATE TRIGGER '.length)}`);
       }
     };
     for (const t of new Set([...this.store.aadMigration.keys(), ...this.target.aadMigration.keys(), ...migPending.keys()])) {
@@ -1501,19 +1515,23 @@ export class Fabric {
       // BOTH surface — a second heal can never overwrite the first
       // divergent content off the report (w57-seal F1).
       const healedRows = this.store._stmt("SELECT key,value FROM meta_kv WHERE tenant=? AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.')").all(t) ?? [];
+      const residueClaims = new Set(healedRows.map(hr => hr.value));
       for (const hr of healedRows) {
         const healed = hr.value;
         const hp = typeof healed === 'string' ? healed.split(':') : null;
         const hs = hp !== null && /^\d+$/.test(hp[0]) ? Number(hp[0]) : undefined;
         const claimed = hp !== null && hp.length > 1 ? hp.slice(1).join(':') : null;
-        let anchored = false, anchorPresent = false;
-        if (Number.isSafeInteger(hs) && claimed !== null) {
-          const row = this.store._stmt('SELECT envelope FROM audit WHERE tenant=? AND seq=?').get(t, hs);
-          anchorPresent = typeof row?.envelope === 'string';
-          if (anchorPresent) {
-            try { anchored = verifySigned(JSON.parse(row.envelope), this.auditPublicKeys(t), 'audit')?.metadata?.fold_floor_divergent === claimed; }
-            catch { anchored = false; }
-          }
+        // Anchor presence is probed independent of the claim's shape — a
+        // malformed residue value must not launder an anchor murder into
+        // a heal-drop on a live anchor (w58-seal F-3).
+        const row = Number.isSafeInteger(hs)
+          ? this.store._stmt('SELECT envelope FROM audit WHERE tenant=? AND seq=?').get(t, hs)
+          : undefined;
+        const anchorPresent = typeof row?.envelope === 'string';
+        let anchored = false;
+        if (anchorPresent && claimed !== null) {
+          try { anchored = verifySigned(JSON.parse(row.envelope), this.auditPublicKeys(t), 'audit')?.metadata?.fold_floor_divergent === claimed; }
+          catch { anchored = false; }
         }
         if (anchored) this.#wmTamperSet(t, { kind: 'floor_marker_healed', seq: hs, healed_marker: claimed });
         else {
@@ -1524,7 +1542,59 @@ export class Fabric {
           this.#wmTamperSet(t, { kind: 'floor_marker_healed_unanchored', seq: Number.isSafeInteger(hs) ? hs : undefined, healed_marker: String(healed).slice(0, 200) });
         }
       }
-      const marker = this.store._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor'").get(t)?.value;
+      // Chain-anchored enumeration: EVERY signed envelope carrying
+      // fold_floor_divergent names a heal the residue plane must carry.
+      // A file-level wipe (drop the keep triggers, delete the rows,
+      // restart) erased the conviction unnamed — the anchor the row
+      // pointed at is itself the durable evidence (w58-fv F-1, w58-store
+      // F-1, same pendingScan doctrine as the aad marker).
+      // The enumeration is cursor-incremental per tenant: claims latch,
+      // so a pure-append window re-reads only the new rows instead of
+      // respelling the whole table on every fold call (the seq guard
+      // lands inserts only at the tip — growth bounded by seq is exactly
+      // the appended span). Any count/max divergence — a deleted row, a
+      // seal renumber, a mid-table rewrite the cursor cannot see —
+      // discards the cursor for a full rescan, and a respelled envelope
+      // can never un-name a claim the cursor already latched. A rollback
+      // clears the whole cursor on the tx edge, so a doomed divergent
+      // row mints no standing claim (w43-store F-1 phantom class).
+      const scan = (this.#residueScan ??= new Map()).get(t)
+        ?? { seq: 0, count: 0, claims: new Set(), retired: new Set() };
+      const scanShape = (this.#residueShapeStmt ??= this.store._stmt('SELECT COUNT(*) c, COALESCE(MAX(seq),0) m FROM audit WHERE tenant=?')).get(t);
+      const absorb = row => {
+        let env; try { env = JSON.parse(row.envelope); } catch { return; }
+        try { verifySigned(env, this.auditPublicKeys(t), 'audit'); }
+        catch { /* unverifiable row — its own verifier names it elsewhere */ return; }
+        if (env?.payload?.type === 'FOLD_RESIDUE_RETIRED')
+          for (const c of env.payload?.metadata?.retired_claims ?? []) if (typeof c === 'string') scan.retired.add(c);
+        const marker = env?.payload?.metadata?.fold_floor_divergent;
+        if (typeof marker === 'string') scan.claims.add(`${row.seq}:${marker}`);
+      };
+      if (scanShape.m !== scan.seq || scanShape.c !== scan.count) {
+        const appendOnly = scanShape.m > scan.seq && scanShape.c === scan.count + (scanShape.m - scan.seq);
+        if (!appendOnly) { scan.claims.clear(); scan.retired.clear(); scan.seq = 0; scan.count = 0; }
+        for (const row of (this.#residueLikeStmt ??= this.store._stmt("SELECT seq,envelope FROM audit WHERE tenant=? AND seq>? AND (envelope LIKE '%fold_floor_divergent%' OR envelope LIKE '%FOLD_RESIDUE_RETIRED%')")).all(t, scan.seq)) absorb(row);
+        scan.seq = scanShape.m; scan.count = scanShape.c;
+      }
+      this.#residueScan.set(t, scan);
+      const standingMarker = this.store._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor'").get(t)?.value;
+      // Heals a previous report already consumed retire with an anchored
+      // FOLD_RESIDUE_RETIRED record — the signed envelope carries the
+      // claims it deleted, so the enumeration below skips every claim a
+      // delivered report has retired (without it, a legitimately retired
+      // residue row would be re-convicted on every later seal).
+      for (const claim of scan.claims) {
+        const cut = claim.indexOf(':');
+        const claimSeq = Number(claim.slice(0, cut)), marker = claim.slice(cut + 1);
+        // A divergent claim names a heal only when the marker actually
+        // moved — a refused guarded update leaves the divergent marker
+        // standing (the malformed arm below convicts it), so no
+        // residue row was ever owed (w56-1).
+        if (marker === standingMarker) continue;
+        if (!residueClaims.has(claim) && !scan.retired.has(claim))
+          this.#wmTamperSet(t, { kind: 'floor_marker_healed', seq: claimSeq, healed_marker: marker });
+      }
+      const marker = standingMarker;
       const parts = typeof marker === 'string' ? marker.split(':') : null;
       const markerSeq = parts && /^\d+$/.test(parts[0]) ? Number(parts[0]) : undefined;
       // A marker that honest code can never emit ('garbage', a bare hash,
@@ -1709,8 +1779,13 @@ export class Fabric {
     // report must both surface, never collapse into the newest
     // (w57-seal F1).
     const flat = (kind, f) => {
-      if (Array.isArray(f?.heals) && f.heals.length > 0)
-        return f.heals.map(h => ({ tenant_id: tenant, kind, ...(h.seq !== undefined ? { seq: h.seq } : {}), ...(h.healed_marker !== undefined ? { healed_marker: h.healed_marker } : {}) }));
+      if (Array.isArray(f?.heals) && f.heals.length > 0) {
+        const rows = f.heals.map(h => ({ tenant_id: tenant, kind, ...(h.seq !== undefined ? { seq: h.seq } : {}), ...(h.healed_marker !== undefined ? { healed_marker: h.healed_marker } : {}) }));
+        // The heals cap is an envelope, not a deletion — the report
+        // must still say heals were observed beyond it (w58-seal F-2).
+        if (f.heals_dropped) rows.push({ tenant_id: tenant, kind, heals_dropped: f.heals_dropped });
+        return rows;
+      }
       return [{ tenant_id: tenant, kind, ...evidence(f) }];
     };
     return [...flat(entry.kind, entry),
@@ -1728,7 +1803,17 @@ export class Fabric {
     // can never overwrite the first off the surface (w57-seal F1).
     const heal = (flag.kind === 'floor_marker_healed' || flag.kind === 'floor_marker_healed_unanchored')
       ? { seq: flag.seq, healed_marker: flag.healed_marker } : undefined;
-    const pushHeal = target => { const arr = (target.heals ??= []); if (!arr.some(h => h.seq === heal.seq && h.healed_marker === heal.healed_marker)) arr.push(heal); };
+    // Planted residue rows are unbounded — the dedupe scan and the
+    // report build must stay linear and bounded. Past the cap the
+    // heals_dropped counter still attests every heal was observed
+    // (w58-seal F-2).
+    const HEALS_CAP = 256;
+    const pushHeal = target => {
+      const arr = (target.heals ??= []);
+      if (arr.some(h => h.seq === heal.seq && h.healed_marker === heal.healed_marker)) return;
+      if (arr.length >= HEALS_CAP) { target.heals_dropped = (target.heals_dropped ?? 0) + 1; return; }
+      arr.push(heal);
+    };
     const cur = this.#wmTamper.get(tenant);
     if (cur === undefined) { if (heal) flag.heals = [heal]; this.#wmTamper.set(tenant, flag); return; }
     if (cur.kind === flag.kind) { if (flag.seq !== undefined) cur.seq = flag.seq; if (flag.healed_marker !== undefined) cur.healed_marker = flag.healed_marker; if (heal) pushHeal(cur); return; }
@@ -1755,23 +1840,46 @@ export class Fabric {
     // keep their healed_marker forever. keepResidue skips the delete —
     // #wmTamperDropHeal retires a flag whose anchor provably died while
     // sibling residue rows still owe an unreported conviction (w57-fv NIT-2).
+    const cur0 = this.#wmTamper.get(tenant);
     if (!keepResidue && (kind === 'floor_marker_healed' || kind === 'floor_marker_healed_unanchored'))
       try {
-        // The fold_residue_keep guards cover every residue row — the
-        // sanctioned retire drops them for this delete and recreates
-        // verbatim immediately, so a file-writer delete aborts in-band
-        // (w57-runtime F-1, same discipline as the aad marker's).
-        this.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
-        this.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
-        this.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
-        try { this.store._stmt("DELETE FROM meta_kv WHERE tenant=? AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.')").run(tenant); }
-        finally {
-          this.store.db.exec("CREATE TRIGGER IF NOT EXISTS fold_residue_keep BEFORE DELETE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
-          this.store.db.exec("CREATE TRIGGER IF NOT EXISTS fold_residue_keep_upd BEFORE UPDATE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
-          this.store.db.exec("CREATE TRIGGER IF NOT EXISTS fold_residue_keep_ins BEFORE INSERT ON meta_kv WHEN NEW.key='fold_floor_healed' OR substr(NEW.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
+        // Conviction-scoped, never tenant-wide: only the residue rows
+        // THIS retiring flag's consulted heals name may go — a peer
+        // heal minted after the last consult keeps its row and reports
+        // on the next pass (w58-store F-2). The drop+delete+create runs
+        // inside a savepoint so a crash on an autocommit caller cannot
+        // leave the guards absent on disk (w58-store F-2).
+        const flag = cur0 === undefined ? undefined : (cur0.kind === kind ? cur0 : cur0.masked?.get(kind));
+        const seqs = new Set([flag?.seq, ...(flag?.heals ?? []).map(h => h.seq)].filter(Number.isSafeInteger));
+        const keys = [...seqs].map(s => `fold_floor_healed.${s}`);
+        // The legacy un-keyed row names its seq in the value — it joins
+        // the delete only when a retired heal claims that seq.
+        const bare = this.store._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_healed'").get(tenant)?.value;
+        const bareSeq = typeof bare === 'string' && /^\d+:/.test(bare) ? Number(bare.split(':')[0]) : undefined;
+        if (Number.isSafeInteger(bareSeq) && seqs.has(bareSeq)) keys.push('fold_floor_healed');
+        const db = this.store.db;
+        // Anchor the retirement BEFORE the delete: the claims a delivered
+        // report consumed are written to the signed chain, so a later
+        // consult can tell a retired residue row (report reached) from a
+        // wiped one (file-level delete) — without this the chain-side
+        // enumeration would re-convict every reported heal forever.
+        if (keys.length) {
+          const claims = this.store._stmt(`SELECT value FROM meta_kv WHERE tenant=? AND key IN (${keys.map(() => '?').join(',')})`).all(tenant, ...keys).map(r => r.value).filter(v => typeof v === 'string');
+          if (claims.length) this.store.audit(tenant, 'FOLD_RESIDUE_RETIRED', 'seal', 'audit', { retired_claims: claims.slice(0, 512), retired_total: claims.length }, this.clock());
         }
+        db.exec('SAVEPOINT residue_retire');
+        try {
+          db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
+          db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
+          db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
+          if (keys.length) db.prepare(`DELETE FROM meta_kv WHERE tenant=? AND key IN (${keys.map(() => '?').join(',')})`).run(tenant, ...keys);
+          db.exec("CREATE TRIGGER fold_residue_keep BEFORE DELETE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
+          db.exec("CREATE TRIGGER fold_residue_keep_upd BEFORE UPDATE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' OR NEW.key='fold_floor_healed' OR substr(NEW.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
+          db.exec("CREATE TRIGGER fold_residue_keep_ins BEFORE INSERT ON meta_kv WHEN NEW.key='fold_floor_healed' OR substr(NEW.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
+        } catch (e) { try { db.exec('ROLLBACK TO residue_retire'); } catch { /* savepoint may already be gone */ } throw e; }
+        finally { try { db.exec('RELEASE residue_retire'); } catch { /* rolled back or never opened */ } }
       } catch { /* meta_kv may be the dropped table — the residue consult names that separately */ }
-    const cur = this.#wmTamper.get(tenant);
+    const cur = cur0;
     if (cur === undefined) return;
     if (cur.kind === kind) {
       const nxt = cur.masked?.entries().next().value;
@@ -1792,7 +1900,11 @@ export class Fabric {
     const e = this.#wmTamper.get(tenant);
     if (!e) return;
     const strip = f => {
-      if (!f || f.kind !== kind || !Array.isArray(f.heals)) return;
+      // Masked slot VALUES store {seq, healed_marker, heals} with no
+      // kind field — the map key already carries it; checking f.kind
+      // here made the masked arm dead code and let a murdered anchor
+      // leave a stale conviction latched (w58-seal F-1).
+      if (!f || !Array.isArray(f.heals)) return;
       f.heals = f.heals.filter(h => h.seq !== seq);
       const last = f.heals[f.heals.length - 1];
       if (last) { f.seq = last.seq; f.healed_marker = last.healed_marker; }
@@ -5221,10 +5333,13 @@ export class Fabric {
       // verifies convicts the table the way a fresh page would.
       reVerify = () => {
         if (idx.maxSeq <= 0) return;
-        // The window is sized to the chain: ceil(n/32) rows per fold keeps
-        // a full-prefix re-verification inside 32 folds without making a
-        // fold on a short chain pay eight signature checks (NFR-PERF-004).
-        const span = Math.max(1, Math.ceil(idx.maxSeq / 32));
+        // The window is sized to the chain but capped: ceil(n/32) rows
+        // per fold covers the full prefix inside 32 folds on chains up
+        // to ~4k rows, and the 16-row cap keeps a fold's cost flat as
+        // the chain grows past that — coverage stays complete, just
+        // spread over more folds (w58: an uncapped span priced every
+        // evaluate() call linearly in chain length, NFR-PERF-004).
+        const span = Math.min(16, Math.max(1, Math.ceil(idx.maxSeq / 32)));
         const from = idx.integrityCursor ?? 1;
         const to = Math.min(idx.maxSeq, from + span - 1);
         idx.integrityCursor = to >= idx.maxSeq ? 1 : to + 1;

@@ -259,11 +259,20 @@ test('w53-ledger H-2/H-3: a false authenticated claim and a .js dispatch surface
 // marker-free).
 test('w53-ledger M: the marker gate flags the widened vocabulary too', t => {
   const src = readFileSync(new URL('../scripts/check.mjs', import.meta.url), 'utf8');
-  // The widened pattern spells each letter through an interpolated
-  // separator class (space/tab/NBSP/dot/underscore/dash and none at
-  // all) — pin the class plus the fullwidth coverage and the
-  // single-word markers (w55-ledger: the old [ ._-] literal pins died
-  // with the class).
-  for (const [w, lit] of [['T' + 'BD', "T' + 'BD"], ['W' + 'IP', "W' + 'IP"], ['HA' + 'CK', "HA' + 'CK"], ['separated spellings', '[ \\\\t\\\\u00A0._-]'], ['fullwidth spellings', 'Ｔ']])
+  // The widened pattern spells each letter through an interpolation so
+  // this table never spells the marker words itself (w58-fv F-7): the
+  // separator is any non-alphanumeric run up to three chars — slashes,
+  // pluses, dashes, spaces, dots, NBSP and none at all — and the word
+  // vocabulary covers the separated and fullwidth forms (w55-ledger:
+  // literal pins track the shipped interpolation shape).
+  const sep = "[^A-Za-z0-9]{0,3}";
+  for (const [w, lit] of [
+    ['T' + 'BD', "${'T'}" + sep + "${'B'}" + sep + "${'D'}"],
+    ['W' + 'IP', "${'I'}" + sep + "${'P'}"],
+    ['HA' + 'CK', "${'H'}" + sep + "${'A'}" + sep + "${'C'}" + sep + "${'K'}"],
+    ['FI' + 'XME', "${'F'}" + sep + "${'I'}" + sep + "${'X'}" + sep + "${'M'}"],
+    ['separated class', sep],
+    ['fullwidth spellings', "${'Ｔ'}"],
+  ])
     assert.ok(src.includes(lit), `marker ${w} must be in the gate (split literal ${lit})`);
 });
