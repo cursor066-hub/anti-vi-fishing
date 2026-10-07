@@ -483,6 +483,18 @@ export class SimulatedTarget {
     this._corruptGrantRows = corrupt;
     return out;
   }
+  // Row-key existence probe — the ledger revoke resolver names rows,
+  // while allGrants names the payloads inside them; a row whose
+  // payload grant_id diverges from its key stays revocable under
+  // either name (w62-fv F-5).
+  grantRowExists(tenant, grant_id) {
+    const r = this._stmt('SELECT value FROM grants WHERE tenant=? AND grant_id=?').get(tenant, grant_id);
+    if (!r) return false;
+    // A row that stands but cannot be read is a corpse, not a live grant —
+    // resolving it live would wedge the committed revocation on the
+    // dataplane flip (w62-runtime F-1).
+    try { this._dec(r.value, tenant, AAD('target', 'grant', tenant, grant_id)); return true; } catch { return false; }
+  }
   allGrants(tenant) {
     const out = []; let corrupt = 0;
     for (const r of this._schemaGuard(() => this._stmt('SELECT grant_id, value FROM grants WHERE tenant=?').all(tenant))) {
@@ -497,12 +509,21 @@ export class SimulatedTarget {
     // pre-revocation value (w21-store F-4), and tx() truncates the WAL
     // residue at commit (w21-store F-5).
     return this.tx(() => {
-      const row = this._stmt('SELECT value FROM grants WHERE tenant=? AND grant_id=?').get(tenant, grant_id);
+      let row = this._stmt('SELECT value FROM grants WHERE tenant=? AND grant_id=?').get(tenant, grant_id);
+      let rowKey = grant_id;
+      if (!row) {
+        // The caller named the payload's grant_id while the row is
+        // keyed differently — re-probe by payload before naming a
+        // corpse, so resolve and flip name the same grant (w62-fv F-5).
+        for (const r of this._schemaGuard(() => this._stmt('SELECT grant_id, value FROM grants WHERE tenant=?').all(tenant))) {
+          try { if (this._dec(r.value, tenant, AAD('target', 'grant', tenant, r.grant_id)).grant_id === grant_id) { row = r; rowKey = r.grant_id; break; } } catch { /* unreadable — not a resolvable name */ }
+        }
+      }
       requireThat(row, 'INV-404-NOT-FOUND', 'Grant not found', 404);
-      const value = this._dec(row.value, tenant, AAD('target', 'grant', tenant, grant_id));
+      const value = this._dec(row.value, tenant, AAD('target', 'grant', tenant, rowKey));
       value.revoked = true;
       this._deleted = true; // revoke supersedes ciphertext (w8-fixverify F3)
-      this._landed(() => this._stmt('UPDATE grants SET value=? WHERE tenant=? AND grant_id=?').run(encrypt(value, this.key(tenant), AAD('target', 'grant', tenant, grant_id)), tenant, grant_id), 'grant revocation');
+      this._landed(() => this._stmt('UPDATE grants SET value=? WHERE tenant=? AND grant_id=?').run(encrypt(value, this.key(tenant), AAD('target', 'grant', tenant, rowKey)), tenant, rowKey), 'grant revocation');
       this._dirtSeq = (this._dirtSeq ?? 0) + 1;
       return value;
     });

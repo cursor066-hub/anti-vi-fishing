@@ -1517,9 +1517,7 @@ export class Fabric {
     const db = this.store.db;
     db.exec('SAVEPOINT residue_drain');
     try {
-      db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
-      db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
-      db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
+      let env, merged;
       if (Array.isArray(retired) && retired.length) {
         // The consumption record lands BEFORE the value delete: a wedged
         // marker write aborts the whole savepoint, leaving the residue
@@ -1531,15 +1529,31 @@ export class Fabric {
         // the claim set now lives inside an audit-signed envelope.
         const prev = db.prepare("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(tenant)?.value;
         let prior = [];
-        try { prior = this.#retiredClaimsOf(tenant, JSON.parse(prev ?? 'null')) ?? []; } catch { prior = []; }
-        const merged = [...new Set([...prior, ...retired])].slice(-4096);
-        const env = this.#auditSigners[tenant].sign({ tenant_id: tenant, fold_floor_retired: merged }, 'audit');
+        try { prior = this.#retiredClaimsOf(tenant, JSON.parse(prev ?? 'null'))?.retired ?? []; } catch { prior = []; }
+        // Freshly retired claims head the merge — a full marker never evicts
+        // this drain's own binding in favour of older prior claims
+        // (w62-runtime F-4).
+        merged = [...new Set([...retired, ...prior])].slice(0, 4096);
+        // marker_seq binds the signature to the committed chain tip the
+        // consult sees: a signer already dead at that tip could never have
+        // minted the marker, so post-death envelopes are refused (w62-seal F-1).
+        const tip = (() => { try { return this._chainFacts(tenant).throughSeq ?? 0; } catch { return 0; } })();
+        // The sign consults the fold (`_signingKeyId` → `_auditIndex`),
+        // whose residue-mint window legitimately re-arms the keep
+        // triggers — so it runs BEFORE the drops below, or the UPSERT
+        // would raise its own guard (w60-fv F-10).
+        env = this.#auditSigners[tenant].sign({ tenant_id: tenant, fold_floor_retired: merged, marker_seq: tip }, 'audit');
+      }
+      db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
+      db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
+      db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
+      if (env !== undefined) {
         db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES (?, 'fold_floor_retired', ?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, JSON.stringify({ claims: merged, env }));
         // Landed probe: the UPSERT is the only write in the drain that
         // was never re-read — a foreign RAISE(IGNORE) or splice eating it
         // left claims bound to the mint alone (w61-runtime F-4).
         const back = db.prepare("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(tenant)?.value;
-        const backClaims = (() => { try { return this.#retiredClaimsOf(tenant, JSON.parse(back ?? 'null')); } catch { return null; } })();
+        const backClaims = (() => { try { return this.#retiredClaimsOf(tenant, JSON.parse(back ?? 'null'))?.retired ?? null; } catch { return null; } })();
         requireThat(Array.isArray(backClaims) && retired.every(c => backClaims.includes(c)), 'INV-409-INTEGRITY', 'fold-floor retired marker refused after write — foreign trigger side-effects', 409);
       }
       for (let ci = 0; ci < values.length; ci += 500) {
@@ -1553,14 +1567,34 @@ export class Fabric {
   // The `fold_floor_retired` claim list, iff the marker row carries it
   // inside an audit-signed envelope bound to this tenant. A bare array or
   // an envelope that does not verify returns null — the consult names
-  // that content instead of consulting it (w61-seal F-1).
+  // that content instead of consulting it (w61-seal F-1). The unsigned
+  // `claims` twin, when present, must be byte-identical to the signed set:
+  // an honest writer serializes the same array twice, so any divergence —
+  // extra unsigned claims, a trimmed twin, a reorder — is tamper evidence
+  // named `forged`, never consulted (w62-runtime F-3, w62-seal F-7).
   #retiredClaimsOf(tenant, parsed) {
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-    if (!Array.isArray(parsed.claims) || parsed.env === undefined) return null;
+    if (parsed.env === undefined) return null;
     try {
       const pl = verifySigned(parsed.env, this.auditPublicKeys(tenant), 'audit');
       if (pl?.tenant_id !== tenant || !Array.isArray(pl?.fold_floor_retired)) return null;
-      return pl.fold_floor_retired.filter(c => typeof c === 'string').slice(0, 8192);
+      // The signed marker asserts the committed tip it consumed to: a
+      // signer dead BEFORE that tip could never have minted it — refuse
+      // post-death signatures (w62-seal F-1).
+      const kid = parsed.env?.protected?.key_id;
+      if (Number.isSafeInteger(pl.marker_seq) && typeof kid === 'string') {
+        const died = this._chainFacts(tenant).dead.get(kid);
+        if (died !== undefined && died < pl.marker_seq) return null;
+      }
+      // The unsigned `claims` twin is advisory — the env is the sole
+      // authority, so a missing twin authenticates (w62-seal F-7); when
+      // present it must still match the signed set byte-for-byte
+      // (w62-runtime F-3).
+      if (parsed.claims !== undefined && JSON.stringify(parsed.claims) !== JSON.stringify(pl.fold_floor_retired)) return null;
+      const retiring = Array.isArray(pl?.fold_floor_retiring)
+        ? pl.fold_floor_retiring.filter(c => typeof c === 'string')
+        : [];
+      return { retired: pl.fold_floor_retired.filter(c => typeof c === 'string').slice(0, 8192), retiring };
     } catch { return null; }
   }
   _foldFloorMarker(t, attestedFloor) {
@@ -1626,9 +1660,15 @@ export class Fabric {
         // A cut over a retire mint carries it only as an inert lifecycle
         // entry — its consumed claims re-apply off the signature-verified
         // carry content, or any honest cut would revive them (w59-seal F-2).
-        for (const lc of pl?.metadata?.lifecycle_carryover ?? [])
+        for (const lc of pl?.metadata?.lifecycle_carryover ?? []) {
           if (lc?.type === 'FOLD_RESIDUE_RETIRED')
             for (const c of lc?.metadata?.retired_claims ?? []) if (typeof c === 'string') scan.retired.add(c);
+          // A doomed AUDIT_SEALED carried as an lc entry keeps its
+          // metadata verbatim — its own fold set is the same retirement
+          // evidence and must union as well (w62-seal F-3).
+          if (lc?.type === 'AUDIT_SEALED')
+            for (const c of lc?.metadata?.retired_claims_fold ?? []) if (typeof c === 'string') scan.retired.add(c);
+        }
         const marker = pl?.metadata?.fold_floor_divergent;
         if (typeof marker === 'string') scan.claims.add(`${row.seq}:${marker}`);
       };
@@ -1654,19 +1694,25 @@ export class Fabric {
       // for a claim to re-fire (w60-seal F-1). Only signature-verified
       // content unions — an unsigned marker row was a write-to-retire
       // oracle that muted real convictions (w61-seal F-1).
+      let retiring = new Set();
       try {
         const mv = this.store._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(t)?.value;
         let parsed = null, malformed = false;
         try { parsed = JSON.parse(mv ?? 'null'); } catch { malformed = mv !== undefined; }
         if (malformed) this.#wmTamperSet(t, { kind: 'floor_marker_retired_malformed', seq: 0 });
-        else if (parsed !== null) {
+        // The taxonomy keys on the ROW's presence, not the parsed shape —
+        // a literal `null` value row is a murdered marker, not a missing
+        // one, so it convicts unauthenticated like any unsigned content
+        // (w62-seal F-6).
+        else if (mv !== undefined) {
           const authed = this.#retiredClaimsOf(t, parsed);
           if (authed !== null) {
-            for (const c of authed) {
-              if (!/^\d+:\S/.test(c)) this.#wmTamperSet(t, { kind: 'floor_marker_retired_malformed', seq: 0 });
+            retiring = new Set(authed.retiring);
+            for (const c of authed.retired) {
+              if (!/^\d+:.+/s.test(c)) this.#wmTamperSet(t, { kind: 'floor_marker_retired_malformed', seq: 0 });
               else scan.retired.add(c);
             }
-          } else this.#wmTamperSet(t, { kind: Array.isArray(parsed) ? 'floor_marker_retired_unauthenticated' : 'floor_marker_retired_forged', seq: 0 });
+          } else this.#wmTamperSet(t, { kind: parsed === null || Array.isArray(parsed) ? 'floor_marker_retired_unauthenticated' : 'floor_marker_retired_forged', seq: 0 });
         }
       } catch (e) { if (e instanceof InvariantError) throw e; /* stmt failure — the residue consult names dropped meta_kv below */ }
       this.#residueScan.set(t, scan);
@@ -1674,7 +1720,7 @@ export class Fabric {
       // benign dust — the sanctioned delete was defeated or never ran.
       // Name it and drain it through the same guarded delete the retire
       // uses (w60-seal F-2).
-      const retiredEcho = new Set();
+      const retiredEcho = new Set(), quietEcho = new Set();
       for (const hr of healedRows) {
         const healed = hr.value;
         // A claim already consumed by an anchored FOLD_RESIDUE_RETIRED
@@ -1682,8 +1728,15 @@ export class Fabric {
         // retirement is dead weight, not fresh evidence (w59-seal F-1).
         // Claims of a retire still in flight skip the arm: the mint's own
         // post-insert consult used to latch the echo on every honest
-        // retire before the drain could run (w61-seal F-3).
-        if (scan.retired.has(healed) && !(this.#retireInFlight?.get(t)?.has(healed))) { retiredEcho.add(healed); continue; }
+        // retire before the drain could run (w61-seal F-3). The durable
+        // `retiring` set inside the marker's signed envelope extends the
+        // same suppression across a crash or a second process — covered
+        // rows still drain, only silently (w62-seal F-4).
+        if (scan.retired.has(healed)) {
+          if (this.#retireInFlight?.get(t)?.has(healed) || retiring.has(healed)) quietEcho.add(healed);
+          else retiredEcho.add(healed);
+          continue;
+        }
         const hp = typeof healed === 'string' ? healed.split(':') : null;
         const hs = hp !== null && /^\d+$/.test(hp[0]) ? Number(hp[0]) : undefined;
         const claimed = hp !== null && hp.length > 1 ? hp.slice(1).join(':') : null;
@@ -1710,9 +1763,9 @@ export class Fabric {
           this.#wmTamperSet(t, { kind: 'floor_marker_healed_unanchored', seq: Number.isSafeInteger(hs) ? hs : undefined, healed_marker: String(healed).slice(0, 200), claim: healed });
         }
       }
-      if (retiredEcho.size) {
-        this.#wmTamperSet(t, { kind: 'floor_marker_residue_retired_echo', seq: 0 });
-        try { this.#residueValueDelete(t, [...retiredEcho]); }
+      if (retiredEcho.size) this.#wmTamperSet(t, { kind: 'floor_marker_residue_retired_echo', seq: 0 });
+      if (retiredEcho.size || quietEcho.size) {
+        try { this.#residueValueDelete(t, [...retiredEcho, ...quietEcho]); }
         catch { /* residue plane may be dropped — the flag stands */ }
       }
       const standingMarker = this.store._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor'").get(t)?.value;
@@ -1798,10 +1851,22 @@ export class Fabric {
     } catch (e) {
       // A bare swallow muted the whole consult on any throw — a dropped
       // or mutated meta_kv used to silence the marker plane with no
-      // record anywhere (w61-runtime F-3). Schema-level failures surface
-      // in the ledger taxonomy; InvariantErrors keep their own verdict.
+      // record anywhere (w61-runtime F-3). But every non-schema fault is
+      // infrastructure, not surgery: BUSY/LOCKED and the io/disk family
+      // must not mint false tamper evidence (the same errcode split
+      // store.tx applies, w62-runtime F-2). Only schema divergence stays
+      // INTEGRITY — dropping meta_kv IS the attack this consult exists
+      // to name. InvariantErrors keep their own verdict.
       if (e instanceof InvariantError) throw e;
-      throw new InvariantError('INV-409-INTEGRITY', 'Residue marker consult failed (meta_kv dropped or diverged) — tamper evidence', 409, { cause: e });
+      const msg = e?.message ?? '';
+      const base = typeof e?.errcode === 'number' ? e.errcode & 0xFF : null;
+      if (/no such table|no such column|not a database|malformed/i.test(msg))
+        throw new InvariantError('INV-409-INTEGRITY', 'Residue marker consult failed (meta_kv dropped or diverged) — tamper evidence', 409, { cause: e });
+      if (e?.errcode === 5 || e?.errcode === 6 || base === 5 || base === 6 || /database .*locked/i.test(msg))
+        throw new InvariantError('INV-503-LEDGER', 'Residue marker consult hit ledger contention — retry', 503, { cause: e });
+      if (base !== null && [8, 10, 11, 13, 14, 15].includes(base))
+        throw new InvariantError('INV-503-STORAGE', `Residue marker consult hit a storage fault: ${msg}`, 503, { cause: e });
+      throw new InvariantError('INV-503-LEDGER', `Residue marker consult engine fault: ${msg}`, 503, { cause: e });
     }
   }
   _headWatermark(tenant) {
@@ -2040,23 +2105,56 @@ export class Fabric {
           for (const r of this.store._stmt("SELECT value FROM meta_kv WHERE tenant=? AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.')").all(tenant))
             if (typeof r.value === 'string') claimSet.add(r.value);
         const claims = [...claimSet];
-        // Anchor the retirement BEFORE the delete: the claims a delivered
-        // report consumed are written to the signed chain, so a later
-        // consult can tell a retired residue row (report reached) from a
-        // wiped one (file-level delete) — without this the chain-side
-        // enumeration would re-convict every reported heal forever. The
-        // mint pages at 512 claims per row — the first-512 cap used to
-        // leave claims 513+ bound to the marker alone, a single-object
-        // kill set (w61-seal F-4 / w61-fv F-2).
+        // Only claims a real residue row can honour may be signed: a
+        // non-`seq:marker` value is planted garbage — drain the row but
+        // never mint it into the marker (w62-seal F-5); and a claim whose
+        // seq outruns the committed tip attests a heal that has not
+        // anchored — premature, drained but unsigned (w62-seal F-2).
+        const committedTip = (() => { try { return this._chainFacts(tenant).throughSeq ?? 0; } catch { return 0; } })();
+        const mintable = [];
+        for (const c of claims) {
+          // The claim shape is `seq:marker` — the marker half is free
+          // content (a divergent marker may itself carry a leading
+          // space, e.g. `17: 999999999:x`); what is unshaped is a value
+          // with no `seq:` head or an empty marker (w62-seal F-5).
+          if (!/^\d+:.+/s.test(c)) { this.#wmTamperSet(tenant, { kind: 'floor_marker_retired_unshaped', seq: 0 }); continue; }
+          const cs = Number(c.slice(0, c.indexOf(':')));
+          if (Number.isSafeInteger(cs) && cs > committedTip) { this.#wmTamperSet(tenant, { kind: 'floor_marker_residue_premature', seq: 0 }); continue; }
+          mintable.push(c);
+        }
         if (claims.length) {
           const inflight = this.#retireInFlight.get(tenant) ?? new Set();
           this.#retireInFlight.set(tenant, inflight);
           for (const c of claims) inflight.add(c);
           try {
-            const pages = Math.ceil(claims.length / 512);
+            // The in-flight window must be durable — a crash (or a second
+            // process) between mint-commit and drain otherwise re-derives
+            // the standing rows as tamper evidence. `fold_floor_retiring`
+            // rides inside the marker's signed envelope; the drain's own
+            // marker rewrite clears it (w62-seal F-4).
+            if (mintable.length) {
+              const db = this.store.db;
+              db.exec('SAVEPOINT residue_note');
+              try {
+                const prev = db.prepare("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(tenant)?.value;
+                let prior = [];
+                try { prior = this.#retiredClaimsOf(tenant, JSON.parse(prev ?? 'null'))?.retired ?? []; } catch { prior = []; }
+                // The sign re-enters the fold, whose residue-mint window
+                // re-arms the keep triggers — sign before dropping them
+                // (w60-fv F-10).
+                const noteEnv = this.#auditSigners[tenant].sign({ tenant_id: tenant, fold_floor_retired: prior, fold_floor_retiring: mintable, marker_seq: committedTip }, 'audit');
+                db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
+                db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
+                db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
+                db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES (?, 'fold_floor_retired', ?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, JSON.stringify({ claims: prior, env: noteEnv }));
+                for (const [, sql] of RESIDUE_KEEP_TRIGGERS) db.exec(sql);
+              } catch (e) { try { db.exec('ROLLBACK TO residue_note'); } catch { /* savepoint may already be gone */ } throw e; }
+              finally { try { db.exec('RELEASE residue_note'); } catch { /* rolled back or never opened */ } }
+            }
+            const pages = Math.ceil(mintable.length / 512);
             for (let pg = 0; pg < pages; pg++)
-              this.store.audit(tenant, 'FOLD_RESIDUE_RETIRED', 'seal', 'audit', { retired_claims: claims.slice(pg * 512, pg * 512 + 512), retired_page: pg + 1, retired_pages: pages, retired_total: claims.length }, this.clock());
-            this.#residueValueDelete(tenant, claims, claims);
+              this.store.audit(tenant, 'FOLD_RESIDUE_RETIRED', 'seal', 'audit', { retired_claims: mintable.slice(pg * 512, pg * 512 + 512), retired_page: pg + 1, retired_pages: pages, retired_total: mintable.length }, this.clock());
+            this.#residueValueDelete(tenant, claims, mintable);
             // The delete is probed, not trusted: a retired-claim value row
             // still standing afterwards means a splice or a re-grafted
             // guard defeated the drain — name it instead of reporting a
@@ -2447,7 +2545,17 @@ export class Fabric {
   _verifyKeys(t, klass) {
     const out = {};
     const cur = this.keys(t)[klass];
-    if (cur) out[cur.key_id] = { public_key: cur.public_key };
+    // Chain-fact key deaths ride the entries as `dead_at` — a positional
+    // bound verifySigned enforces against position-claiming payloads.
+    // The map itself must keep dead signers: revocation is not
+    // retroactive erasure, so their pre-death envelopes still verify
+    // (w62-fv F-4).
+    // `_chainFacts` reads the store — which does not exist yet while the
+    // store's own constructor bootstraps this key set for the audit-tail
+    // verify. dead_at is advisory there (revocation is never retroactive),
+    // so an unopened store simply emits entries without it (w62-fv F-4).
+    const dead = (() => { try { return this._chainFacts(t).dead; } catch { return new Map(); } })();
+    if (cur) out[cur.key_id] = { public_key: cur.public_key, ...(dead.has(cur.key_id) ? { dead_at: dead.get(cur.key_id) } : {}) };
     const needed = this._keyPurposes[klass] ?? [];
     for (const [kid, e] of this.vault.keys) if (this.ownsVaultKey(t, kid)
       && (e.purpose === 'any' || needed.every(x => (Array.isArray(e.purpose) ? e.purpose : [e.purpose]).includes(x)))
@@ -2457,10 +2565,10 @@ export class Fabric {
       // unauthenticated enrollment oracle for attested signers (w13-store
       // F4). Config-declared keys still verify through `cur`/retired above.
       && e.generated_inside !== false
-      && this._vaultAttested(kid, e.public_key)) out[kid] = { public_key: e.public_key };
+      && this._vaultAttested(kid, e.public_key)) out[kid] = { public_key: e.public_key, ...(e.revoked && cur?.key_id !== kid && !(this.keys(t).retired ?? []).some(r => r.key_id === kid) ? { revoked: true } : {}), ...(dead.has(kid) ? { dead_at: dead.get(kid) } : {}) };
     for (const e of this.keys(t).retired ?? []) {
       if (e.key_class && e.key_class !== klass) continue;
-      if (this.#declaredRetired[t]?.get(e.key_id) === e.public_key || this._vaultAttested(e.key_id, e.public_key)) out[e.key_id] = { public_key: e.public_key };
+      if (this.#declaredRetired[t]?.get(e.key_id) === e.public_key || this._vaultAttested(e.key_id, e.public_key)) out[e.key_id] = { public_key: e.public_key, ...(dead.has(e.key_id) ? { dead_at: dead.get(e.key_id) } : {}) };
     }
     return out;
   }
@@ -4002,7 +4110,7 @@ export class Fabric {
       // still cannot drop the retirement binding while the seal stands
       // (w60-seal F-1).
       const retiredFold = this.#residueScan.get(t)?.retired ?? new Set();
-      const sealWrite = this.store.audit(t, 'AUDIT_SEALED', p.subject_id, 'audit', { sealed_at_seq: prevPlSeq + 1, removed_count: removed.length, removed_head: removed[0] ?? null, removed_tail: removed.at(-1) ?? null, lived_until: livedUntil || null, spend_carryover: carrySpend.slice(0, CARRY_PAGE), access_carryover: carryAccess.slice(0, CARRY_PAGE), capabilities_cut: capsCut.slice(0, CARRY_PAGE), revocations_carryover: carryRevoked.slice(0, CARRY_PAGE), lifecycle_carryover: carryLifecycle.slice(0, CARRY_PAGE), carryover_pages: carryPages.length, carryover_totals: { spend: carrySpend.length, access: carryAccess.length, revocations: carryRevoked.length, capabilities: capsCut.length, lifecycle: carryLifecycle.length, mirrors_dropped: droppedMirrorCount, dropped_events: droppedEvents.length + droppedEventsOverflow, deleted_events: deletedRowsTotal, divergent_stored: divergentStored, deleted_gaps_total: deletedGapsTotal }, dropped_mirrors: droppedMirrors, dropped_events: droppedEvents.slice(0, CARRY_PAGE), deleted_gaps: deletedGaps.slice(0, 64), planted_floor_refs: plantedFloor.slice(0, 512), floor_derived: floorDerived.slice(0, 512), murdered_floor_refs: murderedFloor.slice(0, 512), retired_claims_fold: [...retiredFold].slice(0, 512), ...(abandonedHead ?? {}) }, now);
+      const sealWrite = this.store.audit(t, 'AUDIT_SEALED', p.subject_id, 'audit', { sealed_at_seq: prevPlSeq + 1, removed_count: removed.length, removed_head: removed[0] ?? null, removed_tail: removed.at(-1) ?? null, lived_until: livedUntil || null, spend_carryover: carrySpend.slice(0, CARRY_PAGE), access_carryover: carryAccess.slice(0, CARRY_PAGE), capabilities_cut: capsCut.slice(0, CARRY_PAGE), revocations_carryover: carryRevoked.slice(0, CARRY_PAGE), lifecycle_carryover: carryLifecycle.slice(0, CARRY_PAGE), carryover_pages: carryPages.length, carryover_totals: { spend: carrySpend.length, access: carryAccess.length, revocations: carryRevoked.length, capabilities: capsCut.length, lifecycle: carryLifecycle.length, mirrors_dropped: droppedMirrorCount, dropped_events: droppedEvents.length + droppedEventsOverflow, deleted_events: deletedRowsTotal, divergent_stored: divergentStored, deleted_gaps_total: deletedGapsTotal }, dropped_mirrors: droppedMirrors, dropped_events: droppedEvents.slice(0, CARRY_PAGE), deleted_gaps: deletedGaps.slice(0, 64), planted_floor_refs: plantedFloor.slice(0, 512), floor_derived: floorDerived.slice(0, 512), murdered_floor_refs: murderedFloor.slice(0, 512), retired_claims_fold: [...retiredFold].slice(0, 4096), ...(abandonedHead ?? {}) }, now);
       sealSeq = sealWrite?.envelope?.payload?.sequence ?? firstBad;
       for (let i = 0; i < carryPages.length; i++)
         this.store.audit(t, 'AUDIT_SEAL_CARRY', p.subject_id, 'audit', { seal_seq: sealSeq, page: i + 1, ...carryPages[i] }, now);
@@ -7848,9 +7956,12 @@ export class Fabric {
     }
     requireThat(['certificate', 'evidence', 'issuer', 'key', 'subject', 'device', 'capability', 'grant', 'token', 'perception-session'].includes(input.kind), 'INV-400-SCHEMA', 'Unsupported revocation type');
     // Hoisted out of the transaction callback: the dataplane flip below
-    // needs to know whether the grant resolved through its chain anchor
-    // only (w61-runtime F-2).
-    let grantAnchoredOnly = false;
+    // runs only when the resolver saw a LIVE grant row — an anchored-only
+    // corpse needs no dataplane write, and a corrupt-but-present row
+    // resolves anchored_only too (allGrants skips it) yet must not turn a
+    // committed revocation into a post-commit integrity verdict via
+    // revokeGrant's strict decrypt (w61-runtime F-2, w62-runtime F-1).
+    let grantLive = false;
     const env = this.transaction(p, now => {
       // Revocation must name a live authority — revoking a nonexistent id
       // would be silent record pollution.
@@ -7882,7 +7993,7 @@ export class Fabric {
         // Same doctrine as capability: an anchored JIT_GRANT_ISSUED whose
         // mutable grant row was murdered stays revocable through the
         // chain — the anchor is the authority (w61-runtime F-2).
-        grant: () => this.target.allGrants(t).some(g => g.grant_id === input.id) || (this._auditIndex(t).grants?.has(input.id) ? { anchored_only: true } : null),
+        grant: () => this.target.allGrants(t).some(g => g.grant_id === input.id) || this.target.grantRowExists?.(t, input.id) || (this._auditIndex(t).grants?.has(input.id) ? { anchored_only: true } : null),
         token: () => Object.hasOwn(this.tenant(t).auth, input.id) ? this.tenant(t).auth[input.id] : null,
         // A session resolves through the chain — its mutable row is a
         // cache, the anchored PERCEPTION_SESSION event is the authority
@@ -7893,7 +8004,7 @@ export class Fabric {
       }[Object.hasOwn({ certificate:1, evidence:1, issuer:1, key:1, subject:1, device:1, capability:1, grant:1, token:1, 'perception-session':1 }, input.kind) ? input.kind : ''];
       const resolved = exists?.();
       requireThat(resolved, 'INV-404-NOT-FOUND', `No live ${input.kind} authority with that id`, 404);
-      grantAnchoredOnly = resolved?.anchored_only === true;
+      grantLive = input.kind === 'grant' && resolved === true;
       // Re-revocation is refused: the first revocation's `revoked_at` is the
       // forensically important fact and must never be rewritten (w11 F6).
       // Exception: a ref that survives ONLY as a floor_derived seal carry —
@@ -7961,7 +8072,15 @@ export class Fabric {
     // a corpse, not a live grant: the dataplane is already consistent with
     // the anchored revocation (w61-runtime F-2). Any other dataplane
     // failure still propagates.
-    if (input.kind === 'grant') { try { this.target.revokeGrant(p.tenant_id, input.id); } catch (e) { if (!(grantAnchoredOnly && e?.code === 'INV-404-NOT-FOUND')) throw e; } }
+    // The flip only runs on a row the resolver saw LIVE — an
+    // anchored-only corpse needs no dataplane write, and a
+    // corrupt-but-present row must not turn a committed revocation into
+    // an integrity verdict (w62-runtime F-1). INV-404 is swallowed
+    // unconditionally: post-commit it only ever means the row was
+    // murdered between resolve and flip — the dataplane is already
+    // consistent with the anchored revocation, and the ledger is the
+    // authority. Any other dataplane failure still propagates.
+    if (input.kind === 'grant' && grantLive) { try { this.target.revokeGrant(p.tenant_id, input.id); } catch (e) { if (e?.code !== 'INV-404-NOT-FOUND') throw e; } }
     // A ledger revocation on a vault key also flips the vault flag — the
     // ledger stays authoritative (post-commit), and vault-level APIs that
     // consult only their own entry map cannot sign under a revoked key

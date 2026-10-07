@@ -425,8 +425,13 @@ const maskStrings = (text, dead) => {
 // keyword's own parentheses — `if (!auth(req)) return 401` — is the
 // condition itself: it evaluates unconditionally, and the operators
 // before it (`x && auth`) are what condition it (w57 h-3 parity).
-const guardedPrefix = (masked, callStart) => {
-  const stmt = masked.slice(Math.max(masked.lastIndexOf(';', callStart - 1), masked.lastIndexOf('}', callStart - 1), masked.lastIndexOf('{', callStart - 1)) + 1, callStart);
+const guardedPrefix = (masked, callStart, from) => {
+  // `from` is the provably-live arm's entry position: positions before
+  // it (the `else` keyword itself, the dead arm's edge) are not guards —
+  // but `cond &&` between the arm entry and the call still is (w62-fv
+  // F-1).
+  const floor = from === undefined || from < 0 ? 0 : from;
+  const stmt = masked.slice(Math.max(masked.lastIndexOf(';', callStart - 1), masked.lastIndexOf('}', callStart - 1), masked.lastIndexOf('{', callStart - 1), floor - 1) + 1, callStart);
   const open = [];
   for (let i = 0; i < stmt.length; i++) { if (stmt[i] === '(') open.push(i); else if (stmt[i] === ')') open.pop(); }
   for (let i = open.length - 1; i >= 0; i--) {
@@ -479,6 +484,45 @@ const topSplit = (t, ops) => {
   if (!found.length) return null;
   parts.push(t.slice(cur));
   return { parts, ops: found };
+};
+// Span-aware twin of topSplit — dispatch-purity checks need each operand's
+// position on the line so a verb-compare pair can be mapped inside it
+// (the masked view carries no literals to re-match) (w62-fv F-8).
+const splitSpans = (t, ops, base = 0) => {
+  const parts = [], found = [];
+  let d = 0, cur = 0, i = 0, instr = null;
+  while (i < t.length) {
+    const c = t[i];
+    if (instr) { if (c === '\\') { i += 2; continue; } if (c === instr) instr = null; i++; continue; }
+    if (c === '"' || c === "'" || c === '`') { instr = c; i++; continue; }
+    if (c === '(' || c === '[' || c === '{') { d++; i++; continue; }
+    if (c === ')' || c === ']' || c === '}') { d--; i++; continue; }
+    if (d === 0 && i > cur) {
+      let hit = null;
+      for (const op of ops) { if (!t.startsWith(op, i)) continue; hit = op; break; }
+      if (hit) { parts.push({ t: t.slice(cur, i), a: base + cur, b: base + i }); found.push(hit); cur = i + hit.length; i = cur; continue; }
+    }
+    i++;
+  }
+  if (!found.length) return null;
+  parts.push({ t: t.slice(cur), a: base + cur, b: base + t.length });
+  return { parts, ops: found };
+};
+// Operand classes on the masked view: a member-compare, a dispatcher
+// exec/test/match bind, or a compare on anything else are dispatch
+// shapes; a bare identifier, call, negation or `?:`-nested operand is a
+// runtime gate (w62-ledger F-3). DISP_MEMBER is assigned below — this
+// predicate only runs during scans, after the const initializes.
+const dispOperandCls = op => {
+  const t = op.trim();
+  if (t === '' || t.startsWith('!') || /[?:]/.test(t)) return 'impure';
+  DISP_MEMBER.lastIndex = 0;
+  const member = DISP_MEMBER.test(t); DISP_MEMBER.lastIndex = 0;
+  const cmp = /[!=]==?/.test(t);
+  if (member && cmp) return /!={1,2}/.test(t) ? 'memberneg' : 'membercmp';
+  if (/\(\s*[A-Za-z_$][\w$]*\s*=[^=]/.test(t) && /\.(?:exec|test|match)\s*\(/.test(t)) return 'bind';
+  if (cmp) return 'othercmp';
+  return 'impure';
 };
 const ternaryParts = t => {
   // `a ? b : c` at depth 0 → [cond, a, b] — `?.`/`??` are not marks.
@@ -698,8 +742,8 @@ const condTracker = () => {
   // 'sibling' marks a dispatch arm for a DIFFERENT verb — that arm is
   // dead for this row rather than conditional, so an own-verb arm
   // nested inside it still mints unconditionally (w56-fv F-2).
-  const line = (lm, sd, mode, lraw) => {
-    const condPos = new Uint8Array(lm.length), livePos = new Uint8Array(lm.length);
+  const line = (lm, sd, mode, lraw, forUncond = false, verbPos = null, allPos = null) => {
+    const condPos = new Uint8Array(lm.length), livePos = new Uint8Array(lm.length), liveArm = new Int32Array(lm.length);
     // `{` positions on the operand-live twin — stripDead COMPACTS dead
     // operands out of `lm`, so an `lraw.slice(0, ci)` offset would map
     // wrong. `{`s are dead-span boundaries and survive in both views,
@@ -707,7 +751,51 @@ const condTracker = () => {
     const rawBraces = [];
     if (lraw) for (let i = 0; i < lraw.length; i++) if (lraw[i] === '{') rawBraces.push(i);
     let ld = sd, pendingUsed = pending, armBraceTaken = false, braceN = 0, pd = 0;
+    const deadHeads = new Map();
+    let bracelessIfArm = -1, bracelessIfCond = null;
+    // A braceless `if` whose every `||`-side is a pure dispatch side
+    // carrying another verb's positive member-compare (allPos minus this
+    // row's verbPos) is another ROW's arm — dead scope for this row, so a
+    // `;`-ended guard-return inside it does not condition the tail
+    // (w56-ledger F7). A guard (`early`, `m[2]!=='e'`, `x || early`)
+    // may still fire for this row — the tail stays conditional exactly
+    // as w62-ledger F-3 requires.
+    const siblingArm = condPair => {
+      if (condPair === null) return false;
+      const [cond, base] = condPair;
+      const cls = dispOperandCls;
+      const sides = splitSpans(cond, ['||'], base);
+      const parts = sides === null ? [{ t: cond, a: base, b: base + cond.length }] : sides.parts;
+      for (const side of parts) {
+        const s = splitSpans(side.t, ['&&', '??', ',', ':', '?'], side.a);
+        if (s !== null && s.ops.some(o => o !== '&&')) return false;
+        const ops = s === null ? [side] : s.parts;
+        let sideMember = false;
+        for (const op of ops) {
+          const c2 = cls(op.t);
+          if (c2 === 'membercmp') {
+            if ((verbPos ?? []).some(p => p >= op.a && p < op.b)) return false;
+            if (!(allPos ?? []).some(p => p >= op.a && p < op.b)) return false;
+            sideMember = true;
+            continue;
+          }
+          if (c2 !== 'memberneg' && c2 !== 'othercmp' && c2 !== 'bind') return false;
+        }
+        if (!sideMember) return false;
+      }
+      return true;
+    };
     pending = false;
+    // A dead statement's operand tail decides at the NEXT line's head:
+    // `x = a\n+b` is one statement — an operator/continuer-led line keeps
+    // the dead span (w62-fv F-3). An `else` head stays dead here so the
+    // in-loop arm flip can claim it live; every other non-continuer head
+    // means ASI applied and the span is over.
+    if (bracelessDead) {
+      const elseH = /^\s*else\b/.test(lm);
+      const contH = /^\s*(?:\+\+|--|\+|-|\*\*?|\/|%|\(|\[|\.|`|,|\?\??|&&|\|\||[&|^<>~=:!])/.test(lm);
+      if (!elseH && !contH) bracelessDead = null;
+    }
     for (let ci = 0; ci < lm.length; ci++) {
       const c = lm[ci];
       // The live-statement clear runs BEFORE the dead arm: the `;` that
@@ -720,7 +808,7 @@ const condTracker = () => {
       // latch — `if (0) {x} else authorize` mints unconditionally
       // (w61-fv F-9, braced twin of the braceless case).
       if (deadElseExpected !== null && pd === 0 && !/\s/.test(c)) {
-        if (c === 'e' && /^else\b/.test(lm.slice(ci))) bracelessLive = { depth: deadElseExpected };
+        if (c === 'e' && /^else\b/.test(lm.slice(ci))) bracelessLive = { depth: deadElseExpected, arm: ci + 4 };
         deadElseExpected = null;
       }
       if (bracelessDead && pd === 0) {
@@ -730,10 +818,10 @@ const condTracker = () => {
           // With a nested `if` in the dead span the else binds THAT if
           // instead and stays dead (w61-fv F-1).
           const elseAhead = /^\s*else\b/.test(lm.slice(ci + 1));
-          if (elseAhead && !bracelessDead.nestedIf) { bracelessDead = null; bracelessLive = { depth: ld }; }
+          if (elseAhead && !bracelessDead.nestedIf) { bracelessDead = null; bracelessLive = { depth: ld, arm: ci + 1 + /^\s*else\b/.exec(lm.slice(ci + 1))[0].length }; }
           else if (!elseAhead) bracelessDead = null;
         } else if (c === '}' && ld <= bracelessDead.depth) bracelessDead = null;
-        else if (c === 'e' && /^else\b/.test(lm.slice(ci)) && ld <= bracelessDead.depth && !bracelessDead.nestedIf) { bracelessDead = null; bracelessLive = { depth: ld }; }
+        else if (c === 'e' && /^else\b/.test(lm.slice(ci)) && ld <= bracelessDead.depth && !bracelessDead.nestedIf) { bracelessDead = null; bracelessLive = { depth: ld, arm: ci + 4 }; }
       }
       if (c === '{') {
         // The brace-owner analysis needs a view where dead-operand
@@ -747,18 +835,36 @@ const condTracker = () => {
         braceN++;
         const parenHead = /\)\s*$/.test(prevR) ? parenOwner(prevR) : null;
         ld++;
-        if (deadDepths.size > 0 || (parenHead !== null && deadCond(prevR))) deadDepths.add(ld);
+        if (deadDepths.size > 0 || (parenHead !== null && deadCond(prevR))) { deadDepths.add(ld); deadHeads.set(ld, parenHead); }
         else {
           let cond;
-          if (mode === 'ours' && !armBraceTaken && parenHead !== null) { cond = false; armBraceTaken = true; }
+          // The 'ours' exemption claims only the ROW's dispatch arm —
+          // the `if` head that owns this line's first statement. A
+          // second-statement `if`, or a `while`/`for`/`switch`/`catch`
+          // head anywhere, gates on its own condition; only callable
+          // bodies (`function`, `f(x) {`) are dispatch-invoked and stay
+          // unconditional (w62-fv F-2).
+          // A chain continuation counts as first-statement too — the
+          // leading `}` closes the previous arm and `else if (cond)` is
+          // still this row's dispatch when the pair scan says so
+          // (w56-fv F-2). Any other `;`/`{`/`}` before the `if` makes it
+          // a second statement and the exemption dies (w62-fv F-2).
+          const firstStmt = !/[;{}]/.test(prevR.replace(/^\s*}+\s*else\b(\s*if\b)?/, ''));
+          if (mode === 'ours' && !armBraceTaken && parenHead === 'if' && firstStmt && dispatchPure(headCond(prevR), verbPos)) { cond = false; armBraceTaken = true; }
           else if (parenHead !== null) {
             // Callable bodies (`function(req,res) {`, `f(x) {`) run in
             // their handler's own scope — `function` heads on registered
             // handlers are invoked by the dispatch itself (marking them
             // conditional dropped the gate on 8 routes, w61-fv F-9
             // regression). Uninvoked DECLARED functions stay dead via
-            // deadFnLines regardless (w61-ledger F-2).
-            if (parenHead === 'if' || parenHead === 'catch') cond = mode !== 'sibling';
+            // deadFnLines regardless (w61-ledger F-2). Control heads
+            // (`while (cond) {`, `for`, `switch`, `catch`) gate their
+            // bodies on the head's own condition (w62-fv F-2).
+            if (parenHead === 'if' || parenHead === 'catch' || parenHead === 'while' || parenHead === 'switch') cond = mode !== 'sibling';
+            // A `for (x of/in coll)` head enumerates a collection — calls
+            // inside its body are iteration-wide, and under forUncond
+            // (the credential-resolution scan) they are not a gate.
+            else if (parenHead === 'for') cond = forUncond ? false : mode !== 'sibling';
             else cond = false;
           }
           // try/finally bodies run unconditionally — only else/catch/
@@ -772,14 +878,28 @@ const condTracker = () => {
           if (cond) condDepths.push(ld);
         }
       } else if (c === '}') {
+        const deadHead = deadHeads.get(ld);
         const wasDead = deadDepths.delete(ld);
+        deadHeads.delete(ld);
         while (condDepths.length && condDepths[condDepths.length - 1] >= ld) condDepths.pop();
         ld--;
         // A `}` closing a proven-dead arm: its `else` is the live arm —
         // latch the enclosing depth so the next `else` marks live
-        // (w61-fv F-9, braced arm).
-        if (wasDead) deadElseExpected = ld;
-      } else if (c === ';') pendingUsed = false;
+        // (w61-fv F-9, braced arm). Only a dead `if` arms it: `else`
+        // cannot bind a dead while/for body in real JS (w62-ledger F-5).
+        if (wasDead && deadHead === 'if') deadElseExpected = ld;
+      } else if (c === ';') {
+        pendingUsed = false;
+        // A braceless `if (c) return|throw|continue|break;` guards the
+        // rest of the enclosing scope — statements after it run only
+        // when the guard failed, so they are conditional on `c`
+        // (w62-ledger F-3).
+        if (bracelessIfArm >= 0) {
+          if (/^(?:return|throw|continue|break)\b/.test(lm.slice(bracelessIfArm, ci).trim()) && !siblingArm(bracelessIfCond)) condDepths.push(ld);
+          bracelessIfArm = -1;
+          bracelessIfCond = null;
+        }
+      }
       else if (c === '(') pd++;
       else if (c === ')') {
         // The `)` of a deadCond-proven control head with no `{` after
@@ -791,7 +911,11 @@ const condTracker = () => {
         // so its OWN body gates on its condition again: end the live
         // span at the `)` and let the prefix guard score the body
         // (w61-fv F-9 follow-through).
-        else if (head === 'if' && bracelessLive) bracelessLive = null;
+        // A control head's `)` ends the live arm's statement — a new
+        // statement follows, gated by its own condition. `if` covers the
+        // `else if` chain; while/for/switch/catch leak identically when
+        // left out (w62-ledger F-1).
+        else if (bracelessLive && (head === 'if' || head === 'while' || head === 'for' || head === 'switch' || head === 'catch')) bracelessLive = null;
         // `while (0)` that TERMINATES a `do {…}`/`do x` block is a
         // statement end, not a head — the next statement runs
         // unconditionally and must not be dead-spanned (w61-fv F-9).
@@ -819,7 +943,16 @@ const condTracker = () => {
         // early and mint (`if (0) if (0) y; else z` stays dead).
         // A `while` closing a `do` block owns nothing — the statement
         // after it runs unconditionally (w61-fv F-9).
-        if (doTail && !bracelessDead) bracelessLive = { depth: ld };
+        if (doTail && !bracelessDead) bracelessLive = { depth: ld, arm: ci + 1 };
+        // A braceless `if` arm is remembered: if it ends in a guard
+        // (`return`/`throw`/`continue`/`break`), its `;` marks the rest
+        // of the block conditional.
+        if (head === 'if') {
+          let j = ci + 1;
+          while (j < lm.length && /\s/.test(lm[j])) j++;
+          bracelessIfArm = (j >= lm.length || lm[j] !== '{') ? ci + 1 : -1;
+          bracelessIfCond = bracelessIfArm >= 0 ? headCond(prevR) : null;
+        }
         if (!bracelessDead && (head === 'if' || head === 'for' || (head === 'while' && !doTail)) && deadCond(prevR)) {
           let j = ci + 1;
           while (j < lm.length && /\s/.test(lm[j])) j++;
@@ -828,25 +961,93 @@ const condTracker = () => {
         pd--;
       }
       condPos[ci] = deadDepths.size > 0 || bracelessDead ? 2 : (condDepths.length > 0 || (pendingUsed && !(bracelessLive && ld <= bracelessLive.depth)) ? 1 : 0);
-      // Positions a provably-live arm covers — the syntactic prefix
+      // Positions a provably-live arm cover — the syntactic prefix
       // guard cannot see the dead-state, so `else authorize` / a
-      // do-`while` tail would read conditional without this (w61-fv F-9).
+      // do-`while` tail would read conditional without this (w61-fv
+      // F-9). 'Live' means provably-IN-the-arm, not exempt from guards:
+      // the caller rescans the span between the arm's entry and the
+      // call, so `else cond && authorize` still mints conditional
+      // (w62-fv F-1).
       livePos[ci] = bracelessLive ? 1 : 0;
+      liveArm[ci] = bracelessLive ? bracelessLive.arm ?? -1 : -1;
     }
-    // A dead statement that is ASI-complete at the break owns nothing on
-    // the next line — `if (0) x = f(p)\nauthorize` dead-spanned BOTH
-    // statements before (w61-fv F-8). Identifier/literal/`)`/`]`/`}`/
-    // quote/postfix tails complete the statement; operator and open-group
-    // tails continue it.
-    const asiTail = lm.trimEnd();
-    if (bracelessDead && (/[A-Za-z0-9_$)\]}'"`]$/.test(asiTail) || /(?:\+\+|--)$/.test(asiTail))) bracelessDead = null;
+    bracelessIfArm = -1;
+    // The live arm's statement ends where any statement ends — an EOL on
+    // an expression tail after the arm's own content means ASI closed
+    // it; carrying the latch into the next statement mints unconditional
+    // through any guard (w62-ledger F-1/F-2). `else` alone at EOL keeps
+    // it — the arm's body statement hasn't arrived yet.
+    if (bracelessLive && lm.slice(bracelessLive.arm ?? 0).trim() !== ''
+        && (/[A-Za-z0-9_$)\]}'"`]$/.test(lm.trimEnd()) || /(?:\+\+|--)$/.test(lm.trimEnd()))) bracelessLive = null;
     // A line ending on a conditional opener or a short-circuit/ternary
     // edge makes the NEXT statement conditional (braceless body or a
     // broken expression operand).
     const tail = lm.trimEnd();
     if (!/[;{}]\s*$/.test(tail)
         && /(?:\b(?:if|for|while|switch|catch)\s*(?:\([^()]*\)\s*)?|\belse\b|\bcatch\b|=>|&&|\|\||\?|:)\s*$/.test(tail)) pending = true;
-    return { condPos, livePos, endDepth: ld };
+    return { condPos, livePos, liveArm, endDepth: ld };
+  };
+  // The dispatch `if`'s paren condition — between the `(` matching the
+  // `)` that ends `prev` — must be dispatch-pure for the arm exemption:
+  // every top-level `&&`-joined operand a compare or a dispatcher
+  // exec-bind. A bare operand (`req.isAdmin`, `other`, `f(x)`, `!x`) or
+  // any `||`/`??`/`,`/`?`/`:`-mixing is an extra runtime gate — the arm
+  // body is conditional on it (w62-ledger F-3).
+  const headCond = prev => {
+    let d = 0;
+    for (let k = prev.length - 1; k >= 0; k--) {
+      const c = prev[k];
+      if (c === ')') d++;
+      else if (c === '(') { d--; if (d === 0) return [prev.slice(k + 1, -1), k + 1]; }
+    }
+    return null;
+  };
+  const dispatchPure = (condPair, verbPos = null) => {
+    if (condPair === null) return false;
+    const [cond, base] = condPair;
+    const cls = dispOperandCls;
+    const sideOps = side => {
+      const s = splitSpans(side.t, ['&&', '??', ',', ':', '?'], side.a);
+      if (s === null) return [side];
+      if (s.ops.some(o => o !== '&&')) return null;
+      return s.parts;
+    };
+    // A pure side is all-`&&`-operands of dispatch shape. For the row's
+    // own verb the arm must additionally SERVE it: a single-side head
+    // serves when some operand is our verb's member-compare or a
+    // dispatcher bind — `req.method==='GET' && (m=/x/.exec(path))`
+    // defines what an 'a' request even is (w62-check). Under `||` a bind
+    // no longer serves: it only gates the request (the regex can still
+    // reject 'a'), so an alternation arm needs a side whose positive
+    // member-compare the pair scan bound to this verb —
+    // `m[1]==='a' || m[1]==='b'`/`m[1]==='a' || gate` still fire for
+    // every 'a' request, `bind || fallback` never does (w59-fv F-1).
+    // Another verb's member compare or a negated member gates the side
+    // like any conjunct — `m[1]==='a' && m[2]==='b'` is 'b'-conditional
+    // here; `x==='y'` alone serves no verb at all.
+    const vcPos = op => (verbPos ?? []).some(p => p >= op.a && p < op.b);
+    const opPure = op => { const c = cls(op.t); return c === 'membercmp' || c === 'memberneg' || c === 'othercmp' || c === 'bind'; };
+    // An operand containing a pair position IS this verb's positive
+    // compare — whatever its spelling (`m[N]`, a resolved alias, a
+    // `case` label). Other member-compares and negated members are
+    // gates here (w60-fv F-4).
+    const opServe = op => vcPos(op) || cls(op.t) === 'othercmp' || cls(op.t) === 'bind';
+    const pureSide = side => {
+      const ops = sideOps(side);
+      return ops !== null && ops.every(opPure) ? ops : null;
+    };
+    const sides = splitSpans(cond, ['||'], base);
+    if (sides === null) {
+      const ops = pureSide({ t: cond, a: base, b: base + cond.length });
+      if (ops === null) return false;
+      if (verbPos === null) return true;
+      return ops.some(op => vcPos(op) || cls(op.t) === 'bind');
+    }
+    if (verbPos === null) return sides.parts.every(s => pureSide(s) !== null);
+    return sides.parts.some(side => {
+      const ops = sideOps(side);
+      return ops !== null && ops.every(opServe) && ops.some(vcPos);
+    });
   };
   return { line };
 };
@@ -1286,12 +1487,19 @@ const roleSets = lines => {
         {
           const stmtDepth = depthCur - closes;
           while (switchStack.length && stmtDepth <= switchStack.at(-1).depth) switchStack.pop();
-          for (const sm of l.matchAll(/\bswitch\s*\(([^)]*)\)/g)) {
-            const op = sm[1];
+          for (const sm of l.matchAll(/\bswitch\s*\(/g)) {
+            // Balanced-paren operand — `switch (f(m[2]))` truncated at
+            // the first `)` re-targeted the frame onto the raw member
+            // while cases compare the transformed value (w62-ledger
+            // F-4). Only a whole-operand member/alias may bind.
+            let d = 0, k = sm.index + sm[0].length, end = -1;
+            for (; k < l.length; k++) { const c = l[k]; if (c === '(') d++; else if (c === ')') { if (d === 0) { end = k; break; } d--; } }
+            if (end < 0) continue;
+            const op = l.slice(sm.index + sm[0].length, end);
             DISP_MEMBER.lastIndex = 0;
             const dm = DISP_MEMBER.exec(op);
             let member = null;
-            if (dm) { const idx = DISP_IDX_EVAL(dm[1] ?? dm[2] ?? ''); if (idx !== null) member = `m[${idx}]`; }
+            if (dm && dm[0].trim() === op.trim()) { const idx = DISP_IDX_EVAL(dm[1] ?? dm[2] ?? ''); if (idx !== null) member = `m[${idx}]`; }
             else { const r = aliases.get(op.trim()); if (r !== undefined && r !== 'm') member = r; }
             // `stmtDepth` already counts this line's own `{` — the
             // switch's frame depth is one level shallower, so its case
@@ -1442,7 +1650,7 @@ const roleSets = lines => {
       // block is dead scope for this row — not conditional — so an
       // own-verb arm nested inside it still mints (w58-fv F-3,
       // w56-fv F-2).
-      const scan = tracker.line(lm, depthCur, i === from || ours ? 'ours' : (sibling || elseSibling) ? 'sibling' : null, maskStrings(blankBlock(stripComment(lines[i]), deadM), deadM));
+      const scan = tracker.line(lm, depthCur, i === from || ours ? 'ours' : (sibling || elseSibling) ? 'sibling' : null, maskStrings(blankBlock(stripComment(lines[i]), deadM), deadM), false, i === from ? null : pairs.filter(p => p.verb === verb).map(p => p.pos), pairs0.map(p => p.pos));
       if (sibling || elseSibling || deadArm) {
         const lastOpen = l.lastIndexOf('{'), lastClose = l.lastIndexOf('}');
         // An unmatched last `{` opens a block whose interior continues
@@ -1465,6 +1673,30 @@ const roleSets = lines => {
           else ourChainDepth = afterCloses + opens;
         }
       } else if (i === from && opens > 0) deadDepths.add(depthCur + 1);
+      // `ownDispatch(prefix, verbPos)` — the trailing braceless `if`
+      // before a return/throw is THIS row's dispatch (and only this
+      // row's dispatch) when some `||`-side unconditionally serves the
+      // verb: every top-level `&&` operand on that side is a compare or
+      // a dispatcher exec/test/match bind, and at least one is a
+      // positive member-compare the pair scan bound to this verb (or a
+      // bind). Other-verb member-compares and negated members gate the
+      // side like any conjunct (w62-fv F-8).
+      const ownDispatch = (prefix, verbPos) => {
+        if (typeof verb !== 'string' || verb === '') return false;
+        const im = /\bif\s*\(([^;{]*)\)\s*$/.exec(prefix);
+        if (!im) return false;
+        const base = im.index + im[0].indexOf('(') + 1;
+        const vcPos = op => (verbPos ?? []).some(p => p >= op.a && p < op.b);
+        const sides = splitSpans(im[1], ['||'], base);
+        const parts = sides === null ? [{ t: im[1], a: base, b: base + im[1].length }] : sides.parts;
+        return parts.some(side => {
+          const s = splitSpans(side.t, ['&&', '??', ',', ':', '?'], side.a);
+          if (s !== null && s.ops.some(o => o !== '&&')) return false;
+          const ops = s === null ? [side] : s.parts;
+          return ops.every(op => vcPos(op) || dispOperandCls(op.t) === 'othercmp' || dispOperandCls(op.t) === 'bind')
+            && ops.some(vcPos);
+        });
+      };
       if (!excluded && !tailDead) {
         // A `return` at a dominating depth kills the row's tail — cut
         // the line at it, latch dead, and stop crediting authorizes that
@@ -1487,9 +1719,12 @@ const roleSets = lines => {
               // (w56-ledger F7) — UNLESS the braceless if is THIS verb's
               // own dispatch: an `if (m[N]==='ourverb') return send(...)`
               // is unconditional for this row and its tail is dead
-              // (w57-fv NEW-1). Statements after an unconditional throw
-              // are the same dead evidence (w57-ledger F3/F13).
-              && (ours || !/\b(?:if|for|while)\s*\([^;{]*\)\s*$|\belse(?:\s+if\s*\([^;{]*\))?\s*$/.test(lm.slice(0, ci)))) { cut = ci; break; }
+              // (w57-fv NEW-1). Under `ours` the exemption needs the if's
+              // own condition to be our dispatch — `if (m[N]==='ourverb'
+              // [&& bind]*)` — any other guard (`if (early) return`,
+              // `if (m[2]!=='e'||x) return`) keeps the tail conditional,
+              // never dead and never unconditional (w62-fv F-8).
+              && ((ours && ownDispatch(lm.slice(0, ci), pairs.filter(p => p.verb === verb).map(p => p.pos))) || !/\b(?:if|for|while)\s*\([^;{]*\)\s*$|\belse(?:\s+if\s*\([^;{]*\))?\s*$/.test(lm.slice(0, ci)))) { cut = ci; break; }
           }
           if (cut !== -1) { l = l.slice(0, cut); tailDead = true; }
         }
@@ -1505,7 +1740,7 @@ const roleSets = lines => {
           // braceless own-dispatch `)` are the row's unconditional body,
           // not a guarded statement (w60-ledger F-7).
           const bodyUncond = oursBraceEnd >= 0 && m.index > oursBraceEnd;
-          if (scan.condPos[m.index] || (!bodyUncond && !scan.livePos[m.index] && guardedPrefix(lmx, m.index))) continue;
+          if (scan.condPos[m.index] || (!bodyUncond && guardedPrefix(lmx, m.index, scan.livePos[m.index] ? scan.liveArm[m.index] : undefined))) continue;
           const args = l.slice(m.index);
           const am = /authorize\(\s*p\s*,\s*\[([^\]]+)\]/.exec(args);
           if (am) { for (const r of am[1].split(',')) found.add(r.trim().replace(/['"]/g, '')); continue; }
@@ -1538,7 +1773,7 @@ const roleSets = lines => {
       // is a conditional gate that cannot satisfy a role claim
       // (w57-ledger F2/F3, w58-fv F-3).
       for (const m of fm.matchAll(/this\.authorize\(\s*p\s*,\s*[^\s)]/g)) {
-        if (fscan.condPos[m.index] || (!fscan.livePos[m.index] && guardedPrefix(fm, m.index))) continue;
+        if (fscan.condPos[m.index] || guardedPrefix(fm, m.index, fscan.livePos[m.index] ? fscan.liveArm[m.index] : undefined)) continue;
         const args = fl.slice(m.index);
         const am = /this\.authorize\(\s*p\s*,\s*\[([^\]]+)\]/.exec(args);
         if (am) { for (const r of am[1].split(',')) found.add(r.trim().replace(/['"]/g, '')); continue; }
@@ -1672,10 +1907,13 @@ const roleSets = lines => {
       let sd = 0;
       for (let i = hi; i < wEnd; i++) {
         const ml = maskStrings(stripDead(lines[i], d), d);
-        const scan = tr.line(ml, sd, i === hi ? 'ours' : null, maskStrings(blankBlock(stripComment(lines[i]), dM), dM));
+        // Iteration over a collection is a credential resolver's
+        // traversal, not a gate — `for` bodies count as unguarded scope
+        // here (while/if/switch arms stay conditional).
+        const scan = tr.line(ml, sd, i === hi ? 'ours' : null, maskStrings(blankBlock(stripComment(lines[i]), dM), dM), true);
         sd = scan.endDepth;
         for (const m of ml.matchAll(AUTH_CALL))
-          if (!windowDeadFn.has(i) && !scan.condPos[m.index] && (scan.livePos[m.index] || !guardedPrefix(ml, m.index))) return true;
+          if (!windowDeadFn.has(i) && !scan.condPos[m.index] && !guardedPrefix(ml, m.index, scan.livePos[m.index] ? scan.liveArm[m.index] : undefined)) return true;
       }
       return false;
     })();
@@ -1760,7 +1998,7 @@ const roleSets = lines => {
           if (/^\s*(?:async\s+)?function\s/.test(l)) continue;
           priorCalls.push(pl0);
           for (const am of pm.matchAll(/\b(?:auth|authenticateToken|authBreakglass|authorize|verifyJwt|bearer)\s*\(\s*(?:req\b|p\b|request\b)?/g))
-            if (!pscan.condPos[am.index] && (pscan.livePos[am.index] || !guardedPrefix(pm, am.index))) priorAuthed = true;
+            if (!pscan.condPos[am.index] && !guardedPrefix(pm, am.index, pscan.livePos[am.index] ? pscan.liveArm[am.index] : undefined)) priorAuthed = true;
         }
       }
       if ((r.roles[0] === 'authenticated' || r.roles[0] === 'bound subject')

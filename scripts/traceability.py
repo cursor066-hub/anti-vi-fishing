@@ -583,6 +583,12 @@ _TRUTHY_LIT = r'(?:true|1|!false|!0|Infinity)'
 _CONST_UNKNOWN = object()
 _CONST_UNDEF = object()
 _CONST_OBJ = object()
+_CONST_STR = object()
+class _Big(int):
+    # A JS BigInt — a distinct Python type so `1n === 1` folds False
+    # (different JS types) while `1n == 1` still folds through the
+    # numeric path (w62-ledger F-7).
+    pass
 _CONST_NUMERIC = re.compile(r'[+-]?(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|(?:\d[\d_]*(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)[nN]?')
 def _truthy(v):
     # Three-valued: an unknown-fold is neither provably truthy nor
@@ -601,6 +607,9 @@ def _js_loose_eq(a, b):
     # coerce through ToNumber — `'1' == 1` and `0 == false` are TRUE
     # where Python's `==` answers False (w61-ledger F-1).
     if a is _CONST_UNKNOWN or b is _CONST_UNKNOWN or a is _CONST_OBJ or b is _CONST_OBJ: return _CONST_UNKNOWN
+    # A masked-out string literal has unknown content — its blanked
+    # text must not coerce to 0 (w62-ledger F-6).
+    if a is _CONST_STR or b is _CONST_STR: return _CONST_UNKNOWN
     an = a is _CONST_UNDEF or a is None
     bn = b is _CONST_UNDEF or b is None
     if an or bn: return an and bn
@@ -610,18 +619,26 @@ def _js_loose_eq(a, b):
     if na != na or nb != nb: return False  # NaN equals nothing
     return na == nb
 def _tonum(v):
-    if v is _CONST_UNKNOWN or v is _CONST_OBJ: return _CONST_UNKNOWN
+    if v is _CONST_UNKNOWN or v is _CONST_OBJ or v is _CONST_STR: return _CONST_UNKNOWN
     if v is _CONST_UNDEF or v is None: return float('nan')
     if isinstance(v, bool): return int(v)
     if isinstance(v, (int, float)): return v
     if isinstance(v, str):
+        # JS ToNumber on strings: whitespace-only -> 0, `0x`/`0b`/`0o`
+        # prefixes parse, `Infinity` infinites; numeric separators
+        # (`1_000`) are NOT permitted inside strings (w62-ledger F-6).
         s = v.strip()
         if not s: return 0
-        try: return float(s) if re.search(r'[.eExX]', s) else int(s)
+        if '_' in s: return float('nan')
+        try:
+            if re.match(r'^[+-]?0[xX][0-9a-fA-F]+$', s): return int(s, 16)
+            if re.match(r'^[+-]?0[bB][01]+$', s): return int(s, 2)
+            if re.match(r'^[+-]?0[oO][0-7]+$', s): return int(s, 8)
+            return float(s) if re.search(r'[.eEnN]', s) else int(s)
         except ValueError: return float('nan')
     return _CONST_UNKNOWN
 def _tostr(v):
-    if v is _CONST_UNKNOWN or v is _CONST_OBJ: return _CONST_UNKNOWN
+    if v is _CONST_UNKNOWN or v is _CONST_OBJ or v is _CONST_STR: return _CONST_UNKNOWN
     if v is _CONST_UNDEF: return 'undefined'
     if v is None: return 'null'
     if v is True: return 'true'
@@ -706,6 +723,11 @@ def _const_val(e, known):
     m = re.match(r'''^(['"`])((?:\\.|(?!\1)[^\\])*)\1$''', e, re.S)
     if m:
         if m.group(1) == '`' and '${' in m.group(2): return _CONST_UNKNOWN
+        # A masked literal folds to all-whitespace — its real content
+        # is unrecoverable. `_CONST_STR` keeps it truthy (a non-empty
+        # literal always is) without letting its blanked text coerce
+        # to 0 in numeric folds (w62-ledger F-6).
+        if m.group(2) and not m.group(2).strip(): return _CONST_STR
         return m.group(2)
     if re.fullmatch(r'[A-Za-z_$][\w$]*', e):
         return known.get(e, _CONST_UNKNOWN)
@@ -713,8 +735,9 @@ def _const_val(e, known):
         v = e.replace('_', '').rstrip('nN')
         sign = -1 if v.startswith('-') else 1
         try:
-            if re.match(r'[+-]?0[xXbBoO]', v): return sign * int(v.lstrip('+-'), 0)
-            return float(v) if re.search(r'[.eE]', v) else int(v)
+            if re.match(r'[+-]?0[xXbBoO]', v): n = sign * int(v.lstrip('+-'), 0)
+            else: n = float(v) if re.search(r'[.eE]', v) else int(v)
+            return _Big(n) if e.rstrip().endswith(('n', 'N')) else n
         except ValueError:
             return _CONST_UNKNOWN
     if e.startswith('!'):
@@ -804,7 +827,7 @@ def _const_val(e, known):
                 acc = acc and rn.group(0) in (lname, 'Object')
             return acc
         vals = [_const_val(p, known) for p in parts]
-        if any(v is _CONST_UNKNOWN or v is _CONST_OBJ for v in vals): return _CONST_UNKNOWN
+        if any(v is _CONST_UNKNOWN or v is _CONST_OBJ or v is _CONST_STR for v in vals): return _CONST_UNKNOWN
         # Chains fold left-associatively — `1===1===1` is `(1===1)===1`
         # → `true===1` → false (w60-fv F-7).
         acc = vals[0]
@@ -833,6 +856,24 @@ def _const_val(e, known):
             return _CONST_UNKNOWN if any(s is _CONST_UNKNOWN for s in sa) else ''.join(sa)
         nums = [_tonum(v) for v in vals]
         if any(n is _CONST_UNKNOWN for n in nums): return _CONST_UNKNOWN
+        # BigInt arithmetic never mixes with Number — `1n + 1` throws,
+        # and `5n / 2n` truncates to 2n, not 2.5 (w62-ledger F-7).
+        if any(isinstance(n, _Big) for n in nums):
+            if not all(isinstance(n, _Big) for n in nums): return _CONST_UNKNOWN
+            acc = int(nums[0])
+            try:
+                for n in nums[1:]:
+                    if op == '+': acc += n
+                    elif op == '-': acc -= n
+                    elif op == '*': acc *= n
+                    elif op == '/':
+                        if n == 0: return _CONST_UNKNOWN
+                        acc = int(acc / n)
+                    else:
+                        if n == 0: return _CONST_UNKNOWN
+                        acc %= n
+            except (TypeError, ValueError): return _CONST_UNKNOWN
+            return _Big(acc)
         acc = nums[0]
         try:
             for n in nums[1:]:
@@ -880,6 +921,57 @@ def _paren_end(text, i):
             if d == 0: return i + 1
         i += 1
     return len(text)
+def _one_stmt(text, j):
+    # End of the JS statement starting at j: `{` blocks consume balanced,
+    # head keywords consume their parens, `else`-arms chain (`else if…`,
+    # `else {…}`), `do` picks up its `while (…);` tail, plain statements
+    # end at `;`/`}`/`case`/`default` at depth 0 — a `;` inside a call's
+    # parens never ends a statement early (w62-ledger F-8).
+    in_do = False
+    while True:
+        while j < len(text) and text[j] in ' \t\n': j += 1
+        if j >= len(text): return j
+        m = re.match(r'(?:if|while|for|switch|catch|with)\b', text[j:])
+        if m:
+            p = j + m.end()
+            while p < len(text) and text[p] in ' \t\n': p += 1
+            if p < len(text) and text[p] == '(':
+                j = _paren_end(text, p)
+                continue
+            return j
+        if text[j] == 'd' and re.match(r'do\b', text[j:]):
+            in_do = True
+            j += 2
+            continue
+        if text[j] == '{':
+            j = _paren_end(text, j)
+            k = j
+            while k < len(text) and text[k] in ' \t\n': k += 1
+            if re.match(r'(?:else|while)\b', text[k:]):
+                j = k + (5 if text[k:k + 5] == 'while' else 4)
+                continue
+            return j
+        # plain statement — to `;`/`}`/`case`/`default` at depth 0
+        d, k = 0, j
+        while k < len(text):
+            c = text[k]
+            if c in '([{': d += 1
+            elif c in ')]}':
+                if d == 0: break
+                d -= 1
+            elif d == 0 and (c == ';' or re.match(r'case\s|default\b', text[k:])): break
+            k += 1
+        j = k + 1 if k < len(text) and text[k] == ';' else k
+        k = j
+        while k < len(text) and text[k] in ' \t\n': k += 1
+        if re.match(r'else\b', text[k:]):
+            j = k + 4
+            continue
+        if in_do and re.match(r'while\b', text[k:]):
+            in_do = False
+            j = k
+            continue
+        return j
 def _brace_kind(text, j):
     # The `{` at j opens what? 'fn' — a function-family body (arrow,
     # function, method, class, getter/setter) whose contents defer to
@@ -1264,15 +1356,15 @@ def _live_code(text, raw=None):
     for m in re.finditer(r'\bif\s*\(\s*(?:' + live_lit + r')\s*\)', text):
         j = _paren_end(text, text.index('(', m.start()))
         while j < len(text) and text[j] in ' \t\n': j += 1
-        k = _paren_end(text, j) if j < len(text) and text[j] == '{' else (text.find(';', j) + 1 if text.find(';', j) != -1 else len(text))
+        k = _paren_end(text, j) if j < len(text) and text[j] == '{' else _one_stmt(text, j)
         l = k
         while l < len(text) and text[l] in ' \t\n': l += 1
         if text[l:l + 4] == 'else':
             l += 4
-            while l < len(text) and text[l] in ' \t\n': l += 1
-            if l < len(text) and text[l] == '{': spans.append((l, _paren_end(text, l)))
-            else:
-                e = text.find(';', l); spans.append((l, len(text) if e == -1 else e + 1))
+            # The else arm is ONE statement — `else if (y) {…} else {…}`
+            # chains whole, so `text.find(';')` can never drop its tail
+            # live again (w62-ledger F-8).
+            spans.append((l, _one_stmt(text, l)))
     # while(false)/for(;false;) bodies never execute — the dead condition
     # is the whole while clause or the for's middle clause only, so an
     # identifier ending in '0' (`for (x of a0)`) stays live.
@@ -1280,8 +1372,7 @@ def _live_code(text, raw=None):
         j = m.end()
         while j < len(text) and text[j] in ' \t\n': j += 1
         if j < len(text) and text[j] == '{': spans.append((j, _paren_end(text, j)))
-        else:
-            e = text.find(';', j); spans.append((j, len(text) if e == -1 else e + 1))
+        else: spans.append((j, _one_stmt(text, j)))
     # Dead short-circuit operands: `false && x` / `0 &&` / `null &&` /
     # `undefined &&` / `!true &&` never evaluate their right side, and
     # `true ||` / `1 ||` / `!false ||` skip theirs (w56-ledger F2). The
@@ -1349,12 +1440,14 @@ def _live_code(text, raw=None):
     empties = {n for n in re.findall(r'\b(?:const|let|var)\s+(\w+)\s*=\s*(?:\[\s*\]|\{\s*\}|new\s+(?:Set|Map|WeakSet|WeakMap|Array|Object)\s*\(\s*(?:\[\s*\])?\s*\))', text)}
     empty_lit = (r'\[\s*\]|\{\s*\}|\'\'|""|``|new\s+(?:Set|Map|WeakSet|WeakMap|Array|Object)\s*\(\s*(?:\[\s*\])?\s*\)'
                  + (r'|' + '|'.join(re.escape(n) for n in sorted(empties)) if empties else ''))
-    for m in re.finditer(r'\bfor\s*\([^)]*\bof\s*(?:' + empty_lit + r'|\d+(?:\.\d+)?[nN]?|false|true|null|undefined)\s*\)', text):
+    # `for..of` over ANY object literal throws — objects are not
+    # iterable — so the body is dead whatever the literal holds
+    # (w62-ledger F-9). Non-empty strings DO iterate and stay live.
+    for m in re.finditer(r'\bfor\s*\([^)]*\bof\s*(?:' + empty_lit + r'|\{[^{}]*\}|\d+(?:\.\d+)?[nN]?|false|true|null|undefined)\s*\)', text):
         j = m.end()
         while j < len(text) and text[j] in ' \t\n': j += 1
         if j < len(text) and text[j] == '{': spans.append((j, _paren_end(text, j)))
-        else:
-            e = text.find(';', j); spans.append((j, len(text) if e == -1 else e + 1))
+        else: spans.append((j, _one_stmt(text, j)))
     # `for..in` over an empty/non-object operand iterates zero times —
     # `{}`, `0`, `null`, `''` (w61-ledger F-4). Non-empty strings DO
     # enumerate indices and stay live.
@@ -1362,8 +1455,7 @@ def _live_code(text, raw=None):
         j = m.end()
         while j < len(text) and text[j] in ' \t\n': j += 1
         if j < len(text) and text[j] == '{': spans.append((j, _paren_end(text, j)))
-        else:
-            e = text.find(';', j); spans.append((j, len(text) if e == -1 else e + 1))
+        else: spans.append((j, _one_stmt(text, j)))
     for m in re.finditer(r'(?:' + empty_lit + r')\s*\.\s*(?:forEach|map|filter|reduce|some|every|flatMap|find|findIndex)\s*\(', text):
         spans.append((m.start(), _paren_end(text, m.end() - 1)))
     # `void` of a function/arrow literal that is never invoked — the
@@ -1417,7 +1509,11 @@ def _live_code(text, raw=None):
     # are dead evidence (w56-ledger F2).
     for m in re.finditer(r'\bswitch\s*\(\s*([\'"`]?)([\w$.+-]*)\1\s*\)\s*\{', text):
         disc = m.group(2)
-        if not re.fullmatch(r'[\w$.+-]+', disc): continue
+        # Only a KNOWN literal discriminant may suppress arms — an
+        # identifier/member/`f()` is unknowable at audit time, and
+        # treating it as a literal murdered every case arm (w62-ledger
+        # F-10). Quoted text is a literal by its quote.
+        if not m.group(1) and not re.fullmatch(r'[+-]?(?:\d[\d_]*(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|true|false|null|undefined|NaN|Infinity', disc): continue
         body_start = text.index('{', m.end() - 1)
         body_end = _paren_end(text, body_start)
         body = text[body_start:body_end]
