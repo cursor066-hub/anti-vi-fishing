@@ -3,7 +3,7 @@
 // must name 'Issuer not found' distinctly from an endpoint defect (F-2).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { rmSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fixture, hasCode } from './helpers.mjs';
@@ -176,15 +176,22 @@ test('w60-fv F-10: a defeated residue delete is named', t => {
 // ============================================================================
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+const probeFile = src => {
+  const dir = mkdtempSync(join(tmpdir(), 'gate-probe-'));
+  const file = join(dir, 'probe.mjs');
+  writeFileSync(file, src);
+  try { return execFileSync(process.execPath, [file], { encoding: 'utf8', cwd: new URL('..', import.meta.url).pathname }).trim(); }
+  finally { rmSync(dir, { recursive: true, force: true }); }
+};
 const collectRun = (lines, verb) => {
   const src = readFileSync('scripts/check.mjs', 'utf8');
   const helpers = src.slice(src.indexOf('// === shared source scanners'), src.indexOf('// === end shared source scanners'));
   const block = src.slice(src.indexOf('const NONROLE'), src.indexOf('const authorizeAt'));
   assert.ok(block.includes('collectAuthorize'), 'the slice carries the shipped scanner');
-  return JSON.parse(execFileSync(process.execPath, ['-e', [
+  return JSON.parse(probeFile([
     helpers, block,
     `globalThis.process.stdout.write(JSON.stringify(collectAuthorize(${JSON.stringify(lines)}, 0, ${lines.length + 2}, true, ${JSON.stringify(verb)})));`
-  ].join('\n')], { encoding: 'utf8' }).trim());
+  ].join('\n')));
 };
 const HEAD = "if (req.method === 'GET' && (m = /^\\/x\\/(.*)/.exec(path))) {";
 

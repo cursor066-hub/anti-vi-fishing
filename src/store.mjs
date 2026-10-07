@@ -1155,8 +1155,23 @@ export class Store {
         // dropped verbatim for this sanctioned write and recreated
         // immediately — a file-writer delete aborts in-band instead of
         // erasing the conviction (w57-runtime F-1).
-        const residueKey = `fold_floor_healed.${entry.sequence}`;
+        const residueKeyBase = `fold_floor_healed.${entry.sequence}`;
         const residueClaim = `${entry.sequence}:${String(floorPrior).slice(0, 200)}`;
+        // A row already standing at the heal's own key is itself evidence
+        // — a prior heal's unconsumed claim or a plant — and must never
+        // be absorbed by this write (w64-seal F-6). Land under a sibling
+        // `.N` suffix instead: the prefix scan + value-matched drains and
+        // the claim union all cover it, and both contents reach the
+        // report. Same claim at a sibling is the idempotent re-heal.
+        let residueKey = residueKeyBase;
+        {
+          let v = this._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key=?").get(tenant, residueKey)?.value;
+          for (let i = 2; v !== undefined && v !== residueClaim; i++) {
+            requireThat(i <= 64, 'INV-409-INTEGRITY', 'fold-floor healed residue key space exhausted — planted sibling rows', 409);
+            residueKey = `${residueKeyBase}.${i}`;
+            v = this._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key=?").get(tenant, residueKey)?.value;
+          }
+        }
         this.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
         this.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
         this.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');

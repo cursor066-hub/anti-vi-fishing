@@ -3,10 +3,19 @@
 // and ledger F-1..F-7 — every fix proven against the shipped machinery.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync , mkdtempSync, writeFileSync, rmSync} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fixture, hasCode } from './helpers.mjs';
 import { verifySigned } from '../src/crypto.mjs';
+const probeFile = src => {
+  const dir = mkdtempSync(join(tmpdir(), 'gate-probe-'));
+  const file = join(dir, 'probe.mjs');
+  writeFileSync(file, src);
+  try { return execFileSync(process.execPath, [file], { encoding: 'utf8', cwd: new URL('..', import.meta.url).pathname }).trim(); }
+  finally { rmSync(dir, { recursive: true, force: true }); }
+};
 
 const residueRows = h => h.f.store.db.prepare(
   "SELECT key,value FROM meta_kv WHERE tenant='acme' AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.')").all();
@@ -155,10 +164,10 @@ const collectRun = (lines, verb) => {
   const helpers = src.slice(src.indexOf('// === shared source scanners'), src.indexOf('// === end shared source scanners'));
   const block = src.slice(src.indexOf('const NONROLE'), src.indexOf('const authorizeAt'));
   assert.ok(block.includes('collectAuthorize'), 'the slice carries the shipped scanner');
-  return JSON.parse(execFileSync(process.execPath, ['-e', [
+  return JSON.parse(probeFile([
     helpers, block,
     `globalThis.process.stdout.write(JSON.stringify(collectAuthorize(${JSON.stringify(lines)}, 0, ${lines.length + 2}, true, ${JSON.stringify(verb)})));`
-  ].join('\n')], { encoding: 'utf8', cwd: ROOT }).trim());
+  ].join('\n')));
 };
 const HEAD = "if (req.method === 'GET' && (m = /^\\/x\\/(.*)/.exec(path))) {";
 
@@ -218,14 +227,20 @@ test('w61-ledger F-2: dead declarations cannot mint a gate', t => {
       `${tail}: a real invocation keeps the body live`);
 });
 
-// w61-ledger F-5: whole-dispatcher aliases and switch/case arms bind their
-// member — a y-arm's authorize mints nothing on the x row.
+// w61-ledger F-5 + w64 member doctrine: dispatch binds m[1]; an unbound
+// verb still lives on the row's m[1] member, so an arm on a foreign member
+// (m[2], alias-resolved or switch operand) is a real conditional gate on
+// the row — it mints conditionally (.any), never unconditionally.
 test('w61-ledger F-5: aliased and switched dispatch binds the member', t => {
   const aliased = [HEAD, "  const q = m; if (q[2] === 'y') { authorize(p, ['yrole']); }", '}'];
-  assert.equal(collectRun(aliased, 'x').any, false, 'a y-arm through an alias mints nothing on x');
+  const aliasedX = collectRun(aliased, 'x');
+  assert.equal(aliasedX.any, true, 'a y-arm on foreign member m[2] mints conditionally on x');
+  assert.equal(aliasedX.roles, null, 'conditional mints carry no unconditional roles');
   assert.equal(collectRun(aliased, 'y').any, true, 'the y-arm counts on its own row');
   const switched = [HEAD, "  switch (m[2]) { case 'y': authorize(p, ['yrole']); }", '}'];
-  assert.equal(collectRun(switched, 'x').any, false, 'a case arm mints nothing on a sibling row');
+  const switchedX = collectRun(switched, 'x');
+  assert.equal(switchedX.any, true, 'a case arm on foreign member m[2] mints conditionally on x');
+  assert.equal(switchedX.roles, null, 'conditional mints carry no unconditional roles');
   assert.equal(collectRun(switched, 'y').any, true, 'the case arm counts on its own row');
 });
 

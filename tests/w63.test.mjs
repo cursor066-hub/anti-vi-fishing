@@ -11,10 +11,19 @@
 // from shipped code.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync , mkdtempSync, writeFileSync, rmSync} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fixture, designateSuccessor } from './helpers.mjs';
 import { signed } from '../src/crypto.mjs';
+const probeFile = src => {
+  const dir = mkdtempSync(join(tmpdir(), 'gate-probe-'));
+  const file = join(dir, 'probe.mjs');
+  writeFileSync(file, src);
+  try { return execFileSync(process.execPath, [file], { encoding: 'utf8', cwd: new URL('..', import.meta.url).pathname }).trim(); }
+  finally { rmSync(dir, { recursive: true, force: true }); }
+};
 
 const ROOT = new URL('..', import.meta.url).pathname;
 const collectRun = (lines, verb) => {
@@ -22,10 +31,10 @@ const collectRun = (lines, verb) => {
   const helpers = src.slice(src.indexOf('// === shared source scanners'), src.indexOf('// === end shared source scanners'));
   const block = src.slice(src.indexOf('const NONROLE'), src.indexOf('const authorizeAt'));
   assert.ok(block.includes('collectAuthorize'), 'the slice carries the shipped scanner');
-  return JSON.parse(execFileSync(process.execPath, ['-e', [
+  return JSON.parse(probeFile([
     helpers, block,
     `globalThis.process.stdout.write(JSON.stringify(collectAuthorize(${JSON.stringify(lines)}, 0, ${lines.length + 2}, true, ${JSON.stringify(verb)})));`
-  ].join('\n')], { encoding: 'utf8', cwd: ROOT }).trim());
+  ].join('\n')));
 };
 const HEAD = "if (req.method === 'GET' && (m = /^\\/x\\/(.*)/.exec(path))) {";
 const HEAD2 = "if (req.method === 'GET' && (m = /^\\/x\\/(.*)\\/(.*)/.exec(path))) {";
@@ -296,7 +305,14 @@ test('w63-runtime F-2: a stale retiring note cannot mute the echo', t => {
   const env = h.f.store.auditSigners['acme'].sign({ tenant_id: 'acme', fold_floor_retired: [claim], fold_floor_retiring: [claim], marker_seq: -100000 }, 'audit');
   putMarker(h, env, [claim]);
   const kinds = sealKinds(h);
-  assert.ok(kinds.includes('floor_marker_residue_retired_echo'), `a stale retiring set cannot suppress the echo: ${kinds}`);
+  // w64-seal F-2 hardened this further: an env whose marker_seq sits
+  // below its own named claims is refused as forged outright — the
+  // retired/retiring sets never reach the consult — and the standing
+  // row re-heals instead of being suppressed.
+  assert.ok(kinds.includes('floor_marker_retired_forged'),
+    `a stale env is refused as forged: ${kinds}`);
+  assert.ok(kinds.includes('floor_marker_healed'),
+    `the unconsumed row re-heals — nothing suppresses it: ${kinds}`);
   h.close();
 });
 

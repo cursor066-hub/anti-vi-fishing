@@ -286,7 +286,8 @@ export class Fabric {
       const cloneFlag = e => (e === null || typeof e !== 'object') ? e
         : { ...e,
             ...(e.masked ? { masked: new Map([...e.masked].map(([k, v]) => [k, cloneFlag(v)])) } : {}),
-            ...(Array.isArray(e.heals) ? { heals: e.heals.map(h => ({ ...h })) } : {}) };
+            ...(Array.isArray(e.heals) ? { heals: e.heals.map(h => ({ ...h })) } : {}),
+            ...(e._claimsSeen instanceof Set ? { _claimsSeen: new Set(e._claimsSeen) } : {}) };
       if (ev === 'push') {
         (this.#pendingHeadStack ??= []).push(new Map(this.#pendingChainHeads ?? []));
         (this.#wmTamperStack ??= []).push(new Map([...this.#wmTamper].map(([t, e]) => [t, cloneFlag(e)])));
@@ -1603,6 +1604,13 @@ export class Fabric {
         if (!Number.isSafeInteger(pl.marker_seq)) return null;
         const died = this._chainFacts(tenant).dead.get(kid);
         if (died !== undefined && died <= pl.marker_seq) return null;
+        // A marker asserting consumption to marker_seq could not have
+        // seen claims anchored above it — a compromised-then-dead key
+        // minting a backdated env would otherwise suppress future heals
+        // it can predict (w64-seal F-2). Non-`seq:`-shaped claims are left
+        // for the consult's malformed naming.
+        if ([...pl.fold_floor_retired, ...(Array.isArray(pl?.fold_floor_retiring) ? pl.fold_floor_retiring : [])]
+          .some(c => { const m = /^(\d+):/.exec(c); return m !== null && Number.isSafeInteger(Number(m[1])) && Number(m[1]) > pl.marker_seq; })) return null;
       }
       // The unsigned `claims` twin is advisory — the env is the sole
       // authority, so a missing twin authenticates (w62-seal F-7); when
@@ -1705,7 +1713,7 @@ export class Fabric {
         // (`"FOLD_RESIDUE_\u0054ETIRED"` hashes and verifies identically
         // but never matches the literal) — the type/index rescan must
         // bind the PARSED fields, not the byte spelling (w63-runtime F-5).
-        for (const row of (this.#residueLikeStmt ??= this.store._stmt("SELECT seq,envelope FROM audit WHERE tenant=? AND seq>? AND json_valid(envelope) AND (json_extract(envelope,'$.payload.metadata.fold_floor_divergent') IS NOT NULL OR json_extract(envelope,'$.payload.type') IN ('FOLD_RESIDUE_RETIRED','AUDIT_SEALED') OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload.metadata.lifecycle_carryover') je WHERE json_extract(je.value,'$.type') IN ('FOLD_RESIDUE_RETIRED','AUDIT_SEALED')))")).all(t, scan.seq)) absorb(row);
+        for (const row of (this.#residueLikeStmt ??= this.store._stmt("SELECT seq,envelope FROM audit WHERE tenant=? AND seq>? AND json_valid(envelope) AND (json_extract(envelope,'$.payload.metadata.fold_floor_divergent') IS NOT NULL OR json_extract(envelope,'$.payload.type') IN ('FOLD_RESIDUE_RETIRED','AUDIT_SEALED') OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload.metadata.lifecycle_carryover') je WHERE json_extract(je.value,'$.type') IN ('FOLD_RESIDUE_RETIRED','AUDIT_SEALED')) OR EXISTS (SELECT 1 FROM json_each(envelope,'$') GROUP BY \"key\" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload') GROUP BY \"key\" HAVING COUNT(*)>1))")).all(t, scan.seq)) absorb(row);
         const after = shapeStmt.get(t);
         if (after.m === scanShape.m && after.c === scanShape.c) { scan.seq = scanShape.m; scan.count = scanShape.c; break; }
         scan.claims.clear(); scan.retired.clear(); scan.seq = 0; scan.count = 0;
@@ -1735,8 +1743,11 @@ export class Fabric {
             // own scan was replayed or grafted, not freshly written
             // (w63-runtime F-2). `retired` stays anchored by the signature
             // alone; only the volatile field gets the recency window.
-            retiring = new Set(Number.isSafeInteger(authed.markerSeq) && authed.markerSeq >= scan.seq - 8192 ? authed.retiring : []);
-            for (const c of authed.retired) {
+            const markerFresh = Number.isSafeInteger(authed.markerSeq) && authed.markerSeq >= scan.seq - 8192;
+            retiring = new Set(markerFresh ? authed.retiring : []);
+            // `retired` takes the same recency window: a backdated env
+            // must not suppress present-day convictions (w64-seal F-2).
+            for (const c of (markerFresh ? authed.retired : [])) {
               if (!/^\d+:.+/s.test(c)) this.#wmTamperClaim(t, 'floor_marker_retired_malformed', c);
               else scan.retired.add(c);
             }
@@ -2029,7 +2040,10 @@ export class Fabric {
       // Claim-keyed flags carry a bounded sample of the claims they
       // rejected/over-covered — the report must name them, not just a
       // seq:0 slot (w63-seal F-4/F-5).
-      ...(Array.isArray(f?.claims) && f.claims.length ? { claims: f.claims } : {})
+      ...(Array.isArray(f?.claims) && f.claims.length ? { claims: f.claims } : {}),
+      // The sample cap is admitted on the report, like heals_dropped
+      // (w64-runtime F-1).
+      ...(f?.claims_dropped ? { claims_dropped: f.claims_dropped } : {})
     });
     // A heal flag carries EVERY heal it anchored — two heals before one
     // report must both surface, never collapse into the newest
@@ -2072,7 +2086,7 @@ export class Fabric {
     };
     const cur = this.#wmTamper.get(tenant);
     if (cur === undefined) { if (heal) flag.heals = [heal]; this.#wmTamper.set(tenant, flag); return; }
-    if (cur.kind === flag.kind) { if (flag.seq !== undefined) cur.seq = flag.seq; if (flag.healed_marker !== undefined) cur.healed_marker = flag.healed_marker; if (Array.isArray(flag.claims)) cur.claims = flag.claims; if (heal) pushHeal(cur); return; }
+    if (cur.kind === flag.kind) { if (flag.seq !== undefined) cur.seq = flag.seq; if (flag.healed_marker !== undefined) cur.healed_marker = flag.healed_marker; if (Array.isArray(flag.claims)) cur.claims = flag.claims; if (flag.claims_dropped !== undefined) cur.claims_dropped = flag.claims_dropped; if (flag._claimsSeen !== undefined) cur._claimsSeen = flag._claimsSeen; if (heal) pushHeal(cur); return; }
     const slot = (cur.masked ??= new Map());
     const prev = slot.get(flag.kind);
     if (prev !== undefined && typeof prev === 'object' && prev !== null) {
@@ -2081,8 +2095,10 @@ export class Fabric {
       // `claims` arrives fully accumulated from #wmTamperClaim — replace,
       // never append, or each re-fire would double-count.
       if (Array.isArray(flag.claims)) prev.claims = flag.claims;
+      if (flag.claims_dropped !== undefined) prev.claims_dropped = flag.claims_dropped;
+      if (flag._claimsSeen !== undefined) prev._claimsSeen = flag._claimsSeen;
       if (heal) pushHeal(prev);
-    } else slot.set(flag.kind, { seq: flag.seq, ...(flag.healed_marker !== undefined ? { healed_marker: flag.healed_marker } : {}), ...(Array.isArray(flag.claims) ? { claims: flag.claims } : {}), ...(heal ? { heals: [heal] } : {}) });
+    } else slot.set(flag.kind, { seq: flag.seq, ...(flag.healed_marker !== undefined ? { healed_marker: flag.healed_marker } : {}), ...(Array.isArray(flag.claims) ? { claims: flag.claims } : {}), ...(flag.claims_dropped !== undefined ? { claims_dropped: flag.claims_dropped } : {}), ...(flag._claimsSeen !== undefined ? { _claimsSeen: flag._claimsSeen } : {}), ...(heal ? { heals: [heal] } : {}) });
   }
   // Claim-valued flags minted at seq 0 collapse identity on the shared
   // kind — carry a bounded `claims[]` sample (like `heals[]`) so the
@@ -2094,8 +2110,20 @@ export class Fabric {
     // One value = one rejected fact — a consult re-firing on the same
     // claim moves it newest rather than double-counting the sample.
     const c = String(claim).slice(0, 120);
-    const claims = [...(prev?.claims ?? []).filter(x => x !== c), c].slice(-16);
-    this.#wmTamperSet(tenant, { kind, seq: 0, claims });
+    // `claims_dropped` counts DISTINCT claims rejected beyond the
+    // last-16 sample: a consult re-firing the same claims — or a claim
+    // already evicted once — is not a new rejection and must not count.
+    // The first-seen set is bounded: under sustained churn the oldest
+    // entries age out, at which point a re-observed claim counts again —
+    // honest, and the bound is admitted here (w64-runtime F-1).
+    const seen = prev?._claimsSeen ?? new Set();
+    for (const x of prev?.claims ?? []) seen.add(x);
+    if (seen.size >= 8192) seen.delete(seen.values().next().value);
+    const fresh = !seen.has(c);
+    seen.add(c);
+    const mergedSample = [...(prev?.claims ?? []).filter(x => x !== c), c];
+    const claims = mergedSample.slice(-16);
+    this.#wmTamperSet(tenant, { kind, seq: 0, claims, claims_dropped: (prev?.claims_dropped ?? 0) + (fresh && mergedSample.length > 16 ? 1 : 0), _claimsSeen: seen });
   }
   #wmTamperHas(tenant, kind) {
     const cur = this.#wmTamper.get(tenant);
@@ -2157,7 +2185,7 @@ export class Fabric {
           const over = [];
           for (const r of this.store._stmt("SELECT value FROM meta_kv WHERE tenant=? AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.')").all(tenant))
             if (typeof r.value === 'string' && !claimSet.has(r.value)) { claimSet.add(r.value); over.push(r.value); }
-          if (over.length) this.#wmTamperSet(tenant, { kind: 'floor_marker_retired_overcovered', seq: 0, claims: over.map(c => c.slice(0, 120)).slice(-16) });
+          if (over.length) this.#wmTamperSet(tenant, { kind: 'floor_marker_retired_overcovered', seq: 0, claims: over.map(c => c.slice(0, 120)).slice(-16), claims_dropped: Math.max(0, over.length - 16) });
         }
         const claims = [...claimSet];
         // Only claims a real residue row can honour may be signed: a
@@ -2187,8 +2215,15 @@ export class Fabric {
             prior = pa?.retired ?? [];
           }
         }
+        // The 4096 bound caps the marker's retired FIELD (the merge below
+        // slices it, fresh claims heading) — never the mint count. A
+        // capped mint list starved permanently once prior hit 4096: no
+        // FOLD_RESIDUE_RETIRED rows, unsigned drains, re-flag forever
+        // (w64-seal F-4). `prior` is also sliced to the write contract so
+        // an oversized honest-signed env converges instead of wedging
+        // (w64-runtime F-3).
+        prior = prior.slice(0, 4096);
         const mintable = [];
-        const budget = Math.max(0, 4096 - prior.length);
         for (const c of claims) {
           // The claim shape is `seq:marker` — the marker half is free
           // content (a divergent marker may itself carry a leading
@@ -2196,8 +2231,10 @@ export class Fabric {
           // with no `seq:` head or an empty marker (w62-seal F-5).
           if (!/^\d+:.+/s.test(c)) { this.#wmTamperClaim(tenant, 'floor_marker_retired_unshaped', c); continue; }
           const cs = Number(c.slice(0, c.indexOf(':')));
-          if (Number.isSafeInteger(cs) && cs > committedTip) { this.#wmTamperClaim(tenant, 'floor_marker_residue_premature', c); continue; }
-          if (mintable.length >= budget) continue;
+          // A seq no chain row can ever hold (non-safe-integer) is
+          // crafted like one past the tip — flag, never mint
+          // (w64-seal F-3).
+          if (!Number.isSafeInteger(cs) || cs > committedTip) { this.#wmTamperClaim(tenant, 'floor_marker_residue_premature', c); continue; }
           mintable.push(c);
         }
         if (claims.length) {
@@ -2933,7 +2970,7 @@ export class Fabric {
       this._cerRowQ ??= this.store._stmt('SELECT value FROM records WHERE tenant=? AND kind=? AND id=?');
       for (const cid of idx0.ceremonyPlanned.keys()) cer += `${cid}=${this._cerRowQ.get(t, 'ceremony', cid)?.value ?? '-'};`;
     }
-    const selFp = `${this.keys(t)[klass]?.key_id}|${idx0.revoked.size}|${idx0.rotationsByPrev?.size ?? 0}|${idx0.rotationKeys?.size ?? 0}|${idx0.ceremonyPlanned?.size ?? 0}|${idx0.ceremonyCommitted?.size ?? 0}|${idx0.ceremonyCompleted?.size ?? 0}|${idx0.ceremonyAborted?.size ?? 0}|${idx0.ceremonyRotationConsumed?.size ?? 0}|${idx0.ceremonyAcks?.size ?? 0}|${idx0.grants?.size ?? 0}|${cer}`;
+    const selFp = `${this.keys(t)[klass]?.key_id}|${idx0.revoked.size}|${idx0.keyDeadAt?.size ?? 0}|${idx0.rotationsByPrev?.size ?? 0}|${idx0.rotationKeys?.size ?? 0}|${idx0.ceremonyPlanned?.size ?? 0}|${idx0.ceremonyCommitted?.size ?? 0}|${idx0.ceremonyCompleted?.size ?? 0}|${idx0.ceremonyAborted?.size ?? 0}|${idx0.ceremonyRotationConsumed?.size ?? 0}|${idx0.ceremonyAcks?.size ?? 0}|${idx0.grants?.size ?? 0}|${cer}`;
     const selKey = `${t}:${klass}`;
     const selHit = this._signSelCache.get(selKey);
     if (selHit?.fp === selFp) return selHit.sel;
@@ -2966,7 +3003,14 @@ export class Fabric {
         const e = this.vault.keys.get(steered);
         if (e?.pending && !e?.revoked && e?.generated_inside !== false) return { key_id: steered, recovery: true, superseded: configured };
       }
-      return { key_id: configured, recovery: false };
+      // revoked() sees AUTHORITY_REVOKED only — a KEY_ROTATED death is a
+      // ledger death too, and a dead key still signing mints envelopes
+      // that refuse themselves on every consult (marker writers
+      // self-brick: w64-seal F-1). Steer to the successor path; the
+      // fold's keyDeadAt covers both death flavors, and uncommitted
+      // same-transaction rotations are already visible to it (W13-01).
+      if (this._auditIndex(t).keyDeadAt?.has(configured) !== true)
+        return { key_id: configured, recovery: false };
     }
     // A vault entry flagged revoked with no chain AUTHORITY_REVOKED is
     // unattributable in-process tamper — report the divergence honestly

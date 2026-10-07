@@ -46,8 +46,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync , mkdtempSync, writeFileSync, rmSync} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fixture } from './helpers.mjs';
+const probeFile = src => {
+  const dir = mkdtempSync(join(tmpdir(), 'gate-probe-'));
+  const file = join(dir, 'probe.mjs');
+  writeFileSync(file, src);
+  try { return execFileSync(process.execPath, [file], { encoding: 'utf8', cwd: new URL('..', import.meta.url).pathname }).trim(); }
+  finally { rmSync(dir, { recursive: true, force: true }); }
+};
 
 const residueRows = h => h.f.store.db.prepare(
   "SELECT key,value FROM meta_kv WHERE tenant='acme' AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.')").all();
@@ -249,10 +258,10 @@ const collectRun = (lines, verb) => {
   const helpers = src.slice(src.indexOf('// === shared source scanners'), src.indexOf('// === end shared source scanners'));
   const block = src.slice(src.indexOf('const NONROLE'), src.indexOf('const authorizeAt'));
   assert.ok(block.includes('collectAuthorize'), 'the slice carries the shipped scanner');
-  return JSON.parse(execFileSync(process.execPath, ['-e', [
+  return JSON.parse(probeFile([
     helpers, block,
     `globalThis.process.stdout.write(JSON.stringify(collectAuthorize(${JSON.stringify(lines)}, 0, ${lines.length + 2}, true, ${JSON.stringify(verb)})?.roles ?? []));`
-  ].join('\n')], { encoding: 'utf8' }).trim());
+  ].join('\n')));
 };
 
 // w59-fv F-1: negated, conjuncted, and operand-position compares mint
@@ -309,8 +318,8 @@ test('w59-fv F-2: same-member nested own-verb arm is dead scope', t => {
     "  authorize(p, ['shared']);",
     "}",
   ];
-  assert.deepEqual(collectRun(reachable, 'acknowledge'), ['nested', 'shared'],
-    'a different-member nested arm is reachable and mints');
+  assert.deepEqual(collectRun(reachable, 'acknowledge'), ['shared'],
+    'a different-member nested arm is reachable but stays conditional — m[1] is unknowable for the m[2]-bound verb');
 });
 
 // ============================================================================

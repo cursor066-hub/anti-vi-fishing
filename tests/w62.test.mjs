@@ -5,10 +5,19 @@
 // signed set — divergence names forged).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync , mkdtempSync, writeFileSync, rmSync} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fixture, hasCode } from './helpers.mjs';
 import { verifySigned } from '../src/crypto.mjs';
+const probeFile = src => {
+  const dir = mkdtempSync(join(tmpdir(), 'gate-probe-'));
+  const file = join(dir, 'probe.mjs');
+  writeFileSync(file, src);
+  try { return execFileSync(process.execPath, [file], { encoding: 'utf8', cwd: new URL('..', import.meta.url).pathname }).trim(); }
+  finally { rmSync(dir, { recursive: true, force: true }); }
+};
 
 const issueGrant = h => {
   const r = h.proposed('identity.jit.grant', { subject_id: 'operator', resources: ['dataset-1'], actions: ['data.read'], destinations: ['customer-vault'], columns: ['id'], row_ids: [], ttl_ms: 300000, reason: 'Incident', roles: [] }, { action: { type: 'identity.jit.grant', target_resource: 'jit-grants', purpose: 'JIT' } });
@@ -241,10 +250,10 @@ const collectRun = (lines, verb) => {
   const helpers = src.slice(src.indexOf('// === shared source scanners'), src.indexOf('// === end shared source scanners'));
   const block = src.slice(src.indexOf('const NONROLE'), src.indexOf('const authorizeAt'));
   assert.ok(block.includes('collectAuthorize'), 'the slice carries the shipped scanner');
-  return JSON.parse(execFileSync(process.execPath, ['-e', [
+  return JSON.parse(probeFile([
     helpers, block,
     `globalThis.process.stdout.write(JSON.stringify(collectAuthorize(${JSON.stringify(lines)}, 0, ${lines.length + 2}, true, ${JSON.stringify(verb)})));`
-  ].join('\n')], { encoding: 'utf8', cwd: ROOT }).trim());
+  ].join('\n')));
 };
 const HEAD = "if (req.method === 'GET' && (m = /^\\/x\\/(.*)/.exec(path))) {";
 const pyEval = (expr) => execFileSync('python3', ['-c',
