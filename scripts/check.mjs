@@ -885,9 +885,9 @@ const DEFAULT_CASE = Symbol('defaultCase');
 // Returns null when the operand isn't a plain `m[N]` compare.
 const memberCmpFold = (t, verb, verbMembers, posMember = null, posVerb = null, base = 0) => {
   if (verb === null || verb === undefined) return null;
-  const x = /^\s*\(?\s*m\s*(?:\?\s*\.\s*)?(?:\[\s*([^\]]+)\s*\]|\.?\s*at\s*(?:\?\s*\.\s*)?\(\s*([^)]*)\))\s*([!=]={2,3})\s*([^)]*?)\s*\)?\s*$/.exec(t);
+  const x = /^\s*\(?\s*m\s*(?:\?\s*\.\s*)?(?:\[\s*([^\]]+)\s*\]|(?:\?\s*\.\s*|\.\s*)at\s*(?:\?\s*\.\s*)?\(\s*([^)]*)\))\s*([!=]={2,3})\s*([^)]*?)\s*\)?\s*$/.exec(t);
   if (!x) return null;
-  const idx = DISP_IDX_EVAL(x[1] ?? x[2] ?? '');
+  const idx = DISP_IDX_EVAL(x[1] ?? x[2] ?? '', x[1] === undefined);
   if (idx === null) return null;
   const member = `m[${idx}]`;
   // The compared literal is mask-blanked in the tracker view
@@ -1032,11 +1032,9 @@ const pairsForLine = (l, lm, i, stmtDepth, sw, aliases, verb, verbMembers, allCa
       for (; k < l.length; k++) { const c = l[k]; if (c === '(') d++; else if (c === ')') { if (d === 0) { end = k; break; } d--; } }
       if (end < 0) continue;
       const op = l.slice(sm.index + sm[0].length, end);
-      DISP_MEMBER.lastIndex = 0;
-      const dm = DISP_MEMBER.exec(op);
-      let member = null;
-      if (dm && dm[0].trim() === op.trim()) { const idx = DISP_IDX_EVAL(dm[1] ?? dm[2] ?? ''); if (idx !== null) member = `m[${idx}]`; }
-      else { const r = aliases.at(op.trim(), i * 1e7 + sm.index); if (r !== undefined && r !== 'm') member = r; }
+      // Parens/`??`/`,`/alias wrappers on the operand all dispatch on
+      // the member beneath them (w65-fv F-5).
+      const member = switchOperandMember(op, aliases, i * 1e7 + sm.index);
       if (member !== null) sw.push({ member, depth: stmtDepth - 1, at: sm.index, key: i * 1e7 + sm.index, open: null, openExit: false, flow: new Set(), allCases: new Set(), hasDefault: false, segFrom: 0 });
     }
     const top = sw.at(-1);
@@ -1062,7 +1060,7 @@ const pairsForLine = (l, lm, i, stmtDepth, sw, aliases, verb, verbMembers, allCa
   }
   for (const x of l.matchAll(DISP_MEMBER)) {
     if (lm[x.index] === ' ') continue;
-    const idx = DISP_IDX_EVAL(x[1] ?? x[2] ?? '');
+    const idx = DISP_IDX_EVAL(x[1] ?? x[2] ?? '', x[1] === undefined);
     if (idx === null) continue;
     const cmp = /^\s*([!=]={2,3})\s*'([^']+)'/.exec(l.slice(x.index + x[0].length));
     if (!cmp) continue;
@@ -1099,11 +1097,11 @@ const pairsForLine = (l, lm, i, stmtDepth, sw, aliases, verb, verbMembers, allCa
     // Whole-dispatcher alias — `q[N]==='verb'` dispatches like
     // `m[N]==='verb'` — only when the binding live AT THIS COMPARE's
     // position is the whole dispatcher (w61-ledger F-5, w63-fv F-6).
-    const re = new RegExp(`\\b${esc}\\s*(?:\\?\\s*\\.\\s*)?(?:\\[\\s*([^\\]]+)\\]|\\.?\\s*at\\s*\\?\\s*\\.?\\s*\\(\\s*([^)]*)\\))`, 'g');
+    const re = new RegExp(`\\b${esc}\\s*(?:\\?\\s*\\.\\s*)?(?:\\[\\s*([^\\]]+)\\]|(?:\\?\\s*\\.\\s*|\\.\\s*)at\\s*\\?\\s*\\.?\\s*\\(\\s*([^)]*)\\))`, 'g');
     for (const x of l.matchAll(re)) {
       if (lm[x.index] === ' ') continue;
       if (aliases.at(nm, i * 1e7 + x.index) !== 'm') continue;
-      const idx = DISP_IDX_EVAL(x[1] ?? x[2] ?? '');
+      const idx = DISP_IDX_EVAL(x[1] ?? x[2] ?? '', x[1] === undefined);
       if (idx === null) continue;
       const cmp = /^\s*([!=]={2,3})\s*'([^']+)'/.exec(l.slice(x.index + x[0].length));
       if (!cmp) continue;
@@ -1326,8 +1324,12 @@ const condTracker = () => {
   // 'sibling' marks a dispatch arm for a DIFFERENT verb — that arm is
   // dead for this row rather than conditional, so an own-verb arm
   // nested inside it still mints unconditionally (w56-fv F-2).
-  const line = (lm, sd, mode, lraw, forUncond = false, verbPos = null, allPos = null, verbMembers = null, posMember = null, verb = null, posVerb = null, swServed = null, negPos = null) => {
-      const memberDead = verb !== null && (verbMembers?.size ?? 0) === 0 ? IMPLICIT_ROW_MEMBER : verbMembers;
+  const line = (lm, sd, mode, lraw, forUncond = false, verbPos = null, allPos = null, verbMembers = null, posMember = null, verb = null, posVerb = null, swServed = null, negPos = null, aliasCtx = null, l0 = null) => {
+    // The literal-bearing twin of `lm` — same length, so lm-space
+    // offsets slice it verbatim. `lraw`/`lm` blank string contents, so
+    // `req.method === 'X'` reads go through `lit` (w65-fv F-8).
+    const lit = l0 ?? lm;
+      const memberDead = verb !== null && (verbMembers?.size ?? 0) === 0 ? (aliasCtx?.implicit?.() ?? IMPLICIT_ROW_MEMBER) : verbMembers;
     // A foreign bound-member pair inside the head makes it another
     // row's arm even under an own-verb line — `if (m[1]==='a')
     // if (m[2]==='x') x; else y` binds the inner if for 'a', which is
@@ -1339,7 +1341,13 @@ const condTracker = () => {
       // true for 'a', so it is not a foreign pair (w64-fv F-5).
       const foreign = posVerb !== null && [...posVerb.entries()].some(([p, v]) => v !== verb && !negPos?.has(p) && verbMembers?.has(posMember?.get(p)) && p >= hc[1] && p < hc[1] + hc[0].length);
       if (!foreign && mode === 'ours' && dispatchPure(hc, verbPos, verb, verbMembers, posMember, posVerb)) return 'ours';
-      if (siblingArm(hc, verbPos, verb, memberDead, posMember, posVerb)) return 'sibling';
+      if (siblingArm(hc, verbPos, verb, memberDead, posMember, posVerb) || methodCmpDead(hc !== null ? [lit.slice(hc[1], hc[1] + hc[0].length), hc[1], hc[2]] : hc, aliasCtx?.rowMethod ?? null)) return 'sibling';
+      // A statically-true head (`m[1]!=='a'` under every verb but 'a',
+      // `if (true)`) always enters its arm — the body is unconditional
+      // and the `else` dead (w65-fv F-6). 'true' shares the ours-arm's
+      // else-deadness but joins no ownDepth — it satisfied no outer
+      // gate, so it cannot absorb request-gates nested under it.
+      if (condTrueCond(hc, verb, verbMembers, posMember, posVerb)) return 'true';
       return 'cond';
     };
     const condPos = new Uint8Array(lm.length), condPosDeep = new Uint8Array(lm.length), livePos = new Uint8Array(lm.length), liveArm = new Int32Array(lm.length);
@@ -1466,7 +1474,7 @@ const condTracker = () => {
         // else is the LIVE arm, a real gate keeps the else
         // conditional.
         const pe = pendingIfs.pop();
-        if (pe.cls === 'ours') deadElseArm = { depth: pe.depth, arm: ci + 4 };
+        if (pe.cls === 'ours' || pe.cls === 'true') deadElseArm = { depth: pe.depth, arm: ci + 4 };
         else if (pe.cls === 'sibling') bracelessLive = { depth: pe.depth, arm: ci + 4 };
         else if (!bracelessLive && !deadElseArm) bracelessCond = { depth: ld, arm: ci + 4, req: reqGateCond(pe.cond ?? null, verb, verbMembers, posMember, posVerb) };
       } else if (pendingIfs.length && pd === 0 && ((c === '}' && ld <= pendingIfs.at(-1).depth)
@@ -1501,7 +1509,7 @@ const condTracker = () => {
         // usual dead-if latch: `if (m[1]==='b') {x} else authorize`
         // mints for 'a' (w63-fv F-4 sibling direction). Runs on `lm` —
         // pair/posMember positions are lm-space.
-        const sibArm = parenHead === 'if' && siblingArm(headCond(lm.slice(0, ci).trimEnd()), verbPos, verb, memberDead, posMember, posVerb);
+        const sibArm = parenHead === 'if' && (siblingArm(headCond(lm.slice(0, ci).trimEnd()), verbPos, verb, memberDead, posMember, posVerb) || methodCmpDead(headCond(lit.slice(0, ci).trimEnd()), aliasCtx?.rowMethod ?? null));
         // A `switch (member)` whose case set is COMPLETE on this line
         // and serves no verb this row binds is dead scope in full —
         // `switch(m[1]){case'x':x}` never runs for 'a' (w64-fv F-6).
@@ -1509,10 +1517,8 @@ const condTracker = () => {
         // switch is left to its own label frames instead.
         const hc8 = parenHead === 'switch' ? headCond(prevR) : null;
         const swMemberBound = hc8 !== null && (() => {
-          const sm3 = /^\s*m\s*(?:\?\s*\.\s*)?(?:\[\s*([^\]]+)\s*\]|\.?\s*at\s*(?:\?\s*\.\s*)?\(\s*([^)]*))\s*\)?\s*$/.exec(hc8[0]);
-          if (sm3 === null) return false;
-          const idx3 = DISP_IDX_EVAL(sm3[1] ?? sm3[2] ?? '');
-          return idx3 !== null && (memberDead?.has(`m[${idx3}]`) === true);
+          const memb = switchOperandMember(lraw === null || lraw === undefined ? hc8[0] : lraw.slice(hc8[1], hc8[1] + hc8[0].length), aliasCtx?.aliases ?? null, (aliasCtx?.posBase ?? 0) + hc8[1]);
+          return memb !== null && (memberDead?.has(memb) === true);
         })();
         const swDead = hc8 !== null && swServed !== null && swServed.get(hc8[2]) === true && swMemberBound;
         // Whether this switch head discriminates on a member this row
@@ -1520,10 +1526,8 @@ const condTracker = () => {
         // then lets an own `case`/`default` arm consume the gate like
         // a dispatch `if` does (w64-fv F-6).
         const swMember = hc8 !== null && (() => {
-          const sm2 = /^\s*m\s*(?:\?\s*\.\s*)?(?:\[\s*([^\]]+)\s*\]|\.?\s*at\s*(?:\?\s*\.\s*)?\(\s*([^)]*))\s*\)?\s*$/.exec(hc8[0]);
-          if (sm2 === null) return false;
-          const idx = DISP_IDX_EVAL(sm2[1] ?? sm2[2] ?? '');
-          return idx === null || (memberDead?.size ?? 0) === 0 || memberDead.has(`m[${idx}]`);
+          const memb = switchOperandMember(lraw === null || lraw === undefined ? hc8[0] : lraw.slice(hc8[1], hc8[1] + hc8[0].length), aliasCtx?.aliases ?? null, (aliasCtx?.posBase ?? 0) + hc8[1]);
+          return memb === null || (memberDead?.size ?? 0) === 0 || memberDead.has(memb);
         })();
         if (deadDepths.size > 0 || elseDead || sibArm || swDead || (parenHead !== null && deadCond(prevR))) { deadDepths.add(ld); deadHeads.set(ld, elseDead ? 'oursElse' : parenHead); }
         else {
@@ -1565,7 +1569,8 @@ const condTracker = () => {
             // deadFnLines regardless (w61-ledger F-2). Control heads
             // (`while (cond) {`, `for`, `switch`, `catch`) gate their
             // bodies on the head's own condition (w62-fv F-2).
-            if (parenHead === 'if' || parenHead === 'catch' || parenHead === 'while' || parenHead === 'switch') cond = mode !== 'sibling';
+            if (parenHead === 'if' && !enclosingGate(lm, lit, hc5?.[2] ?? ci, verb, verbMembers, posMember, posVerb, aliasCtx?.rowMethod ?? null) && condTrue(prevR, verb, verbMembers, posMember, posVerb, lit, aliasCtx?.rowMethod ?? null)) cond = false;
+            else if (parenHead === 'if' || parenHead === 'catch' || parenHead === 'while' || parenHead === 'switch') cond = mode !== 'sibling';
             // A `for (x of/in coll)` head enumerates a collection — calls
             // inside its body are iteration-wide, and under forUncond
             // (the credential-resolution scan) they are not a gate.
@@ -1581,12 +1586,14 @@ const condTracker = () => {
             // This row's own `case`/`default` label opens its own arm —
             // unconditional like the dispatch `if` arm (w64-fv F-6).
             const ownLabel = (() => { const lm6 = /\b(?:case|default)\b[^?:{};]*$/.exec(prevR); return lm6 !== null && (verbPos ?? []).includes(lm6.index); })();
-            // For a row bound nowhere, a bare `else` arm is the only
-            // live arm — unconditional rather than conditional
-            // (w64-fv F-7).
-            const unboundElse = /\belse\b/.test(prevR) && (verbMembers?.size ?? 1) === 0;
+            // The chain ledger (chainFailed/deadElseExpected) already
+            // mints the else unconditional exactly when every head in
+            // the chain is provably dead for this verb — a bare `else`
+            // under an unbound verb must NOT be promoted unconditionally:
+            // foreign-member and non-member heads are live gates for it
+            // (w65-fv F-1).
             if (bracelessLive) { bracelessLive = null; cond = false; }
-            else cond = (ownLabel || unboundElse) ? false : mode !== 'sibling';
+            else cond = ownLabel ? false : mode !== 'sibling';
           }
           else if (pendingUsed) cond = mode !== 'sibling';
           else cond = false;
@@ -1602,7 +1609,7 @@ const condTracker = () => {
           const hc9 = headCond(prevR);
           const kwS = hc9 ? hc9[2] : -1;
           const cont = kwS >= 0 && /\belse\s*$/.test(prevR.slice(0, kwS));
-          const res = elseDead ? 'ours' : (sibArm || deadCond(prevR) ? true : (oursIfArm === ld ? 'ours' : false));
+          const res = elseDead ? 'ours' : (condTrue(prevR, verb, verbMembers, posMember, posVerb, lit, aliasCtx?.rowMethod ?? null) || oursIfArm === ld ? 'ours' : (sibArm || deadCond(prevR) ? true : false));
           const prev9 = chainFailed.get(ld - 1);
           chainFailed.set(ld - 1, cont ? (prev9 === 'ours' || res === 'ours' ? 'ours' : (prev9 === false || res === false ? false : true)) : res);
           const resReq = reqGateCond(hc9, verb, verbMembers, posMember, posVerb), prevReq = chainFailedReq.get(ld - 1) ?? false;
@@ -1732,7 +1739,13 @@ const condTracker = () => {
             // real gate (w64-ledger F-5 — nested foreign-member heads
             // must NOT latch ours even under an own-verb line).
             lastIfWasBraced = !braceless;
-            if (braceless) pendingIfs.push({ depth: ld, cls: pendCls(headCond(prevR)), cond: headCond(prevR), bodyDone: false });
+            if (braceless) {
+              const pcls = pendCls(headCond(prevR));
+              pendingIfs.push({ depth: ld, cls: pcls, cond: headCond(prevR), bodyDone: false });
+              // A statically-true braceless `if` proves its body live —
+              // the same arm the dead-if's `else` gets (w65-fv F-6).
+              if (pcls === 'true' && !bracelessLive) bracelessLive = { depth: ld, arm: ci + 1 };
+            }
           }
         }
         if (!bracelessDead && (head === 'if' || head === 'for' || (head === 'while' && !doTail)) && deadCond(prevR)) {
@@ -1744,7 +1757,7 @@ const condTracker = () => {
         // for this row, its `else` the live arm via the dead-span
         // else-flip: `if (m[1]==='b') x; else authorize` mints for 'a'
         // (w63-fv F-4 sibling braceless twin).
-        if (!bracelessDead && head === 'if' && siblingArm(headCond(prevR), verbPos, verb, memberDead, posMember, posVerb)) bracelessDead = { depth: ld, nestedIf: false };
+        if (!bracelessDead && head === 'if' && (siblingArm(headCond(prevR), verbPos, verb, memberDead, posMember, posVerb) || methodCmpDead(headCond(lit.slice(0, ci + 1).trimEnd()), aliasCtx?.rowMethod ?? null))) bracelessDead = { depth: ld, nestedIf: false };
         // The braceless twin of the `{`-handler chain ledger — a `)`
         // that closed an `if` head resolves this arm for this row
         // (bound-member sibling arm or literal-dead cond fails, ours
@@ -1754,7 +1767,7 @@ const condTracker = () => {
           const hc9 = bracelessIfCond ?? headCond(prevR);
           const kwS = hc9 ? hc9[2] : -1;
           const cont = kwS >= 0 && /\belse\s*$/.test(prevR.slice(0, kwS));
-          const res = bracelessDead ? true : (pendingIfs.at(-1)?.cls === 'ours' ? 'ours' : (pendingIfs.at(-1)?.cls === 'sibling' ? true : false));
+          const res = bracelessDead ? true : (pendingIfs.at(-1)?.cls === 'ours' || pendingIfs.at(-1)?.cls === 'true' ? 'ours' : (pendingIfs.at(-1)?.cls === 'sibling' ? true : false));
           const prev9 = chainFailed.get(ld);
           chainFailed.set(ld, cont ? (prev9 === 'ours' || res === 'ours' ? 'ours' : (prev9 === false || res === false ? false : true)) : res);
           const resReq = reqGateCond(hc9, verb, verbMembers, posMember, posVerb), prevReq = chainFailedReq.get(ld) ?? false;
@@ -1838,19 +1851,94 @@ const condTracker = () => {
   // any `||`/`??`/`,`/`?`/`:`-mixing is an extra runtime gate — the arm
   // body is conditional on it (w62-ledger F-3).
   const headCond = prev => {
-    let d = 0;
+    let d = 0, closePos = -1;
     for (let k = prev.length - 1; k >= 0; k--) {
       const c = prev[k];
-      if (c === ')') d++;
+      // The head's own closer is the first `)` walking back — a trailing
+      // space before `{` must not leak it into the operand (w65-ledger
+      // F-3b: `switch (m.at(1)) {` vs `switch (m.at(1)){` flipped dead↔live).
+      if (c === ')') { d++; if (closePos === -1) closePos = k; }
       else if (c === '(') {
         d--;
         if (d === 0) {
           const kw = /([A-Za-z_$][\w$]*)\s*$/.exec(prev.slice(0, k));
-          return [prev.slice(k + 1, -1), k + 1, kw ? k - kw[0].length : -1];
+          return [prev.slice(k + 1, closePos), k + 1, kw ? k - kw[0].length : -1];
         }
       }
     }
     return null;
+  };
+  // A whole-condition statically TRUE for this row — a truthy literal
+  // (`if (true)`), a member compare folding const-true for this verb
+  // (`m[1]!=='a'` under a verb that never equals 'a'), or an `&&`/`||`
+  // composition of them. The arm mints unconditional and its `else` is
+  // dead — the dual of deadCond (w65-fv F-6). `&&` chains prove true
+  // only when EVERY operand does; an `||` side proves true when one of
+  // its sides does.
+  const condTrueCond = (hc, verb, verbMembers, posMember, posVerb, litC = null, rowM = null) => {
+    if (hc === null) return false;
+    const provable = op => {
+      const raw = op.t.trim();
+      // `op.t` comes from the MASKED cond — string literals inside it
+      // are blanked. `op.a/op.b` carry its line offsets so `lit`
+      // (the literal-bearing twin) answers the method literal
+      // (w65-fv F-8).
+      const tR = (litC ?? '').slice(op.a, op.b);
+      const v = litVal(raw, null);
+      if (v === true) return true;
+      if (v === false || v === LV_NUL) return false;
+      const f = memberCmpFold(raw, verb, verbMembers, posMember, posVerb, 0);
+      if (f !== null) return f.verdict === 'const-true';
+      // `req.method === <row's own>` / `!== <other>` is statically true
+      // for this row — dead weight, never a gate (w65-fv F-8).
+      const mm = /\breq\.method\s*([!=]={2,3})\s*'([^']*)'|'([^']*)'\s*([!=]={2,3})\s*\breq\.method\b/.exec(tR);
+      if (mm !== null) {
+        if (rowM === null) return false;
+        const neg = (mm[1] ?? mm[4])[0] === '!';
+        const lit2 = mm[1] !== undefined ? mm[2] : mm[3];
+        return neg ? lit2 !== rowM : lit2 === rowM;
+      }
+      return null;
+    };
+    const sides = splitSpans(hc[0], ['||'], hc[1]);
+    for (const side of (sides === null ? [{ t: hc[0], a: hc[1], b: hc[1] + hc[0].length }] : sides.parts)) {
+      const conj = splitSpans(side.t, ['&&'], side.a);
+      const parts = conj === null ? [side] : conj.parts;
+      if (parts.every(op => provable(op) === true)) return true;
+    }
+    return false;
+  };
+  const condTrue = (prev, verb, verbMembers, posMember, posVerb, litC = null, rowM = null) => {
+    const hc = headCond(prev);
+    // hc[2] is the keyword's START — the head word sits at its front.
+    const head = hc !== null ? /^([A-Za-z_$][\w$]*)/.exec(prev.slice(hc[2]))?.[1] ?? '' : '';
+    return head === 'if' && condTrueCond(hc, verb, verbMembers, posMember, posVerb, litC, rowM);
+  };
+  // `if (g1) if (g2) {` — every control head between the last
+  // statement boundary (`;`/`{`/`}`) and this arm's keyword encloses
+  // the arm. A `condTrue` head may only skip the gate when each
+  // enclosing head is itself provably entered; an unproven `if (x)`
+  // keeps the arm conditional (w65-fv F-1 follow-through — the
+  // outer gate is not the arm's own dispatch).
+  const enclosingGate = (lmC, litC, kwAbs, verb, verbMembers, posMember, posVerb, rowM) => {
+    const txt = lmC.slice(0, kwAbs);
+    const bound = Math.max(txt.lastIndexOf(';'), txt.lastIndexOf('{'), txt.lastIndexOf('}'));
+    const re = /\b(?:if|while|for|switch|catch)\s*\(/g;
+    re.lastIndex = bound + 1;
+    let im;
+    while ((im = re.exec(txt)) !== null) {
+      const open = im.index + im[0].length - 1;
+      let d = 0, close = -1;
+      for (let k = open; k < kwAbs; k++) {
+        const c = lmC[k];
+        if (c === '(') d++;
+        else if (c === ')') { d--; if (d === 0) { close = k; break; } }
+      }
+      if (close === -1) return true;
+      if (!condTrueCond([litC.slice(open + 1, close), open + 1, close], verb, verbMembers, posMember, posVerb, litC, rowM)) return true;
+      re.lastIndex = close;
+    }
+    return false;
   };
 
   return { line };
@@ -1860,7 +1948,7 @@ const condTracker = () => {
 // aliases bound by `sub = m[2]` / `const {2: sub} = m` all dispatch
 // exactly like `m[2]` (w58-fv F-4). The index expression is parsed, not
 // regex-spelled.
-const DISP_IDX_EVAL = expr => {
+const DISP_IDX_EVAL = (expr, trunc = false) => {
   const t = expr.trim().replace(/^\++/, '');
   const q = /^['"`]([^'"`]+)['"`]?$/.exec(t);
   const raw = (q ? q[1] : t).trim();
@@ -1868,7 +1956,9 @@ const DISP_IDX_EVAL = expr => {
     : /^0x[0-9a-f]+$/i.test(raw) ? parseInt(raw, 16)
     : /^0o[0-7]+$/i.test(raw) ? parseInt(raw, 8)
     : /^0b[01]+$/i.test(raw) ? parseInt(raw, 2)
-    : /^\d*\.\d+$/.test(raw) ? Math.trunc(parseFloat(raw))
+    // `m.at(1.9)` ToIntegerOrInfinity's → m[1]; `m[1.9]` reads property
+    // '1.9' — undefined on a match array, never m[1] (w65-ledger F-2).
+    : /^\d*\.\d+$/.test(raw) ? (v => trunc ? Math.trunc(v) : (v === Math.trunc(v) ? v : null))(parseFloat(raw))
     : null;
 };
 // Index-bearing member access on `m` — `m[…]`/`m?.[…]`/`m.at(…)` — plus
@@ -1876,7 +1966,51 @@ const DISP_IDX_EVAL = expr => {
 // `m[N]`). Matches run on the UNMASKED line so quoted digits survive;
 // the caller rejects positions the masked twin proves are inside a
 // literal (w58-fv F-4).
-const DISP_MEMBER = /\bm\s*(?:\?\s*\.\s*)?(?:\[\s*([^\]]+)\]|\.?\s*at\s*(?:\?\s*\.\s*)?\(\s*([^)]*)\))/g;
+const DISP_MEMBER = /\bm\s*(?:\?\s*\.\s*)?(?:\[\s*([^\]]+)\]|(?:\?\s*\.\s*|\.\s*)at\s*(?:\?\s*\.\s*)?\(\s*([^)]*)\))/g;
+// The member a `switch (<operand>)` discriminates on — the operand may
+// carry wrapper syntax that isn't the member itself: balanced outer
+// parens (`switch ((m[1]))`), a discarded `,` head (`(x, m[1])`), a
+// `??`/`||` fallback tail (`m[1] ?? ''` still tests m[1]), or an alias
+// bound to `m` (`let m2 = m; switch (m2[1])` — w65-fv F-5). Returns
+// 'm[N]', another resolved member, or null when the operand isn't a
+// member at all.
+const switchOperandMember = (op, aliases, pos) => {
+  let o = op.trim();
+  for (let guard = 0; guard < 8; guard++) {
+    let changed = false;
+    if (o.startsWith('(') && o.endsWith(')')) {
+      let d = 0, wraps = true;
+      for (let k = 0; k < o.length; k++) { const c = o[k]; if (c === '(') d++; else if (c === ')') { d--; if (d === 0 && k < o.length - 1) { wraps = false; break; } } }
+      if (wraps && d === 0) { o = o.slice(1, -1).trim(); changed = true; }
+    }
+    if (!changed) {
+      const cs = splitSpans(o, [','], 0);
+      if (cs !== null && cs.parts.length > 1) { o = cs.parts.at(-1).t.trim(); changed = true; }
+    }
+    if (!changed) {
+      const ns = splitSpans(o, ['??', '||'], 0);
+      if (ns !== null && ns.parts.length > 1) { o = ns.parts[0].t.trim(); changed = true; }
+    }
+    if (!changed) break;
+  }
+  DISP_MEMBER.lastIndex = 0;
+  const dm = DISP_MEMBER.exec(o);
+  if (dm !== null && dm[0].trim() === o) {
+    const idx = DISP_IDX_EVAL(dm[1] ?? dm[2] ?? '', dm[1] === undefined);
+    return idx === null ? null : `m[${idx}]`;
+  }
+  const am = /^([A-Za-z_$][\w$]*)\s*(?:\[\s*([^\]]+)\s*\]|(?:\?\s*\.\s*|\.\s*)at\s*(?:\?\s*\.\s*)?\(\s*([^)]*)\))$/.exec(o);
+  if (am !== null && aliases !== null) {
+    const r = aliases.at(am[1], pos);
+    if (r === 'm') { const idx = DISP_IDX_EVAL(am[2] ?? am[3] ?? '', am[2] === undefined); return idx === null ? null : `m[${idx}]`; }
+    if (r !== undefined) return r;
+  }
+  if (aliases !== null) {
+    const r = aliases.at(o, pos);
+    if (r !== undefined) return r === 'm' ? null : r;
+  }
+  return null;
+};
 const dispAliases = lines => {
   // name → [{pos, member}] — bindings are POSITIONAL: a compare sees
   // only the last assignment before it — `q[1]==='a'` before `q = m`
@@ -1901,13 +2035,13 @@ const dispAliases = lines => {
   for (const l0 of lines) {
     const base = li++ * 1e7;
     const s = maskStrings(stripDead(l0, dead), dead);
-    for (const m of s.matchAll(/\b(?:const|let|var)?\s*([A-Za-z_$][\w$]*)\s*=\s*(?:m\s*(?:\?\s*\.\s*)?(?:\[\s*([^\]]+)\]|\.?\s*at\s*(?:\?\s*\.\s*)?\(\s*([^)]*)\))|([A-Za-z_$][\w$]*))/g)) {
+    for (const m of s.matchAll(/\b(?:const|let|var)?\s*([A-Za-z_$][\w$]*)\s*=\s*(?:m\s*(?:\?\s*\.\s*)?(?:\[\s*([^\]]+)\]|(?:\?\s*\.\s*|\.\s*)at\s*(?:\?\s*\.\s*)?\(\s*([^)]*)\))|([A-Za-z_$][\w$]*))/g)) {
       // Chained aliases (`sub2 = sub`) resolve through the binding live
       // AT THIS POSITION — member binding, not surface binding
       // (w63-fv F-6). `const q = m` binds the WHOLE dispatcher — `q[N]`
       // then dispatches exactly like `m[N]` (w61-ledger F-5).
       const resolved = m[4] === 'm' ? 'm' : m[4] !== undefined ? at(m[4], base + m.index) : null;
-      const idx = resolved ?? (() => { const v = DISP_IDX_EVAL(m[2] ?? m[3] ?? ''); return v === null ? null : `m[${v}]`; })();
+      const idx = resolved ?? (() => { const v = DISP_IDX_EVAL(m[2] ?? m[3] ?? '', m[2] === undefined); return v === null ? null : `m[${v}]`; })();
       if (idx !== null) push(m[1], base + m.index, idx);
     }
     const d = /\b(?:const|let|var)\s*\{([^}]*)\}\s*=\s*m\b/.exec(s);
@@ -1918,7 +2052,7 @@ const dispAliases = lines => {
     for (const m of s.matchAll(/\b([A-Za-z_$][\w$]*)\s*(?<![=!<>])=(?![=])\s*/g)) {
       if (!hist.has(m[1])) continue;
       const rhs = s.slice(m.index + m[0].length);
-      if (/^m\s*(?:\?\s*\.\s*)?(?:\[|\.?\s*at\s*(?:\?\s*\.\s*)?\()/.test(rhs)) continue;
+      if (/^m\s*(?:\?\s*\.\s*)?(?:\[|(?:\?\s*\.\s*|\.\s*)at\s*(?:\?\s*\.\s*)?\()/.test(rhs)) continue;
       // `name = m` binds the whole dispatcher, not a member — it keeps
       // the alias instead of reading as a non-m rebind (w61-ledger F-5).
       if (/^m\s*(?:[;,]|$)/.test(rhs)) continue;
@@ -1930,7 +2064,7 @@ const dispAliases = lines => {
   }
   return { hist, at };
 };
-const DISPATCH_2 = new RegExp("m\\s*(?:\\?\\s*\\.\\s*)?(?:\\[|\\.?\\s*at\\s*\\?\\s*\\.?\\s*\\()");
+const DISPATCH_2 = new RegExp("m\\s*(?:\\?\\s*\\.\\s*)?(?:\\[|(?:\\?\\s*\\.\\s*|\\.\\s*)at\\s*\\?\\s*\\.?\\s*\\()");
 // A role gate may name its set through a module-scope constant —
 // `authorize(p, ADMIN_SET)` gates exactly as honestly as the literal
 // array, and treating it as no gate turns a real role check into a
@@ -1986,6 +2120,33 @@ const roleSets = lines => {
 // the first capture group — so `m[1]==='a'` folds dead for it while
 // foreign-member arms stay conditional (w64: unbound-verb parity).
 const IMPLICIT_ROW_MEMBER = new Set(['m[1]']);
+// Whether every `||`-side of a condition carries a conjunct provably
+// false under this row's own method — `req.method === 'X'` with
+// X !== the row's method, or `req.method !== 'X'` with X === the row's
+// method. Only exact literals decide; `path`/regex comparisons are the
+// route boundary's domain, not this fold's (w65-fv F-8).
+const methodCmpDead = (condPair, rowMethod) => {
+  if (condPair === null || rowMethod === null || rowMethod === undefined) return false;
+  const [cond, base] = condPair;
+  const sides = splitSpans(cond, ['||'], base);
+  const parts = sides === null ? [{ t: cond, a: base, b: base + cond.length }] : sides.parts;
+  for (const side of parts) {
+    const s = splitSpans(side.t, ['&&', '??', ',', ':', '?'], side.a);
+    if (s !== null && s.ops.some(o => o !== '&&')) return false;
+    const ops = s === null ? [side] : s.parts;
+    let dead = false;
+    for (const op of ops) {
+      const mm = /\breq\.method\s*([!=]={2,3})\s*'([^']*)'|'([^']*)'\s*([!=]={2,3})\s*\breq\.method\b/.exec(op.t);
+      if (mm === null) continue;
+      const neg = (mm[1] ?? mm[4])[0] === '!';
+      const lit = mm[1] !== undefined ? mm[2] : mm[3];
+      const eq = lit === rowMethod;
+      if (neg ? eq : !eq) { dead = true; break; }
+    }
+    if (!dead) return false;
+  }
+  return true;
+};
 // === end shared source scanners ===
 {
   const server = readFileSync('src/server.mjs', 'utf8').split('\n');
@@ -2143,6 +2304,15 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
     return dead;
   };
   const collectAuthorize = (lines, from, depth, breakIf = true, verb = null) => {
+    // `undefined` and `null` are the same "no verb bound" — only
+    // `null` reads as unbound downstream; normalize so the two
+    // spellings never pick different member doctrine (w65-ledger F-5).
+    verb = verb ?? null;
+    // `undefined` (omitted arg) and `null` (explicit) must pick the same
+    // dead-member doctrine — normalize once at the boundary (w65-ledger
+    // F-5: NONROLE's omitted-verb call took IMPLICIT_ROW_MEMBER while
+    // authorizeAt's default took the raw set).
+    verb ??= null;
     const defs = roleSets(lines);
     const aliases = dispAliases(lines);
     const deadFn = deadFnLines(lines, from, from + depth);
@@ -2175,10 +2345,22 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
     // exiting) plus each dispatched sub-arm's body depth (w56-ledger F7).
     const deadDepths = new Set();
     let tailDead = false;
+    // Route-chain depth at the row's head — a route boundary is a
+    // same-chain `if`, never a nested mid-row gate (w65-fv F-8).
+    let rowBase = -1;
     // Members this row's verb dispatches on — accumulates as the scan
     // sees this verb's member-compare pairs; siblingArm consults it to
     // prove disjointness is same-member, not same-line (w63-fv F-3).
     const verbMemberSet = new Set();
+    // The row's own method — the literal its route head compares
+    // `req.method` against. A mid-row `if (req.method === 'X')` with a
+    // different X is statically dead (its else is the row's live arm);
+    // the route boundary only fires at route-chain depth so that arm
+    // pair is folded honestly instead of hiding the grant (w65-fv F-8).
+    const rowMethod = (() => {
+      const mm = /\breq\.method\s*={2,3}\s*'([^']+)'/.exec(lines[from] ?? '');
+      return mm?.[1] ?? null;
+    })();
     // Seed it row-wide: a sibling arm consults the set BEFORE the line
     // that binds the verb (`if(m[1]==='abort')` precedes
     // `if(m[1]==='acknowledge')`, w59-fv F-2 — incremental accumulation
@@ -2190,13 +2372,26 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
     // '<verb>'` frames — so a compare inside `/* */` can no longer
     // phantom-bind a member and a re-bound alias keeps only its last
     // binding (w64-fv F-8, w64-ledger F-3).
+    // The member an unbound verb implicitly dispatches on is the row's
+    // OWN dispatch member — the plurality of its pair members across
+    // the row (multiplexed rows bind verbs on m[2], so an unbound
+    // verb's `m[1]` gate is foreign, not dead — w65-fv F-7). A row
+    // carrying no pairs keeps the historical m[1].
+    const rowMemberVotes = new Map();
+    const implicitSet = () => {
+      let best = null, n = 0;
+      for (const [mb, c] of rowMemberVotes) if (c > n) { best = mb; n = c; }
+      return best === null ? IMPLICIT_ROW_MEMBER : new Set([best]);
+    };
     if (verb !== null) {
       const seedStack = [], seedCases = new Map();
       let swDepth = 0;
       for (let i2 = from; i2 < Math.min(from + depth, lines.length); i2++) {
         const l2 = stripDead(lines[i2], deadM), lm2 = maskStrings(stripComment(l2), deadM);
-        for (const p of pairsForLine(stripComment(l2), lm2, i2, swDepth, seedStack, aliases, verb, verbMemberSet, seedCases))
+        for (const p of pairsForLine(stripComment(l2), lm2, i2, swDepth, seedStack, aliases, verb, verbMemberSet, seedCases)) {
+          rowMemberVotes.set(p.member, (rowMemberVotes.get(p.member) ?? 0) + 1);
           if (p.verb === verb && p.neg !== true) verbMemberSet.add(p.member);
+        }
         swDepth += (lm2.match(/\{/g) ?? []).length - (lm2.match(/\}/g) ?? []).length;
       }
     }
@@ -2223,6 +2418,7 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
       // continuation of a sibling chain is sibling too: it serves the
       // chain's catch-all row, not this verb — excluding it errs toward
       // flagging, never laundering.
+      if (i === from) rowBase = depthCur;
       let l = stripDead(lines[i], dead);
       // `lm` is the string-blanked twin: call detection runs on it so an
       // authorize/dispatch/return inside a string literal mints nothing;
@@ -2240,7 +2436,13 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
       // (w64-ledger F-1). The real boundary: a dispatch-compare `if`
       // whose arm this row does not serve, sitting at or above the
       // row's own arm depth — only that terminates the row's window.
-      if (i !== from && breakIf && routeArmBoundary(l, lm, i, switchStack, aliases) && !isValidationGuard(lines[i])) break;
+      const enclosingClosesEarly = (() => { let bal = 0, enc = 0; for (const ch of lm) { if (ch === '{') bal++; else if (ch === '}') { if (bal > 0) bal--; else enc++; } } return enc; })();
+      // The boundary needs the route-chain depth: the row head sits at
+      // `rowBase` (the dispatch's own depth); a nested `if` deeper than
+      // that is a mid-row gate, never a new route — even a
+      // route-shaped one (`if (req.method === 'PUT') {…} else {…}`)
+      // whose else is the row's live arm (w65-fv F-8).
+      if (i !== from && breakIf && depthCur - enclosingClosesEarly <= rowBase && routeArmBoundary(l, lm, i, switchStack, aliases) && !isValidationGuard(lines[i])) break;
       // Depth arithmetic reads the fully-masked view — `//`/`/* */`
       // comments, string bodies and dead operands all blank — so every
       // `{`/`}` counted here is real structure. A phantom `/* } */`
@@ -2253,8 +2455,7 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
       // outlives them is an enclosing close. A self-contained inner
       // block on one line (`if (m[1]==='a') { authorize(...) }`) must
       // not pop the sibling frame it sits inside (w60-fv F-3).
-      let bal = 0, enclosingCloses = 0;
-      for (const ch of lm) { if (ch === '{') bal++; else if (ch === '}') { if (bal > 0) bal--; else enclosingCloses++; } }
+      const enclosingCloses = enclosingClosesEarly;
       // Dispatch verbs are read from the UNMASKED `l` (the masked twin
       // blanks quoted digits), each position checked against `lm` so a
       // dispatch spelling inside a string literal mints nothing
@@ -2342,7 +2543,7 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
       // scan — a sibling arm is provably disjoint only when its member
       // compare binds a member THIS verb also binds (w63-fv F-3).
       for (const p of pairs0) if (p.verb === verb && p.neg !== true) verbMemberSet.add(p.member);
-      const verbDeadSet = () => verbMemberSet.size === 0 ? IMPLICIT_ROW_MEMBER : verbMemberSet;
+      const verbDeadSet = () => verbMemberSet.size === 0 ? implicitSet() : verbMemberSet;
       const posMemberMap = new Map(pairs0.map(p => [p.pos, p.member]));
       const posVerbMap = new Map(pairs0.map(p => [p.pos, p.verb]));
       const negPosSet = new Set(pairs0.filter(p => p.neg === true).map(p => p.pos));
@@ -2373,7 +2574,7 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
         const headDead = open => {
           let d = 0, close = -1;
           for (let k = open; k < lm.length; k++) { const c = lm[k]; if (c === '(') d++; else if (c === ')') { d--; if (d === 0) { close = k; break; } } }
-          return close >= 0 && siblingArm([lm.slice(open + 1, close), open + 1], verbPosLine, verb, verbDeadSet(), posMemberMap, posVerbMap);
+          return close >= 0 && (siblingArm([lm.slice(open + 1, close), open + 1], verbPosLine, verb, verbDeadSet(), posMemberMap, posVerbMap) || methodCmpDead([l.slice(open + 1, close), open + 1], rowMethod));
         };
         for (const p of pairs) {
           const a = armOf(lm, p.pos);
@@ -2405,8 +2606,8 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
             // carry the arm semantics — only a cross-member switch head
             // is a live guard for this verb (w61-ledger F-5).
             const swc = lm.slice(open + 1, close);
-            const swm = /^\s*m\s*\[\s*([^\]]+)\s*\]\s*$/.exec(swc);
-            const swBound = swm !== null && DISP_IDX_EVAL(swm[1]) !== null && verbDeadSet().has(`m[${DISP_IDX_EVAL(swm[1])}]`);
+            const swmMember = switchOperandMember(swc, aliases, i * 1e7 + open + 1);
+            const swBound = swmMember !== null && verbDeadSet().has(swmMember);
             if (!swBound && !siblingArm([swc, open + 1], verbPosLine, verb, verbDeadSet(), posMemberMap, posVerbMap)) return false;
           }
         }
@@ -2452,7 +2653,7 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
       // block is dead scope for this row — not conditional — so an
       // own-verb arm nested inside it still mints (w58-fv F-3,
       // w56-fv F-2).
-      const scan = tracker.line(lm, depthCur, i === from || ours ? 'ours' : (sibling || elseSibling) ? 'sibling' : null, maskStrings(blankBlock(stripComment(lines[i]), deadM), deadM), false, i === from && pairs0.length === 0 ? null : verbPosLine, pairs0.map(p => p.pos), verbMemberSet, posMemberMap, verb, posVerbMap, swServed, negPosSet);
+      const scan = tracker.line(lm, depthCur, i === from || ours ? 'ours' : (sibling || elseSibling) ? 'sibling' : null, maskStrings(blankBlock(stripComment(lines[i]), deadM), deadM), false, i === from && pairs0.length === 0 ? null : verbPosLine, pairs0.map(p => p.pos), verbMemberSet, posMemberMap, verb, posVerbMap, swServed, negPosSet, { aliases, posBase: i * 1e7, implicit: implicitSet, rowMethod }, l);
       if (sibling || elseSibling || deadArm) {
         const lastOpen = l.lastIndexOf('{'), lastClose = l.lastIndexOf('}');
         // An unmatched last `{` opens a block whose interior continues

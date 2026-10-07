@@ -124,6 +124,7 @@ const healOnce = (h, marker) => {
   h.f.store.db.prepare("UPDATE meta_kv SET value=? WHERE tenant='acme' AND key='fold_floor'").run(marker);
   h.f.store.audit('acme', 'PROBE', 'actor', null, {}, h.f.clock());
 };
+const tipHashAt = (h, seq) => h.f.store.db.prepare("SELECT hash FROM audit WHERE tenant='acme' AND seq=?").get(seq)?.hash ?? null;
 
 // ============================================================================
 // w62-fv F-4: a vault-revoked key must carry `revoked` into the verify set —
@@ -213,7 +214,7 @@ test('w62-seal F-4: the durable retiring note suppresses the echo flag', t => {
   // the signed retiring set still names it — the drain never ran.
   dropResidueGuards(h);
   const tip = h.f.store.db.prepare("SELECT MAX(seq) m FROM audit WHERE tenant='acme'").get().m;
-  const env = h.f.store.auditSigners['acme'].sign({ tenant_id: 'acme', fold_floor_retired: [claim], fold_floor_retiring: [claim], marker_seq: tip }, 'audit');
+  const env = h.f.store.auditSigners['acme'].sign({ tenant_id: 'acme', fold_floor_retired: [claim], fold_floor_retiring: [claim], marker_seq: tip, marker_tip_hash: tipHashAt(h, tip) }, 'audit');
   h.f.store.db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme','fold_floor_retired',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(JSON.stringify({ claims: [claim], env }));
   const seal = h.f.sealAuditChain(h.p('security'));
   const kinds = (seal.head_watermark_tampered ?? []).map(e => e.kind);

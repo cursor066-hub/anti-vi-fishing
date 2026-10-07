@@ -35,7 +35,7 @@ See [WORKFLOWS.md](docs/WORKFLOWS.md) for exact operation and signing instructio
 
 ```sh
 sh scripts/verify.sh        # complete pipeline: check + tests + simulate + verifiers
-npm test                    # 1404-test suite incl. adversarial, conformance, canonical fuzz + coverage bypass probe
+npm test                    # 1415-test suite incl. adversarial, conformance, canonical fuzz + coverage bypass probe
 npm run conformance         # regenerate vectors; verify under node, WebCrypto and Python
 node scripts/verify-export.mjs reports/sample-audit.json reports/sample-pinned-trust.json
 python scripts/canonical-vectors.py examples/canonical-vectors.json

@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 9495,
-      "bytes": 722660
+      "lines": 9544,
+      "bytes": 725595
     },
     "src/issuerd.mjs": {
       "lines": 954,
@@ -82,8 +82,8 @@
       "bytes": 3876
     },
     "src/store.mjs": {
-      "lines": 1410,
-      "bytes": 106734
+      "lines": 1420,
+      "bytes": 107367
     },
     "src/target.mjs": {
       "lines": 669,
@@ -114,8 +114,8 @@
       "bytes": 1523
     },
     "scripts/check.mjs": {
-      "lines": 3071,
-      "bytes": 186616
+      "lines": 3272,
+      "bytes": 198369
     },
     "scripts/generate-contracts.mjs": {
       "lines": 120,
@@ -523,7 +523,7 @@
     },
     "tests/w56.test.mjs": {
       "lines": 440,
-      "bytes": 26238
+      "bytes": 26008
     },
     "tests/w57.test.mjs": {
       "lines": 73,
@@ -534,8 +534,8 @@
       "bytes": 13809
     },
     "tests/w59.test.mjs": {
-      "lines": 535,
-      "bytes": 29552
+      "lines": 532,
+      "bytes": 29493
     },
     "tests/w6-fix.test.mjs": {
       "lines": 186,
@@ -546,24 +546,28 @@
       "bytes": 9246
     },
     "tests/w60.test.mjs": {
-      "lines": 378,
-      "bytes": 23855
+      "lines": 391,
+      "bytes": 24754
     },
     "tests/w61.test.mjs": {
-      "lines": 315,
-      "bytes": 18557
+      "lines": 324,
+      "bytes": 19040
     },
     "tests/w62.test.mjs": {
-      "lines": 367,
-      "bytes": 22587
+      "lines": 368,
+      "bytes": 22754
     },
     "tests/w63.test.mjs": {
-      "lines": 393,
-      "bytes": 25663
+      "lines": 395,
+      "bytes": 25934
     },
     "tests/w64.test.mjs": {
-      "lines": 373,
-      "bytes": 23277
+      "lines": 374,
+      "bytes": 23540
+    },
+    "tests/w65.test.mjs": {
+      "lines": 304,
+      "bytes": 18795
     },
     "tests/w7-dek.test.mjs": {
       "lines": 118,
@@ -614,6 +618,6 @@
       "bytes": 6499
     }
   },
-  "total_files": 153,
-  "total_lines": 47951
+  "total_files": 154,
+  "total_lines": 48538
 }

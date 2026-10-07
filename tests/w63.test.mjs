@@ -56,6 +56,7 @@ const putMarker = (h, env, claims = null) => {
     .run(JSON.stringify({ claims: claims ?? (env ? JSON.parse(env.payload ?? '{}')?.fold_floor_retired ?? [] : []), env }));
 };
 const sealKinds = h => (h.f.sealAuditChain(h.p('security')).head_watermark_tampered ?? []).map(e => e.kind);
+const tipHashAt = (h, seq) => h.f.store.db.prepare("SELECT hash FROM audit WHERE tenant='acme' AND seq=?").get(seq)?.hash ?? null;
 
 // ============================================================================
 // w63-ledger F-1: a dead operand's tail stops at `;` — a same-line
@@ -270,7 +271,7 @@ test('w63-seal F-1b: a rotated-out signer cannot mint past its death row', t => 
   // and past the death row. marker_seq == deadAt is an honest-verify-only
   // boundary: the key died before that tip could exist.
   dropResidueGuards(h);
-  const boundary = signed({ tenant_id: 'acme', fold_floor_retired: [claim], marker_seq: deadAt }, deadKey, 'audit');
+  const boundary = signed({ tenant_id: 'acme', fold_floor_retired: [claim], marker_seq: deadAt, marker_tip_hash: tipHashAt(h, deadAt) }, deadKey, 'audit');
   h.f.store.db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme','fold_floor_retired',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value")
     .run(JSON.stringify({ claims: [claim], env: boundary }));
   const kinds = sealKinds(h);
@@ -278,7 +279,7 @@ test('w63-seal F-1b: a rotated-out signer cannot mint past its death row', t => 
     `a dead-signer envelope at its own death row is refused: ${kinds}`);
   // And below the boundary the same key is honored — the gate is exactly
   // `died <= marker_seq`, not a blanket dead-key refusal.
-  const below = signed({ tenant_id: 'acme', fold_floor_retired: [claim], marker_seq: deadAt - 1 }, deadKey, 'audit');
+  const below = signed({ tenant_id: 'acme', fold_floor_retired: [claim], marker_seq: deadAt - 1, marker_tip_hash: tipHashAt(h, deadAt - 1) }, deadKey, 'audit');
   h.f.store.db.prepare("UPDATE meta_kv SET value=? WHERE tenant='acme' AND key='fold_floor_retired'")
     .run(JSON.stringify({ claims: [claim], env: below }));
   const kinds2 = sealKinds(h);
@@ -380,7 +381,8 @@ test('w63-seal F-5: unshaped env claims are individually named', t => {
   // claims — the consult names each into the flag's claims[] sample
   // instead of collapsing them all into one seq:0 slot.
   const unshaped = ['bare', 'no-colon', 'still.no.colon'];
-  const env = h.f.store.auditSigners['acme'].sign({ tenant_id: 'acme', fold_floor_retired: unshaped, marker_seq: h.f.store.db.prepare("SELECT MAX(seq) m FROM audit WHERE tenant='acme'").get().m }, 'audit');
+  const _tip = h.f.store.db.prepare("SELECT MAX(seq) m FROM audit WHERE tenant='acme'").get().m;
+  const env = h.f.store.auditSigners['acme'].sign({ tenant_id: 'acme', fold_floor_retired: unshaped, marker_seq: _tip, marker_tip_hash: tipHashAt(h, _tip) }, 'audit');
   putMarker(h, env, unshaped);
   const seal = h.f.sealAuditChain(h.p('security'));
   const flags = seal.head_watermark_tampered ?? [];

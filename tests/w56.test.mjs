@@ -142,7 +142,7 @@ test('w56-fv F-2: else-arms of a multiplex sibling chain never bleed roles into 
   assert.ok(block.includes('collectAuthorize'), 'the slice carries the shipped scanner');
   const run = (lines, verb) => JSON.parse(probeFile([
     helpers, block,
-    `globalThis.process.stdout.write(JSON.stringify(collectAuthorize(${JSON.stringify(lines)}, 0, ${lines.length + 2}, true, ${JSON.stringify(verb)})?.roles ?? []));`
+    `globalThis.process.stdout.write(JSON.stringify(collectAuthorize(${JSON.stringify(lines)}, 0, ${lines.length + 2}, true, ${JSON.stringify(verb)}) ?? { roles: null, any: false }));`
   ].join('\n')));
 
   // Index 0 is the route arm the scan starts on (its own dispatch is
@@ -158,9 +158,9 @@ test('w56-fv F-2: else-arms of a multiplex sibling chain never bleed roles into 
     "  }",
     "}",
   ];
-  assert.deepEqual(run(chain, 'a'), ['admin'], 'else-arms belong to their own rows, not verb a');
-  assert.deepEqual(run(chain, 'b'), ['operator'], 'the else-if arm of verb b is still collected');
-  assert.deepEqual(run(chain, 'c'), [], 'the catch-all else cannot mint roles for an undispatched verb');
+  assert.deepEqual(run(chain, 'a').roles, ['admin'], 'else-arms belong to their own rows, not verb a');
+  assert.deepEqual(run(chain, 'b').roles, ['operator'], 'the else-if arm of verb b is still collected');
+  { const r = run(chain, 'c'); assert.equal(r.any, false); assert.equal(r.roles, null); }
 
   // Nested sibling inside a sibling arm: the inner block's close must not
   // drop the outer exclusion.
@@ -175,8 +175,8 @@ test('w56-fv F-2: else-arms of a multiplex sibling chain never bleed roles into 
     "  authorize(p, ['ours']);",
     "}",
   ];
-  assert.deepEqual(run(nested, 'a'), ['admin', 'ours'], 'the inner sibling is excluded, arm-a gates count');
-  assert.deepEqual(run(nested, 'x'), ['ours'], 'x binds m[2] — the enclosing m[1] arm is unknowable for it, so spy stays conditional (w63 member-binding supersedes the w56 member-agnostic gate rule)');
+  assert.deepEqual(run(nested, 'a').roles, ['admin', 'ours'], 'the inner sibling is excluded, arm-a gates count');
+  assert.deepEqual(run(nested, 'x').roles, ['ours'], 'x binds m[2] — the enclosing m[1] arm is unknowable for it, so spy stays conditional (w63 member-binding supersedes the w56 member-agnostic gate rule)');
 
   // Braceless sibling body: indented continuation lines stay excluded.
   const braceless = [
@@ -186,7 +186,7 @@ test('w56-fv F-2: else-arms of a multiplex sibling chain never bleed roles into 
     "  authorize(p, ['ours']);",
     "}",
   ];
-  assert.deepEqual(run(braceless, 'b'), ['ours'], 'a braceless sibling body is excluded, the next statement is not');
+  assert.deepEqual(run(braceless, 'b').roles, ['ours'], 'a braceless sibling body is excluded, the next statement is not');
 });
 
 // w56-fv F-3: roleSets left three bindings invisible — a bare `B = A`
@@ -224,7 +224,7 @@ test('w56-ledger F7: post-return authorizes are dead; nested-if returns do not d
   const block = src.slice(src.indexOf('const NONROLE'), src.indexOf('const authorizeAt'));
   const run = (lines, verb) => JSON.parse(probeFile([
     helpers, block,
-    `globalThis.process.stdout.write(JSON.stringify(collectAuthorize(${JSON.stringify(lines)}, 0, ${lines.length + 2}, true, ${JSON.stringify(verb)})?.roles ?? []));`
+    `globalThis.process.stdout.write(JSON.stringify(collectAuthorize(${JSON.stringify(lines)}, 0, ${lines.length + 2}, true, ${JSON.stringify(verb)}) ?? { roles: null, any: false }));`
   ].join('\n')));
 
   const dead = [
@@ -236,7 +236,7 @@ test('w56-ledger F7: post-return authorizes are dead; nested-if returns do not d
     "  }",
     "}",
   ];
-  assert.deepEqual(run(dead, 'a'), ['before'], 'the post-return authorize in the same arm is unreachable');
+  assert.deepEqual(run(dead, 'a').roles, ['before'], 'the post-return authorize in the same arm is unreachable');
 
   const deadNextLine = [
     "if (req.method === 'GET' && (m = /^\\/x\\/(.*)/.exec(path))) {",
@@ -245,7 +245,7 @@ test('w56-ledger F7: post-return authorizes are dead; nested-if returns do not d
     "  return send(404);",
     "}",
   ];
-  assert.deepEqual(run(deadNextLine, 'a'), [], 'a return closing the arm kills the shared tail for that verb');
+  { const r = run(deadNextLine, 'a'); assert.equal(r.any, false); assert.equal(r.roles, null); }
 
   const conditional = [
     "if (req.method === 'GET' && (m = /^\\/x\\/(.*)/.exec(path))) {",
@@ -255,8 +255,8 @@ test('w56-ledger F7: post-return authorizes are dead; nested-if returns do not d
     "  }",
     "}",
   ];
-  assert.deepEqual(run(conditional, 'a'), [], 'the m[2]-bound return CAN fire for verb a — the nested mint and the tail are both conditional under member-binding');
-  assert.deepEqual(run(conditional, 'x'), [], 'x binds m[2] — the enclosing m[1] arm is unknowable for it, so nested stays conditional');
+  { const r = run(conditional, 'a'); assert.equal(r.any, true); assert.equal(r.roles, null); }
+  { const r = run(conditional, 'x'); assert.equal(r.any, true); assert.equal(r.roles, null); }
 
   // A `return` that is a braceless conditional's body is NOT dominant —
   // `if (c) return x; authorize` leaves the gate reachable.
@@ -268,7 +268,7 @@ test('w56-ledger F7: post-return authorizes are dead; nested-if returns do not d
     "  }",
     "}",
   ];
-  assert.deepEqual(run(condRet, 'a'), [], 'a conditional return dominates nothing — the tail authorize still counts, conditionally: m[2] is unknowable for verb a');
+  { const r = run(condRet, 'a'); assert.equal(r.any, true); assert.equal(r.roles, null); }
 
   // A braceless dispatch `if (m[2]==='x') return serve(...)` dominates
   // the region's tail for its own verb.
@@ -280,8 +280,8 @@ test('w56-ledger F7: post-return authorizes are dead; nested-if returns do not d
     "  }",
     "}",
   ];
-  assert.deepEqual(run(braceless, 'x'), [], 'a braceless dispatch return dominates — the tail cannot mint for x');
-  assert.deepEqual(run(braceless, 'a'), [], 'other verbs still reach the shared gate — conditionally, since the m[2] guard is unknowable for a');
+  { const r = run(braceless, 'x'); assert.equal(r.any, false); assert.equal(r.roles, null); }
+  { const r = run(braceless, 'a'); assert.equal(r.any, true); assert.equal(r.roles, null); }
 });
 
 // Gate regressions below run the shipped scans against copied trees —

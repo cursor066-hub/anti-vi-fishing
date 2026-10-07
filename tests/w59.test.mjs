@@ -260,7 +260,7 @@ const collectRun = (lines, verb) => {
   assert.ok(block.includes('collectAuthorize'), 'the slice carries the shipped scanner');
   return JSON.parse(probeFile([
     helpers, block,
-    `globalThis.process.stdout.write(JSON.stringify(collectAuthorize(${JSON.stringify(lines)}, 0, ${lines.length + 2}, true, ${JSON.stringify(verb)})?.roles ?? []));`
+    `globalThis.process.stdout.write(JSON.stringify(collectAuthorize(${JSON.stringify(lines)}, 0, ${lines.length + 2}, true, ${JSON.stringify(verb)}) ?? { roles: null, any: false }));`
   ].join('\n')));
 };
 
@@ -269,26 +269,26 @@ const collectRun = (lines, verb) => {
 test('w59-fv F-1: verb extraction honors polarity and conjunction', t => {
   const head = "if (req.method === 'GET' && (m = /^\\/x\\/(.*)/.exec(path))) {";
   // !== — the arm can never serve the named verb.
-  assert.deepEqual(collectRun([head, "  if (m[1] !== 'a') {", "    authorize(p, ['sneak']);", "  }", "}"], 'a'), [],
-    'a !== arm mints nothing for the negated verb');
+  { const r = collectRun([head, "  if (m[1] !== 'a') {", "    authorize(p, ['sneak']);", "  }", "}"], 'a');
+    assert.equal(r.any, false); assert.equal(r.roles, null); }
   // !(m===v) — negated group.
-  assert.deepEqual(collectRun([head, "  if (!(m[1] === 'a')) {", "    authorize(p, ['sneak']);", "  }", "}"], 'a'), [],
-    'a !(compare) arm mints nothing');
+  { const r = collectRun([head, "  if (!(m[1] === 'a')) {", "    authorize(p, ['sneak']);", "  }", "}"], 'a');
+    assert.equal(r.any, true); assert.equal(r.roles, null); }
   // && conjunct — the arm serves the verb only under the extra conjunct.
-  assert.deepEqual(collectRun([head, "  if (m[1] === 'a' && otherGate(p)) {", "    authorize(p, ['sneak']);", "  }", "}"], 'a'), [],
-    'an &&-conjunct compare is conditional, not ours');
-  assert.deepEqual(collectRun([head, "  if (otherGate(p) && m[1] === 'a') {", "    authorize(p, ['sneak']);", "  }", "}"], 'a'), [],
-    'a trailing-conjunct compare is conditional, not ours');
+  { const r = collectRun([head, "  if (m[1] === 'a' && otherGate(p)) {", "    authorize(p, ['sneak']);", "  }", "}"], 'a');
+    assert.equal(r.any, true); assert.equal(r.roles, null); }
+  { const r = collectRun([head, "  if (otherGate(p) && m[1] === 'a') {", "    authorize(p, ['sneak']);", "  }", "}"], 'a');
+    assert.equal(r.any, true); assert.equal(r.roles, null); }
   // Operand position — the compare feeds a ternary, not the condition.
-  assert.deepEqual(collectRun([head, "  if (x === (m[1] === 'a' ? 1 : 2)) {", "    authorize(p, ['sneak']);", "  }", "}"], 'a'), [],
-    'a compare inside an operand is no dispatch arm');
+  { const r = collectRun([head, "  if (x === (m[1] === 'a' ? 1 : 2)) {", "    authorize(p, ['sneak']);", "  }", "}"], 'a');
+    assert.equal(r.any, true); assert.equal(r.roles, null); }
   // Preserved honest shapes: ||-alternation stays unconditional.
-  assert.deepEqual(collectRun([head, "  if (m[1] === 'a' || m[1] === 'b') {", "    authorize(p, ['dual']);", "  }", "}"], 'a'), ['dual'],
+  assert.deepEqual(collectRun([head, "  if (m[1] === 'a' || m[1] === 'b') {", "    authorize(p, ['dual']);", "  }", "}"], 'a').roles, ['dual'],
     'an ||-joined same-member compare stays ours');
-  assert.deepEqual(collectRun([head, "  if (m[1] === 'a' || otherGate(p)) {", "    authorize(p, ['dual']);", "  }", "}"], 'a'), ['dual'],
+  assert.deepEqual(collectRun([head, "  if (m[1] === 'a' || otherGate(p)) {", "    authorize(p, ['dual']);", "  }", "}"], 'a').roles, ['dual'],
     'an ||-arm serves the named verb unconditionally');
   // The positive case still mints.
-  assert.deepEqual(collectRun([head, "  if (m[1] === 'a') {", "    authorize(p, ['admin']);", "  }", "}"], 'a'), ['admin'],
+  assert.deepEqual(collectRun([head, "  if (m[1] === 'a') {", "    authorize(p, ['admin']);", "  }", "}"], 'a').roles, ['admin'],
     'a plain positive compare still mints');
 });
 
@@ -306,8 +306,7 @@ test('w59-fv F-2: same-member nested own-verb arm is dead scope', t => {
     "  authorize(p, ['shared']);",
     "}",
   ];
-  assert.deepEqual(collectRun(chain, 'acknowledge'), ['shared'],
-    'a same-member contradiction is dead — the spy role mints nothing');
+  { const r = collectRun(chain, 'acknowledge'); assert.deepEqual(r.roles, ['shared']); assert.equal(r.any, true); }
   const reachable = [
     "if (req.method === 'GET' && (m = /^\\/x\\/(.*)/.exec(path))) {",
     "  if (m[1] === 'abort') {",
@@ -318,8 +317,7 @@ test('w59-fv F-2: same-member nested own-verb arm is dead scope', t => {
     "  authorize(p, ['shared']);",
     "}",
   ];
-  assert.deepEqual(collectRun(reachable, 'acknowledge'), ['shared'],
-    'a different-member nested arm is reachable but stays conditional — m[1] is unknowable for the m[2]-bound verb');
+  { const r = collectRun(reachable, 'acknowledge'); assert.deepEqual(r.roles, ['shared']); assert.equal(r.any, true); }
 });
 
 // ============================================================================
@@ -340,7 +338,7 @@ test('w59-ledger F-6: dead-constant branch mints no roles', t => {
       "  authorize(p, ['real']);",
       "}",
     ];
-    assert.deepEqual(collectRun(lines, 'a'), ['real'], `if (${deadCond}) scope is dead`);
+    assert.deepEqual(collectRun(lines, 'a').roles, ['real'], `if (${deadCond}) scope is dead`);
   }
   // `false &&` and `&& false` kill the whole condition.
   assert.deepEqual(collectRun([
@@ -349,16 +347,15 @@ test('w59-ledger F-6: dead-constant branch mints no roles', t => {
     "  if (gate(p) && false) { authorize(p, ['sneak2']); }",
     "  authorize(p, ['real']);",
     "}",
-  ], 'a'), ['real'], 'a false-conjuncted condition is dead');
-  // A truthy-constant condition stays live — but an `if` body is still
-  // conditional scope: it mints no unconditional roles either way
-  // (doctrine: only the row's own dispatch arm is unconditional).
+  ], 'a').roles, ['real'], 'a false-conjuncted condition is dead');
+  // A truthy-constant `if` is statically proven to enter its arm —
+  // the body mints unconditionally (w65 const-true doctrine).
   assert.deepEqual(collectRun([
     "if (req.method === 'GET' && (m = /^\\/x\\/(.*)/.exec(path))) {",
     "  if (true) { authorize(p, ['kept']); }",
     "  authorize(p, ['real']);",
     "}",
-  ], 'a'), ['real'], 'a live conditional arm is not dead scope');
+  ], 'a').roles, ['kept', 'real'], 'a statically-true arm mints unconditional');
 });
 
 // F-1: a declared-but-never-invoked local function carries dead asserts.
@@ -369,7 +366,7 @@ test('w59-ledger F-1: uninvoked local function is dead scope', t => {
     "  authorize(p, ['real']);",
     "}",
   ];
-  assert.deepEqual(collectRun(lines, 'a'), ['real'], 'an uninvoked function body mints nothing');
+  assert.deepEqual(collectRun(lines, 'a').roles, ['real'], 'an uninvoked function body mints nothing');
   const invoked = [
     "if (req.method === 'GET' && (m = /^\\/x\\/(.*)/.exec(path))) {",
     "  function helper() { authorize(p, ['tagged']); }",
@@ -377,7 +374,7 @@ test('w59-ledger F-1: uninvoked local function is dead scope', t => {
     "  authorize(p, ['real']);",
     "}",
   ];
-  assert.deepEqual(collectRun(invoked, 'a'), ['tagged', 'real'], 'an invoked function still mints');
+  assert.deepEqual(collectRun(invoked, 'a').roles, ['tagged', 'real'], 'an invoked function still mints');
 });
 
 // F-4: a comma inside a dead call's argument list is an argument
@@ -392,7 +389,7 @@ test('w59-ledger F-4: dead continuation honors paren depth', t => {
     "  authorize(p, ['real']);",
     "}",
   ];
-  assert.deepEqual(collectRun(lines, 'a'), ['real'], 'authorize nested in dead call args is dead');
+  assert.deepEqual(collectRun(lines, 'a').roles, ['real'], 'authorize nested in dead call args is dead');
 });
 
 // F-3: an else-if arm repeating the named verb after our chain closed
@@ -407,7 +404,7 @@ test('w59-ledger F-3: else-if after closed chain is dead scope', t => {
     "  }",
     "}",
   ];
-  assert.deepEqual(collectRun(lines, 'a'), ['first'],
+  assert.deepEqual(collectRun(lines, 'a').roles, ['first'],
     'a repeat-verb else-if cannot run — it mints nothing');
 });
 
@@ -425,7 +422,7 @@ test('w59-ledger F-5: rebound dispatch alias unbinds', t => {
     "}",
   ];
   const got = collectRun(lines, 'a');
-  assert.ok(!got.includes('sneak'), `a rebound alias arm cannot serve the verb (got ${JSON.stringify(got)})`);
+  assert.ok(!(got.roles ?? []).includes('sneak'), `a rebound alias arm cannot serve the verb (got ${JSON.stringify(got)})`);
 });
 
 // F-7: a `${}` interpolation inside a template literal is code — an
@@ -438,7 +435,7 @@ test('w59-ledger F-7: template interpolation is code', t => {
     "  }",
     "}",
   ];
-  assert.deepEqual(collectRun(lines, 'a'), ['tagged'], 'an authorize inside ${} still mints');
+  assert.deepEqual(collectRun(lines, 'a').roles, ['tagged'], 'an authorize inside ${} still mints');
 });
 
 // ---------------------------------------------------------------------------

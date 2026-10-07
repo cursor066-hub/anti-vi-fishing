@@ -1,5 +1,5 @@
 import { randomUUID, randomBytes, createHmac, createPrivateKey, createPublicKey } from 'node:crypto';
-import { Store, RESIDUE_KEEP_TRIGGERS } from './store.mjs';
+import { Store, RESIDUE_KEEP_TRIGGERS, DUP_KEY_PROBE } from './store.mjs';
 import { SimulatedTarget } from './target.mjs';
 import { RuntimeGate } from './runtime.mjs';
 import { digest, clone, canonical, hashBytes } from './canonical.mjs';
@@ -287,7 +287,8 @@ export class Fabric {
         : { ...e,
             ...(e.masked ? { masked: new Map([...e.masked].map(([k, v]) => [k, cloneFlag(v)])) } : {}),
             ...(Array.isArray(e.heals) ? { heals: e.heals.map(h => ({ ...h })) } : {}),
-            ...(e._claimsSeen instanceof Set ? { _claimsSeen: new Set(e._claimsSeen) } : {}) };
+            ...(e._claimsSeen instanceof Set ? { _claimsSeen: new Set(e._claimsSeen) } : {}),
+            ...(e._healsDroppedSeen instanceof Set ? { _healsDroppedSeen: new Set(e._healsDroppedSeen) } : {}) };
       if (ev === 'push') {
         (this.#pendingHeadStack ??= []).push(new Map(this.#pendingChainHeads ?? []));
         (this.#wmTamperStack ??= []).push(new Map([...this.#wmTamper].map(([t, e]) => [t, cloneFlag(e)])));
@@ -368,7 +369,7 @@ export class Fabric {
     // would satisfy the SQL while the verified bytes name nothing — every
     // dup member makes the row a candidate and the PARSED envelope decides
     // attestation, never the SQL hit (w46-ledger HIGH-1).
-    const aadDedupeStmt = this.store._stmt("SELECT envelope FROM audit WHERE tenant=? AND json_valid(envelope) AND ((json_extract(envelope,'$.payload.type') IN ('AAD_MIGRATION','AAD_MIGRATION_MARKER') AND instr(COALESCE(json_extract(envelope,'$.payload.metadata.marker_digests'),''), ?) > 0) OR EXISTS (SELECT 1 FROM json_each(envelope,'$') GROUP BY \"key\" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload') GROUP BY \"key\" HAVING COUNT(*)>1))");
+    const aadDedupeStmt = this.store._stmt("SELECT envelope FROM audit WHERE tenant=? AND json_valid(envelope) AND ((json_extract(envelope,'$.payload.type') IN ('AAD_MIGRATION','AAD_MIGRATION_MARKER') AND instr(COALESCE(json_extract(envelope,'$.payload.metadata.marker_digests'),''), ?) > 0)" + DUP_KEY_PROBE + ")");
     const aadAttested = (t, d) => {
       for (const row of aadDedupeStmt.all(t, d)) {
         try {
@@ -408,7 +409,7 @@ export class Fabric {
     // unsigned pending names nothing (same dedupe doctrine as markers).
     // Each pending's migration_id joins the fresh-filter set so the
     // attestation below names the owed residue exactly once.
-    const pendingScan = this.store._stmt("SELECT tenant,envelope FROM audit WHERE json_valid(envelope) AND (json_extract(envelope,'$.payload.type')='AAD_MIGRATION_PENDING' OR EXISTS (SELECT 1 FROM json_each(envelope,'$') GROUP BY \"key\" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload') GROUP BY \"key\" HAVING COUNT(*)>1))");
+    const pendingScan = this.store._stmt("SELECT tenant,envelope FROM audit WHERE json_valid(envelope) AND (json_extract(envelope,'$.payload.type')='AAD_MIGRATION_PENDING'" + DUP_KEY_PROBE + ")");
     for (const row of this.store._schemaGuard(() => pendingScan.all())) {
       let env; try { env = JSON.parse(row.envelope); } catch { continue; }
       const pl = env?.payload, mid = pl?.metadata?.migration_id;
@@ -1544,8 +1545,12 @@ export class Fabric {
           try { prior = prevAuthed?.retired ?? []; } catch { prior = []; }
         // Freshly retired claims head the merge — a full marker never evicts
         // this drain's own binding in favour of older prior claims
-        // (w62-runtime F-4).
-        merged = [...new Set([...retired, ...prior])].slice(0, 4096);
+        // (w62-runtime F-4). But a retired-set flood filling the whole cap
+        // pushed every standing prior claim off the tail — a steerable
+        // echo-resurfacing primitive (w65-runtime F-3). Split the budget:
+        // this drain's claims take the first 2048 slots, prior
+        // suppressions fill the rest — a flood can only push its own tail.
+        merged = [...new Set([...retired.slice(0, 2048), ...prior])].slice(0, 4096);
         // marker_seq binds the signature to the committed chain tip the
         // consult sees: a signer already dead at that tip could never have
         // minted the marker, so post-death envelopes are refused (w62-seal F-1).
@@ -1554,7 +1559,12 @@ export class Fabric {
         // whose residue-mint window legitimately re-arms the keep
         // triggers — so it runs BEFORE the drops below, or the UPSERT
         // would raise its own guard (w60-fv F-10).
-        env = this.#auditSigners[tenant].sign({ tenant_id: tenant, fold_floor_retired: merged, marker_seq: tip }, 'audit');
+        // `marker_seq` is a bare position the seq guard REUSES after a
+        // seal cut rewinds the table — pin the exact row bytes it names
+        // so a post-cut (or replayed) env cannot re-bind to a renumbered
+        // epoch (w65-seal F-1).
+        const tipHash = (() => { try { return this.store._stmt("SELECT hash FROM audit WHERE tenant=? AND seq=?").get(tenant, tip)?.hash ?? null; } catch { return null; } })();
+        env = this.#auditSigners[tenant].sign({ tenant_id: tenant, fold_floor_retired: merged, marker_seq: tip, marker_tip_hash: tipHash }, 'audit');
         }
       }
       db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
@@ -1609,8 +1619,21 @@ export class Fabric {
         // minting a backdated env would otherwise suppress future heals
         // it can predict (w64-seal F-2). Non-`seq:`-shaped claims are left
         // for the consult's malformed naming.
+        // Unsafe-integer seq prefixes fail CLOSED: a `\d+` head beyond
+        // MAX_SAFE_INTEGER cannot be proven <= marker_seq — treating it as
+        // legal let such a claim authenticate (and suppress a standing
+        // residue row) where the mintable arm refuses the identical string
+        // as premature (w65-seal F-2). Bare non-`seq:` claims still pass —
+        // the consult names them malformed.
         if ([...pl.fold_floor_retired, ...(Array.isArray(pl?.fold_floor_retiring) ? pl.fold_floor_retiring : [])]
-          .some(c => { const m = /^(\d+):/.exec(c); return m !== null && Number.isSafeInteger(Number(m[1])) && Number(m[1]) > pl.marker_seq; })) return null;
+          .some(c => { const m = /^(\d+):/.exec(c); return m !== null && (!Number.isSafeInteger(Number(m[1])) || Number(m[1]) > pl.marker_seq); })) return null;
+        // `marker_seq` is a bare chain position the seq guard REUSES once
+        // a seal cut rewinds the table — MAX is not a clock. The env must
+        // pin the exact row it asserted (`marker_tip_hash`); a replayed or
+        // epoch-stranded marker binds a seq that now holds different bytes
+        // — or no row at all — and refuses (w65-seal F-1).
+        const tipRow = this.store._stmt("SELECT hash FROM audit WHERE tenant=? AND seq=?").get(tenant, pl.marker_seq);
+        if (tipRow?.hash !== pl.marker_tip_hash) return null;
       }
       // The unsigned `claims` twin is advisory — the env is the sole
       // authority, so a missing twin authenticates (w62-seal F-7); when
@@ -1713,7 +1736,7 @@ export class Fabric {
         // (`"FOLD_RESIDUE_\u0054ETIRED"` hashes and verifies identically
         // but never matches the literal) — the type/index rescan must
         // bind the PARSED fields, not the byte spelling (w63-runtime F-5).
-        for (const row of (this.#residueLikeStmt ??= this.store._stmt("SELECT seq,envelope FROM audit WHERE tenant=? AND seq>? AND json_valid(envelope) AND (json_extract(envelope,'$.payload.metadata.fold_floor_divergent') IS NOT NULL OR json_extract(envelope,'$.payload.type') IN ('FOLD_RESIDUE_RETIRED','AUDIT_SEALED') OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload.metadata.lifecycle_carryover') je WHERE json_extract(je.value,'$.type') IN ('FOLD_RESIDUE_RETIRED','AUDIT_SEALED')) OR EXISTS (SELECT 1 FROM json_each(envelope,'$') GROUP BY \"key\" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload') GROUP BY \"key\" HAVING COUNT(*)>1))")).all(t, scan.seq)) absorb(row);
+        for (const row of (this.#residueLikeStmt ??= this.store._stmt("SELECT seq,envelope FROM audit WHERE tenant=? AND seq>? AND json_valid(envelope) AND (json_extract(envelope,'$.payload.metadata.fold_floor_divergent') IS NOT NULL OR json_extract(envelope,'$.payload.type') IN ('FOLD_RESIDUE_RETIRED','AUDIT_SEALED') OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload.metadata.lifecycle_carryover') je WHERE json_extract(je.value,'$.type') IN ('FOLD_RESIDUE_RETIRED','AUDIT_SEALED'))" + DUP_KEY_PROBE + ")")).all(t, scan.seq)) absorb(row);
         const after = shapeStmt.get(t);
         if (after.m === scanShape.m && after.c === scanShape.c) { scan.seq = scanShape.m; scan.count = scanShape.c; break; }
         scan.claims.clear(); scan.retired.clear(); scan.seq = 0; scan.count = 0;
@@ -2081,7 +2104,21 @@ export class Fabric {
     const pushHeal = target => {
       const arr = (target.heals ??= []);
       if (arr.some(h => h.seq === heal.seq && h.healed_marker === heal.healed_marker)) return;
-      if (arr.length >= HEALS_CAP) { target.heals_dropped = (target.heals_dropped ?? 0) + 1; return; }
+      if (arr.length >= HEALS_CAP) {
+        // A drop is a fact, not an event — a standing residue row re-fires
+        // the same heal every consult, so the counter inflated ~2x
+        // (w65-seal F-3). Dedupe drops by (seq, healed_marker) under the
+        // same bounded-window doctrine as _claimsSeen: at capacity a
+        // re-observation is indistinguishable from a new drop — freeze.
+        const key = `${heal.seq}:${heal.healed_marker}`;
+        const droppedSeen = (target._healsDroppedSeen ??= new Set());
+        const rolling = droppedSeen.size >= 8192;
+        const fresh = !droppedSeen.has(key);
+        droppedSeen.add(key);
+        if (droppedSeen.size > 8192) droppedSeen.delete(droppedSeen.values().next().value);
+        if (fresh && !rolling) target.heals_dropped = (target.heals_dropped ?? 0) + 1;
+        return;
+      }
       arr.push(heal);
     };
     const cur = this.#wmTamper.get(tenant);
@@ -2115,15 +2152,20 @@ export class Fabric {
     // already evicted once — is not a new rejection and must not count.
     // The first-seen set is bounded: under sustained churn the oldest
     // entries age out, at which point a re-observed claim counts again —
-    // honest, and the bound is admitted here (w64-runtime F-1).
+    // honest, and the bound is admitted here (w64-runtime F-1). Once the
+    // window is rolling (set at capacity) every re-observed evictee looks
+    // fresh again and each consult re-counts ~the whole set (~2x
+    // inflation, w65-runtime F-2): freeze the counter while at cap —
+    // a claim arriving mid-roll cannot be proven new rather than evicted.
     const seen = prev?._claimsSeen ?? new Set();
     for (const x of prev?.claims ?? []) seen.add(x);
-    if (seen.size >= 8192) seen.delete(seen.values().next().value);
+    const rolling = seen.size >= 8192;
     const fresh = !seen.has(c);
     seen.add(c);
+    if (seen.size > 8192) seen.delete(seen.values().next().value);
     const mergedSample = [...(prev?.claims ?? []).filter(x => x !== c), c];
     const claims = mergedSample.slice(-16);
-    this.#wmTamperSet(tenant, { kind, seq: 0, claims, claims_dropped: (prev?.claims_dropped ?? 0) + (fresh && mergedSample.length > 16 ? 1 : 0), _claimsSeen: seen });
+    this.#wmTamperSet(tenant, { kind, seq: 0, claims, claims_dropped: (prev?.claims_dropped ?? 0) + (fresh && !rolling && mergedSample.length > 16 ? 1 : 0), _claimsSeen: seen });
   }
   #wmTamperHas(tenant, kind) {
     const cur = this.#wmTamper.get(tenant);
@@ -2231,10 +2273,11 @@ export class Fabric {
           // with no `seq:` head or an empty marker (w62-seal F-5).
           if (!/^\d+:.+/s.test(c)) { this.#wmTamperClaim(tenant, 'floor_marker_retired_unshaped', c); continue; }
           const cs = Number(c.slice(0, c.indexOf(':')));
-          // A seq no chain row can ever hold (non-safe-integer) is
-          // crafted like one past the tip — flag, never mint
-          // (w64-seal F-3).
-          if (!Number.isSafeInteger(cs) || cs > committedTip) { this.#wmTamperClaim(tenant, 'floor_marker_residue_premature', c); continue; }
+          // A seq no chain row can ever hold (non-safe-integer, zero or
+          // negative — `0:` passes the shape regex and Number() yet no
+          // audit seq can be <1) is crafted like one past the tip —
+          // flag, never mint (w64-seal F-3, w65-fv F-4).
+          if (!Number.isSafeInteger(cs) || cs > committedTip || cs < 1) { this.#wmTamperClaim(tenant, 'floor_marker_residue_premature', c); continue; }
           mintable.push(c);
         }
         if (claims.length) {
@@ -2257,7 +2300,8 @@ export class Fabric {
                 // The sign re-enters the fold, whose residue-mint window
                 // re-arms the keep triggers — sign before dropping them
                 // (w60-fv F-10).
-                const noteEnv = this.#auditSigners[tenant].sign({ tenant_id: tenant, fold_floor_retired: prior, fold_floor_retiring: mintable, marker_seq: committedTip }, 'audit');
+                const noteTipHash = (() => { try { return this.store._stmt("SELECT hash FROM audit WHERE tenant=? AND seq=?").get(tenant, committedTip)?.hash ?? null; } catch { return null; } })();
+                const noteEnv = this.#auditSigners[tenant].sign({ tenant_id: tenant, fold_floor_retired: prior, fold_floor_retiring: mintable, marker_seq: committedTip, marker_tip_hash: noteTipHash }, 'audit');
                 db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
                 db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
                 db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
@@ -2808,7 +2852,7 @@ export class Fabric {
     // unwinds (w63 self-bisect — verify↔facts cycle hung the suite).
     this.#cfScanning.set(tenant, cached);
     try {
-      if (shape.m > cached.throughSeq) for (const row of (this.#cfScanStmt ??= this.store._stmt("SELECT seq,envelope FROM audit WHERE tenant=? AND seq>? AND json_valid(envelope) AND (json_extract(envelope,'$.payload.type') IN ('AUTHORITY_REVOKED','KEY_ROTATED','AUDIT_SEALED','AUDIT_SEAL_CARRY') OR json_extract(envelope,'$.payload.type') LIKE 'CEREMONY_%' OR EXISTS (SELECT 1 FROM json_each(envelope,'$') GROUP BY \"key\" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload') GROUP BY \"key\" HAVING COUNT(*)>1))")).all(tenant, cached.throughSeq)) {
+      if (shape.m > cached.throughSeq) for (const row of (this.#cfScanStmt ??= this.store._stmt("SELECT seq,envelope FROM audit WHERE tenant=? AND seq>? AND json_valid(envelope) AND (json_extract(envelope,'$.payload.type') IN ('AUTHORITY_REVOKED','KEY_ROTATED','AUDIT_SEALED','AUDIT_SEAL_CARRY') OR json_extract(envelope,'$.payload.type') LIKE 'CEREMONY_%'" + DUP_KEY_PROBE + ")")).all(tenant, cached.throughSeq)) {
         let env; try { env = JSON.parse(row.envelope); } catch { continue; }
         const pl = env?.payload, meta = pl?.metadata;
         let verified;
@@ -2970,7 +3014,12 @@ export class Fabric {
       this._cerRowQ ??= this.store._stmt('SELECT value FROM records WHERE tenant=? AND kind=? AND id=?');
       for (const cid of idx0.ceremonyPlanned.keys()) cer += `${cid}=${this._cerRowQ.get(t, 'ceremony', cid)?.value ?? '-'};`;
     }
-    const selFp = `${this.keys(t)[klass]?.key_id}|${idx0.revoked.size}|${idx0.keyDeadAt?.size ?? 0}|${idx0.rotationsByPrev?.size ?? 0}|${idx0.rotationKeys?.size ?? 0}|${idx0.ceremonyPlanned?.size ?? 0}|${idx0.ceremonyCommitted?.size ?? 0}|${idx0.ceremonyCompleted?.size ?? 0}|${idx0.ceremonyAborted?.size ?? 0}|${idx0.ceremonyRotationConsumed?.size ?? 0}|${idx0.ceremonyAcks?.size ?? 0}|${idx0.grants?.size ?? 0}|${cer}`;
+    // `idx0.maxSeq` is the fold epoch: every contribution to these maps
+    // arrives through a folded audit row that advances it, so a
+    // same-size member swap (a second rotation overwriting
+    // rotationsByPrev at constant size) still flips the fingerprint —
+    // the stale-selection wedge a sizes-only fp allowed (w65-fv F-3).
+    const selFp = `${idx0.maxSeq}|${this.keys(t)[klass]?.key_id}|${idx0.revoked.size}|${idx0.keyDeadAt?.size ?? 0}|${idx0.rotationsByPrev?.size ?? 0}|${idx0.rotationKeys?.size ?? 0}|${idx0.ceremonyPlanned?.size ?? 0}|${idx0.ceremonyCommitted?.size ?? 0}|${idx0.ceremonyCompleted?.size ?? 0}|${idx0.ceremonyAborted?.size ?? 0}|${idx0.ceremonyRotationConsumed?.size ?? 0}|${idx0.ceremonyAcks?.size ?? 0}|${idx0.grants?.size ?? 0}|${cer}`;
     const selKey = `${t}:${klass}`;
     const selHit = this._signSelCache.get(selKey);
     if (selHit?.fp === selFp) return selHit.sel;
@@ -5764,7 +5813,7 @@ export class Fabric {
         idx.sealScanFp = sealFp;
         const claims = new Map(), seen = new Map(), sealRows = [];
         const recountKeys = this.auditPublicKeys(t);
-        for (const r of this.store._stmt("SELECT seq,hash,envelope FROM audit WHERE tenant=? AND json_valid(envelope) AND (json_extract(envelope,'$.payload.type') IN ('AUDIT_SEALED','AUDIT_SEAL_CARRY') OR EXISTS (SELECT 1 FROM json_each(envelope,'$') GROUP BY \"key\" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload') GROUP BY \"key\" HAVING COUNT(*)>1))").all(t)) {
+        for (const r of this.store._stmt("SELECT seq,hash,envelope FROM audit WHERE tenant=? AND json_valid(envelope) AND (json_extract(envelope,'$.payload.type') IN ('AUDIT_SEALED','AUDIT_SEAL_CARRY')" + DUP_KEY_PROBE + ")").all(t)) {
           sealRows.push({ seq: r.seq, hash: r.hash });
           let env; try { env = JSON.parse(r.envelope); } catch { continue; }
           // The stored hash column is the minted digest(payload): a

@@ -55,6 +55,7 @@ const putMarker = (h, env, claims = null) => {
 };
 const sealKinds = h => (h.f.sealAuditChain(h.p('security')).head_watermark_tampered ?? []).map(e => e.kind);
 const committedTip = h => h.f.store.db.prepare("SELECT MAX(seq) m FROM audit WHERE tenant='acme'").get().m;
+const tipHashAt = (h, seq) => h.f.store.db.prepare("SELECT hash FROM audit WHERE tenant='acme' AND seq=?").get(seq)?.hash ?? null;
 
 // ============================================================================
 // w64-fv F-5/F-10: negated member compares fold against the bound member —
@@ -213,7 +214,7 @@ test('w64-seal F-2c: a marker_seq covering the claim verifies', t => {
   const claim = residueRows(h)[0]?.value;
   assert.ok(claim, 'a residue claim stands');
   const tip = committedTip(h);
-  const ok = h.f.store.auditSigners['acme'].sign({ tenant_id: 'acme', fold_floor_retired: [claim], marker_seq: tip }, 'audit');
+  const ok = h.f.store.auditSigners['acme'].sign({ tenant_id: 'acme', fold_floor_retired: [claim], marker_seq: tip, marker_tip_hash: tipHashAt(h, tip) }, 'audit');
   putMarker(h, ok, [claim]);
   const kinds = sealKinds(h);
   assert.ok(!kinds.includes('floor_marker_retired_forged') && !kinds.includes('floor_marker_retired_unauthenticated'),
@@ -276,7 +277,7 @@ test('w64-seal F-4: an oversized prior still mints fresh claims', t => {
   h.ready(); h.ready();
   // An honest-signed marker over the write contract — 4097 prior claims.
   const prior = Array.from({ length: 4097 }, (_, i) => `1:p${i}`);
-  const env = h.f.store.auditSigners['acme'].sign({ tenant_id: 'acme', fold_floor_retired: prior, marker_seq: committedTip(h) }, 'audit');
+  const env = h.f.store.auditSigners['acme'].sign({ tenant_id: 'acme', fold_floor_retired: prior, marker_seq: committedTip(h), marker_tip_hash: tipHashAt(h, committedTip(h)) }, 'audit');
   putMarker(h, env, prior);
   // A fresh heal convicts, retires — its claim must reach a chain mint
   // even though prior alone exceeds the field cap.
@@ -297,7 +298,7 @@ test('w64-runtime F-1: claims_dropped admits the sample truncation', t => {
   const h = fixture(t);
   h.ready(); h.ready();
   const unshaped = Array.from({ length: 20 }, (_, i) => `claim-${i}`);
-  const env = h.f.store.auditSigners['acme'].sign({ tenant_id: 'acme', fold_floor_retired: unshaped, marker_seq: committedTip(h) }, 'audit');
+  const env = h.f.store.auditSigners['acme'].sign({ tenant_id: 'acme', fold_floor_retired: unshaped, marker_seq: committedTip(h), marker_tip_hash: tipHashAt(h, committedTip(h)) }, 'audit');
   putMarker(h, env, unshaped);
   const seal = h.f.sealAuditChain(h.p('security'));
   const flags = seal.head_watermark_tampered ?? [];

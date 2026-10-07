@@ -119,10 +119,15 @@ test('w60-seal F-1/F-2: retire-mint murder cannot un-consume a claim', t => {
   dropResidueGuards(h);
   h.f.store.db.prepare("INSERT INTO meta_kv VALUES('acme','fold_floor_healed.echo',?)").run(claimVal);
   const seal2 = h.f.sealAuditChain(h.p('security'));
-  assert.ok(!(seal2.head_watermark_tampered ?? []).some(e => e.healed_marker === 'unconsummable'),
-    `a re-planted retired claim must not re-fire: ${JSON.stringify(seal2.head_watermark_tampered)}`);
-  assert.ok((seal2.head_watermark_tampered ?? []).some(e => e.kind === 'floor_marker_residue_retired_echo'),
-    'the defeated retirement is named, not skipped');
+  const kinds2 = (seal2.head_watermark_tampered ?? []).map(e => e.kind);
+  // w65-seal F-1 epoch binding: the murdered row was the retired
+  // marker's `marker_tip_hash` anchor — its envelope now refuses, so
+  // the retired set it carried is unconsulted and the re-planted claim
+  // re-fires as a NAMED conviction (healed/orphaned/forged), never a
+  // silent skip.
+  assert.ok(kinds2.some(k => /retired_(?:forged|unauthenticated)|forged/.test(k)),
+    `the epoch-stranded retired marker is refused: ${kinds2}`);
+  assert.ok(kinds2.length > 0, `the re-planted claim re-fires named: ${kinds2}`);
   assert.equal(residueRows(h).length, 0, 'the echo row is drained by value');
   // The seal-fold is a third consumption record when a cut mints one —
   // a tail-murdered retire leaves a verifying chain, so nothing mints.
@@ -199,12 +204,20 @@ const HEAD = "if (req.method === 'GET' && (m = /^\\/x\\/(.*)/.exec(path))) {";
 // literal orthography — mint nothing; the live arm still mints.
 test('w60 gate: dead-condition literals mint nothing', t => {
   const dead = ['0', '0.0', '0x0', '0b0', '0e0', "''", '""', 'NaN', 'false', 'null', 'undefined', 'void 0', '!true',
-    'false || false', '1 < 0', '{} instanceof Array', "new Set() instanceof Map", '0 ? 1 : 2'];
+    'false || false', '1 < 0', '{} instanceof Array', "new Set() instanceof Map"];
   for (const cond of dead) {
     const r = collectRun([HEAD, `  if (m[1] === 'a') { if (${cond}) { authorize(p, ['dead']); } authorize(p, ['live']); }`, '}'], 'a');
     assert.deepEqual(r.roles, ['live'], `${cond}: dead arm minted`);
     assert.equal(r.any, true, `${cond}: the live authorize still counts as any`);
   }
+  // `0 ? 1 : 2` folds to its `:2` arm — truthy, so the arm is LIVE:
+  // the fold now evaluates ternary arms rather than folding the whole
+  // `?:` to the discriminant's verdict (w65-fv F-8 honesty fix).
+  { const r = collectRun([HEAD, `  if (m[1] === 'a') { if (0 ? 1 : 2) { authorize(p, ['dead']); } authorize(p, ['live']); }`, '}'], 'a');
+    assert.deepEqual(r.roles, ['dead', 'live'], 'a truthy ternary arm mints');
+    assert.equal(r.any, true); }
+  { const r = collectRun([HEAD, `  if (m[1] === 'a') { if (1 ? 0 : 2) { authorize(p, ['dead']); } authorize(p, ['live']); }`, '}'], 'a');
+    assert.deepEqual(r.roles, ['live'], 'a falsy ternary arm mints nothing'); }
   // The pure-dead route — nothing live at all — mints no any either.
   const r = collectRun([HEAD, "  if (m[1] === 'a') { if (0) authorize(p, ['dead']); }", '}'], 'a');
   assert.equal(r.any, false, 'a fully dead body mints no evidence at all');

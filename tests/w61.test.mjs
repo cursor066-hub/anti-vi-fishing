@@ -234,14 +234,23 @@ test('w61-ledger F-2: dead declarations cannot mint a gate', t => {
 test('w61-ledger F-5: aliased and switched dispatch binds the member', t => {
   const aliased = [HEAD, "  const q = m; if (q[2] === 'y') { authorize(p, ['yrole']); }", '}'];
   const aliasedX = collectRun(aliased, 'x');
-  assert.equal(aliasedX.any, true, 'a y-arm on foreign member m[2] mints conditionally on x');
-  assert.equal(aliasedX.roles, null, 'conditional mints carry no unconditional roles');
+  // Under the w64 plurality doctrine an unbound verb rides the row's
+  // plurality member — m[2] here (its only pair) — so the y-arm is
+  // another verb's arm and mints nothing for 'x'.
+  assert.equal(aliasedX.any, false, 'a y-arm on plurality member m[2] is dead for x');
+  assert.equal(aliasedX.roles, null);
   assert.equal(collectRun(aliased, 'y').any, true, 'the y-arm counts on its own row');
   const switched = [HEAD, "  switch (m[2]) { case 'y': authorize(p, ['yrole']); }", '}'];
   const switchedX = collectRun(switched, 'x');
-  assert.equal(switchedX.any, true, 'a case arm on foreign member m[2] mints conditionally on x');
-  assert.equal(switchedX.roles, null, 'conditional mints carry no unconditional roles');
+  assert.equal(switchedX.any, false, 'a case arm on plurality member m[2] is dead for x');
+  assert.equal(switchedX.roles, null);
   assert.equal(collectRun(switched, 'y').any, true, 'the case arm counts on its own row');
+  // A foreign-member arm — one the plurality does not bind — still
+  // mints conditionally (w61 doctrine unchanged).
+  const foreign = [HEAD, "  if (m[1] === 'a') { serve(); } if (q[2] === 'y') { authorize(p, ['yrole']); }", '}'];
+  const foreignX = collectRun(foreign, 'x');
+  assert.equal(foreignX.any, true, 'a foreign-member arm mints conditionally for x');
+  assert.equal(foreignX.roles, null);
 });
 
 // ============================================================================
