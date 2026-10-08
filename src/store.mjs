@@ -1183,15 +1183,32 @@ export class Store {
       // next append silently overwrites it — the envelope already names
       // the divergence and the residue pointer must land (w67-fv N-1).
       const storedRef = storedWellFormed && Number.isSafeInteger(storedSeqProbe) && storedSeqProbe <= tipNow
-        ? this._stmt('SELECT hash FROM audit WHERE tenant=? AND seq=?').get(tenant, storedSeqProbe)
+        ? this._stmt('SELECT envelope FROM audit WHERE tenant=? AND seq=?').get(tenant, storedSeqProbe)
         : undefined;
-      if (stored !== undefined && !(storedWellFormed && storedSeqProbe <= tipNow && storedRef !== undefined && storedRef.hash === storedParts[1])) {
+      // The stored `hash` column is attacker clay — recompute the digest
+      // from the row's own envelope bytes like floorPriorForeign does
+      // above (w69-fv F-4): a column rewrite matching the planted
+      // marker's hash half must not launder it into 'still well-formed'.
+      const storedRefOk = (() => {
+        try { return storedRef !== undefined && digest(JSON.parse(storedRef.envelope).payload) === storedParts[1]; } catch { return false; }
+      })();
+      if (stored !== undefined && !(storedWellFormed && storedSeqProbe <= tipNow && storedRef !== undefined && storedRefOk)) {
         // The refused update left a divergent marker in place — overwrite
         // it outright (with the TRUE tip when a concurrent commit is
         // visible, else our own entry). A real foreign trigger fighting
         // the heal re-fires on this write and the re-probe below still
         // convicts.
-        const tipRowNow = tipNow === entry.sequence ? { seq: entry.sequence, hash } : this._stmt('SELECT seq, hash FROM audit WHERE tenant=? AND seq=?').get(tenant, tipNow);
+        const tipRowNow = tipNow === entry.sequence
+          ? { seq: entry.sequence, hash }
+          : (() => {
+            // Same clay rule on the heal write: a peer tip's `hash`
+            // column is attacker-rewritable, so the marker binds the
+            // recomputed digest — a row that cannot recompute is itself
+            // divergence, and our own entry is the only pair we can
+            // still mint truthfully.
+            const r = this._stmt('SELECT seq, envelope FROM audit WHERE tenant=? AND seq=?').get(tenant, tipNow);
+            try { return { seq: r?.seq, hash: digest(JSON.parse(r.envelope).payload) }; } catch { return { seq: entry.sequence, hash }; }
+          })();
         this._stmt("UPDATE meta_kv SET value=? WHERE tenant=? AND key='fold_floor'").run(`${tipRowNow?.seq ?? entry.sequence}:${tipRowNow?.hash ?? hash}`, tenant);
         stored = this._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor'").get(tenant)?.value;
       }

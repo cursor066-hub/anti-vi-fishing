@@ -100,10 +100,11 @@ const counts = { pass: numLast(/# pass (\d+)/, tapText), fail: rawFail, tests: r
 if (rawTests > 0 && counts.pass + rawFail + rawSkip + rawTodo + rawCancel !== rawTests) { console.error(`TAP summary inconsistent: tests=${rawTests} but pass+fail+skipped+deferred+cancelled=${counts.pass + rawFail + rawSkip + rawTodo + rawCancel}`); process.exitCode = 1; }
 write('reports/tests.tap', stableTap);
 write('reports/final-regression.tap', stableTap);
-// The runner string names the invocation actually performed above — an
-// explicit sorted file list, not a glob the environment could expand
-// differently (w55-ledger M-1).
-const testSummary = { tests: counts.pass + counts.fail, pass: counts.pass, fail: counts.fail, runner: 'node --test --test-concurrency=4 --test-reporter=tap <sorted tests/**/*.test.mjs list>', generated_at: 'regenerated on demand by scripts/report.mjs', note: 'Live counts; per-test durations are stripped so the artifact is deterministic.' };
+// The runner string names the invocation actually performed above — the
+// explicit sorted file list itself, not a glob the environment could
+// expand differently and not a template placeholder (w55-ledger M-1,
+// w69-ledger F-8).
+const testSummary = { tests: counts.pass + counts.fail, pass: counts.pass, fail: counts.fail, runner: `${process.execPath} --test --test-concurrency=4 --test-reporter=tap ${testFiles.join(' ')}`, runner_files: testFiles, generated_at: 'regenerated on demand by scripts/report.mjs', note: 'Live counts; per-test durations are stripped so the artifact is deterministic.' };
 write('reports/test-summary.json', JSON.stringify(testSummary, null, 2) + '\n');
 write('reports/final-regression-summary.json', JSON.stringify({ ...testSummary, scope: 'final regression baseline' }, null, 2) + '\n');
 
