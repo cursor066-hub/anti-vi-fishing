@@ -1007,7 +1007,14 @@ export class Store {
     // `floorPriorSeq > last.seq` is a plant that would wedge the guarded
     // UPSERT (and every later epoch attestation) forever (w66-seal F-2).
     const floorPriorAhead = floorPriorSeq !== undefined && floorPriorSeq > (last?.seq ?? 0);
-    const divergentMarker = floorPrior !== undefined && (!floorPriorWellFormed || floorPriorAhead) ? String(floorPrior).slice(0, 200) : undefined;
+    // A well-formed in-range marker whose hash half names bytes the
+    // stored row does not carry is a transplant: the guarded UPSERT
+    // only loses to seq, so it survived every honest append unnamed
+    // (w67-fv N-1). Name it divergent like the malformed/ahead shapes.
+    const floorPriorForeign = floorPriorWellFormed && !floorPriorAhead
+      ? this._stmt('SELECT hash FROM audit WHERE tenant=? AND seq=?').get(tenant, floorPriorSeq)?.hash !== floorPriorParts[1]
+      : false;
+    const divergentMarker = floorPrior !== undefined && (!floorPriorWellFormed || floorPriorAhead || floorPriorForeign) ? String(floorPrior).slice(0, 200) : undefined;
     // The key is reserved evidence: a caller-supplied fold_floor_divergent
     // must never ride the signed envelope verbatim when no divergence was
     // observed — it would let a file-writer pair planted residue with a
@@ -1158,7 +1165,16 @@ export class Store {
       // commit's marker legitimately exceeds our own entry.sequence but
       // never exceeds the tip it was written for.
       const tipNow = this._stmt('SELECT MAX(seq) m FROM audit WHERE tenant=?').get(tenant)?.m ?? entry.sequence;
-      if (stored !== undefined && !(storedWellFormed && storedSeqProbe <= tipNow)) {
+      // An in-range marker must also bind the real hash of the row it
+      // names: the guarded UPSERT only loses to a stored seq >= our own,
+      // so a survivor naming OUR seq (or a peer's just-committed row)
+      // with foreign bytes is a forge that otherwise stands until the
+      // next append silently overwrites it — the envelope already names
+      // the divergence and the residue pointer must land (w67-fv N-1).
+      const storedRef = storedWellFormed && Number.isSafeInteger(storedSeqProbe) && storedSeqProbe <= tipNow
+        ? this._stmt('SELECT hash FROM audit WHERE tenant=? AND seq=?').get(tenant, storedSeqProbe)
+        : undefined;
+      if (stored !== undefined && !(storedWellFormed && storedSeqProbe <= tipNow && storedRef !== undefined && storedRef.hash === storedParts[1])) {
         // The refused update left a divergent marker in place — overwrite
         // it outright (with the TRUE tip when a concurrent commit is
         // visible, else our own entry). A real foreign trigger fighting
@@ -1168,7 +1184,7 @@ export class Store {
         this._stmt("UPDATE meta_kv SET value=? WHERE tenant=? AND key='fold_floor'").run(`${tipRowNow?.seq ?? entry.sequence}:${tipRowNow?.hash ?? hash}`, tenant);
         stored = this._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor'").get(tenant)?.value;
       }
-      if (floorPrior !== undefined && (!floorPriorWellFormed || floorPriorAhead) && stored !== floorPrior) {
+      if (floorPrior !== undefined && (!floorPriorWellFormed || floorPriorAhead || floorPriorForeign) && stored !== floorPrior) {
         // Evidence, not laundering: the residue row is a POINTER into the
         // signed chain — this append's own envelope already carries
         // fold_floor_divergent, so the row can be verified against

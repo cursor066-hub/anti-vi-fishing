@@ -119,6 +119,13 @@ export class Fabric {
   // post-cut tip pin (w66-runtime F-3). Discarded when the seal aborts:
   // its residue deletes rolled back too.
   #deferredRetiredMints = new Map();
+  // Commit-landed marker for the deferred replay: the queue must apply
+  // when the seal's tx committed even if a post-commit step threw and
+  // the result never returned — the residue deletes + F_R_R mints are
+  // already durable, so discarding the queue would strand suppression
+  // (w67-seal F-2). Set beside repointUndo=null, consumed+reset in the
+  // outer finally alongside sealCommitted.
+  #sealTxCommitted = new Set();
   #sealCarry = new Map();
   #chainHeadRaw = undefined;
   #chainHeadParsed = null;
@@ -1526,6 +1533,11 @@ export class Fabric {
   // (w60-seal F-1).
   #residueValueDelete(tenant, values, retired) {
     const db = this.store.db;
+    // The deferred set is recorded only when the drain's own savepoint
+    // commits — an in-memory queue populated mid-savepoint survives a
+    // rollback and would mint suppression over residue rows the failed
+    // delete left standing (w67-fv F-2).
+    let deferredAdd = null;
     db.exec('SAVEPOINT residue_drain');
     try {
       let env, merged;
@@ -1542,12 +1554,20 @@ export class Fabric {
         // A standing marker that does not authenticate is left in place —
         // overwriting it would shrink its coverage under the corrupt
         // row's name; the residue consult names it on the next pass
-        // instead (w63-runtime F-6).
+        // instead (w63-runtime F-6). The gate below suppresses only the
+        // MINT — a drain running under a seal still queues its consumed
+        // set so the post-commit apply can name what it could not
+        // anchor, instead of the claims dying with the residue rows
+        // (w67-runtime F-1).
         let prevAuthed = null;
         try { prevAuthed = prev === undefined ? null : this.#retiredClaimsOf(tenant, JSON.parse(prev)); } catch { prevAuthed = null; }
-        if (!(prev !== undefined && prevAuthed === null)) {
+        {
           let prior = [];
-          try { prior = prevAuthed?.retired ?? []; } catch { prior = []; }
+          // A replay that failed to land leaves its claims inside the
+          // marker's transient `retiring` set — union it into the next
+          // write's retired field or those claims strand unsigned
+          // forever (w67-fv F-3).
+          try { prior = [...new Set([...(prevAuthed?.retired ?? []), ...(prevAuthed?.retiring ?? [])])]; } catch { prior = []; }
         // Freshly retired claims head the merge — a full marker never evicts
         // this drain's own binding in favour of older prior claims
         // (w62-runtime F-4). But a retired-set flood filling the whole cap
@@ -1580,12 +1600,11 @@ export class Fabric {
         if (this.#sealing?.has(tenant)) {
           // Queue the UNCAPPED merge set — the replay recomputes the
           // cap and the `prior_evicted` count at apply time, so a capped
-          // queue could never report an eviction honestly.
-          const q = this.#deferredRetiredMints.get(tenant) ?? new Set();
-          for (const c of mergedSet) q.add(c);
-          this.#deferredRetiredMints.set(tenant, q);
+          // queue could never report an eviction honestly. Staged only:
+          // committed to the map after the savepoint's writes land.
+          deferredAdd = mergedSet;
         }
-        else {
+        else if (!(prev !== undefined && prevAuthed === null)) {
         // The sign consults the fold (`_signingKeyId` → `_auditIndex`),
         // whose residue-mint window legitimately re-arms the keep
         // triggers — so it runs BEFORE the drops below, or the UPSERT
@@ -1614,8 +1633,13 @@ export class Fabric {
         db.prepare(`DELETE FROM meta_kv WHERE tenant=? AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.') AND value IN (${chunk.map(() => '?').join(',')})`).run(tenant, ...chunk);
       }
       for (const [, sql] of RESIDUE_KEEP_TRIGGERS) db.exec(sql);
-    } catch (e) { try { db.exec('ROLLBACK TO residue_drain'); } catch { /* savepoint may already be gone */ } throw e; }
+    } catch (e) { deferredAdd = null; try { db.exec('ROLLBACK TO residue_drain'); } catch { /* savepoint may already be gone */ } throw e; }
     finally { try { db.exec('RELEASE residue_drain'); } catch { /* rolled back or never opened */ } }
+    if (deferredAdd) {
+      const q = this.#deferredRetiredMints.get(tenant) ?? new Set();
+      for (const c of deferredAdd) q.add(c);
+      this.#deferredRetiredMints.set(tenant, q);
+    }
   }
   // The retired-marker envelope: `marker_seq` binds the signature to the
   // committed chain tip the consult sees — a bare position the seq guard
@@ -1642,24 +1666,66 @@ export class Fabric {
     if (!q?.size) return;
     const db = this.store.db;
     const prev = (() => { try { return this.store._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(tenant)?.value; } catch { return undefined; } })();
+    let prior = [];
     if (prev !== undefined) {
       let pa = null;
       try { pa = this.#retiredClaimsOf(tenant, JSON.parse(prev)); } catch { pa = null; }
-      if (pa === null) return;
+      if (pa === null) {
+        // A non-authenticating standing marker is left for the consult
+        // to name — the deferred set cannot overwrite it. A silent drop
+        // would leave the queue's only suppression copy inside the
+        // already-minted F_R_R rows: the drop itself is evidence, so
+        // name it with the same bounded claims convention as the other
+        // rejected-claim flags (w67-runtime F-1).
+        const dropped = [...q].map(c => String(c).slice(0, 120));
+        this.#wmTamperSet(tenant, { kind: 'floor_marker_retired_deferred_dropped', seq: 0, claims: dropped.slice(-16), claims_dropped: Math.max(0, dropped.length - 16) });
+        return;
+      }
+      // `retiring` holds claims an interrupted replay left in flight —
+      // the next marker write absorbs them into `retired` instead of
+      // stranding them unsigned (w67-fv F-3).
+      prior = [...new Set([...pa.retired, ...pa.retiring])];
     }
-    const merged = [...q].slice(0, 4096);
-    const env = this.#mintRetiredEnvelope(tenant, merged, q.size - merged.length);
-    db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
-    db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
-    db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
+    // The deferred set unions the standing marker's own retired claims
+    // before the cap — a peer marker write between commit and apply is
+    // never clobbered out of the durable set (w67-runtime F-4). Queue
+    // order is drain order, not freshness: a later drain's fresh claims
+    // would sit behind an earlier drain's priors and be evicted under
+    // the prior_evicted label — re-derive freshness instead: claims the
+    // standing marker does not yet carry head the union like the
+    // drain's own retired set does (w67-seal F-4).
+    const priorSet = new Set(prior);
+    const fresh = [...q].filter(c => !priorSet.has(c));
+    // The union spans the FULL prior set — slicing priors before the
+    // union would hide the very eviction `prior_evicted` signs: the cap
+    // must count what it dropped, not what it never saw (w66-runtime
+    // F-2, w67-seal F-4 keeps the fresh-first order).
+    const unionSet = new Set([...fresh.slice(0, 2048), ...prior]);
+    const merged = [...unionSet].slice(0, 4096);
+    const env = this.#mintRetiredEnvelope(tenant, merged, unionSet.size - merged.length);
+    // Same savepoint doctrine as the drain's note: the trigger drops,
+    // the write and the landed probe are one atomic span — a mid-span
+    // fault rolls back to guards-intact, never leaves them absent on
+    // disk (w67-runtime F-3, w58-store F-2).
+    db.exec('SAVEPOINT deferred_mint');
     try {
+      db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
+      db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
+      db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
       db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES (?, 'fold_floor_retired', ?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, JSON.stringify({ claims: merged, env }));
       const back = db.prepare("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(tenant)?.value;
       const backClaims = (() => { try { return this.#retiredClaimsOf(tenant, JSON.parse(back ?? 'null'))?.retired ?? null; } catch { return null; } })();
       requireThat(Array.isArray(backClaims) && merged.every(c => backClaims.includes(c)), 'INV-409-INTEGRITY', 'fold-floor retired marker refused after deferred write — foreign trigger side-effects', 409);
-    } finally {
       for (const [, sql] of RESIDUE_KEEP_TRIGGERS) db.exec(sql);
+    } catch (e) {
+      try { db.exec('ROLLBACK TO deferred_mint'); } catch { /* savepoint may already be gone */ }
+      // The replay's own caller swallows every fault — an eaten marker
+      // write would otherwise be the only residue write that convicts
+      // nothing. Name it like the drain sibling does (w67-seal F-3).
+      if (e?.code === 'INV-409-INTEGRITY') this.#wmTamperSet(tenant, { kind: 'floor_marker_retired_marker_defeated', seq: 0 });
+      throw e;
     }
+    finally { try { db.exec('RELEASE deferred_mint'); } catch { /* rolled back or never opened */ } }
   }
   // The `fold_floor_retired` claim list, iff the marker row carries it
   // inside an audit-signed envelope bound to this tenant. A bare array or
@@ -1723,7 +1789,14 @@ export class Fabric {
       const retiring = Array.isArray(pl?.fold_floor_retiring)
         ? pl.fold_floor_retiring.filter(c => typeof c === 'string')
         : [];
-      return { retired: pl.fold_floor_retired.filter(c => typeof c === 'string').slice(0, 8192), retiring, markerSeq: Number.isSafeInteger(pl.marker_seq) ? pl.marker_seq : null };
+      // `prior_evicted` is signed accounting: the field must round-trip
+      // or the signed number was write-only (a flood could evict priors
+      // forever with no reader ever seeing the count — w67-runtime F-2).
+      // A garbage count on a verified env is crafted like a bad
+      // marker_seq; older envs simply carried no field.
+      const evicted = pl.prior_evicted === undefined ? 0 : (Number.isSafeInteger(pl.prior_evicted) && pl.prior_evicted >= 0 ? pl.prior_evicted : null);
+      if (evicted === null) return null;
+      return { retired: pl.fold_floor_retired.filter(c => typeof c === 'string').slice(0, 8192), retiring, markerSeq: Number.isSafeInteger(pl.marker_seq) ? pl.marker_seq : null, priorEvicted: evicted };
     } catch { return null; }
   }
   _foldFloorMarker(t, attestedFloor) {
@@ -1846,6 +1919,11 @@ export class Fabric {
             // own scan was replayed or grafted, not freshly written
             // (w63-runtime F-2). `retired` stays anchored by the signature
             // alone; only the volatile field gets the recency window.
+            // A signed nonzero eviction count is durable evidence — the
+            // flood that pushed priors off the cap is named on the
+            // report, not silent churn inside the marker (w67-runtime
+            // F-2).
+            if (authed.priorEvicted > 0) this.#wmTamperSet(t, { kind: 'floor_marker_retired_evicted', seq: 0, claims_dropped: authed.priorEvicted });
             const markerFresh = Number.isSafeInteger(authed.markerSeq) && authed.markerSeq >= scan.seq - 8192;
             retiring = new Set(markerFresh ? authed.retiring : []);
             // `retired` takes the same recency window: a backdated env
@@ -2282,6 +2360,12 @@ export class Fabric {
         const claimSet = new Set();
         for (const h of flag?.heals ?? []) {
           if (typeof h?.claim === 'string') claimSet.add(h.claim);
+          // An unanchored flag's healed_marker IS the whole residue
+          // value (`anchorSeq:marker` — the flag stores the raw string),
+          // so prefixing h.seq again would mint a double-seq malformed
+          // claim; an anchored flag carries bare marker content and
+          // needs the prefix (w67-runtime F-5).
+          else if (flag?.kind === 'floor_marker_healed_unanchored' && typeof h?.healed_marker === 'string') claimSet.add(h.healed_marker);
           else if (Number.isSafeInteger(h?.seq) && typeof h?.healed_marker === 'string') claimSet.add(`${h.seq}:${h.healed_marker}`);
         }
         // The legacy un-keyed row names its seq in the value — it joins
@@ -2386,6 +2470,14 @@ export class Fabric {
                 db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
                 db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
                 db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES (?, 'fold_floor_retired', ?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, JSON.stringify({ claims: prior, env: noteEnv }));
+                // The note is a security write like every other on this
+                // plane: read it back and require the landed content to
+                // carry the retiring set — a foreign trigger that ate or
+                // rewrote it is evidence, not a silent no-op
+                // (w67-runtime F-5).
+                const backNote = db.prepare("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(tenant)?.value;
+                const backAuthed = (() => { try { return this.#retiredClaimsOf(tenant, JSON.parse(backNote ?? 'null')); } catch { return null; } })();
+                requireThat(backAuthed !== null && mintable.every(c => backAuthed.retiring.includes(c)) && prior.every(c => backAuthed.retired.includes(c)), 'INV-409-INTEGRITY', 'fold-floor retiring note refused after write — foreign trigger side-effects', 409);
                 for (const [, sql] of RESIDUE_KEEP_TRIGGERS) db.exec(sql);
               } catch (e) { try { db.exec('ROLLBACK TO residue_note'); } catch { /* savepoint may already be gone */ } throw e; }
               finally { try { db.exec('RELEASE residue_note'); } catch { /* rolled back or never opened */ } }
@@ -3421,7 +3513,19 @@ export class Fabric {
       // when the seal committed — an aborted seal's residue deletes
       // rolled back, so minting those claims would forge suppression
       // evidence over rows that still stand (w66-runtime F-3).
-      if (sealCommitted) { try { this.#applyDeferredRetiredMints?.(t); } catch { /* the note env stands; the next consult re-pins */ } }
+      // `sealCommitted` covers a returned result; `#sealTxCommitted`
+      // covers a tx that committed but whose post-commit steps threw —
+      // the deletes landed either way (w67-seal F-2).
+      const sealTxLanded = this.#sealTxCommitted?.delete(t) === true;
+      if (sealCommitted || sealTxLanded) {
+        try { this.#applyDeferredRetiredMints?.(t); }
+        catch {
+          // A probe-defeated deferred write must not die in the swallow:
+          // the drain names the identical conviction — the apply names
+          // it too, then the note env stands (w67-seal F-3).
+          this.#wmTamperSet(t, { kind: 'floor_marker_retired_marker_defeated', seq: 0 });
+        }
+      }
       else this.#deferredRetiredMints.delete(t);
     }
   }
@@ -4237,6 +4341,33 @@ export class Fabric {
       // ROW dies here — any conviction already latched still retires
       // through the seal result's attestation, never silently.
       this.store._stmt("DELETE FROM meta_kv WHERE tenant=? AND key='fold_floor'").run(t);
+      // The retired-claim marker binds the tip it pinned (`marker_seq` +
+      // `marker_tip_hash`): the cut can murder that row, and a corpse the
+      // seal itself produced would then convict `forged` on every later
+      // consult while the drain's left-standing doctrine never re-pins
+      // (w67-seal F-1). A VERIFIED env whose pinned stored-seq is inside
+      // the doomed set is this seal's own casualty — delete it like
+      // `fold_floor` and let the plane re-derive. A marker that fails
+      // verification is planted evidence the consult must still name —
+      // left standing.
+      {
+        const rmv = this.store._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(t)?.value;
+        const rmPin = (() => {
+          try { const pl = verifySigned(JSON.parse(rmv ?? 'null')?.env, this.auditPublicKeys(t), 'audit'); return Number.isSafeInteger(pl?.marker_seq) ? pl.marker_seq : null; }
+          catch { return null; }
+        })();
+        if (rmPin !== null && doomedStored.has(rmPin)) {
+          // The keep guards cover `fold_floor_retired` by name — drop
+          // them for the delete and recreate from the shared text, the
+          // same sanctioned span the drain uses for its own marker
+          // write (the rollback below restores them on any fault).
+          this.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
+          this.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
+          this.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
+          this.store._stmt("DELETE FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").run(t);
+          for (const [, sql] of RESIDUE_KEEP_TRIGGERS) this.store.db.exec(sql);
+        }
+      }
       // A planted same-name trigger on a sibling table would make the bare
       // CREATE below die mid-statement — sqlite trigger names are global,
       // not table-scoped. Drop our names first: the guards are fixed schema
@@ -4447,6 +4578,10 @@ export class Fabric {
       // is durable, so post-commit faults can no longer claim the ledger
       // rejected it: the in-memory repoint and vault activation stay.
       repointUndo = null;
+      // The tx committed — mark it so the deferred-mint replay survives
+      // a post-commit throw below: the residue deletes + F_R_R mints are
+      // durable regardless of which late step faults (w67-seal F-2).
+      (this.#sealTxCommitted ??= new Set()).add(t);
       // A post-commit flush fault is retried on the next transaction edge —
       // the pending heads were re-buffered by restore(); the committed seal
       // is never reported back as denied (w28-store F5, w28-fixverify F5).

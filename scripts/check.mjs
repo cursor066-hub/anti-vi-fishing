@@ -589,7 +589,7 @@ const DISP_FIELD = /\b(?:path|rawPath|rawTarget|target|url\.pathname|req\.(?:met
 // cannot save the side — the bound conjunct already kills it for this
 // row (w63-fv F-3). Module scope: the tracker's sibArm/bracelessDead
 // checks and the collect-level sibling-line check share it.
-const siblingArm = (condPair, verbPos, verb, verbMembers, posMember, posVerb = null) => {
+const siblingArm = (condPair, verbPos, verb, verbMembers, posMember, posVerb = null, proven = null) => {
   if (condPair === null) return false;
   const [cond, base] = condPair;
   const cls = dispOperandCls;
@@ -607,7 +607,7 @@ const siblingArm = (condPair, verbPos, verb, verbMembers, posMember, posVerb = n
     // can still serve this row — the arm is no sibling then.
     let dead = false;
     for (const op of ops) {
-      const f = memberCmpFold(op.t, verb, verbMembers, posMember, posVerb, op.a);
+      const f = memberCmpFold(op.t, verb, verbMembers, posMember, posVerb, op.a, proven);
       if (f !== null && f.verdict === 'const-false') { dead = true; break; }
       // This row's own serving pair — OUR arm, not a sibling (a
       // statically-false compare never serves, so it is folded first;
@@ -623,9 +623,13 @@ const siblingArm = (condPair, verbPos, verb, verbMembers, posMember, posVerb = n
       // member): a bound-member pair for another verb is statically
       // false for this row; everything else is a live conjunct
       // (w63-fv F-3 keeps `m[2]==='x'` and `m[2]!=='e'` live guards).
-      let pm;
-      for (const [p, mem] of posMember ?? []) if (p >= op.a && p < op.b) { pm = mem; break; }
-      if (pm !== undefined && verbMembers?.has(pm)) { dead = true; break; }
+      // An unfolded `!==` is never a kill — its runtime gamble makes
+      // the arm conditional, not foreign-dead (w67-fv F-1).
+      if (dispOperandCls(op.t) !== 'memberneg') {
+        let pm;
+        for (const [p, mem] of posMember ?? []) if (p >= op.a && p < op.b) { pm = mem; break; }
+        if (pm !== undefined && verbMembers?.has(pm)) { dead = true; break; }
+      }
     }
     if (!dead) return false;
   }
@@ -638,7 +642,7 @@ const siblingArm = (condPair, verbPos, verb, verbMembers, posMember, posVerb = n
 // non-`&&` compositions are not — a gate the request cannot satisfy is
 // never request-controlled (w59-fv F-2: an own-verb arm nested inside
 // a request gate re-includes as this row's code).
-const reqGateCond = (condPair, verb, verbMembers, posMember = null, posVerb = null) => {
+const reqGateCond = (condPair, verb, verbMembers, posMember = null, posVerb = null, proven = null) => {
   if (condPair === null) return false;
   const [cond, base] = condPair;
   const sides = splitSpans(cond, ['||'], base);
@@ -655,7 +659,7 @@ const reqGateCond = (condPair, verb, verbMembers, posMember = null, posVerb = nu
         // check inside an m[1]-bound 'a' arm must stay conditional).
         // A folded const-true drops out, a const-false kills its side —
         // both are still dispatch material for the gate test.
-        const f = memberCmpFold(op.t, verb, verbMembers, posMember, posVerb, op.a);
+        const f = memberCmpFold(op.t, verb, verbMembers, posMember, posVerb, op.a, proven);
         if (f !== null && (f.verdict === 'foreign' || f.verdict === 'const-false')) return false;
         continue;
       }
@@ -890,7 +894,7 @@ const DEFAULT_CASE = Symbol('defaultCase');
 // convention (w64-fv F-5/F-10) — is statically decidable; on a member
 // the verb never binds it is a real cross-member gate ('foreign').
 // Returns null when the operand isn't a plain `m[N]` compare.
-const memberCmpFold = (t, verb, verbMembers, posMember = null, posVerb = null, base = 0) => {
+const memberCmpFold = (t, verb, verbMembers, posMember = null, posVerb = null, base = 0, proven = null) => {
   if (verb === null || verb === undefined) return null;
   const x = /^\s*\(?\s*m\s*(?:\?\s*\.\s*)?(?:\[\s*([^\]]+)\s*\]|(?:\?\s*\.\s*|\.\s*)at\s*(?:\?\s*\.\s*)?\(\s*([^)]*)\))\s*([!=]={2,3})\s*([^)]*?)\s*\)?\s*$/.exec(t);
   if (!x) return null;
@@ -907,6 +911,13 @@ const memberCmpFold = (t, verb, verbMembers, posMember = null, posVerb = null, b
   if (v === null && rhs === '' && posVerb !== null)
     for (const [p, mv] of posVerb)
       if (p >= base && p < base + t.length && (posMember === null || posMember.get(p) === member)) { v = mv; break; }
+  // A negated compare on an UNPROVEN member is a real runtime gamble,
+  // not a static fold: `m[2]!=='y'` is decidable only when a POSITIVE
+  // compare proves the member discriminates — then an unbound verb
+  // rides it conventionally and `!=='v'` folds (w64-fv F-5). With no
+  // positive vote the implicit-member convention does not reach `!==`:
+  // 'x'-requests may carry 'y' dynamically (w67-fv F-1).
+  if (x[3][0] === '!' && proven !== null && !proven.has(member)) return null;
   if (verbMembers !== undefined && verbMembers !== null && verbMembers.size !== 0 && !verbMembers.has(member)) return { member, verdict: 'foreign' };
   if (v === null || v === DEFAULT_CASE || typeof v !== 'string') return null;
   const eq = x[3][0] !== '!';
@@ -931,7 +942,7 @@ const compoundInner = t => {
   }
   return /&&|\|\||,|\?(?![.?])|:(?!:)/.test(tt);
 };
-const dispatchPure = (condPair, verbPos = null, verb = null, verbMembers = null, posMember = null, posVerb = null) => {
+const dispatchPure = (condPair, verbPos = null, verb = null, verbMembers = null, posMember = null, posVerb = null, proven = null) => {
   if (condPair === null) return false;
   const [cond, base] = condPair;
   const cls = dispOperandCls;
@@ -969,7 +980,7 @@ const dispatchPure = (condPair, verbPos = null, verb = null, verbMembers = null,
   const foldCls = op => {
     const c2 = cls(op.t);
     if (c2 !== 'membercmp' && c2 !== 'memberneg') return { cls: c2 };
-    const f = memberCmpFold(op.t, verb, verbMembers, posMember, posVerb, op.a);
+    const f = memberCmpFold(op.t, verb, verbMembers, posMember, posVerb, op.a, proven);
     if (f !== null && f.verdict === 'const-true') return { cls: 'folded' };
     return { cls: c2, foreign: f !== null && f.verdict === 'foreign', constFalse: f !== null && f.verdict === 'const-false' };
   };
@@ -1014,7 +1025,10 @@ const dispatchPure = (condPair, verbPos = null, verb = null, verbMembers = null,
 // the verb has no case anywhere in the switch, or an arm after an
 // un-exited `default` (w64-fv F-6).
 const pairServes = (p, verb, caseMap) =>
-  p.neg !== true
+  // Only an operator-negated compare fails to serve its verb: a
+  // conjunct-gated pair (`flag && m[1]==='a'`) still IS 'a''s arm
+  // (w67-ledger F-3).
+  p.opNeg !== true
   && (p.verb === verb
     || p.fall?.has(verb)
     || (p.verb === DEFAULT_CASE && !caseMap?.get(p.sw?.key)?.allCases?.has(verb))
@@ -1071,6 +1085,12 @@ const pairsForLine = (l, lm, i, stmtDepth, sw, aliases, verb, verbMembers, allCa
     if (idx === null) continue;
     const cmp = /^\s*([!=]={2,3})\s*'([^']+)'/.exec(l.slice(x.index + x[0].length));
     if (!cmp) continue;
+    // A chained `===`/`!==` right after the literal makes the whole
+    // expression a different comparison — `m[1]==='a'===false` is true
+    // iff `m[1]!=='a'` — so the extracted compare's polarity inverts
+    // (w67-ledger F-2). Bind no pair; the arm gates like any runtime
+    // expression.
+    if (/^\s*[!=]={2,3}/.test(l.slice(x.index + x[0].length + cmp[0].length))) continue;
     const a = armOf(lm, x.index);
     if (!a) continue;
     if (negatedCompare(lm, a.term, x.index)) continue;
@@ -1079,7 +1099,11 @@ const pairsForLine = (l, lm, i, stmtDepth, sw, aliases, verb, verbMembers, allCa
     // memberCmpFold resolves the masked literal and folds it
     // statically (`m[1]!=='b'` is true for 'a', false for 'b',
     // w64-fv F-5). `neg` keeps it out of every serving set.
-    if (cmp[1][0] === '!') { out.push({ member: `m[${idx}]`, verb: cmp[2], pos: x.index, sw: null, fall: null, neg: true }); continue; }
+    // `opNeg` marks operator negation only — it excludes the pair from
+    // serving sets and votes. The conjunct-gated mark below (`neg` on
+    // an un-droppable `&&` sibling) excludes serving but still VOTES —
+    // `flag && m[2]==='y'` proves `m[2]` discriminates 'y' (w67-ledger F-3).
+    if (cmp[1][0] === '!') { out.push({ member: `m[${idx}]`, verb: cmp[2], pos: x.index, sw: null, fall: null, neg: true, opNeg: true }); continue; }
     if (conditionalTerm(lm, a.term)) {
       // A top-level `&&` sibling that folds statically-true for this
       // verb is dead weight — `m[1]==='a' && m[1]!=='b'` IS 'a''s arm
@@ -1112,6 +1136,9 @@ const pairsForLine = (l, lm, i, stmtDepth, sw, aliases, verb, verbMembers, allCa
       if (idx === null) continue;
       const cmp = /^\s*([!=]={2,3})\s*'([^']+)'/.exec(l.slice(x.index + x[0].length));
       if (!cmp) continue;
+      // Same chained-comparison polarity guard as the `m[N]` site
+      // (w67-ledger F-2).
+      if (/^\s*[!=]={2,3}/.test(l.slice(x.index + x[0].length + cmp[0].length))) continue;
       const a = armOf(lm, x.index);
       if (!a) continue;
       if (negatedCompare(lm, a.term, x.index)) continue;
@@ -1343,7 +1370,13 @@ const condTracker = () => {
     // offsets slice it verbatim. `lraw`/`lm` blank string contents, so
     // `req.method === 'X'` reads go through `lit` (w65-fv F-8).
     const lit = l0 ?? lm;
-      const memberDead = verb !== null && (verbMembers?.size ?? 0) === 0 ? (aliasCtx?.implicit?.() ?? IMPLICIT_ROW_MEMBER) : verbMembers;
+      // An unbound verb rides the member its literal names (positive or
+      // negated compare, gated or not) — 'x' names m[2] via `m[2]==='x'`,
+      // so compares on m[1] are foreign live gates for it; a verb named
+      // nowhere rides the implicit member (w64-fv F-5 ride doctrine).
+      const memberDead = verb !== null && (verbMembers?.size ?? 0) === 0
+        ? (aliasCtx?.ride?.get(verb) !== undefined ? new Set([aliasCtx.ride.get(verb)]) : (aliasCtx?.implicit?.() ?? IMPLICIT_ROW_MEMBER))
+        : verbMembers;
     // A plurality arm resting on a member the row does not prove to be
     // a verb discriminator is a model gamble for an unbound verb:
     // `if (m[2]==='y')` may match a resource value an x-request
@@ -1362,6 +1395,13 @@ const condTracker = () => {
         // statically dead regardless of whether the member is a proven
         // discriminator (w66-fv F-5 vs w59-fv F-1).
         if (negPos?.has(p)) continue;
+        // A verb named on THIS member carries its own literal
+        // conventionally — 'b' (`m[1]!=='b'`) provably fails
+        // `m[1]==='a'`, so the arm folds dead and the else is 'b''s
+        // live arm unconditionally; only a verb named on ANOTHER member
+        // (or nowhere) may ride the compare's value — its arms are a
+        // real gamble (w64-fv F-5 vs w66-fv F-5, w62-check).
+        if ([...(aliasCtx?.ride ?? [])].some(([v, mb]) => v === verb && mb === mem)) continue;
         if (p >= hc[1] && p < hc[1] + hc[0].length && (pv?.get(mem)?.size ?? 0) < 2) return true;
       }
       return false;
@@ -1376,15 +1416,15 @@ const condTracker = () => {
       // from — `m[1]!=='b'` sits on 'a''s own member and is statically
       // true for 'a', so it is not a foreign pair (w64-fv F-5).
       const foreign = posVerb !== null && [...posVerb.entries()].some(([p, v]) => v !== verb && !negPos?.has(p) && verbMembers?.has(posMember?.get(p)) && p >= hc[1] && p < hc[1] + hc[0].length);
-      if (!foreign && mode === 'ours' && dispatchPure(hc, verbPos, verb, verbMembers, posMember, posVerb)) return 'ours';
-      if (siblingArm(hc, verbPos, verb, memberDead, posMember, posVerb)) return pluralGamble(hc) ? 'siblingPlural' : 'sibling';
+      if (!foreign && mode === 'ours' && dispatchPure(hc, verbPos, verb, verbMembers, posMember, posVerb, aliasCtx?.plural)) return 'ours';
+      if (siblingArm(hc, verbPos, verb, memberDead, posMember, posVerb, aliasCtx?.plural)) return pluralGamble(hc) ? 'siblingPlural' : 'sibling';
       if (methodCmpDead(hc !== null ? [lit.slice(hc[1], hc[1] + hc[0].length), hc[1], hc[2]] : hc, aliasCtx?.rowMethod ?? null)) return 'sibling';
       // A statically-true head (`m[1]!=='a'` under every verb but 'a',
       // `if (true)`) always enters its arm — the body is unconditional
       // and the `else` dead (w65-fv F-6). 'true' shares the ours-arm's
       // else-deadness but joins no ownDepth — it satisfied no outer
       // gate, so it cannot absorb request-gates nested under it.
-      if (condTrueCond(hc, verb, verbMembers, posMember, posVerb, lit, aliasCtx?.rowMethod ?? null)) return 'true';
+      if (condTrueCond(hc, verb, verbMembers, posMember, posVerb, lit, aliasCtx?.rowMethod ?? null, aliasCtx?.plural)) return 'true';
       return 'cond';
     };
     const condPos = new Uint8Array(lm.length), condPosDeep = new Uint8Array(lm.length), livePos = new Uint8Array(lm.length), liveArm = new Int32Array(lm.length);
@@ -1513,7 +1553,7 @@ const condTracker = () => {
         const pe = pendingIfs.pop();
         if (pe.cls === 'ours' || pe.cls === 'true') deadElseArm = { depth: pe.depth, arm: ci + 4 };
         else if (pe.cls === 'sibling') bracelessLive = { depth: pe.depth, arm: ci + 4 };
-        else if (!bracelessLive && !deadElseArm) bracelessCond = { depth: ld, arm: ci + 4, req: reqGateCond(pe.cond ?? null, verb, verbMembers, posMember, posVerb) };
+        else if (!bracelessLive && !deadElseArm) bracelessCond = { depth: ld, arm: ci + 4, req: reqGateCond(pe.cond ?? null, verb, verbMembers, posMember, posVerb, aliasCtx?.plural) };
       } else if (pendingIfs.length && pd === 0 && ((c === '}' && ld <= pendingIfs.at(-1).depth)
           || (pendingIfs.at(-1).bodyDone && !/\s/.test(c) && !(c === 'e' && /^else\b/.test(lm.slice(ci)))))) {
         // The innermost pending `if`'s statement closed — restore the
@@ -1599,7 +1639,7 @@ const condTracker = () => {
           // enters — `m[1]==='a' || m[1]!=='b'` is unconditional for
           // 'c' even though no positive pair serves it (w64-fv F-5).
           const ownRow = mode === 'ours' || (mode === null && (verbMembers?.size ?? 0) === 0);
-          if (ownRow && !armBraceTaken && parenHead === 'if' && (chainCont || (firstStmt && !nestedHead)) && dispatchPure(headCond(prevR), verbPos, verb, verbMembers, posMember, posVerb)) { cond = false; armBraceTaken = true; oursIfNested = oursIfArm >= 0; oursIfArm = ld; }
+          if (ownRow && !armBraceTaken && parenHead === 'if' && (chainCont || (firstStmt && !nestedHead)) && dispatchPure(headCond(prevR), verbPos, verb, verbMembers, posMember, posVerb, aliasCtx?.plural)) { cond = false; armBraceTaken = true; oursIfNested = oursIfArm >= 0; oursIfArm = ld; }
           else if (parenHead !== null) {
             // Callable bodies (`function(req,res) {`, `f(x) {`) run in
             // their handler's own scope — `function` heads on registered
@@ -1609,7 +1649,7 @@ const condTracker = () => {
             // deadFnLines regardless (w61-ledger F-2). Control heads
             // (`while (cond) {`, `for`, `switch`, `catch`) gate their
             // bodies on the head's own condition (w62-fv F-2).
-            if (parenHead === 'if' && !enclosingGate(lm, lit, hc5?.[2] ?? ci, verb, verbMembers, posMember, posVerb, aliasCtx?.rowMethod ?? null) && condTrue(prevR, verb, verbMembers, posMember, posVerb, lit, aliasCtx?.rowMethod ?? null)) cond = false;
+            if (parenHead === 'if' && !enclosingGate(lm, lit, hc5?.[2] ?? ci, verb, verbMembers, posMember, posVerb, aliasCtx?.rowMethod ?? null, aliasCtx?.plural) && condTrue(prevR, verb, verbMembers, posMember, posVerb, lit, aliasCtx?.rowMethod ?? null, aliasCtx?.plural)) cond = false;
             else if (parenHead === 'if' || parenHead === 'catch' || parenHead === 'while' || parenHead === 'switch') cond = mode !== 'sibling';
             // A `for (x of/in coll)` head enumerates a collection — calls
             // inside its body are iteration-wide, and under forUncond
@@ -1637,7 +1677,7 @@ const condTracker = () => {
           }
           else if (pendingUsed) cond = mode !== 'sibling';
           else cond = false;
-          if (cond) condDepths.push({ d: ld, g: false, req: reqGateCond(headCond(prevR), verb, verbMembers, posMember, posVerb) || swMember });
+          if (cond) condDepths.push({ d: ld, g: false, req: reqGateCond(headCond(prevR), verb, verbMembers, posMember, posVerb, aliasCtx?.plural) || swMember });
         }
         // Chain ledger for the else-arm consult: record how this `if`
         // arm resolves for THIS row — a bound-member sibling arm or a
@@ -1649,10 +1689,10 @@ const condTracker = () => {
           const hc9 = headCond(prevR);
           const kwS = hc9 ? hc9[2] : -1;
           const cont = kwS >= 0 && /\belse\s*$/.test(prevR.slice(0, kwS));
-          const res = elseDead ? 'ours' : (condTrue(prevR, verb, verbMembers, posMember, posVerb, lit, aliasCtx?.rowMethod ?? null) || oursIfArm === ld ? 'ours' : (sibArm || deadCond(prevR) ? (sibArmPlural ? 'plural' : true) : false));
+          const res = elseDead ? 'ours' : (condTrue(prevR, verb, verbMembers, posMember, posVerb, lit, aliasCtx?.rowMethod ?? null, aliasCtx?.plural) || oursIfArm === ld ? 'ours' : (sibArm || deadCond(prevR) ? (sibArmPlural ? 'plural' : true) : false));
           const prev9 = chainFailed.get(ld - 1);
           chainFailed.set(ld - 1, cont ? (prev9 === 'ours' || res === 'ours' ? 'ours' : (prev9 === false || res === false ? false : (prev9 === 'plural' || res === 'plural' ? 'plural' : true))) : res);
-          const resReq = reqGateCond(hc9, verb, verbMembers, posMember, posVerb), prevReq = chainFailedReq.get(ld - 1) ?? false;
+          const resReq = reqGateCond(hc9, verb, verbMembers, posMember, posVerb, aliasCtx?.plural), prevReq = chainFailedReq.get(ld - 1) ?? false;
           chainFailedReq.set(ld - 1, cont ? (prevReq && resReq) : resReq);
         }
         // A callable body's `{` opens a return-scope boundary — exits
@@ -1708,7 +1748,7 @@ const condTracker = () => {
         // (w62-ledger F-3). Same tail-conditional semantics as the
         // braced `}`-pop propagation.
         if (bracelessIfArm >= 0) {
-          if (/^(?:return|throw|continue|break)\b/.test(lm.slice(bracelessIfArm, ci).trim()) && !siblingArm(bracelessIfCond, verbPos, verb, memberDead, posMember, posVerb)) condTail.push({ d: ld, g: false, req: reqGateCond(bracelessIfCond, verb, verbMembers, posMember, posVerb) });
+          if (/^(?:return|throw|continue|break)\b/.test(lm.slice(bracelessIfArm, ci).trim()) && (!siblingArm(bracelessIfCond, verbPos, verb, memberDead, posMember, posVerb, aliasCtx?.plural) || pluralGamble(bracelessIfCond))) condTail.push({ d: ld, g: false, req: reqGateCond(bracelessIfCond, verb, verbMembers, posMember, posVerb, aliasCtx?.plural) });
           bracelessIfArm = -1;
           bracelessIfCond = null;
         }
@@ -1810,7 +1850,7 @@ const condTracker = () => {
         // stays defensible, w66-fv F-5).
         if (!bracelessDead && head === 'if') {
           const hcB = headCond(prevR);
-          if (siblingArm(hcB, verbPos, verb, memberDead, posMember, posVerb) || methodCmpDead(headCond(lit.slice(0, ci + 1).trimEnd()), aliasCtx?.rowMethod ?? null)) bracelessDead = { depth: ld, nestedIf: false };
+          if (siblingArm(hcB, verbPos, verb, memberDead, posMember, posVerb, aliasCtx?.plural) || methodCmpDead(headCond(lit.slice(0, ci + 1).trimEnd()), aliasCtx?.rowMethod ?? null)) bracelessDead = { depth: ld, nestedIf: false };
         }
         // The braceless twin of the `{`-handler chain ledger — a `)`
         // that closed an `if` head resolves this arm for this row
@@ -1827,7 +1867,7 @@ const condTracker = () => {
           const res = pendingIfs.at(-1)?.cls === 'siblingPlural' ? 'plural' : (bracelessDead ? true : (pendingIfs.at(-1)?.cls === 'ours' || pendingIfs.at(-1)?.cls === 'true' ? 'ours' : (pendingIfs.at(-1)?.cls === 'sibling' ? true : false)));
           const prev9 = chainFailed.get(ld);
           chainFailed.set(ld, cont ? (prev9 === 'ours' || res === 'ours' ? 'ours' : (prev9 === false || res === false ? false : (prev9 === 'plural' || res === 'plural' ? 'plural' : true))) : res);
-          const resReq = reqGateCond(hc9, verb, verbMembers, posMember, posVerb), prevReq = chainFailedReq.get(ld) ?? false;
+          const resReq = reqGateCond(hc9, verb, verbMembers, posMember, posVerb, aliasCtx?.plural), prevReq = chainFailedReq.get(ld) ?? false;
           chainFailedReq.set(ld, cont ? (prevReq && resReq) : resReq);
         }
         pd--;
@@ -1897,15 +1937,36 @@ const condTracker = () => {
     // real gate whose conditional survives into the arm (w63-fv F-4
     // fallout: `if (c)` newline `if (0){x} else auth` over-minted).
     const tail = lm.trimEnd();
+    // A control head's condition may itself contain parens: `if (f(x))`
+    // ends on a balanced `)` that a `[^()]*` extraction can never match,
+    // which left `pending` unset and minted the next statement
+    // UNCONDITIONAL (w67-ledger F-1). Detect the head with the
+    // balanced-paren scan instead — a trailing `)` whose matcher's
+    // keyword is a control word is a gate head whatever the condition
+    // held — and a control keyword whose paren never closes is an open
+    // head, gating the same way.
+    const eolHead = tail.endsWith(')') ? headCond(tail) : null;
+    const eolKw = eolHead !== null && eolHead[2] >= 0 ? tail.slice(eolHead[2], eolHead[1] - 1).trim() : null;
+    const eolCtrl = eolKw !== null && /^(?:if|for|while|switch|catch)$/.test(eolKw);
+    const eolCtrlOpen = (() => {
+      const m = /\b(?:if|for|while|switch|catch)\s*\(/.exec(tail);
+      if (m === null) return false;
+      let d = 0;
+      for (let k = tail.indexOf('(', m.index); k < tail.length; k++) {
+        if (tail[k] === '(') d++;
+        else if (tail[k] === ')') d--;
+      }
+      return d > 0;
+    })();
     if (!/[;{}]\s*$/.test(tail)
-        && /(?:\b(?:if|for|while|switch|catch)\s*(?:\([^()]*\)\s*)?|\belse\b|\bcatch\b|=>|&&|\|\||\?|:)\s*$/.test(tail)) pending = /(?:\belse\b|=>)\s*$/.test(tail) ? 'arm'
+        && (eolCtrl || eolCtrlOpen || /(?:\b(?:if|for|while|switch|catch)\s*(?:\([^()]*\)\s*)?|\belse\b|\bcatch\b|=>|&&|\|\||\?|:)\s*$/.test(tail))) pending = /(?:\belse\b|=>)\s*$/.test(tail) ? 'arm'
         // A braceless `if` this row provably enters gates nothing — its
         // body runs unconditionally, so `if (true)`/`if (m[1]==='a')`
         // (this row's own member) never carries 'gate' into the next
         // statement. An unproven enclosing pending `if` still gates
         // through it (w66-fv F-6).
-        : (/\bif\s*\([^()]*\)\s*$/.test(tail)
-            && ['ours', 'true'].includes(pendCls(headCond(tail)))
+        : ((eolKw === 'if' || /\bif\s*\([^()]*\)\s*$/.test(tail))
+            && ['ours', 'true'].includes(pendCls(eolHead ?? headCond(tail)))
             && !pendingIfs.some(p => p.cls === 'cond' || p.cls === 'sibling' || p.cls === 'siblingPlural')
           ? false : 'gate');
     return { condPos, condPosDeep, livePos, liveArm, endDepth: ld };
@@ -1941,7 +2002,7 @@ const condTracker = () => {
   // dead — the dual of deadCond (w65-fv F-6). `&&` chains prove true
   // only when EVERY operand does; an `||` side proves true when one of
   // its sides does.
-  const condTrueCond = (hc, verb, verbMembers, posMember, posVerb, litC = null, rowM = null) => {
+  const condTrueCond = (hc, verb, verbMembers, posMember, posVerb, litC = null, rowM = null, proven = null) => {
     if (hc === null) return false;
     const provable = op => {
       const raw = op.t.trim();
@@ -1953,7 +2014,7 @@ const condTracker = () => {
       const v = litVal(raw, null);
       if (v === true) return true;
       if (v === false || v === LV_NUL) return false;
-      const f = memberCmpFold(raw, verb, verbMembers, posMember, posVerb, op.a);
+      const f = memberCmpFold(raw, verb, verbMembers, posMember, posVerb, op.a, proven);
       if (f !== null) return f.verdict === 'const-true';
       // `req.method === <row's own>` / `!== <other>` is statically true
       // for this row — dead weight, never a gate (w65-fv F-8). The
@@ -1979,11 +2040,11 @@ const condTracker = () => {
     }
     return false;
   };
-  const condTrue = (prev, verb, verbMembers, posMember, posVerb, litC = null, rowM = null) => {
+  const condTrue = (prev, verb, verbMembers, posMember, posVerb, litC = null, rowM = null, proven = null) => {
     const hc = headCond(prev);
     // hc[2] is the keyword's START — the head word sits at its front.
     const head = hc !== null ? /^([A-Za-z_$][\w$]*)/.exec(prev.slice(hc[2]))?.[1] ?? '' : '';
-    return head === 'if' && condTrueCond(hc, verb, verbMembers, posMember, posVerb, litC, rowM);
+    return head === 'if' && condTrueCond(hc, verb, verbMembers, posMember, posVerb, litC, rowM, proven);
   };
   // `if (g1) if (g2) {` — every control head between the last
   // statement boundary (`;`/`{`/`}`) and this arm's keyword encloses
@@ -1991,7 +2052,7 @@ const condTracker = () => {
   // enclosing head is itself provably entered; an unproven `if (x)`
   // keeps the arm conditional (w65-fv F-1 follow-through — the
   // outer gate is not the arm's own dispatch).
-  const enclosingGate = (lmC, litC, kwAbs, verb, verbMembers, posMember, posVerb, rowM) => {
+  const enclosingGate = (lmC, litC, kwAbs, verb, verbMembers, posMember, posVerb, rowM, proven = null) => {
     const txt = lmC.slice(0, kwAbs);
     // A `;`/`{`/`}` inside an enclosing `(…)`/`[…]` belongs to the head
     // that owns it — `for(;;)` init/step separators, `f({x:1})` call
@@ -2019,7 +2080,7 @@ const condTracker = () => {
         else if (c === ')') { d--; if (d === 0) { close = k; break; } }
       }
       if (close === -1) return true;
-      if (!condTrueCond([litC.slice(open + 1, close), open + 1, close], verb, verbMembers, posMember, posVerb, litC, rowM)) return true;
+      if (!condTrueCond([litC.slice(open + 1, close), open + 1, close], verb, verbMembers, posMember, posVerb, litC, rowM, proven)) return true;
       re.lastIndex = close;
     }
     return false;
@@ -2606,6 +2667,15 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
     // a dispatch chain (w66-fv F-5).
     const rowMemberVotes = new Map();
     const rowVerbSets = new Map();
+    // `rowVerbRide` — verb -> the member its literal names ANYWHERE in
+    // the row (positive or negated compare, gated or not). The verb
+    // rides that member conventionally: compares on it fold by the
+    // verb's own literal; compares on a DIFFERENT member are live
+    // gambles for it. A verb named nowhere rides the implicit member
+    // (w64-fv F-5 convention). Vote gating must NOT hide the name —
+    // `m[2]==='x'` inside a foreign arm still names 'x' on m[2] even
+    // though it casts no vote (w67-ledger F-4 vs w56-ledger F7).
+    const rowVerbRide = new Map();
     const implicitSet = () => {
       let best = null, n = 0;
       for (const [mb, c] of rowMemberVotes) if (c > n) { best = mb; n = c; }
@@ -2614,17 +2684,89 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
     if (verb !== null) {
       const seedStack = [], seedCases = new Map();
       let swDepth = 0;
+      // Vote scoping (w67-ledger F-4): a member compare counts as a
+      // verb-discriminating vote only at the row's own dispatch level —
+      // inside the arm of a nested `m`-rebind (the `m` there binds a
+      // DIFFERENT dispatcher, so `m[2]==='z'` carries foreign values)
+      // or inside any other control arm (`if (flag)`, a per-verb
+      // `if (m[2]==='y')`, a case body) the compare is gated and never
+      // a dispatch site. Dispatch levels are arms of dispatcher-binding
+      // heads (`if ((m = /re/))`) and of `switch` frames — compare
+      // positions inside their direct bodies vote; deeper ones don't.
+      const openFrames = [];   // {kind:'rowBind'|'other', d:number|null, startPos:number}
+      const gateRanges = [];   // [startPos, endPos) absolute i2*1e7+char
+      // A position is gated inside a closed range OR inside an `other`
+      // frame still open at the compare's line (the frame's range only
+      // lands when its `}` arrives).
+      const gatedAt = ap => gateRanges.some(([a, b]) => ap >= a && ap < b)
+        || openFrames.some(f => f.kind !== 'rowBind' && f.startPos <= ap);
       for (let i2 = from; i2 < Math.min(from + depth, lines.length); i2++) {
         const l2 = stripDead(lines[i2], deadM), lm2 = maskStrings(stripComment(l2), deadM);
-        for (const p of pairsForLine(stripComment(l2), lm2, i2, swDepth, seedStack, aliases, verb, verbMemberSet, seedCases)) {
+        const swBefore = swDepth;
+        const wn = new Set(['m']);
+        for (const nm of aliases.hist.keys()) if (aliases.at(nm, i2 * 1e7) === 'm') wn.add(nm);
+        const evts = [];
+        for (const b of lm2.matchAll(/[{}]/g)) evts.push({ pos: b.index, t: b[0] });
+        for (const hm of lm2.matchAll(/\b(?:if|for|while|switch|catch|else|case|default)\b/g)) evts.push({ pos: hm.index, t: 'kw', kw: hm[0] });
+        evts.sort((a, b) => a.pos - b.pos);
+        let curD = swDepth;
+        for (const e of evts) {
+          if (e.t === '{') { curD++; continue; }
+          if (e.t === '}') {
+            curD--;
+            for (let fi = openFrames.length - 1; fi >= 0; fi--) {
+              const f = openFrames[fi];
+              if (f.d !== null && f.d > curD) {
+                if (f.kind !== 'rowBind') gateRanges.push([f.startPos, i2 * 1e7 + e.pos]);
+                openFrames.splice(fi, 1);
+              }
+            }
+            continue;
+          }
+          // Control keyword — read its paren condition (if any) and arm opener.
+          let k2 = e.pos + e.kw.length;
+          while (k2 < lm2.length && /\s/.test(lm2[k2])) k2++;
+          if (e.kw === 'else' && lm2.slice(k2, k2 + 2) === 'if') continue; // the `if` pushes its own frame
+          if ((e.kw === 'case' || e.kw === 'default')) {
+            // A case/default body gates its interior until the next
+            // case label or the switch's close — an `other` frame at
+            // the current depth (closed by the switch's `}`).
+            for (let fi = openFrames.length - 1; fi >= 0; fi--) if (openFrames[fi].caseLvl) { gateRanges.push([openFrames[fi].startPos, i2 * 1e7 + e.pos]); openFrames.splice(fi, 1); }
+            let colon = lm2.indexOf(':', e.pos + e.kw.length);
+            if (colon < 0) colon = lm2.length;
+            openFrames.push({ kind: 'other', d: curD, caseLvl: true, startPos: i2 * 1e7 + colon + 1 });
+            continue;
+          }
+          let condTxt = null, condEnd = k2;
+          if (lm2[k2] === '(') {
+            const c0 = k2;
+            let d2 = 0;
+            for (k2 = c0; k2 < lm2.length; k2++) { if (lm2[k2] === '(') d2++; else if (lm2[k2] === ')') { d2--; if (d2 === 0) break; } }
+            condTxt = lm2.slice(c0 + 1, k2); condEnd = k2 + 1;
+          }
+          let k3 = condEnd;
+          while (k3 < lm2.length && /\s/.test(lm2[k3])) k3++;
+          const assignsM = condTxt !== null && [...wn].some(nm => new RegExp(`\\b${nm.replace(/\$/g, '\\$')}\\s*=(?![=!<>])`).test(condTxt));
+          const kind = (e.kw === 'switch' || (assignsM && !openFrames.some(f => f.kind === 'rowBind'))) ? 'rowBind' : 'other';
+          if (lm2[k3] === '{') openFrames.push({ kind, d: curD + 1, caseLvl: false, startPos: i2 * 1e7 + k3 + 1 });
+          else if (kind !== 'rowBind') {
+            // Braceless arm covers the rest of the line; a head ending
+            // the line gates the next statement (≈ the next line).
+            const endLine = lm2.slice(k3).trim() === '' ? i2 + 2 : i2 + 1;
+            gateRanges.push([i2 * 1e7 + (condTxt === null ? k3 : condEnd), endLine * 1e7]);
+          }
+        }
+        swDepth = curD;
+        for (const p of pairsForLine(stripComment(l2), lm2, i2, swBefore, seedStack, aliases, verb, verbMemberSet, seedCases)) {
+          if (typeof p.verb === 'string' && p.verb !== '' && p.member !== null && p.member !== undefined && !rowVerbRide.has(p.verb)) rowVerbRide.set(p.verb, p.member);
+          if (gatedAt(i2 * 1e7 + p.pos)) continue;
           rowMemberVotes.set(p.member, (rowMemberVotes.get(p.member) ?? 0) + 1);
-          if (p.verb === verb && p.neg !== true) verbMemberSet.add(p.member);
-          if (typeof p.verb === 'string' && p.verb !== '' && p.neg !== true) {
+          if (p.verb === verb && p.opNeg !== true) verbMemberSet.add(p.member);
+          if (typeof p.verb === 'string' && p.verb !== '' && p.opNeg !== true) {
             let vs = rowVerbSets.get(p.member); if (vs === undefined) rowVerbSets.set(p.member, vs = new Set());
             vs.add(p.verb);
           }
         }
-        swDepth += (lm2.match(/\{/g) ?? []).length - (lm2.match(/\}/g) ?? []).length;
       }
     }
     // Conditional bodies (`if/else/case/catch/try/=>`/braceless/
@@ -2774,11 +2916,17 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
       // Members this row's verb dispatches on, accumulated across the
       // scan — a sibling arm is provably disjoint only when its member
       // compare binds a member THIS verb also binds (w63-fv F-3).
-      for (const p of pairs0) if (p.verb === verb && p.neg !== true) verbMemberSet.add(p.member);
-      const verbDeadSet = () => verbMemberSet.size === 0 ? implicitSet() : verbMemberSet;
+      for (const p of pairs0) if (p.verb === verb && p.opNeg !== true) verbMemberSet.add(p.member);
+      // An unbound verb rides the member its literal names (positive or
+      // negated compare anywhere in the row), else the implicit member:
+      // 'x' names m[2] via `m[2]==='x'`, so `m[1]==='a'` is a foreign
+      // live gate for it — not its dead arm (w64-fv F-5 ride doctrine).
+      const verbDeadSet = () => verbMemberSet.size === 0
+        ? (rowVerbRide.has(verb) ? new Set([rowVerbRide.get(verb)]) : implicitSet())
+        : verbMemberSet;
       const posMemberMap = new Map(pairs0.map(p => [p.pos, p.member]));
       const posVerbMap = new Map(pairs0.map(p => [p.pos, p.verb]));
-      const negPosSet = new Set(pairs0.filter(p => p.neg === true).map(p => p.pos));
+      const negPosSet = new Set(pairs0.filter(p => p.opNeg === true).map(p => p.pos));
       // `verbPosLine` = positions this row serves — own compares AND
       // fall-through/`default` coverage (w64-fv F-6).
       const verbPosLine = pairs.filter(p => pairServes(p, verb, switchCaseMap)).map(p => p.pos);
@@ -2846,7 +2994,7 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
             const swc = lm.slice(open + 1, close);
             const swmMember = switchOperandMember(swc, aliases, i * 1e7 + open + 1);
             const swBound = swmMember !== null && verbDeadSet().has(swmMember);
-            if (!swBound && !siblingArm([swc, open + 1], verbPosLine, verb, verbDeadSet(), posMemberMap, posVerbMap)) return false;
+            if (!swBound && !siblingArm([swc, open + 1], verbPosLine, verb, verbDeadSet(), posMemberMap, posVerbMap, rowVerbSets)) return false;
           }
         }
         return true;
@@ -2891,7 +3039,7 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
       // block is dead scope for this row — not conditional — so an
       // own-verb arm nested inside it still mints (w58-fv F-3,
       // w56-fv F-2).
-      const scan = tracker.line(lm, depthCur, i === from || ours ? 'ours' : (sibling || elseSibling) ? 'sibling' : null, maskStrings(blankBlock(stripComment(lines[i]), deadM), deadM), false, i === from && pairs0.length === 0 ? null : verbPosLine, pairs0.map(p => p.pos), verbMemberSet, posMemberMap, verb, posVerbMap, swServed, negPosSet, { aliases, posBase: i * 1e7, implicit: implicitSet, rowMethod, plural: rowVerbSets }, l);
+      const scan = tracker.line(lm, depthCur, i === from || ours ? 'ours' : (sibling || elseSibling) ? 'sibling' : null, maskStrings(blankBlock(stripComment(lines[i]), deadM), deadM), false, i === from && pairs0.length === 0 ? null : verbPosLine, pairs0.map(p => p.pos), verbMemberSet, posMemberMap, verb, posVerbMap, swServed, negPosSet, { aliases, posBase: i * 1e7, implicit: implicitSet, rowMethod, plural: rowVerbSets, ride: rowVerbRide }, l);
       if (sibling || elseSibling || deadArm) {
         const lastOpen = l.lastIndexOf('{'), lastClose = l.lastIndexOf('}');
         // An unmatched last `{` opens a block whose interior continues
@@ -2940,7 +3088,7 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
             // weight — `m[1]==='a' && m[1]!=='b'` is still 'a''s own
             // arm (w64-fv F-5); a cross-member compare is a live gate.
             if (c2 === 'membercmp' || c2 === 'memberneg') {
-              const f = memberCmpFold(op.t, verb, verbMemberSet, posMember, posVerb, op.a);
+              const f = memberCmpFold(op.t, verb, verbMemberSet, posMember, posVerb, op.a, rowVerbSets);
               if (f !== null) return f.verdict === 'const-true';
             }
             return vcPos(op) || c2 === 'othercmp' || c2 === 'bind';
@@ -2967,7 +3115,7 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
           // live gate already conditioned the tail via condTail.
           const armScoped = prefix => {
             const br = bracedCtlCond(prefix, 'if|for|while');
-            if (br !== null) return ours && dispatchPure([br[0], br[1]], verbPosLine, verb, verbMemberSet, posMemberMap, posVerbMap);
+            if (br !== null) return ours && dispatchPure([br[0], br[1]], verbPosLine, verb, verbMemberSet, posMemberMap, posVerbMap, rowVerbSets);
             const bc = tailCtlCond(prefix, 'if|for|while');
             if (bc !== null) return ours && ownDispatch(prefix, verbPosLine, posMemberMap, posVerbMap);
             return !/\belse\s*$/.test(prefix);

@@ -110,12 +110,16 @@ test('w65-fv F-5: switch operand wrappers still resolve the member', () => {
 });
 
 // ============================================================================
-// w65-fv F-6 + F-7: `m[1] !== 'a'` under an unbound verb mints the row's
-// live arm unconditionally; plurality picks the row's own member set.
+// w65-fv F-6 + F-7 (revised by w67-fv F-1): `m[1] !== 'a'` under an
+// unbound verb mints CONDITIONAL when the member carries no positive
+// vote — the fold only reaches `!==` on a proven discriminator.
 // ============================================================================
 test('w65-fv F-6/F-7: member-neg and plurality-verb binding', () => {
+  // w67-fv F-1 supersedes the w65 unconditional fold: m[1] carries no
+  // POSITIVE vote in this row, so the unbound 'x' cannot prove what
+  // `m[1]` holds — the `!==` arm mints CONDITIONAL, not unconditional.
   { const r = collectRun([HEAD, "  if (m[1] !== 'a') { authorize(p, ['adm']); }", "}"], 'x');
-    assert.equal(r.any, true); assert.deepEqual(r.roles, ['adm']); }
+    assert.equal(r.any, true); assert.equal(r.roles, null); }
   // Row dispatch binds m[2]; an m[1] gate is a foreign-member gate for
   // the m[2]-bound verb — conditional.
   const m2row = [HEAD2, "  if (m[1] !== 'x') { authorize(p, ['gated']); }", "  if (m[2] === 'b') { serveB(); } else { authorize(p, ['elseArm']); }", "}"];
