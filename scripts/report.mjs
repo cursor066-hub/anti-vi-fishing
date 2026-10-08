@@ -103,8 +103,12 @@ write('reports/final-regression.tap', stableTap);
 // The runner string names the invocation actually performed above — the
 // explicit sorted file list itself, not a glob the environment could
 // expand differently and not a template placeholder (w55-ledger M-1,
-// w69-ledger F-8).
-const testSummary = { tests: counts.pass + counts.fail, pass: counts.pass, fail: counts.fail, runner: `${process.execPath} --test --test-concurrency=4 --test-reporter=tap ${testFiles.join(' ')}`, runner_files: testFiles, generated_at: 'regenerated on demand by scripts/report.mjs', note: 'Live counts; per-test durations are stripped so the artifact is deterministic.' };
+// w69-ledger F-8). The binary is spelled 'node', not process.execPath:
+// execPath is machine metadata (/opt/hostedtoolcache on CI, ~/.nvm on a
+// dev box) and the committed artifact is byte-compared against a fresh
+// regeneration on a DIFFERENT machine — an absolute path makes every
+// commit stale everywhere except its birthplace (w69 CI).
+const testSummary = { tests: counts.pass + counts.fail, pass: counts.pass, fail: counts.fail, runner: `node --test --test-concurrency=4 --test-reporter=tap ${testFiles.join(' ')}`, runner_files: testFiles, generated_at: 'regenerated on demand by scripts/report.mjs', note: 'Live counts; per-test durations are stripped so the artifact is deterministic.' };
 write('reports/test-summary.json', JSON.stringify(testSummary, null, 2) + '\n');
 write('reports/final-regression-summary.json', JSON.stringify({ ...testSummary, scope: 'final regression baseline' }, null, 2) + '\n');
 
