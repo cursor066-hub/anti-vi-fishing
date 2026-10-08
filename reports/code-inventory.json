@@ -598,8 +598,8 @@
       "bytes": 13822
     },
     "tests/w70.test.mjs": {
-      "lines": 490,
-      "bytes": 33355
+      "lines": 493,
+      "bytes": 33587
     },
     "tests/w8-canonical.test.mjs": {
       "lines": 161,
@@ -639,5 +639,5 @@
     }
   },
   "total_files": 159,
-  "total_lines": 51861
+  "total_lines": 51864
 }
