@@ -67,12 +67,17 @@ test('w65-fv F-1: else arms under an unbound verb mint conditional, member head 
   const elseFlag = [HEAD, "  if (flag) { serveA(); } else { authorize(p, ['r']); }", "}"];
   { const r = collectRun(elseFlag, 'z'); assert.equal(r.any, true); assert.equal(r.roles, null); }
   // Under the row's implicit plurality the unbound verb rides m[2] on
-  // a HEAD2 row — `m[2]==='x'` is another verb's arm, its else live.
+  // a HEAD2 row — `m[2]==='x'` is another verb's arm — but a lone
+  // compare never PROVES m[2] is the verb discriminator, so the else
+  // mints conditional, not unconditional (w66-fv F-5 supersedes the
+  // w65 live-else doctrine).
   const elseM2 = [HEAD2, "  if (m[2] === 'x') { serveA(); } else { authorize(p, ['r']); }", "}"];
-  { const r = collectRun(elseM2, 'z'); assert.equal(r.any, true); assert.deepEqual(r.roles, ['r']); }
-  // A pure own-member head's else is the live arm — unconditional.
+  { const r = collectRun(elseM2, 'z'); assert.equal(r.any, true); assert.equal(r.roles, null); }
+  // Same shape on m[1]: a single 'a'-binding cannot prove the member —
+  // the else is conditional for 'z' (w66-fv F-5 names this shape
+  // verbatim as the launder).
   const elseM1 = [HEAD, "  if (m[1] === 'a') { serveA(); } else { authorize(p, ['r']); }", "}"];
-  { const r = collectRun(elseM1, 'z'); assert.equal(r.any, true); assert.deepEqual(r.roles, ['r']); }
+  { const r = collectRun(elseM1, 'z'); assert.equal(r.any, true); assert.equal(r.roles, null); }
   // Dead-head else: `m[1] === 'z'` under verb 'z' — the IF arm is ours,
   // its else is dead.
   const deadElse = [HEAD, "  if (m[1] === 'z') { authorize(p, ['ours']); } else { authorize(p, ['spy']); }", "}"];

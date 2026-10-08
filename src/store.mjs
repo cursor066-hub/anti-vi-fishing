@@ -46,7 +46,11 @@ export const RESIDUE_KEEP_TRIGGERS = [
 // fragment: every audit-envelope scanning query appends it identically.
 // The lifecycle_carryover element level needs je.type='object' guarding —
 // json_each on a scalar element raises 'malformed JSON' and fails the scan.
-export const DUP_KEY_PROBE = ` OR EXISTS (SELECT 1 FROM json_each(envelope,'$') GROUP BY "key" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload') GROUP BY "key" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload.metadata') GROUP BY "key" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload.metadata.lifecycle_carryover') je, json_each(CASE WHEN je.type='object' THEN je.value ELSE '{}' END) jk GROUP BY je.key, jk.key HAVING COUNT(*)>1)`;
+// The fifth clause descends one level further — dup keys inside an
+// element's own `metadata` object (w66-runtime F-1). Coverage still stops
+// at lc[*].metadata.*: deeper free-form nesting has no schema-defined
+// sub-object, and no scan selects on those paths.
+export const DUP_KEY_PROBE = ` OR EXISTS (SELECT 1 FROM json_each(envelope,'$') GROUP BY "key" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload') GROUP BY "key" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload.metadata') GROUP BY "key" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload.metadata.lifecycle_carryover') je, json_each(CASE WHEN je.type='object' THEN je.value ELSE '{}' END) jk GROUP BY je.key, jk.key HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload.metadata.lifecycle_carryover') je2, json_each(CASE WHEN je2.type='object' AND json_type(je2.value,'$.metadata')='object' THEN json_extract(je2.value,'$.metadata') ELSE '{}' END) jm GROUP BY je2.key, jm.key HAVING COUNT(*)>1)`;
 
 
 
@@ -997,7 +1001,13 @@ export class Store {
     const floorPriorParts = typeof floorPrior === 'string' ? floorPrior.split(':') : null;
     const floorPriorSeq = floorPriorParts !== null && /^\d+$/.test(floorPriorParts[0]) ? Number(floorPriorParts[0]) : undefined;
     const floorPriorWellFormed = floorPriorParts !== null && floorPriorParts.length === 2 && Number.isSafeInteger(floorPriorSeq) && floorPriorSeq >= 1 && floorPriorParts[1] !== '';
-    const divergentMarker = floorPrior !== undefined && !floorPriorWellFormed ? String(floorPrior).slice(0, 200) : undefined;
+    // A marker naming a seq ahead of every committed row is never honest:
+    // marker writes are atomic with their row's append, so a committed
+    // marker's seq is always <= the committed tip at this snapshot —
+    // `floorPriorSeq > last.seq` is a plant that would wedge the guarded
+    // UPSERT (and every later epoch attestation) forever (w66-seal F-2).
+    const floorPriorAhead = floorPriorSeq !== undefined && floorPriorSeq > (last?.seq ?? 0);
+    const divergentMarker = floorPrior !== undefined && (!floorPriorWellFormed || floorPriorAhead) ? String(floorPrior).slice(0, 200) : undefined;
     // The key is reserved evidence: a caller-supplied fold_floor_divergent
     // must never ride the signed envelope verbatim when no divergence was
     // observed — it would let a file-writer pair planted residue with a
@@ -1137,24 +1147,38 @@ export class Store {
       const delta = this._totalChanges() - before;
       requireThat(delta <= 1, 'INV-409-INTEGRITY', `fold-floor marker produced ${delta} row writes in one statement — foreign trigger side-effects`, 409);
       let stored = this._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor'").get(tenant)?.value;
-      if (stored !== undefined && !(typeof stored === 'string' && /^\d+:/.test(stored))) {
-        // The refused update left planted garbage in place — overwrite it
-        // outright. A real foreign trigger fighting the heal re-fires on
-        // this write and the re-probe below still convicts.
-        this._stmt("UPDATE meta_kv SET value=? WHERE tenant=? AND key='fold_floor'").run(`${entry.sequence}:${hash}`, tenant);
+      const storedParts = typeof stored === 'string' ? stored.split(':') : null;
+      const storedSeqProbe = storedParts !== null && /^\d+$/.test(storedParts[0]) ? Number(storedParts[0]) : undefined;
+      const storedWellFormed = storedParts !== null && storedParts.length === 2 && Number.isSafeInteger(storedSeqProbe) && storedSeqProbe >= 1 && storedParts[1] !== '';
+      // A well-formed-shaped marker ahead of every row we can see is a
+      // plant: the guarded UPSERT refuses it (stored CAST >= excluded) and
+      // so does every FUTURE honest mint — the epoch attestation would
+      // stay broken forever while `/^\d+:/` kept passing it (w66-seal
+      // F-2). Compare against the visible committed tip — a concurrent
+      // commit's marker legitimately exceeds our own entry.sequence but
+      // never exceeds the tip it was written for.
+      const tipNow = this._stmt('SELECT MAX(seq) m FROM audit WHERE tenant=?').get(tenant)?.m ?? entry.sequence;
+      if (stored !== undefined && !(storedWellFormed && storedSeqProbe <= tipNow)) {
+        // The refused update left a divergent marker in place — overwrite
+        // it outright (with the TRUE tip when a concurrent commit is
+        // visible, else our own entry). A real foreign trigger fighting
+        // the heal re-fires on this write and the re-probe below still
+        // convicts.
+        const tipRowNow = tipNow === entry.sequence ? { seq: entry.sequence, hash } : this._stmt('SELECT seq, hash FROM audit WHERE tenant=? AND seq=?').get(tenant, tipNow);
+        this._stmt("UPDATE meta_kv SET value=? WHERE tenant=? AND key='fold_floor'").run(`${tipRowNow?.seq ?? entry.sequence}:${tipRowNow?.hash ?? hash}`, tenant);
         stored = this._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor'").get(tenant)?.value;
       }
-      if (floorPrior !== undefined && !floorPriorWellFormed && stored !== floorPrior) {
+      if (floorPrior !== undefined && (!floorPriorWellFormed || floorPriorAhead) && stored !== floorPrior) {
         // Evidence, not laundering: the residue row is a POINTER into the
         // signed chain — this append's own envelope already carries
         // fold_floor_divergent, so the row can be verified against
         // anchored bytes and a planted residue cannot mint a phantom conviction
         // (w56-store MED). It survives until a report retires it — never
         // deleted on first read (w56-store HIGH). Written ONLY when the
-        // marker actually changed — a well-formed-shaped but divergent
-        // marker (an unreachable seq the guarded update refuses) is left
-        // standing as evidence on purpose, not 'healed', so it writes no
-        // pointer (w56-seal parity). Landed-check it like every security
+        // marker actually changed. An ahead-of-tip marker is no longer
+        // left standing (w66-seal F-2 reversed that w56 doctrine: standing
+        // forever meant wedged forever — it is healed above and writes
+        // its pointer here like any other divergence). Landed-check it like every security
         // write: a foreign RAISE(IGNORE) trigger eating this insert must
         // convict (w56-store LOW). The row is keyed PER HEAL — two heals
         // before a report must both reach the surface, never overwrite
@@ -1199,7 +1223,11 @@ export class Store {
         requireThat(landedResidue === residueClaim, 'INV-409-INTEGRITY', 'fold-floor healed residue refused after write — foreign trigger side-effects', 409);
       }
       const storedSeq = typeof stored === 'string' && /^\d+:/.test(stored) ? Number(stored.split(':')[0]) : undefined;
-      requireThat(storedSeq !== undefined && storedSeq >= entry.sequence, 'INV-409-INTEGRITY', `fold-floor marker write ${stored === undefined ? 'missing' : 'refused'} after write — foreign trigger side-effects`, 409);
+      // The upper bound matters as much as the lower: a `\d+`-shaped
+      // ahead-of-tip plant surviving the heal (a foreign trigger eating
+      // the overwrite) still satisfies `>= entry.sequence` — convict it
+      // (w66-seal F-2).
+      requireThat(storedSeq !== undefined && storedSeq >= entry.sequence && storedSeq <= tipNow, 'INV-409-INTEGRITY', `fold-floor marker write ${stored === undefined ? 'missing' : 'refused'} after write — foreign trigger side-effects`, 409);
     }));
     // Post-commit ordering: only a landed entry may move the anchors and
     // ratchet the detector (w23 W23-05). Our own head is the newest

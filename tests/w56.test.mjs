@@ -35,18 +35,23 @@ test('w56-1: reader-malformed marker shapes heal with the divergent content name
     assert.ok(healed, `the heal of ${JSON.stringify(planted)} is named once: ${JSON.stringify(seal.head_watermark_tampered)}`);
     assert.equal(healed.healed_marker, planted, 'the conviction carries the planted content');
   }
-  // A well-formed-shaped but unreachable marker is evidence, not garbage:
-  // the guarded update refuses it, the append writes no residue and names
-  // no heal — the reader convicts the unsafe-integer seq itself.
+  // A digit-shaped marker asserting a seq no committed row can ever hold
+  // wedges the guarded UPSERT permanently — CAST(1e30) beats every honest
+  // mint, so leaving it standing meant the epoch attestation died forever.
+  // w66-seal F-2 supersedes the w56 standing-evidence doctrine: the heal
+  // overwrites the plant with the true tip marker and names the planted
+  // content verbatim via residue + floor_marker_healed.
   const huge = '9'.repeat(30) + ':h';
   h.f.store.db.prepare("UPDATE meta_kv SET value=? WHERE tenant='acme' AND key='fold_floor'").run(huge);
   h.f.store.audit('acme', 'PROBE', 'actor', null, {}, h.f.clock());
-  assert.equal(markerValue(h), huge, 'the divergent marker is left standing as evidence');
-  assert.equal(h.f.store.db.prepare("SELECT value FROM meta_kv WHERE tenant='acme' AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.')").get()?.value, undefined,
-    'no heal residue is written when nothing was overwritten');
+  const tip = h.f.store.db.prepare("SELECT seq, hash FROM audit WHERE tenant='acme' ORDER BY seq DESC LIMIT 1").get();
+  assert.equal(markerValue(h), `${tip.seq}:${tip.hash}`, 'the ahead-plant is healed to the true committed tip');
+  const residue = h.f.store.db.prepare("SELECT value FROM meta_kv WHERE tenant='acme' AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.')").get()?.value;
+  assert.equal(residue, `${tip.seq}:${huge}`, 'the heal residue binds the anchor row to the planted content');
   const seal = h.f.sealAuditChain(h.p('security'));
-  assert.ok(!(seal.head_watermark_tampered ?? []).some(e => e.kind === 'floor_marker_healed'),
-    'a marker that was never overwritten claims no heal');
+  const healed = (seal.head_watermark_tampered ?? []).find(e => e.kind === 'floor_marker_healed');
+  assert.ok(healed && healed.healed_marker === huge,
+    `the ahead-plant heal reaches the seal report verbatim: ${JSON.stringify(seal.head_watermark_tampered)}`);
   h.close();
 });
 

@@ -167,7 +167,12 @@ test('w32 store F2/F3: a signed watermark stranded above the committed tip still
   assert.throws(() => cold._auditIndex('acme'), hasCode('INV-409-INTEGRITY'), 'a signed floor above the committed tip must still wedge');
   const res = cold.sealAuditChain(h.p('security'));
   assert.equal(res.sealed, false, 'chain verifies — no cut needed');
-  assert.equal(cold._headWatermark('acme'), staleSeq + 1, 'the floor now covers the committed re-anchor row');
+  // The stranded marker above the committed tip is an ahead-plant the
+  // heal convicts under w66-seal F-2: the re-anchor row names it
+  // divergent, the residue consult latches the heal, and the retire
+  // mints its FOLD_RESIDUE_RETIRED tombstone — one more row than the
+  // bare re-anchor, and the floor covers it.
+  assert.equal(cold._headWatermark('acme'), staleSeq + 2, 'the floor now covers the re-anchor row and its heal-retirement mint');
   assert.doesNotThrow(() => cold._auditIndex('acme'), 'fold works again post-repair');
 });
 

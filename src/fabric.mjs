@@ -114,6 +114,11 @@ export class Fabric {
   // head checks stand down inside its transaction — the fold's per-row
   // signature verification keeps running (w25-clock F-2).
   #sealing = null;
+  // Claim sets the residue drain could not sign while a seal held the
+  // tenant — replayed by sealAuditChain's post-commit edge under a
+  // post-cut tip pin (w66-runtime F-3). Discarded when the seal aborts:
+  // its residue deletes rolled back too.
+  #deferredRetiredMints = new Map();
   #sealCarry = new Map();
   #chainHeadRaw = undefined;
   #chainHeadParsed = null;
@@ -1550,21 +1555,43 @@ export class Fabric {
         // echo-resurfacing primitive (w65-runtime F-3). Split the budget:
         // this drain's claims take the first 2048 slots, prior
         // suppressions fill the rest — a flood can only push its own tail.
-        merged = [...new Set([...retired.slice(0, 2048), ...prior])].slice(0, 4096);
-        // marker_seq binds the signature to the committed chain tip the
-        // consult sees: a signer already dead at that tip could never have
-        // minted the marker, so post-death envelopes are refused (w62-seal F-1).
-        const tip = (() => { try { return this._chainFacts(tenant).throughSeq ?? 0; } catch { return 0; } })();
+        const mergedSet = new Set([...retired.slice(0, 2048), ...prior]);
+        merged = [...mergedSet].slice(0, 4096);
+        // Every other bounded set in this file counts what it drops
+        // (claims_dropped, heals_dropped, dropped_mirrors) — the merge
+        // tail past slot 4096 was the exception: a sustained retired
+        // flood evicts one prior claim per excess fresh claim, silently.
+        // Positions >= 4096 always hold prior claims (retired is capped
+        // at 2048 before the union), so sign the eviction count into the
+        // marker — accounted, not indistinguishable churn (w66-runtime
+        // F-2).
+        const priorEvicted = mergedSet.size - merged.length;
+        // A seal in flight rewinds/renumbers the table under a second
+        // snapshot: a marker minted now pins the pre-cut tip and convicts
+        // as `floor_marker_forged` on the next consult though the mint
+        // was authorized — and the left-standing doctrine above means the
+        // false conviction never heals. Defer the mint while a seal is
+        // armed for this tenant; the standing marker stays authentic and
+        // the next drain re-pins post-cut. The defer QUEUES the merged
+        // claim set — sealAuditChain replays it after its commit under a
+        // post-cut tip, so consumed claims still reach `fold_floor_retired`
+        // exactly once instead of stranding as `retiring` forever
+        // (w66-runtime F-3, w66-runtime F-2).
+        if (this.#sealing?.has(tenant)) {
+          // Queue the UNCAPPED merge set — the replay recomputes the
+          // cap and the `prior_evicted` count at apply time, so a capped
+          // queue could never report an eviction honestly.
+          const q = this.#deferredRetiredMints.get(tenant) ?? new Set();
+          for (const c of mergedSet) q.add(c);
+          this.#deferredRetiredMints.set(tenant, q);
+        }
+        else {
         // The sign consults the fold (`_signingKeyId` → `_auditIndex`),
         // whose residue-mint window legitimately re-arms the keep
         // triggers — so it runs BEFORE the drops below, or the UPSERT
         // would raise its own guard (w60-fv F-10).
-        // `marker_seq` is a bare position the seq guard REUSES after a
-        // seal cut rewinds the table — pin the exact row bytes it names
-        // so a post-cut (or replayed) env cannot re-bind to a renumbered
-        // epoch (w65-seal F-1).
-        const tipHash = (() => { try { return this.store._stmt("SELECT hash FROM audit WHERE tenant=? AND seq=?").get(tenant, tip)?.hash ?? null; } catch { return null; } })();
-        env = this.#auditSigners[tenant].sign({ tenant_id: tenant, fold_floor_retired: merged, marker_seq: tip, marker_tip_hash: tipHash }, 'audit');
+        env = this.#mintRetiredEnvelope(tenant, merged, priorEvicted);
+        }
         }
       }
       db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
@@ -1589,6 +1616,50 @@ export class Fabric {
       for (const [, sql] of RESIDUE_KEEP_TRIGGERS) db.exec(sql);
     } catch (e) { try { db.exec('ROLLBACK TO residue_drain'); } catch { /* savepoint may already be gone */ } throw e; }
     finally { try { db.exec('RELEASE residue_drain'); } catch { /* rolled back or never opened */ } }
+  }
+  // The retired-marker envelope: `marker_seq` binds the signature to the
+  // committed chain tip the consult sees — a bare position the seq guard
+  // REUSES after a seal cut, so `marker_tip_hash` pins the exact row
+  // bytes it names and a post-cut (or replayed) env cannot re-bind to a
+  // renumbered epoch (w65-seal F-1). Shared by the drain's mint and the
+  // post-seal deferred replay (w66-runtime F-3).
+  #mintRetiredEnvelope(tenant, merged, priorEvicted) {
+    const tip = (() => { try { return this._chainFacts(tenant).throughSeq ?? 0; } catch { return 0; } })();
+    const tipHash = (() => { try { const r = this.store._stmt("SELECT envelope FROM audit WHERE tenant=? AND seq=?").get(tenant, tip); return r === undefined ? null : digest(JSON.parse(r.envelope).payload); } catch { return null; } })();
+    return this.#auditSigners[tenant].sign({ tenant_id: tenant, fold_floor_retired: merged, marker_seq: tip, marker_tip_hash: tipHash, prior_evicted: priorEvicted }, 'audit');
+  }
+  // Replay the marker mint the drain deferred while a seal held the
+  // tenant — invoked from sealAuditChain's post-commit edge, where the
+  // pinned tip is the post-cut one. Only a COMMITTED seal may apply it:
+  // an aborted seal rolled back the residue deletes, so minting the
+  // claims would forge suppression evidence over rows that still stand.
+  // The drain's overwrite doctrine is mirrored exactly: a standing marker
+  // that does not authenticate is left for the consult to name, never
+  // rewritten under the deferred write (w66-runtime F-3).
+  #applyDeferredRetiredMints(tenant) {
+    const q = this.#deferredRetiredMints.get(tenant);
+    this.#deferredRetiredMints.delete(tenant);
+    if (!q?.size) return;
+    const db = this.store.db;
+    const prev = (() => { try { return this.store._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(tenant)?.value; } catch { return undefined; } })();
+    if (prev !== undefined) {
+      let pa = null;
+      try { pa = this.#retiredClaimsOf(tenant, JSON.parse(prev)); } catch { pa = null; }
+      if (pa === null) return;
+    }
+    const merged = [...q].slice(0, 4096);
+    const env = this.#mintRetiredEnvelope(tenant, merged, q.size - merged.length);
+    db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
+    db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
+    db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
+    try {
+      db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES (?, 'fold_floor_retired', ?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, JSON.stringify({ claims: merged, env }));
+      const back = db.prepare("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(tenant)?.value;
+      const backClaims = (() => { try { return this.#retiredClaimsOf(tenant, JSON.parse(back ?? 'null'))?.retired ?? null; } catch { return null; } })();
+      requireThat(Array.isArray(backClaims) && merged.every(c => backClaims.includes(c)), 'INV-409-INTEGRITY', 'fold-floor retired marker refused after deferred write — foreign trigger side-effects', 409);
+    } finally {
+      for (const [, sql] of RESIDUE_KEEP_TRIGGERS) db.exec(sql);
+    }
   }
   // The `fold_floor_retired` claim list, iff the marker row carries it
   // inside an audit-signed envelope bound to this tenant. A bare array or
@@ -1631,9 +1702,18 @@ export class Fabric {
         // a seal cut rewinds the table — MAX is not a clock. The env must
         // pin the exact row it asserted (`marker_tip_hash`); a replayed or
         // epoch-stranded marker binds a seq that now holds different bytes
-        // — or no row at all — and refuses (w65-seal F-1).
-        const tipRow = this.store._stmt("SELECT hash FROM audit WHERE tenant=? AND seq=?").get(tenant, pl.marker_seq);
-        if (tipRow?.hash !== pl.marker_tip_hash) return null;
+        // — or no row at all — and refuses (w65-seal F-1). The pin is
+        // REQUIRED: a pre-pin env (no field) replayed against an
+        // out-of-table seq satisfied both-undefined and could launder
+        // planted claims into every later marker via `prior` (w66-seal
+        // F-1). And the stored `hash` column is attacker clay (w44) —
+        // recompute it from the row's own envelope bytes; a mid-table
+        // column rewrite is invisible to the tip-only cfShape fingerprint
+        // but never satisfies this check.
+        const tipRow = this.store._stmt("SELECT envelope FROM audit WHERE tenant=? AND seq=?").get(tenant, pl.marker_seq);
+        let tipRecomputed = null;
+        try { tipRecomputed = tipRow === undefined ? null : digest(JSON.parse(tipRow.envelope).payload); } catch { tipRecomputed = null; }
+        if (typeof pl.marker_tip_hash !== 'string' || tipRecomputed === null || tipRecomputed !== pl.marker_tip_hash) return null;
       }
       // The unsigned `claims` twin is advisory — the env is the sole
       // authority, so a missing twin authenticates (w62-seal F-7); when
@@ -2300,7 +2380,7 @@ export class Fabric {
                 // The sign re-enters the fold, whose residue-mint window
                 // re-arms the keep triggers — sign before dropping them
                 // (w60-fv F-10).
-                const noteTipHash = (() => { try { return this.store._stmt("SELECT hash FROM audit WHERE tenant=? AND seq=?").get(tenant, committedTip)?.hash ?? null; } catch { return null; } })();
+                const noteTipHash = (() => { try { const r = this.store._stmt("SELECT envelope FROM audit WHERE tenant=? AND seq=?").get(tenant, committedTip); return r === undefined ? null : digest(JSON.parse(r.envelope).payload); } catch { return null; } })();
                 const noteEnv = this.#auditSigners[tenant].sign({ tenant_id: tenant, fold_floor_retired: prior, fold_floor_retiring: mintable, marker_seq: committedTip, marker_tip_hash: noteTipHash }, 'audit');
                 db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
                 db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
@@ -3315,7 +3395,8 @@ export class Fabric {
     // A refusal thrown mid-seal still speaks the watermark tamper evidence
     // it carries — the attestation otherwise only rides the result shapes
     // (w39-seal F-10).
-    try { return this._sealAuditChain(p, t, iid, sealPreTamperEntries); }
+    let sealCommitted = false;
+    try { const sealedResult = this._sealAuditChain(p, t, iid, sealPreTamperEntries); sealCommitted = true; return sealedResult; }
     catch (e) {
       if (e instanceof InvariantError && (this.#wmTamper.size || sealPreTamperEntries.length)) {
         const seen = new Set(), attested = [];
@@ -3333,7 +3414,16 @@ export class Fabric {
       }
       throw e;
     }
-    finally { this.#sealing.delete(t); }
+    finally {
+      this.#sealing.delete(t);
+      // Replay retired-marker mints the drain deferred while the seal
+      // was armed: they pin the POST-cut tip now, exactly once, and only
+      // when the seal committed — an aborted seal's residue deletes
+      // rolled back, so minting those claims would forge suppression
+      // evidence over rows that still stand (w66-runtime F-3).
+      if (sealCommitted) { try { this.#applyDeferredRetiredMints?.(t); } catch { /* the note env stands; the next consult re-pins */ } }
+      else this.#deferredRetiredMints.delete(t);
+    }
   }
   _sealAuditChain(p, t, iid, sealPreTamperEntries = []) {
     // A config-revoked principal must not seal either — the frozen identity

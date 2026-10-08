@@ -1,6 +1,6 @@
 {
-  "tests": 1415,
-  "pass": 1415,
+  "tests": 1426,
+  "pass": 1426,
   "fail": 0,
   "runner": "node --test --test-concurrency=4 --test-reporter=tap <sorted tests/**/*.test.mjs list>",
   "generated_at": "regenerated on demand by scripts/report.mjs",

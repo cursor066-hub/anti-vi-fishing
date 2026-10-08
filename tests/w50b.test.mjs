@@ -8,7 +8,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fixture, hasCode } from './helpers.mjs';
 
 // --- fixverify F-1: the seq-guard mimic still dies as INTEGRITY — the
@@ -247,7 +249,15 @@ test('w50 H-2: check.mjs parity gate flags unauditable dispatch shapes', t => {
       block,
       `globalThis.process.stdout.write(JSON.stringify({ failed, errors }));`
     ].join('\n');
-    return JSON.parse(execFileSync(process.execPath, ['-e', prog], { encoding: 'utf8' }).trim());
+    // Exec from a file, not `-e`: the shared-scanner slice outgrew the
+    // 128KB single-argv limit (E2BIG). The bytes under test are still
+    // the shipped block verbatim — only the transport changed.
+    const dir = mkdtempSync(join(tmpdir(), 'w50b-'));
+    try {
+      const f = join(dir, 'probe.mjs');
+      writeFileSync(f, prog);
+      return JSON.parse(execFileSync(process.execPath, [f], { encoding: 'utf8' }).trim());
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   };
   const declared = new Set(['GET /x']);
   assert.equal(run(["if (req.method === 'GET' && path === '/x') send(200, {});"], declared).failed, false, 'a declared route passes');

@@ -22,20 +22,30 @@ const maxSeq = h => h.f.store.db.prepare("SELECT COALESCE(MAX(seq),0) m FROM aud
 const markerValue = h => h.f.store.db.prepare("SELECT value FROM meta_kv WHERE tenant='acme' AND key='fold_floor'").get()?.value;
 const wmTamper = (h, kind) => (seal => (seal.head_watermark_tampered ?? []).some(e => e.kind === kind));
 
-// --- runtime F-1 (HIGH): an attacker-set divergent marker must survive
-// honest appends — a plain UPSERT used to overwrite it silently,
-// laundering a committed-write rollback probe.
-test('w54-runtime F-1a: honest appends cannot overwrite a divergent fold_floor marker', t => {
+// --- runtime F-1 (HIGH) + w66-seal F-2: an attacker-set divergent marker
+// must be named, never silently overwritten — a `\d+`-shaped plant ahead
+// of the committed tip wedges every later honest epoch attestation
+// (guarded UPSERT refuses forever), so the append heals it to the true
+// tip and attests the divergence on the signed chain: the append's own
+// envelope carries fold_floor_divergent and a keyed fold_floor_healed.<seq>
+// residue row names it on the next seal report.
+test('w54-runtime F-1a + w66-seal F-2: an ahead-of-tip marker is healed on append and attested on-chain', t => {
   const h = fixture(t);
   h.ready(); h.ready();
   h.f._auditIndex('acme');
   const tip = maxSeq(h);
   const planted = `${tip + 1000}:${'a'.repeat(64)}`;
   h.f.store.db.prepare("UPDATE meta_kv SET value=? WHERE tenant='acme' AND key='fold_floor'").run(planted);
-  h.ready(); h.ready(); // honest appends land below the planted span — monotone write refuses
-  assert.equal(markerValue(h), planted, 'the divergent marker survives appends');
+  h.ready(); h.ready(); // honest appends land below the planted span — guard refuses, heal writes the true tip
+  const newTip = maxSeq(h);
+  const tipHash = h.f.store.db.prepare("SELECT hash FROM audit WHERE tenant='acme' AND seq=?").get(newTip).hash;
+  assert.equal(markerValue(h), `${newTip}:${tipHash}`, 'the divergent marker is healed to the committed tip');
+  const divergent = h.f.store.db.prepare("SELECT json_extract(envelope,'$.payload.metadata.fold_floor_divergent') d FROM audit WHERE tenant='acme' AND envelope LIKE '%fold_floor_divergent%' ORDER BY seq DESC LIMIT 1").get()?.d;
+  assert.equal(divergent, planted, 'the planted marker is named on the healing append\'s signed envelope');
+  const healedRows = h.f.store.db.prepare("SELECT value FROM meta_kv WHERE tenant='acme' AND substr(key,1,18)='fold_floor_healed.'").all();
+  assert.ok(healedRows.some(r => r.value.endsWith(`:${planted}`)), 'the heal residue row names the divergent marker');
   const seal = h.f.sealAuditChain(h.p('security'));
-  assert.ok(wmTamper(h, 'floor_marker_ahead')(seal), `the divergence is named: ${JSON.stringify(seal.head_watermark_tampered)}`);
+  assert.ok(wmTamper(h, 'floor_marker_healed')(seal), `the heal surfaces on the report: ${JSON.stringify(seal.head_watermark_tampered)}`);
   h.close();
 });
 

@@ -1,13 +1,13 @@
 {
   "described_tree": {
-    "commit": "6fdb9d00950e26ab8117d7b60d0ccb6fcc526b66",
+    "commit": "3559493335f6296a5a5c53490db2dc5ae496a139",
     "clean": false
   },
   "note": "volatile evidence: describes the tree at generation time — freshness is proven by the live CI step, not by this snapshot (w11-supply SC-08)",
   "report": {
     "check_exit": 1,
     "report": {
-      "syntax_files": 148,
+      "syntax_files": 149,
       "syntax_and_focused_source_checks": false,
       "security_certification": false
     }
