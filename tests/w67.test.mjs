@@ -117,13 +117,17 @@ test('w67-fv F-1: an unproven-member `!==` mints conditional, not unconditional'
   // symmetric for unproven members.
   { const r = collectRun([HEAD2, "  if (m[2] !== 'y') { spy(); } else { authorize(p, ['r']); }", '}'], 'x');
     assert.equal(r.any, true); assert.equal(r.roles, null); }
-  // A positive compare on the member elsewhere in the row proves it —
-  // the `!==` folds for an outsider verb exactly as before.
+  // A single positive compare is an id-filter, not discriminator proof
+  // (w68-ledger F-1): the unbound 'x' folds only once at least two
+  // distinct verbs bind the member. A verb bound ON the member keeps the
+  // deterministic fold — its own binding proves discrimination for it.
   const proven = [HEAD2, "  if (m[2]==='y') { serve(); }", "  if (m[2]!=='z') { authorize(p, ['adm']); }", '}'];
-  { const r = collectRun(proven, 'x'); assert.deepEqual(r.roles, ['adm']); }
+  { const r = collectRun(proven, 'x'); assert.equal(r.roles, null, 'lone id-filter vote — conditional for the unbound'); }
   { const r = collectRun(proven, 'y'); assert.deepEqual(r.roles, ['adm'], "y-requests carry m[2]='y' which is !=='z' — the arm runs"); }
   // 'z' itself can never satisfy its own exclusion — dead arm.
   { const r = collectRun(proven, 'z'); assert.equal(r.any, false, "z-requests carry m[2]='z' — dead"); }
+  const proven2 = [HEAD2, "  if (m[2]==='y') { serve(); }", "  if (m[2]==='w') { serveW(); }", "  if (m[2]!=='z') { authorize(p, ['adm']); }", '}'];
+  { const r = collectRun(proven2, 'x'); assert.deepEqual(r.roles, ['adm'], 'two positive votes prove the member — the fold returns'); }
   // An unbound verb with NO member-neg arm at all stays unconditional.
   { const r = collectRun([HEAD, "  authorize(p, ['adm']);", '}'], 'x');
     assert.deepEqual(r.roles, ['adm']); }
@@ -139,9 +143,13 @@ test('w67-ledger F-3: conjunct-gated pairs keep their vote and arm binding', () 
   // `flag && m[1]==='a'` is 'a''s arm gated by flag — conditional mint.
   { const r = collectRun([HEAD, "  if (flag && m[1]==='a') { authorize(p, ['adm']); }", '}'], 'a');
     assert.equal(r.any, true); assert.equal(r.roles, null, 'flag gates the mint'); }
-  // But it still proves m[1] discriminates — a sibling `!==` folds.
+  // But a lone gated vote is still only an id-filter for unbound verbs
+  // (w68-ledger F-1) — 'c' mints conditional; a second positive vote
+  // restores the discriminator fold.
   const row = [HEAD, "  if (flag && m[1]==='a') { serveA(); }", "  if (m[1]!=='b') { authorize(p, ['adm']); }", '}'];
-  { const r = collectRun(row, 'c'); assert.deepEqual(r.roles, ['adm'], 'm[1] proven — unbound verb folds `!==`'); }
+  { const r = collectRun(row, 'c'); assert.equal(r.roles, null, 'lone gated vote — id-filter only, conditional'); }
+  const row2 = [HEAD, "  if (flag && m[1]==='a') { serveA(); }", "  if (m[1]==='d') { serveD(); }", "  if (m[1]!=='b') { authorize(p, ['adm']); }", '}'];
+  { const r = collectRun(row2, 'c'); assert.deepEqual(r.roles, ['adm'], 'two votes prove m[1] — the unbound fold returns'); }
   // The operator-negated compare itself never serves its own arm.
   { const r = collectRun([HEAD, "  if (m[1]!=='a') { authorize(p, ['notA']); }", '}'], 'a');
     assert.equal(r.roles, null, 'a-requests never enter the `!==` arm'); }
@@ -159,10 +167,13 @@ test('w67-ledger F-4: compares under a foreign gate cannot launder member votes'
   // unbound verb mints conditional.
   const gated = [HEAD, "  if (flag) { if (m[1]==='a') { serveA(); } }", "  if (m[1]!=='b') { authorize(p, ['adm']); }", '}'];
   { const r = collectRun(gated, 'c'); assert.equal(r.roles, null, 'gated proof is no discriminator vote'); }
-  // The same compare at row depth (un-gated) proves the member — the
-  // identical `!==` then folds unconditional for 'c'.
+  // The same compare at row depth (un-gated) still votes — but a lone
+  // vote is an id-filter (w68-ledger F-1), so the unbound `!==` mints
+  // conditional until a second verb proves the member.
   const free = [HEAD, "  if (m[1]==='a') { serveA(); }", "  if (m[1]!=='b') { authorize(p, ['adm']); }", '}'];
-  { const r = collectRun(free, 'c'); assert.deepEqual(r.roles, ['adm']); }
+  { const r = collectRun(free, 'c'); assert.equal(r.roles, null, 'lone vote — id-filter only, conditional'); }
+  const free2 = [HEAD, "  if (m[1]==='a') { serveA(); }", "  if (m[1]==='d') { serveD(); }", "  if (m[1]!=='b') { authorize(p, ['adm']); }", '}'];
+  { const r = collectRun(free2, 'c'); assert.deepEqual(r.roles, ['adm'], 'two votes prove the member — the fold returns'); }
 });
 
 // ============================================================================

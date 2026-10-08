@@ -59,16 +59,21 @@ const tipHashAt = (h, seq) => h.f.store.db.prepare("SELECT hash FROM audit WHERE
 
 // ============================================================================
 // w64-fv F-5/F-10: negated member compares fold against the bound member —
-// `m[1]==='a' || m[1]!=='b'` is dead scope for 'b' (both sides false) and
-// unconditional for 'c' (right side tautologically true); the `&&` twin
-// mints unconditional for 'a' and dead for 'b'.
+// `m[1]==='a' || m[1]!=='b'` is dead scope for 'b' (both sides false —
+// 'b' can never satisfy its own exclusion, a deterministic fold). For an
+// UNBOUND outsider 'c' a lone positive vote is only an id-filter, not a
+// dispatch discriminator — the `!==` side mints conditional (w68-ledger
+// F-1); two positive votes prove the member and restore the fold.
 // ============================================================================
-test('w64-fv F-5: ||-memberneg folds dead for the excluded verb, unconditional for outsiders', () => {
+test('w64-fv F-5: ||-memberneg folds dead for the excluded verb, conditional for outsiders under a lone vote', () => {
   const dead = collectRun([HEAD, "  if (m[1]==='a' || m[1]!=='b') { authorize(p,['r']); }", '}'], 'b');
   assert.equal(dead.roles, null, `b can never enter: ${JSON.stringify(dead)}`);
   assert.equal(dead.any, false, 'b mints no reachability evidence either');
-  const uncond = collectRun([HEAD, "  if (m[1]==='a' || m[1]!=='b') { authorize(p,['r']); }", '}'], 'c');
-  assert.deepEqual(uncond.roles, ['r'], `c always enters via the right side: ${JSON.stringify(uncond)}`);
+  const cond = collectRun([HEAD, "  if (m[1]==='a' || m[1]!=='b') { authorize(p,['r']); }", '}'], 'c');
+  assert.equal(cond.roles, null, `lone 'a' vote is an id-filter — conditional for c: ${JSON.stringify(cond)}`);
+  assert.equal(cond.any, true);
+  const proven2 = collectRun([HEAD, "  if (m[1]==='d') { serve(); }", "  if (m[1]==='a' || m[1]!=='b') { authorize(p,['r']); }", '}'], 'c');
+  assert.deepEqual(proven2.roles, ['r'], `two positive votes prove the member — c folds back to unconditional: ${JSON.stringify(proven2)}`);
   const taut = collectRun([HEAD, "  if (m[1]==='a' && m[1]!=='b') { authorize(p,['r']); }", '}'], 'a');
   assert.deepEqual(taut.roles, ['r'], `the &&-tautology is unconditional for 'a': ${JSON.stringify(taut)}`);
   const deadAnd = collectRun([HEAD, "  if (m[1]==='a' && m[1]!=='b') { authorize(p,['r']); }", '}'], 'b');

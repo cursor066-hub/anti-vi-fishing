@@ -1011,8 +1011,19 @@ export class Store {
     // stored row does not carry is a transplant: the guarded UPSERT
     // only loses to seq, so it survived every honest append unnamed
     // (w67-fv N-1). Name it divergent like the malformed/ahead shapes.
+    // The stored `hash` column is attacker clay — recompute the digest
+    // from the row's own envelope bytes like the marker-pin check does
+    // (fabric.mjs:1779): a column rewrite that matches the planted
+    // marker's hash half must not launder the marker into 'not
+    // divergent' and let the guarded UPSERT consume it unnamed
+    // (w68-fv F-4).
     const floorPriorForeign = floorPriorWellFormed && !floorPriorAhead
-      ? this._stmt('SELECT hash FROM audit WHERE tenant=? AND seq=?').get(tenant, floorPriorSeq)?.hash !== floorPriorParts[1]
+      ? (() => {
+        try {
+          const r = this._stmt('SELECT envelope FROM audit WHERE tenant=? AND seq=?').get(tenant, floorPriorSeq);
+          return r === undefined || digest(JSON.parse(r.envelope).payload) !== floorPriorParts[1];
+        } catch { return true; }
+      })()
       : false;
     const divergentMarker = floorPrior !== undefined && (!floorPriorWellFormed || floorPriorAhead || floorPriorForeign) ? String(floorPrior).slice(0, 200) : undefined;
     // The key is reserved evidence: a caller-supplied fold_floor_divergent
