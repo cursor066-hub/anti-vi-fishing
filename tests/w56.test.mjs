@@ -14,6 +14,13 @@ import { tmpdir } from 'node:os';
 import { Fabric } from '../src/fabric.mjs';
 import { clone } from '../src/canonical.mjs';
 import { fixture } from './helpers.mjs';
+const probeFile = src => {
+  const dir = mkdtempSync(join(tmpdir(), 'gate-probe-'));
+  const file = join(dir, 'probe.mjs');
+  writeFileSync(file, src);
+  try { return execFileSync(process.execPath, [file], { encoding: 'utf8', cwd: new URL('..', import.meta.url).pathname }).trim(); }
+  finally { rmSync(dir, { recursive: true, force: true }); }
+};
 
 const markerValue = h => h.f.store.db.prepare("SELECT value FROM meta_kv WHERE tenant='acme' AND key='fold_floor'").get()?.value;
 
@@ -28,18 +35,23 @@ test('w56-1: reader-malformed marker shapes heal with the divergent content name
     assert.ok(healed, `the heal of ${JSON.stringify(planted)} is named once: ${JSON.stringify(seal.head_watermark_tampered)}`);
     assert.equal(healed.healed_marker, planted, 'the conviction carries the planted content');
   }
-  // A well-formed-shaped but unreachable marker is evidence, not garbage:
-  // the guarded update refuses it, the append writes no residue and names
-  // no heal — the reader convicts the unsafe-integer seq itself.
+  // A digit-shaped marker asserting a seq no committed row can ever hold
+  // wedges the guarded UPSERT permanently — CAST(1e30) beats every honest
+  // mint, so leaving it standing meant the epoch attestation died forever.
+  // w66-seal F-2 supersedes the w56 standing-evidence doctrine: the heal
+  // overwrites the plant with the true tip marker and names the planted
+  // content verbatim via residue + floor_marker_healed.
   const huge = '9'.repeat(30) + ':h';
   h.f.store.db.prepare("UPDATE meta_kv SET value=? WHERE tenant='acme' AND key='fold_floor'").run(huge);
   h.f.store.audit('acme', 'PROBE', 'actor', null, {}, h.f.clock());
-  assert.equal(markerValue(h), huge, 'the divergent marker is left standing as evidence');
-  assert.equal(h.f.store.db.prepare("SELECT value FROM meta_kv WHERE tenant='acme' AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.')").get()?.value, undefined,
-    'no heal residue is written when nothing was overwritten');
+  const tip = h.f.store.db.prepare("SELECT seq, hash FROM audit WHERE tenant='acme' ORDER BY seq DESC LIMIT 1").get();
+  assert.equal(markerValue(h), `${tip.seq}:${tip.hash}`, 'the ahead-plant is healed to the true committed tip');
+  const residue = h.f.store.db.prepare("SELECT value FROM meta_kv WHERE tenant='acme' AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.')").get()?.value;
+  assert.equal(residue, `${tip.seq}:${huge}`, 'the heal residue binds the anchor row to the planted content');
   const seal = h.f.sealAuditChain(h.p('security'));
-  assert.ok(!(seal.head_watermark_tampered ?? []).some(e => e.kind === 'floor_marker_healed'),
-    'a marker that was never overwritten claims no heal');
+  const healed = (seal.head_watermark_tampered ?? []).find(e => e.kind === 'floor_marker_healed');
+  assert.ok(healed && healed.healed_marker === huge,
+    `the ahead-plant heal reaches the seal report verbatim: ${JSON.stringify(seal.head_watermark_tampered)}`);
   h.close();
 });
 
@@ -133,10 +145,10 @@ test('w56-fv F-2: else-arms of a multiplex sibling chain never bleed roles into 
   const helpers = src.slice(src.indexOf('// === shared source scanners'), src.indexOf('// === end shared source scanners'));
   const block = src.slice(src.indexOf('const NONROLE'), src.indexOf('const authorizeAt'));
   assert.ok(block.includes('collectAuthorize'), 'the slice carries the shipped scanner');
-  const run = (lines, verb) => JSON.parse(execFileSync(process.execPath, ['-e', [
+  const run = (lines, verb) => JSON.parse(probeFile([
     helpers, block,
-    `globalThis.process.stdout.write(JSON.stringify(collectAuthorize(${JSON.stringify(lines)}, 0, ${lines.length + 2}, true, ${JSON.stringify(verb)})?.roles ?? []));`
-  ].join('\n')], { encoding: 'utf8' }).trim());
+    `globalThis.process.stdout.write(JSON.stringify(collectAuthorize(${JSON.stringify(lines)}, 0, ${lines.length + 2}, true, ${JSON.stringify(verb)}) ?? { roles: null, any: false }));`
+  ].join('\n')));
 
   // Index 0 is the route arm the scan starts on (its own dispatch is
   // always included); the multiplex sub-routes dispatch from index 1 on.
@@ -151,9 +163,9 @@ test('w56-fv F-2: else-arms of a multiplex sibling chain never bleed roles into 
     "  }",
     "}",
   ];
-  assert.deepEqual(run(chain, 'a'), ['admin'], 'else-arms belong to their own rows, not verb a');
-  assert.deepEqual(run(chain, 'b'), ['operator'], 'the else-if arm of verb b is still collected');
-  assert.deepEqual(run(chain, 'c'), [], 'the catch-all else cannot mint roles for an undispatched verb');
+  assert.deepEqual(run(chain, 'a').roles, ['admin'], 'else-arms belong to their own rows, not verb a');
+  assert.deepEqual(run(chain, 'b').roles, ['operator'], 'the else-if arm of verb b is still collected');
+  { const r = run(chain, 'c'); assert.equal(r.any, false); assert.equal(r.roles, null); }
 
   // Nested sibling inside a sibling arm: the inner block's close must not
   // drop the outer exclusion.
@@ -168,8 +180,8 @@ test('w56-fv F-2: else-arms of a multiplex sibling chain never bleed roles into 
     "  authorize(p, ['ours']);",
     "}",
   ];
-  assert.deepEqual(run(nested, 'a'), ['admin', 'ours'], 'the inner sibling is excluded, arm-a gates count');
-  assert.deepEqual(run(nested, 'x'), ['spy', 'ours'], 'a nested dispatch for this verb is this row\'s gate, plus shared arm code');
+  assert.deepEqual(run(nested, 'a').roles, ['admin', 'ours'], 'the inner sibling is excluded, arm-a gates count');
+  assert.deepEqual(run(nested, 'x').roles, ['ours'], 'x binds m[2] — the enclosing m[1] arm is unknowable for it, so spy stays conditional (w63 member-binding supersedes the w56 member-agnostic gate rule)');
 
   // Braceless sibling body: indented continuation lines stay excluded.
   const braceless = [
@@ -179,7 +191,7 @@ test('w56-fv F-2: else-arms of a multiplex sibling chain never bleed roles into 
     "  authorize(p, ['ours']);",
     "}",
   ];
-  assert.deepEqual(run(braceless, 'b'), ['ours'], 'a braceless sibling body is excluded, the next statement is not');
+  assert.deepEqual(run(braceless, 'b').roles, ['ours'], 'a braceless sibling body is excluded, the next statement is not');
 });
 
 // w56-fv F-3: roleSets left three bindings invisible — a bare `B = A`
@@ -189,11 +201,11 @@ test('w56-fv F-2: else-arms of a multiplex sibling chain never bleed roles into 
 test('w56-fv F-3: roleSets resolves bare aliases, concat binds and bracket args', t => {
   const src = readFileSync('scripts/check.mjs', 'utf8');
   const helpers = src.slice(src.indexOf('// === shared source scanners'), src.indexOf('// === end shared source scanners'));
-  const run = lines => JSON.parse(execFileSync(process.execPath, ['-e', [
+  const run = lines => JSON.parse(probeFile([
     helpers,
     `const defs = roleSets(${JSON.stringify(lines)});`,
     `globalThis.process.stdout.write(JSON.stringify(Object.fromEntries(defs)));`
-  ].join('\n')], { encoding: 'utf8' }).trim());
+  ].join('\n')));
   const defs = run([
     "const A = ['admin','operator'];",
     "B = A;",
@@ -215,10 +227,10 @@ test('w56-ledger F7: post-return authorizes are dead; nested-if returns do not d
   const src = readFileSync('scripts/check.mjs', 'utf8');
   const helpers = src.slice(src.indexOf('// === shared source scanners'), src.indexOf('// === end shared source scanners'));
   const block = src.slice(src.indexOf('const NONROLE'), src.indexOf('const authorizeAt'));
-  const run = (lines, verb) => JSON.parse(execFileSync(process.execPath, ['-e', [
+  const run = (lines, verb) => JSON.parse(probeFile([
     helpers, block,
-    `globalThis.process.stdout.write(JSON.stringify(collectAuthorize(${JSON.stringify(lines)}, 0, ${lines.length + 2}, true, ${JSON.stringify(verb)})?.roles ?? []));`
-  ].join('\n')], { encoding: 'utf8' }).trim());
+    `globalThis.process.stdout.write(JSON.stringify(collectAuthorize(${JSON.stringify(lines)}, 0, ${lines.length + 2}, true, ${JSON.stringify(verb)}) ?? { roles: null, any: false }));`
+  ].join('\n')));
 
   const dead = [
     "if (req.method === 'GET' && (m = /^\\/x\\/(.*)/.exec(path))) {",
@@ -229,7 +241,7 @@ test('w56-ledger F7: post-return authorizes are dead; nested-if returns do not d
     "  }",
     "}",
   ];
-  assert.deepEqual(run(dead, 'a'), ['before'], 'the post-return authorize in the same arm is unreachable');
+  assert.deepEqual(run(dead, 'a').roles, ['before'], 'the post-return authorize in the same arm is unreachable');
 
   const deadNextLine = [
     "if (req.method === 'GET' && (m = /^\\/x\\/(.*)/.exec(path))) {",
@@ -238,7 +250,7 @@ test('w56-ledger F7: post-return authorizes are dead; nested-if returns do not d
     "  return send(404);",
     "}",
   ];
-  assert.deepEqual(run(deadNextLine, 'a'), [], 'a return closing the arm kills the shared tail for that verb');
+  { const r = run(deadNextLine, 'a'); assert.equal(r.any, false); assert.equal(r.roles, null); }
 
   const conditional = [
     "if (req.method === 'GET' && (m = /^\\/x\\/(.*)/.exec(path))) {",
@@ -248,8 +260,8 @@ test('w56-ledger F7: post-return authorizes are dead; nested-if returns do not d
     "  }",
     "}",
   ];
-  assert.deepEqual(run(conditional, 'a'), ['after'], 'the m[2] sibling arm is excluded for verb a — its nested return never fired');
-  assert.deepEqual(run(conditional, 'x'), ['nested'], 'x\'s own return dominates — the a-arm\'s shared tail cannot mint for x');
+  { const r = run(conditional, 'a'); assert.equal(r.any, true); assert.equal(r.roles, null); }
+  { const r = run(conditional, 'x'); assert.equal(r.any, true); assert.equal(r.roles, null); }
 
   // A `return` that is a braceless conditional's body is NOT dominant —
   // `if (c) return x; authorize` leaves the gate reachable.
@@ -261,7 +273,7 @@ test('w56-ledger F7: post-return authorizes are dead; nested-if returns do not d
     "  }",
     "}",
   ];
-  assert.deepEqual(run(condRet, 'a'), ['after'], 'a conditional return dominates nothing — the tail authorize still counts');
+  { const r = run(condRet, 'a'); assert.equal(r.any, true); assert.equal(r.roles, null); }
 
   // A braceless dispatch `if (m[2]==='x') return serve(...)` dominates
   // the region's tail for its own verb.
@@ -273,8 +285,8 @@ test('w56-ledger F7: post-return authorizes are dead; nested-if returns do not d
     "  }",
     "}",
   ];
-  assert.deepEqual(run(braceless, 'x'), [], 'a braceless dispatch return dominates — the tail cannot mint for x');
-  assert.deepEqual(run(braceless, 'a'), ['after'], 'other verbs still reach the shared gate');
+  { const r = run(braceless, 'x'); assert.equal(r.any, false); assert.equal(r.roles, null); }
+  { const r = run(braceless, 'a'); assert.equal(r.any, true); assert.equal(r.roles, null); }
 });
 
 // Gate regressions below run the shipped scans against copied trees —
@@ -382,7 +394,7 @@ test('w56-fv F-7: spawn contacts must resolve inside the repo', t => {
   const post = "\ntest('REQ-X', t => { assert.ok(1) })";
   assert.equal(binds(pre + "ex('node', ['/etc/passwd']);" + post), false, 'an absolute path outside the repo is not a contact');
   assert.equal(binds(pre + "ex('node', ['plain-arg']);" + post), false, 'a slash-less argument names no file');
-  assert.equal(binds(pre + "ex('node', ['./scripts/run.mjs']);" + post), true, 'a repo-relative literal still contacts');
+  assert.equal(binds(pre + "ex('node', ['./scripts/check.mjs']);" + post), true, 'a repo-relative literal that resolves and exists still contacts');
   assert.equal(binds(pre + "ex('node', ['../outside']);" + post), false, 'a literal escaping the repo root contacts nothing');
 });
 

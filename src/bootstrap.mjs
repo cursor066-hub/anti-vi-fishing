@@ -204,7 +204,10 @@ export function bootstrap(directory, tenants = ['acme'], now = Date.now(), { iss
   // protocol (w48-store W48-5). `wx` keeps the no-clobber contract on the
   // final rename target.
   const save = (path, value) => {
-    const tmp = `${path}.${randomBytes(8).toString('hex')}.tmp`;
+    // The tmp name carries the pid segment — the vault commit-recovery
+    // regex matches `master.key.<pid>.<hex>.tmp`; an unnamed shape would
+    // wedge a crash-window recovery forever (w58-store F-3).
+    const tmp = `${path}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`;
     const fd = openSync(tmp, 'wx', 0o600);
     try { writeSync(fd, canonical(value) + '\n'); fsyncSync(fd); } finally { closeSync(fd); }
     // rename clobbers silently — keep the wx contract on the target.

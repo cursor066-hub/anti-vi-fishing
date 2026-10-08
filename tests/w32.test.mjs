@@ -167,7 +167,19 @@ test('w32 store F2/F3: a signed watermark stranded above the committed tip still
   assert.throws(() => cold._auditIndex('acme'), hasCode('INV-409-INTEGRITY'), 'a signed floor above the committed tip must still wedge');
   const res = cold.sealAuditChain(h.p('security'));
   assert.equal(res.sealed, false, 'chain verifies — no cut needed');
-  assert.equal(cold._headWatermark('acme'), staleSeq + 1, 'the floor now covers the committed re-anchor row');
+  // The stranded marker above the committed tip is an ahead-plant the
+  // heal convicts under w66-seal F-2: the re-anchor row names it
+  // divergent, the residue consult latches the heal, and the retire
+  // mints its FOLD_RESIDUE_RETIRED tombstone — one more row than the
+  // bare re-anchor, and the floor covers it.
+  assert.equal(cold._headWatermark('acme'), staleSeq + 2, 'the floor now covers the re-anchor row and its heal-retirement mint');
+  // …and the +2 is exactly those two rows — a same-count substitution
+  // (re-anchor + an unrelated mint) must not satisfy it (w67-ledger F-5).
+  {
+    const newTypes = cold.store.db.prepare("SELECT json_extract(envelope,'$.payload.type') t FROM audit WHERE tenant='acme' AND seq>? ORDER BY seq").all(staleSeq).map(r => r.t);
+    assert.deepEqual(newTypes, ['AUDIT_WM_REANCHORED', 'FOLD_RESIDUE_RETIRED'], 'the re-anchor and the heal tombstone are the two new rows');
+    assert.equal(cold.store.db.prepare("SELECT COUNT(*) n FROM meta_kv WHERE tenant='acme' AND key='fold_floor_retired'").get().n, 1, 'the healed marker lands after the retirement');
+  }
   assert.doesNotThrow(() => cold._auditIndex('acme'), 'fold works again post-repair');
 });
 

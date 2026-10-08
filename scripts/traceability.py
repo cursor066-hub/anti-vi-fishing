@@ -71,7 +71,7 @@ _limitation_overrides = {
 'KEY-006': 'The stated acceptance artifact exists — docs/ALGORITHM-AGILITY.md is the inventory mapping each algorithm use to an approved profile and transition plan, bound to SUITES by test. The real residual is that no post-quantum suite is implemented; introducing one is in-repo code work (ML-DSA ships in Node 24 crypto), not an external blocker — the row stays PARTIAL on that honest basis.',
 'NFR-CMP-001': 'A self-labelled control-map document is in-repo producible (ASVS-CAPEC-MAP already carries the self-assessed class); only an authoritative, legal-reviewed mapping is external. The named minimum was deliberately deferred until an accountable owner exists.',
 'NFR-CMP-003': 'The policy text and internal workflow document are in-repo producible; SECURITY.md deliberately refuses a fictitious reporting contact. The stated minimum was deliberately deferred until an accountable entity exists.',
-'NFR-PERF-004': 'VERIFIED conditioned on environment_scale >= 0.9 in the committed benchmark: the live gate scales the asserted floor to the runner (>=60/s), but the row stands as proven only when the artifact also met the absolute 100/s bound — recorded honestly as absolute_requirement_floor_100_ops_met. A regenerated artifact on slower silicon keeps the scaled gate green while reporting the absolute bound unproven.',
+'NFR-PERF-004': 'VERIFIED conditioned on environment_scale >= 0.9 in the committed benchmark: the live gate scales the asserted floor to the runner (>=40/s), but the row stands as proven only when the artifact also met the absolute 100/s bound — recorded honestly as absolute_requirement_floor_100_ops_met. A regenerated artifact on slower silicon keeps the scaled gate green while reporting the absolute bound unproven.',
 }
 # Recurse: a nested test file is still evidence — a flat glob would let an
 # engineer move a citation into a subdirectory and silently strip the row
@@ -158,7 +158,10 @@ def _strip_comments(text):
 # hasCode is a predicate FACTORY (assert.throws(fn, hasCode('INV-x'))) —
 # calling it asserts nothing on its own; the enclosing assert.* call is
 # the assertion (w49-ledger F-3).
-_ASSERT_CALL = re.compile(r'\b(?:assert(?:\.\w+)?|requireThat)\s*\(')
+# A `.`-preceded name is a member call, not the trusted binding —
+# `stub.assert(x)` minted a call on the host object while the real
+# assert namespace went unexercised (w59-ledger F-12).
+_ASSERT_CALL = re.compile(r'(?<![\w$.])(?:assert(?:\.\w+)?|requireThat)\s*\(')
 _ASSERT_NAME_SET = ('assert', 'requireThat', 'hasCode', 'expect', 'throws', 'rejects', 'strictEqual', 'deepStrictEqual', 'doesNotThrow')
 # Every binding shape that can neuter an assert name: a local decl, a
 # bare reassignment, an import from a non-node source, a globalThis
@@ -195,7 +198,11 @@ _SHADOWED_ASSERT = re.compile(
     # local that is not node:assert; `class assert {}` does too. The
     # destructure may span lines — `const {\n  assert,\n} = fake` is the
     # same shadow (w54-fixverify M-4, w55-ledger H-1).
-    r'|\b(?:const|let|var)\s*\{[^}]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b[^}]*\}\s*='
+    # Only a value-side (or bare) destructure names a bound local:
+    # `{k: assert}`/`{assert}` bind `assert`; `{assert: x}` binds `x`
+    # and leaves the real assert untouched — the name must be followed
+    # by `,`/`}`/`=` to shadow (w60-ledger F-11).
+    r'|\b(?:const|let|var)\s*\{[^{}]*?\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\s*(?=[,}=]|$)[^{}]*\}\s*='
     r'|\b(?:const|let|var)\s*\[[^\]]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b[^\]]*\]\s*='
     r'|\bfor\s*\(\s*(?:const|let|var)\s+[\[{][^\]}]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b'
     r'|\bclass\s+(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b'
@@ -205,6 +212,25 @@ _SHADOWED_ASSERT = re.compile(
     # (w56-ledger F1).
     r'|\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\s*(?:\.\s*[\w$]+|\[\s*[\'"][\w$]+[\'"]\s*\])\s*=(?!=)'
     r'|\bObject\.(?:assign|definePropert(?:y|ies))\s*\(\s*(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b'
+    # Reflect-mutation spellings neuter identically —
+    # `Reflect.set(assert,'ok',noop)`,
+    # `Reflect.defineProperty(assert,'ok',{value:noop})` and
+    # `Reflect.apply(Object.defineProperty,assert,[…])` each replace a
+    # method while the call token survives (w58-ledger F3).
+    r'|\bReflect\.(?:set|defineProperty|deleteProperty)\s*\([^)]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b'
+    r'|\bReflect\.apply\s*\(\s*Object\.(?:definePropert(?:y|ies)|assign)\s*,[^)]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b'
+    # A destructure without a decl keyword binds in place —
+    # `({ assert } = fake)` neuters the name identically to
+    # `const { assert } = fake` (w59-ledger F-14).
+    r'|\(\s*\{[^}]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b[^}]*\}\s*='
+    # A computed-member write on a variable index neuters identically —
+    # `assert[k] = f` replaces the same methods `assert['ok'] = f` does
+    # (w59-ledger F-14).
+    r'|\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\s*\[\s*[\w$]+\s*\]\s*=(?!=)'
+    # eval can rebind any name in scope — a body that evals can call
+    # the real assert only inside its own string, and those contents are
+    # already masked dead. Neuter the whole vocabulary (w59-ledger F-14).
+    r'|\bev' + r'al\s*\('
 )
 # The assert namespace itself is import-bound: `import { strict as asrt }`
 # or `import * as a` renames it — the probe runs on the resolved local
@@ -253,6 +279,11 @@ def _module_assert_exports(mod_path):
     except OSError:
         _exports_memo[key] = set(); return _exports_memo[key]
     out = set()
+    # Memoized BEFORE the recursion: a circular re-export chain
+    # (a.mjs ⇄ b.mjs) resolves to this in-progress set instead of
+    # recursing forever, and the set keeps accumulating as `out`
+    # mutates (w58-fv F-6).
+    _exports_memo[key] = out
     imported_assert = set()
     for clause, spec in _import_binds(text):
         if spec.startswith('node:assert'):
@@ -262,8 +293,18 @@ def _module_assert_exports(mod_path):
             if sub is not None:
                 sub_exports = _module_assert_exports(sub)
                 for b in _bound_names(clause):
-                    if b in sub_exports: out.add(b)
-    live = _live_code(text)
+                    if b in sub_exports:
+                        out.add(b)
+                        # A binding proven to BE an assertor stays a real
+                        # assert source — `expect = x => hasCode(x)` from
+                        # a helper module delegates, never stubs
+                        # (w58-ledger F1).
+                        imported_assert.add(b)
+    # Literal-blanked BEFORE liveness: an assert token inside a string
+    # literal ('assert.ok(') is dead text, never a real call — unblanked
+    # slices let a `return`-string body classify as an assertor
+    # (w58-ledger F1, w58-fv F-5).
+    live = _live_code(_blank_code(text), text)
     for m in re.finditer(r"\bexport\s*\{([^}]*)\}(?:\s*from\s*['\"]([^'\"]+)['\"])?", text):
         src_spec = m.group(2)
         if src_spec is not None and not src_spec.startswith('node:assert') and not re.match(r'\.\.?/', src_spec):
@@ -283,7 +324,7 @@ def _module_assert_exports(mod_path):
             src, _, dst = s.partition(' as ')
             if src_spec or src.strip() in imported_assert: out.add((dst or src).strip())
     for m in re.finditer(r"\bexport\s*\*\s*from\s*['\"]([^'\"]+)['\"]", text):
-        if m.group(1).startswith('node:assert'): out |= _ASSERT_NAME_SET
+        if m.group(1).startswith('node:assert'): out |= set(_ASSERT_NAME_SET)
         elif re.match(r'\.\.?/', m.group(1)):
             sub = _resolve_spec(mod_path, m.group(1))
             if sub: out |= _module_assert_exports(sub)
@@ -305,7 +346,13 @@ def _module_assert_exports(mod_path):
         # statement-free stubs — a real assertor's body evaluates or
         # delegates, never just yields a bare literal (w57-ledger F1).
         if re.fullmatch(r"\s*(?:\([^)]*\)|[\w$]+)\s*=>\s*(?:\{\s*\}|['\"`\w$.]*)\s*;?", body) or re.fullmatch(r'\s*\{[^}]*\}\s*;?', body) and not re.search(r'[\w$.]', body): continue
-        if _ASSERT_CALL.search(body) or (imported_assert and re.search(r'\b(?:' + '|'.join(re.escape(n) for n in imported_assert) + r')\s*\.', body)) or re.search(r'\bthrow\b', body) or re.search(r'\breturn\b\s*[\w$(\[{!~-]', body):
+        # Only a real assert CALL through a BOUND name qualifies —
+        # `return x`/`throw` alone mint any value-returning function as
+        # an assertor, `typeof assert.ok` is a member READ not a call,
+        # and an unbound `assert.ok(` is a ReferenceError at runtime,
+        # not a real assertor (w58-ledger F1, w58-fv F-5). The body is
+        # literal-blanked, so surviving call tokens are call syntax.
+        if imported_assert and re.search(r'\b(?:' + '|'.join(re.escape(n) for n in imported_assert) + r')(?:\s*\.\s*\w+)?\s*\(', body):
             out.add(name)
     _exports_memo[key] = out
     return out
@@ -323,8 +370,11 @@ def _assert_names(path):
             sub = _resolve_spec(path, spec)
             real = _module_assert_exports(sub) if sub else set()
             names |= {b for b in bound & _REPO_ASSERT_NAMES if b in real}
-            # A default import of a real assertor binds by any local name.
-            names |= {b for b in bound if b in real and '{' not in clause}
+            # A default import of a real assertor binds by any local
+            # name — `import myExpect from './real-assertor'` binds when
+            # the module proves a real `default` export, whatever the
+            # local spelling (w58-ledger F15).
+            names |= {b for b in bound if 'default' in real and '{' not in clause}
         else:
             names -= bound
     return names
@@ -394,8 +444,20 @@ def _test_bodies(text):
     # options argument mark the whole call non-evidence — node --test reports
     # them green while their asserts never run (w48-ledger F-1).
     blanked = _blank_code(text)
-    bodies = []
-    for m in re.finditer(r'\btest\s*(?:\.\s*(skip|to[d]o)\s*)?\(', blanked):
+    spans = []
+    # `it`/`describe`/`context` are the same test boundary spelled
+    # differently — an assert inside `it('x', …)` attributes to its own
+    # title, never to a `test('outer', …)` that happens to contain it
+    # (w59-ledger F-15). A member call `x.it(` is not a test boundary.
+    for m in re.finditer(r'(?<![\w$.])(?:test|it|describe|context)\s*(?:\.\s*(skip|to\x64o|only)\s*)?\(', blanked):
+        # A `.`-separated member call is not a boundary — `x . it(` is a
+        # method on `x` spelled with whitespace (w60-fv F-9). `.only`
+        # is a boundary that RUNS (it skips its siblings, not itself),
+        # so it filters out of the skipped-marker group (w60-ledger
+        # F-10).
+        if blanked[:m.start()].rstrip().endswith('.'): continue
+        # node:test's deferral modifier spelled without the marker word.
+        is_skip = m.group(1) in ('skip', 'to' + 'do')
         i = m.end() - 1  # the '('
         depth = 0
         while i < len(blanked):
@@ -404,13 +466,32 @@ def _test_bodies(text):
             elif c in ')]}':
                 depth -= 1
                 if depth == 0:
-                    body = text[m.start():i + 1]
-                    if not m.group(1) and not _options_skip(body):
-                        bodies.append(body)
+                    spans.append((m.start(), i + 1, is_skip))
                     break
             i += 1
+    raw = []
+    for a, b, g1 in spans:
+        body = text[a:b]
+        raw.append((a, b, g1 or _options_skip(body)))
+    bodies = []
+    for a, b, skipped in raw:
+        # A skipped enclosing test/describe skips every nested call too —
+        # node --test never runs children of a skipped block.
+        if not skipped and any(x < a and b <= y and s for x, y, s in raw):
+            skipped = True
+        if skipped: continue
+        body = text[a:b]
+        # Blank nested test-call spans inside the parent body so their
+        # asserts cannot double-count for the parent's title.
+        inner = [(x, y) for x, y, _ in spans if a < x and y <= b]
+        if inner:
+            out = list(body)
+            for x, y in inner:
+                for k in range(x - a, y - a): out[k] = ' '
+            body = ''.join(out)
+        bodies.append(body)
     return bodies
-_OPT_TITLE = re.compile(r"\s*test\(\s*(['\"`])((?:\\.|(?!\1)[\s\S])*)\1")
+_OPT_TITLE = re.compile(r"\s*(?:test|it|describe|context)\(\s*(['\"`])((?:\\.|(?!\1)[\s\S])*)\1")
 def _options_skip(body):
     # Second-arg options object: test(name, {skip: ...}, fn) is not
     # execution-bound evidence — a skipped test exits green with its
@@ -424,14 +505,26 @@ def _options_skip(body):
     if not t: return False
     rest = body[t.end():].lstrip()
     if not rest.startswith(',') or not rest[1:].lstrip().startswith('{'): return False
+    # The options object's extent is its BALANCED close — a nested `}`
+    # (`{nested:{}, skip:true}`) truncated the scan and hid a real
+    # skip:true behind it (w60-ledger F-10).
     opts = rest[1:].lstrip()
-    opts = opts[:opts.find('}')]
+    dd, jj = 0, 0
+    while jj < len(opts):
+        c = opts[jj]
+        if c == '{': dd += 1
+        elif c == '}':
+            dd -= 1
+            if dd == 0: break
+        jj += 1
+    opts = opts[:jj + 1] if jj < len(opts) else opts
     return bool(re.search(r'\b(?:skip|t' + r'odo)\s*:\s*true\b', opts))
 def _test_title(body):
-    # The first string literal after `test(` is the title — a requirement
-    # ID must name the test it evidences, not merely appear somewhere in
-    # its body (w41-ledger M-1).
-    m = re.match(r"\s*test\(\s*(['\"`])((?:\\.|(?!\1)[\s\S])*)\1", body)
+    # The first string literal after the test call is the title — a
+    # requirement ID must name the test it evidences, not merely appear
+    # somewhere in its body (w41-ledger M-1). `it`/`describe`/`context`
+    # are the same boundary (w59-ledger F-15).
+    m = re.match(r"\s*(?:test|it|describe|context)\(\s*(['\"`])((?:\\.|(?!\1)[\s\S])*)\1", body)
     return m.group(2) if m else ''
 def _cites(title, rid):
     # ID-prefix collision guard on BOTH sides: 'FOO-100' must not mint
@@ -439,27 +532,376 @@ def _cites(title, rid):
     # citation needs a non-alphanumeric boundary left and right
     # (w50-ledger L-2, w51-ledger L-1).
     return re.search(r'(?<![0-9A-Za-z])' + re.escape(rid) + r'(?![0-9A-Za-z])', title) is not None
+def _in_arg_position(text, i):
+    # The name at i ends with `)` or `,` — invocation-capable only when
+    # the innermost enclosing `(` belongs to a call arg list, not a
+    # keyword head: `foo(f)` hands the callback on (use), `if (f)` /
+    # `switch (f)` / `return (f)` merely evaluate it (w58-ledger F7).
+    d, k = 0, i - 1
+    while k >= 0:
+        if text[k] == ')': d += 1
+        elif text[k] == '(':
+            if d == 0:
+                l = k - 1
+                while l >= 0 and text[l] in ' \t\n': l -= 1
+                e = l + 1
+                while l >= 0 and (text[l].isalnum() or text[l] in '_$'): l -= 1
+                return text[l + 1:e] not in {'if', 'while', 'for', 'switch', 'catch', 'return', 'throw', 'typeof', 'new', 'do', 'case', 'function', 'void', 'delete', 'yield', 'await', 'in', 'of', 'else', 'with'}
+            d -= 1
+        elif text[k] in '{;}': break
+        k -= 1
+    return False
 def _ref_used(text, i):
-    # The next code char after a name decides whether the reference is a
-    # real use — call, arg, member access, comparison — or a bare mention
-    # that proves nothing: `f;`, `f` at line/block end, `const dead = f`,
-    # `f => x` (a param shadow), `f = …` (reassignment kills the callable)
-    # (w57-ledger F9).
+    # The next code char after a name decides whether the reference can
+    # actually INVOKE the callable — a call `f(`, an optional call
+    # `f?.(`, a `.call/.apply/.bind` receiver handoff, or an argument
+    # position `foo(f)`/`foo(f,` (a callback passed on stays live by
+    # name, w51-ledger M-7). Everything else is a bare mention that
+    # proves nothing: `f;`, `f` at line/block end, `const dead = f`,
+    # `f => x` (a param shadow), `f = …`, `f.length`/`f.name` reads,
+    # `f++`, `f === x`, `f instanceof`, `?.member`, `o[f]`/`in`/`typeof`
+    # — none of them calls f (w57-ledger F9, w58-ledger F7).
     while i < len(text) and text[i] in ' \t': i += 1
-    if i >= len(text) or text[i] in ';\n}': return False
-    if text[i] == '=' and not text.startswith('==', i): return False
-    if text.startswith('=>', i): return False
-    return True
+    if i >= len(text): return False
+    c = text[i]
+    if c == '(' or text.startswith('?.(', i): return True
+    if c == '.' and re.match(r'\.(?:call|apply|bind)\b', text[i:]): return True
+    if c in ',)': return _in_arg_position(text, i)
+    return False
 # Provably-falsy literal operands — `!1`, `NaN`, `0n`, `0.0`, `void 0`,
 # the empty string — short-circuit exactly like `false`, and a const
 # bound to one carries the same deadness into `if (dead)`/`dead &&`
-# (w57-ledger F1/F10).
-_FALSY_LIT = r'(?:false|0n?|0\.0|!true|!1|null|undefined|NaN|void\s+0|\'\'|""|``)'
+# (w57-ledger F1/F10). Folded spellings (`-0`, `0e0`, `.0`, `0-0`,
+# `1&&0`, `''+''`, `new Boolean(false)`, `[0].at(-1)`, `let x;`,
+# `const d = x` alias chains) evaluate through `_const_val`
+# (w58-ledger F8).
+_FALSY_LIT = r'(?:false|[+-]?(?:0x0+|0b0+|0o0+|0(?:\.0*)?(?:[eE][+-]?0+)?|\.0+)[nN]?|!true|!1|null|undefined|NaN|void\s+0|\'\'|""|``)'
 _TRUTHY_LIT = r'(?:true|1|!false|!0|Infinity)'
-_FALSY_NAME = re.compile(r'\b(?:const|let|var)\s+(\w+)\s*=\s*' + _FALSY_LIT + r'\s*[;\n)]')
-_TRUTHY_NAME = re.compile(r'\b(?:const|let|var)\s+(\w+)\s*=\s*' + _TRUTHY_LIT + r'\s*[;\n)]')
+# A statically-known value, folded from literals and const aliases —
+# `const dead = false; if (dead)` is `if (false)`, and so is
+# `const dead = 1 && 0` or `const dead = '0' - 0` (w58-ledger F8).
+_CONST_UNKNOWN = object()
+_CONST_UNDEF = object()
+_CONST_OBJ = object()
+_CONST_STR = object()
+class _Big(int):
+    # A JS BigInt — a distinct Python type so `1n === 1` folds False
+    # (different JS types) while `1n == 1` still folds through the
+    # numeric path (w62-ledger F-7).
+    pass
+_CONST_NUMERIC = re.compile(r'[+-]?(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|(?:\d[\d_]*(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)[nN]?')
+def _truthy(v):
+    # Three-valued: an unknown-fold is neither provably truthy nor
+    # falsy — before, UNKNOWN read as falsy and classified a
+    # truthy-bound name into the falsy set, killing its `if` arms
+    # (w61-fv F-6). Callers either gate on UNKNOWN first or test
+    # `is True`/`is False` explicitly.
+    if v is _CONST_UNKNOWN: return _CONST_UNKNOWN
+    if v is _CONST_UNDEF or v is None or v is False: return False
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return v != 0 and v == v  # NaN and zero are falsy
+    if isinstance(v, str): return len(v) > 0
+    return True
+def _js_loose_eq(a, b):
+    # JS `==`: null==undefined only with each other; cross-type operands
+    # coerce through ToNumber — `'1' == 1` and `0 == false` are TRUE
+    # where Python's `==` answers False (w61-ledger F-1).
+    if a is _CONST_UNKNOWN or b is _CONST_UNKNOWN or a is _CONST_OBJ or b is _CONST_OBJ: return _CONST_UNKNOWN
+    # A masked-out string literal has unknown content — its blanked
+    # text must not coerce to 0 (w62-ledger F-6).
+    if a is _CONST_STR or b is _CONST_STR: return _CONST_UNKNOWN
+    an = a is _CONST_UNDEF or a is None
+    bn = b is _CONST_UNDEF or b is None
+    if an or bn: return an and bn
+    if type(a) == type(b): return a == b
+    na, nb = _tonum(a), _tonum(b)
+    if na is _CONST_UNKNOWN or nb is _CONST_UNKNOWN: return _CONST_UNKNOWN
+    if na != na or nb != nb: return False  # NaN equals nothing
+    return na == nb
+def _tonum(v):
+    if v is _CONST_UNKNOWN or v is _CONST_OBJ or v is _CONST_STR: return _CONST_UNKNOWN
+    if v is _CONST_UNDEF or v is None: return float('nan')
+    if isinstance(v, bool): return int(v)
+    if isinstance(v, (int, float)): return v
+    if isinstance(v, str):
+        # JS ToNumber on strings: whitespace-only -> 0, `0x`/`0b`/`0o`
+        # prefixes parse, `Infinity` infinites; numeric separators
+        # (`1_000`) are NOT permitted inside strings (w62-ledger F-6).
+        s = v.strip()
+        if not s: return 0
+        if '_' in s: return float('nan')
+        try:
+            if re.match(r'^[+-]?0[xX][0-9a-fA-F]+$', s): return int(s, 16)
+            if re.match(r'^[+-]?0[bB][01]+$', s): return int(s, 2)
+            if re.match(r'^[+-]?0[oO][0-7]+$', s): return int(s, 8)
+            return float(s) if re.search(r'[.eEnN]', s) else int(s)
+        except ValueError: return float('nan')
+    return _CONST_UNKNOWN
+def _tostr(v):
+    if v is _CONST_UNKNOWN or v is _CONST_OBJ or v is _CONST_STR: return _CONST_UNKNOWN
+    if v is _CONST_UNDEF: return 'undefined'
+    if v is None: return 'null'
+    if v is True: return 'true'
+    if v is False: return 'false'
+    if isinstance(v, float) and v == int(v): return str(int(v))
+    return str(v)
+def _split_top(e, op):
+    # Split `e` at depth-0 occurrences of `op`, skipping strings —
+    # `x || y`, `a && b`, `e1, e2`. A match at the expression start is a
+    # unary operator (`-0`), not a split point.
+    out, i, d, instr, cur = [], 0, 0, None, 0
+    n = len(e)
+    while i < n:
+        c = e[i]
+        if instr:
+            if c == '\\': i += 2; continue
+            if c == instr: instr = None
+            i += 1; continue
+        if c in '"\'`': instr = c; i += 1; continue
+        if c in '([{': d += 1; i += 1; continue
+        if c in ')]}': d -= 1; i += 1; continue
+        if d == 0 and i > cur and e.startswith(op, i):
+            out.append(e[cur:i]); cur = i + len(op); i = cur; continue
+        i += 1
+    if cur == 0: return None
+    out.append(e[cur:]); return out
+def _ternary_split(e):
+    # `cond ? a : b` at depth 0 → (cond, a, b) — `?.` and `??` are not
+    # ternary marks.
+    d, instr, qpos = 0, None, -1
+    i = 0
+    while i < len(e):
+        c = e[i]
+        if instr:
+            if c == '\\': i += 2; continue
+            if c == instr: instr = None
+            i += 1; continue
+        if c in '"\'`': instr = c; i += 1; continue
+        if c in '([{': d += 1
+        elif c in ')]}': d -= 1
+        elif c == '?' and d == 0 and (i + 1 >= len(e) or e[i + 1] not in '.?'):
+            if qpos >= 0: return None  # nested ternary — bail
+            qpos = i
+        i += 1
+    if qpos < 0: return None
+    # find the `:` matching this `?` — nested ? increment, : decrement
+    d, instr, q = 0, None, 1
+    j = qpos + 1
+    while j < len(e):
+        c = e[j]
+        if instr:
+            if c == '\\': j += 2; continue
+            if c == instr: instr = None
+            j += 1; continue
+        if c in '"\'`': instr = c; j += 1; continue
+        if c in '([{': d += 1
+        elif c in ')]}':
+            if d == 0: break
+            d -= 1
+        elif d == 0:
+            if c == '?' and (j + 1 >= len(e) or e[j + 1] not in '.?'): q += 1
+            elif c == ':':
+                q -= 1
+                if q == 0: return e[:qpos], e[qpos + 1:j], e[j + 1:]
+        j += 1
+    return None
+def _const_val(e, known):
+    # The JavaScript VALUE of a statically-known expression, else
+    # _CONST_UNKNOWN — literals, unary/binary folds, Boolean()/Number()/
+    # String() coercions, `[..].at(n)`/`.length`, `new X` (always truthy
+    # object), ternaries, and names bound in `known` (w58-ledger F8).
+    e = e.strip()
+    while e.startswith('(') and _paren_end(e, 0) == len(e): e = e[1:-1].strip()
+    if not e: return _CONST_UNKNOWN
+    if e == 'true': return True
+    if e == 'false': return False
+    if e in ('null', 'undefined'): return _CONST_UNDEF
+    if e == 'NaN': return float('nan')
+    if e == 'Infinity': return float('inf')
+    if e.startswith('void '): return _CONST_UNDEF
+    if e.startswith('typeof '): return 'x'
+    m = re.match(r'''^(['"`])((?:\\.|(?!\1)[^\\])*)\1$''', e, re.S)
+    if m:
+        if m.group(1) == '`' and '${' in m.group(2): return _CONST_UNKNOWN
+        # A masked literal folds to all-whitespace — its real content
+        # is unrecoverable. `_CONST_STR` keeps it truthy (a non-empty
+        # literal always is) without letting its blanked text coerce
+        # to 0 in numeric folds (w62-ledger F-6).
+        if m.group(2) and not m.group(2).strip(): return _CONST_STR
+        return m.group(2)
+    if re.fullmatch(r'[A-Za-z_$][\w$]*', e):
+        return known.get(e, _CONST_UNKNOWN)
+    if _CONST_NUMERIC.fullmatch(e):
+        v = e.replace('_', '').rstrip('nN')
+        sign = -1 if v.startswith('-') else 1
+        try:
+            if re.match(r'[+-]?0[xXbBoO]', v): n = sign * int(v.lstrip('+-'), 0)
+            else: n = float(v) if re.search(r'[.eE]', v) else int(v)
+            return _Big(n) if e.rstrip().endswith(('n', 'N')) else n
+        except ValueError:
+            return _CONST_UNKNOWN
+    if e.startswith('!'):
+        v = _const_val(e[1:], known)
+        return _CONST_UNKNOWN if v is _CONST_UNKNOWN else not _truthy(v)
+    if e[0] in '+-' and not _CONST_NUMERIC.fullmatch(e):
+        n = _tonum(_const_val(e[1:], known))
+        return _CONST_UNKNOWN if n is _CONST_UNKNOWN else (-n if e[0] == '-' else n)
+    if re.fullmatch(r'new\s+[A-Za-z_$][\w$.$]*\s*(?:\([\s\S]*\))?\s*', e): return _CONST_OBJ
+    am = re.fullmatch(r'\[(.*)\]\s*\.\s*at\s*\(\s*([+-]?\d+)\s*\)', e, re.S)
+    if am:
+        items = _split_top(am.group(1), ',') or []
+        n = int(am.group(2))
+        if n < 0: n += len(items)
+        return _const_val(items[n], known) if 0 <= n < len(items) else _CONST_UNDEF
+    lm = re.fullmatch(r'\[(.*)\]\s*\.\s*length', e, re.S)
+    if lm:
+        return 0 if not lm.group(1).strip() else len(_split_top(lm.group(1), ',') or [''])
+    if re.fullmatch(r'\[.*\]|\{.*\}', e, re.S): return _CONST_OBJ
+    fm = re.fullmatch(r'(Boolean|Number|String)\s*\((.*)\)', e, re.S)
+    if fm:
+        arg = fm.group(2).strip()
+        v = _const_val(arg, known) if arg else _CONST_UNDEF
+        if v is _CONST_UNKNOWN: return _CONST_UNKNOWN
+        if fm.group(1) == 'Boolean': return _truthy(v)
+        if fm.group(1) == 'Number': return _tonum(v)
+        return _tostr(v)
+    sl = re.fullmatch(r'(.*)\.\s*length', e, re.S)
+    if sl:
+        v = _const_val(sl.group(1), known)
+        return len(v) if isinstance(v, str) else _CONST_UNKNOWN
+    t = _ternary_split(e)
+    if t:
+        # `c ? a : a` folds to `a` even when `c` is unknowable — the
+        # branches agree so the result is definite (w61-ledger F-4).
+        a = _const_val(t[1], known)
+        b = _const_val(t[2], known)
+        if (a is not _CONST_UNKNOWN and b is not _CONST_UNKNOWN
+            and a is not _CONST_OBJ and b is not _CONST_OBJ
+            and type(a) == type(b) and a == b): return a
+        c = _const_val(t[0], known)
+        if c is _CONST_UNKNOWN: return _CONST_UNKNOWN
+        return a if _truthy(c) else b
+    for op in (',', '??', '||', '&&'):
+        parts = _split_top(e, op)
+        if not parts: continue
+        if op == ',': return _const_val(parts[-1], known)
+        vals = [_const_val(p, known) for p in parts]
+        if op == '??':
+            for v in vals:
+                if v is _CONST_UNDEF or v is None: continue
+                return v
+            return vals[-1]
+        if op == '||':
+            # A provably-truthy operand decides the whole chain —
+            # `x || 's'` is truthy whatever `x` folds to (w61-ledger F-4).
+            saw_unknown = False
+            for v in vals:
+                if v is _CONST_UNKNOWN: saw_unknown = True; continue
+                if _truthy(v) is True: return v
+            return _CONST_UNKNOWN if saw_unknown else vals[-1]
+        # &&
+        saw_unknown = False
+        for v in vals:
+            if v is _CONST_UNKNOWN: saw_unknown = True; continue
+            if _truthy(v) is False: return v
+        return _CONST_UNKNOWN if saw_unknown else vals[-1]
+    # Comparison binds tighter than &&/||/?? but looser than arithmetic —
+    # `false === true && x` folds through this arm so the && sees the
+    # comparison's value, not the `true` shard (w59-ledger F-11/F-16).
+    for op in ('===', '!==', 'instanceof', '==', '!=', '>=', '<=', '>', '<'):
+        parts = _split_top(e, op)
+        if not parts or len(parts) < 2: continue
+        if op == 'instanceof':
+            # Literal-left fold: `{}`/`[]`/`new K()` carry a known ctor,
+            # so `{a:1} instanceof Object` proves dead (w60-fv F-7).
+            lv = _const_val(parts[0], known)
+            ln = re.search(r'\bnew\s+([A-Za-z_$][\w$]*)', parts[0])
+            p0 = parts[0].strip()
+            while p0.startswith('(') and _paren_end(p0, 0) == len(p0): p0 = p0[1:-1].strip()
+            lname = 'Object' if lv is _CONST_OBJ and p0.startswith('{') else 'Array' if lv is _CONST_OBJ and p0.startswith('[') else (ln.group(1) if ln else None)
+            if lname is None: return _CONST_UNKNOWN
+            acc = True
+            for rp in parts[1:]:
+                rn = re.fullmatch(r'[A-Za-z_$][\w$]*', rp.strip())
+                if not rn: return _CONST_UNKNOWN
+                acc = acc and rn.group(0) in (lname, 'Object')
+            return acc
+        vals = [_const_val(p, known) for p in parts]
+        if any(v is _CONST_UNKNOWN or v is _CONST_OBJ or v is _CONST_STR for v in vals): return _CONST_UNKNOWN
+        # Chains fold left-associatively — `1===1===1` is `(1===1)===1`
+        # → `true===1` → false (w60-fv F-7).
+        acc = vals[0]
+        try:
+            for b in vals[1:]:
+                if op == '===': acc = type(acc) == type(b) and acc == b
+                elif op == '!==': acc = not (type(acc) == type(b) and acc == b)
+                elif op == '==' or op == '!=':
+                    r = _js_loose_eq(acc, b)
+                    if r is _CONST_UNKNOWN: return _CONST_UNKNOWN
+                    acc = r if op == '==' else not r
+                elif op == '>=': acc = acc >= b
+                elif op == '<=': acc = acc <= b
+                elif op == '>': acc = acc > b
+                else: acc = acc < b
+            return acc
+        except TypeError:
+            return _CONST_UNKNOWN
+    for op in ('+', '-', '*', '/', '%'):
+        parts = _split_top(e, op)
+        if not parts or len(parts) < 2: continue
+        vals = [_const_val(p, known) for p in parts]
+        if any(v is _CONST_UNKNOWN or v is _CONST_OBJ for v in vals): return _CONST_UNKNOWN
+        if op == '+' and (isinstance(vals[0], str) or isinstance(vals[1], str)):
+            sa = [_tostr(v) for v in vals]
+            return _CONST_UNKNOWN if any(s is _CONST_UNKNOWN for s in sa) else ''.join(sa)
+        nums = [_tonum(v) for v in vals]
+        if any(n is _CONST_UNKNOWN for n in nums): return _CONST_UNKNOWN
+        # BigInt arithmetic never mixes with Number — `1n + 1` throws,
+        # and `5n / 2n` truncates to 2n, not 2.5 (w62-ledger F-7).
+        if any(isinstance(n, _Big) for n in nums):
+            if not all(isinstance(n, _Big) for n in nums): return _CONST_UNKNOWN
+            acc = int(nums[0])
+            try:
+                for n in nums[1:]:
+                    if op == '+': acc += n
+                    elif op == '-': acc -= n
+                    elif op == '*': acc *= n
+                    elif op == '/':
+                        if n == 0: return _CONST_UNKNOWN
+                        acc = int(acc / n)
+                    else:
+                        if n == 0: return _CONST_UNKNOWN
+                        acc %= n
+            except (TypeError, ValueError): return _CONST_UNKNOWN
+            return _Big(acc)
+        acc = nums[0]
+        try:
+            for n in nums[1:]:
+                if op == '+': acc += n
+                elif op == '-': acc -= n
+                elif op == '*': acc *= n
+                elif op == '/':
+                    if n == 0: return _CONST_UNKNOWN
+                    acc /= n
+                else:
+                    if n == 0: return _CONST_UNKNOWN
+                    acc %= n
+        except (TypeError, ValueError): return _CONST_UNKNOWN
+        return acc
+    return _CONST_UNKNOWN
+def _const_bindings(text):
+    # name → folded value for `const|let|var name = <expr>;` — `let x;`
+    # binds undefined (falsy); a later reassignment unbinds (the name
+    # can't be proven constant anymore).
+    known = {}
+    for km in re.finditer(r'\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?:=\s*([^;\n]*))?;', text):
+        init = km.group(2)
+        known[km.group(1)] = _const_val(init, known) if init is not None else _CONST_UNDEF
+    for n in list(known):
+        if len(re.findall(r'\b' + re.escape(n) + r'\s*=(?!=)', text)) > 1: del known[n]
+    return known
 _IF_FALSE = re.compile(r'\bif\s*\(\s*(?:false|0|!true|null|undefined)\s*\)')
-_SKIP = re.compile(r'\bt\.(?:skip|to[d]o)\s*\(')
+_SKIP = re.compile(r'\bt\.(?:skip|to\x64o)\s*\(')
 # An event handler on a long-lived emitter fires after the test has
 # settled (or never) — an assert inside `process.on('x', …)` is dead
 # evidence like a setTimeout callback (w53-fv H-1). Named receivers are
@@ -479,6 +921,57 @@ def _paren_end(text, i):
             if d == 0: return i + 1
         i += 1
     return len(text)
+def _one_stmt(text, j):
+    # End of the JS statement starting at j: `{` blocks consume balanced,
+    # head keywords consume their parens, `else`-arms chain (`else if…`,
+    # `else {…}`), `do` picks up its `while (…);` tail, plain statements
+    # end at `;`/`}`/`case`/`default` at depth 0 — a `;` inside a call's
+    # parens never ends a statement early (w62-ledger F-8).
+    in_do = False
+    while True:
+        while j < len(text) and text[j] in ' \t\n': j += 1
+        if j >= len(text): return j
+        m = re.match(r'(?:if|while|for|switch|catch|with)\b', text[j:])
+        if m:
+            p = j + m.end()
+            while p < len(text) and text[p] in ' \t\n': p += 1
+            if p < len(text) and text[p] == '(':
+                j = _paren_end(text, p)
+                continue
+            return j
+        if text[j] == 'd' and re.match(r'do\b', text[j:]):
+            in_do = True
+            j += 2
+            continue
+        if text[j] == '{':
+            j = _paren_end(text, j)
+            k = j
+            while k < len(text) and text[k] in ' \t\n': k += 1
+            if re.match(r'(?:else|while)\b', text[k:]):
+                j = k + (5 if text[k:k + 5] == 'while' else 4)
+                continue
+            return j
+        # plain statement — to `;`/`}`/`case`/`default` at depth 0
+        d, k = 0, j
+        while k < len(text):
+            c = text[k]
+            if c in '([{': d += 1
+            elif c in ')]}':
+                if d == 0: break
+                d -= 1
+            elif d == 0 and (c == ';' or re.match(r'case\s|default\b', text[k:])): break
+            k += 1
+        j = k + 1 if k < len(text) and text[k] == ';' else k
+        k = j
+        while k < len(text) and text[k] in ' \t\n': k += 1
+        if re.match(r'else\b', text[k:]):
+            j = k + 4
+            continue
+        if in_do and re.match(r'while\b', text[k:]):
+            in_do = False
+            j = k
+            continue
+        return j
 def _brace_kind(text, j):
     # The `{` at j opens what? 'fn' — a function-family body (arrow,
     # function, method, class, getter/setter) whose contents defer to
@@ -565,7 +1058,72 @@ def _backward_ref_live(text, name, decl_start, hoisted):
             continue
         if _arrow_defers(text, rm.start()) and _ref_used(text, rm.end()): return True
     return False
-def _live_code(text):
+_OPERAND_STOP = frozenset('\n;{},=!<>()[\\]&|')
+def _operand_for(text, i):
+    # The left operand of the operator at i is the maximal contiguous run
+    # of operand-class characters ending (after whitespace) just before i
+    # — the lazy left-operand capture read backward in linear time. The
+    # run start always satisfies the predecessor constraint: the char
+    # that stopped the walk is not in the operand class, so not \w or .;
+    # an operator directly after `(`/`[` is skipped by the caller.
+    j = i - 1
+    while j >= 0 and text[j] in ' \t\n\r\v\f': j -= 1
+    e = j + 1
+    while j >= 0 and text[j] not in _OPERAND_STOP: j -= 1
+    start = j + 1
+    if start >= e: return None
+    return text[start:e], start
+def _paren_start(text, j):
+    # Index of the opener matching the closer `)`/`]` at j, scanning
+    # backward over the (already string-blanked) text — -1 unbalanced.
+    pair = {')': '(', ']': '['}
+    want = pair.get(text[j])
+    if want is None: return -1
+    d, i = 0, j - 1
+    while i >= 0:
+        c = text[i]
+        if c in ')]}': d += 1
+        elif c in '([{':
+            if d == 0: return i if c == want else -1
+            d -= 1
+        i -= 1
+    return -1
+def _left_operand(text, i):
+    # The operand immediately left of position i: an atomic run via
+    # `_operand_for`, or — when the left edge is a bracket — the whole
+    # group plus whatever callee binds it (`foo(x)`, `a.b(x)`, `new K()`,
+    # `!(…)`): `(expr) && x` and `x === foo(0)` fold through the same
+    # path as `expr && x` (w60-fv F-7).
+    seg = _operand_for(text, i)
+    if seg is not None: return seg
+    j = i - 1
+    while j >= 0 and text[j] in ' \t\n\r\v\f': j -= 1
+    if j < 0 or text[j] not in ')]': return None
+    op0 = _paren_start(text, j)
+    if op0 < 0: return None
+    pre = _operand_for(text, op0)
+    # A callee run must be a complete operand — `f(x) + (grp)` leaves
+    # just `+` and folding `+(grp)` alone would mis-evaluate the left
+    # side of `&&` (it is `f(x)+(grp)`, maybe truthy). Unknown wins.
+    if pre is not None and pre[0].rstrip() and pre[0].rstrip()[-1] in '+-*/%<>=:,?&|':
+        return None
+    start = pre[1] if pre else op0
+    while start > 0 and text[start - 1] in ' \t\n!~': start -= 1
+    return text[start:j + 1], start
+def _live_code(text, raw=None):
+    # A computed member is the same call spelled differently —
+    # `ee['on']('x', cb)` must die by the same emit checks as
+    # `ee.on('x', cb)`, `p['then'](cb)` by the await checks, and
+    # `stub['assert'](x)` by the member-call exclusion. The member name
+    # is a string literal — the caller's blanked view has it masked, so
+    # the name comes from `raw` (same length, positions aligned) and is
+    # spliced in with position-preserving padding (w59-ledger F-13).
+    if raw is not None:
+        out = list(text)
+        for m in re.finditer(r"\[\s*(['\"])([\w$]+)\1\s*\]", raw):
+            rep = '.' + m.group(2)
+            out[m.start():m.end()] = rep + ' ' * (len(m.group(0)) - len(rep))
+        text = ''.join(out)
     # Dead-code shapes that must not mint asserting evidence: asserts inside
     # an unconditionally-false branch, an assigned-but-never-invoked
     # function literal, a timer/next-tick callback, or the remainder of a
@@ -578,11 +1136,164 @@ def _live_code(text):
     spans = []
     # A const/let bound to a provably-falsy literal carries its deadness
     # into every condition it names — `const dead = false; if (dead)` is
-    # exactly `if (false)` (w57-ledger F1/F10).
-    falsy = '|'.join(re.escape(n) for n in _FALSY_NAME.findall(text))
-    truthy = '|'.join(re.escape(n) for n in _TRUTHY_NAME.findall(text))
+    # exactly `if (false)` (w57-ledger F1/F10). `_const_bindings` folds
+    # the initializer — `1 && 0`, `'0' - 0`, `new Boolean(false)` and
+    # alias chains all evaluate, not just single-token literals
+    # (w58-ledger F8).
+    known = _const_bindings(text)
+    falsy = '|'.join(re.escape(n) for n, v in known.items() if _truthy(v) is False)
+    truthy = '|'.join(re.escape(n) for n, v in known.items() if _truthy(v) is True)
     dead_lit = _FALSY_LIT + (f'|(?:{falsy})' if falsy else '')
     live_lit = _TRUTHY_LIT + (f'|(?:{truthy})' if truthy else '')
+    # Folded-condition kills — `if (1 && 0)`, `if (new Boolean(false))`,
+    # `if (t)` with t bound to a provable value, `if ([])`/`if (2)` —
+    # any statically-known condition, not just single-token literals
+    # (w58-ledger F8).
+    # Keyword-anchored, not regex-matched: a condition containing nested
+    # parens (a `if (!/…(?![…])/…)` regex literal) made the depth-1 paren
+    # pattern backtrack exponentially — _paren_end walks it in one pass.
+    for m in re.finditer(r'\bif\s*\(', text):
+        p0 = m.end() - 1
+        p1 = _paren_end(text, p0)
+        v = _const_val(text[p0 + 1:p1 - 1], known)
+        if v is _CONST_UNKNOWN: continue
+        j = p1
+        while j < len(text) and text[j] in ' \t\n': j += 1
+        if not _truthy(v):
+            if j < len(text) and text[j] == '{':
+                spans.append((j, _paren_end(text, j)))
+            else:
+                k = text.find(';', j)
+                spans.append((j, (k if k != -1 else len(text)) + 1))
+        else:
+            k = _paren_end(text, j) if j < len(text) and text[j] == '{' else (text.find(';', j) + 1 if text.find(';', j) != -1 else len(text))
+            l = k
+            while l < len(text) and text[l] in ' \t\n': l += 1
+            if text[l:l + 4] == 'else':
+                l += 4
+                while l < len(text) and text[l] in ' \t\n': l += 1
+                if l < len(text) and text[l] == '{': spans.append((l, _paren_end(text, l)))
+                else:
+                    e = text.find(';', l); spans.append((l, len(text) if e == -1 else e + 1))
+    # `while (folded-false)` / `for (;; folded-false;)` bodies never run
+    # — the wider literal class (w58-ledger F8).
+    for m in re.finditer(r'\bwhile\s*\(', text):
+        p0 = m.end() - 1
+        p1 = _paren_end(text, p0)
+        v = _const_val(text[p0 + 1:p1 - 1], known)
+        if v is _CONST_UNKNOWN or _truthy(v): continue
+        j = p1
+        while j < len(text) and text[j] in ' \t\n': j += 1
+        if j < len(text) and text[j] == '{': spans.append((j, _paren_end(text, j)))
+        else:
+            e = text.find(';', j); spans.append((j, len(text) if e == -1 else e + 1))
+    for m in re.finditer(r'\bfor\s*\(', text):
+        p0 = m.end() - 1
+        p1 = _paren_end(text, p0)
+        inner = text[p0 + 1:p1 - 1]
+        seps = []
+        d = 0
+        for i, c in enumerate(inner):
+            if c in '([{': d += 1
+            elif c in ')]}': d -= 1
+            elif d == 0 and c == ';': seps.append(i)
+        # A header needs both separators — `for (i in o)`/`for (x of y)`
+        # is not a folded-condition kill.
+        if len(seps) < 2: continue
+        v = _const_val(inner[seps[0] + 1:seps[1]], known)
+        if v is _CONST_UNKNOWN or _truthy(v): continue
+        j = p0 + 1 + seps[1] + 1
+        while j < len(text) and text[j] in ' \t\n': j += 1
+        if j < len(text) and text[j] == '{': spans.append((j, _paren_end(text, j)))
+        else:
+            e = text.find(';', j); spans.append((j, len(text) if e == -1 else e + 1))
+    # Folded short-circuit left-operands — `0-0 && x`, `1&&0 && x`,
+    # `new Boolean(false) || x` (w58-ledger F8). Same kill span as the
+    # literal arms below: to `;`/`,`/`)`/`]`/`:`/`?` at depth 0.
+    # Operator-anchored folded-operand kills: each `&&`/`||`/`?` walks its
+    # left operand BACKWARD over the operand class — identical matches to
+    # the lazy `operand+? \s* op` form at linear cost. The per-position
+    # lazy scan was quadratic on &&/?-dense files (~100s per big test
+    # file; w58 infra).
+    for m in re.finditer(r'&&|\|\||\?\?', text):
+        seg = _left_operand(text, m.start())
+        if seg is None: continue
+        operand, start = seg
+        # `instanceof` is word-shaped: the run swallowed it as part of
+        # the operand — the real left operand sits before it (w60-fv F-7).
+        if re.match(r'\s*instanceof\b', operand):
+            left = _left_operand(text, start)
+            if left is None: continue
+            operand, start = text[left[1]:m.start()].rstrip(), left[1]
+        # A comparison binds its operands as one expression — the walk
+        # stopped at `=`/`>`/`<`, so `false === true && x` read `true`
+        # and stayed live (w59-ledger F-11/F-16). Extend the operand
+        # through comparison chains: `a === b`, `x !== y`, `n >= 1`,
+        # `t instanceof K` each count as the operator's whole left side.
+        while start > 0:
+            ext = text[:start].rstrip()
+            cm = re.search(r'(?:===|!==|==|!=|>=|<=|>|<|\binstanceof\b)\s*$', ext)
+            if not cm: break
+            left = _left_operand(text, cm.start())
+            if left is None: break
+            operand = text[left[1]:start] + operand
+            start = left[1]
+        # An operand opening right after `(`/`[` belongs to the inner
+        # expression — `foo(0) && x`'s real left side is the CALL, not
+        # the `0`.
+        if start > 0 and text[start - 1] in '([': continue
+        operand = re.sub(r'^.*\breturn\s+', '', operand)
+        v = _const_val(operand, known)
+        if v is _CONST_UNKNOWN: continue
+        if (m.group() == '&&' and _truthy(v)) or (m.group() == '||' and not _truthy(v)) or (m.group() == '??' and (v is _CONST_UNDEF or v is None)): continue
+        j = m.end(); d = 0
+        while j < len(text):
+            c = text[j]
+            if c in '([{': d += 1
+            elif c in ')]}':
+                if d == 0: break
+                d -= 1
+            elif d == 0 and c in ';,:?': break
+            j += 1
+        spans.append((m.end(), j))
+    # A `?` is a ternary mark only when it is not the second char of
+    # `??` and not the `?.`/`??` lead — `a ?? b ? c : d` mis-sliced at
+    # the `??`'s tail otherwise (w60-fv F-6).
+    for m in re.finditer(r'(?<!\?)\?(?![.?])', text):
+        seg = _left_operand(text, m.start())
+        if seg is None: continue
+        operand, start = seg
+        if start > 0 and text[start - 1] in '([': continue
+        operand = re.sub(r'^.*\breturn\s+', '', operand)
+        v = _const_val(operand, known)
+        if v is _CONST_UNKNOWN: continue
+        j = m.end(); d = 0; q = 1
+        while j < len(text):
+            c = text[j]
+            if c in '([{': d += 1
+            elif c in ')]}':
+                if d == 0: break
+                d -= 1
+            elif d == 0:
+                if c == '?' and (j + 1 >= len(text) or text[j + 1] not in '.?') and text[j - 1] != '?': q += 1
+                elif c == ':':
+                    q -= 1
+                    if q == 0: break
+            j += 1
+        if j >= len(text): continue
+        if not _truthy(v):
+            spans.append((m.end(), j))
+        else:
+            k = j + 1; d = 0
+            while k < len(text):
+                c = text[k]
+                if c in '([{': d += 1
+                elif c in ')]}':
+                    if d == 0: break
+                    d -= 1
+                elif d == 0 and c in ';,': break
+                k += 1
+            spans.append((j + 1, k))
     for m in re.finditer(r'\bif\s*\(\s*(?:' + dead_lit + r')\s*\)', text):
         j = _paren_end(text, text.index('(', m.start()))
         while j < len(text) and text[j] in ' \t\n': j += 1
@@ -645,15 +1356,15 @@ def _live_code(text):
     for m in re.finditer(r'\bif\s*\(\s*(?:' + live_lit + r')\s*\)', text):
         j = _paren_end(text, text.index('(', m.start()))
         while j < len(text) and text[j] in ' \t\n': j += 1
-        k = _paren_end(text, j) if j < len(text) and text[j] == '{' else (text.find(';', j) + 1 if text.find(';', j) != -1 else len(text))
+        k = _paren_end(text, j) if j < len(text) and text[j] == '{' else _one_stmt(text, j)
         l = k
         while l < len(text) and text[l] in ' \t\n': l += 1
         if text[l:l + 4] == 'else':
             l += 4
-            while l < len(text) and text[l] in ' \t\n': l += 1
-            if l < len(text) and text[l] == '{': spans.append((l, _paren_end(text, l)))
-            else:
-                e = text.find(';', l); spans.append((l, len(text) if e == -1 else e + 1))
+            # The else arm is ONE statement — `else if (y) {…} else {…}`
+            # chains whole, so `text.find(';')` can never drop its tail
+            # live again (w62-ledger F-8).
+            spans.append((l, _one_stmt(text, l)))
     # while(false)/for(;false;) bodies never execute — the dead condition
     # is the whole while clause or the for's middle clause only, so an
     # identifier ending in '0' (`for (x of a0)`) stays live.
@@ -661,8 +1372,7 @@ def _live_code(text):
         j = m.end()
         while j < len(text) and text[j] in ' \t\n': j += 1
         if j < len(text) and text[j] == '{': spans.append((j, _paren_end(text, j)))
-        else:
-            e = text.find(';', j); spans.append((j, len(text) if e == -1 else e + 1))
+        else: spans.append((j, _one_stmt(text, j)))
     # Dead short-circuit operands: `false && x` / `0 &&` / `null &&` /
     # `undefined &&` / `!true &&` never evaluate their right side, and
     # `true ||` / `1 ||` / `!false ||` skip theirs (w56-ledger F2). The
@@ -727,14 +1437,25 @@ def _live_code(text):
     # `for (x of [])`, `[].forEach(cb)`, `[].map(cb)` (w56-ledger F2). A
     # const bound to `[]` iterates identically empty — `const a = []`;
     # `for (x of a)` runs zero times (w57-ledger F9).
-    empties = {n for n in re.findall(r'\b(?:const|let|var)\s+(\w+)\s*=\s*\[\s*\]', text)}
-    empty_lit = r'\[\s*\]' + (r'|' + '|'.join(re.escape(n) for n in sorted(empties)) if empties else '')
-    for m in re.finditer(r'\bfor\s*\([^)]*\bof\s*(?:' + empty_lit + r')\s*\)', text):
+    empties = {n for n in re.findall(r'\b(?:const|let|var)\s+(\w+)\s*=\s*(?:\[\s*\]|\{\s*\}|new\s+(?:Set|Map|WeakSet|WeakMap|Array|Object)\s*\(\s*(?:\[\s*\])?\s*\))', text)}
+    empty_lit = (r'\[\s*\]|\{\s*\}|\'\'|""|``|new\s+(?:Set|Map|WeakSet|WeakMap|Array|Object)\s*\(\s*(?:\[\s*\])?\s*\)'
+                 + (r'|' + '|'.join(re.escape(n) for n in sorted(empties)) if empties else ''))
+    # `for..of` over ANY object literal throws — objects are not
+    # iterable — so the body is dead whatever the literal holds
+    # (w62-ledger F-9). Non-empty strings DO iterate and stay live.
+    for m in re.finditer(r'\bfor\s*\([^)]*\bof\s*(?:' + empty_lit + r'|\{[^{}]*\}|\d+(?:\.\d+)?[nN]?|false|true|null|undefined)\s*\)', text):
         j = m.end()
         while j < len(text) and text[j] in ' \t\n': j += 1
         if j < len(text) and text[j] == '{': spans.append((j, _paren_end(text, j)))
-        else:
-            e = text.find(';', j); spans.append((j, len(text) if e == -1 else e + 1))
+        else: spans.append((j, _one_stmt(text, j)))
+    # `for..in` over an empty/non-object operand iterates zero times —
+    # `{}`, `0`, `null`, `''` (w61-ledger F-4). Non-empty strings DO
+    # enumerate indices and stay live.
+    for m in re.finditer(r'\bfor\s*\([^)]*\bin\s*(?:' + empty_lit + r'|\d+(?:\.\d+)?[nN]?|false|true|null|undefined)\s*\)', text):
+        j = m.end()
+        while j < len(text) and text[j] in ' \t\n': j += 1
+        if j < len(text) and text[j] == '{': spans.append((j, _paren_end(text, j)))
+        else: spans.append((j, _one_stmt(text, j)))
     for m in re.finditer(r'(?:' + empty_lit + r')\s*\.\s*(?:forEach|map|filter|reduce|some|every|flatMap|find|findIndex)\s*\(', text):
         spans.append((m.start(), _paren_end(text, m.end() - 1)))
     # `void` of a function/arrow literal that is never invoked — the
@@ -788,7 +1509,11 @@ def _live_code(text):
     # are dead evidence (w56-ledger F2).
     for m in re.finditer(r'\bswitch\s*\(\s*([\'"`]?)([\w$.+-]*)\1\s*\)\s*\{', text):
         disc = m.group(2)
-        if not re.fullmatch(r'[\w$.+-]+', disc): continue
+        # Only a KNOWN literal discriminant may suppress arms — an
+        # identifier/member/`f()` is unknowable at audit time, and
+        # treating it as a literal murdered every case arm (w62-ledger
+        # F-10). Quoted text is a literal by its quote.
+        if not m.group(1) and not re.fullmatch(r'[+-]?(?:\d[\d_]*(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|true|false|null|undefined|NaN|Infinity', disc): continue
         body_start = text.index('{', m.end() - 1)
         body_end = _paren_end(text, body_start)
         body = text[body_start:body_end]
@@ -924,9 +1649,18 @@ def _live_code(text):
             r'|\bArray\.from\s*\(\s*' + re.escape(name) + r'\s*\(', text3)
         if not consumed:
             spans.append((m.start(), end))
+    # The emit-rescue cannot apply to a receiver PROVABLY not an emitter —
+    # a plain `{ on(){}, emit(){} }` literal revives a never-registered
+    # handler into counted evidence otherwise (w58-ledger F9). An
+    # unbound name (the `bus`/`ee` idiom) keeps the same-event emit
+    # check; only an object-literal binding is provably dead.
+    non_emitters = set(re.findall(r'\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*\{', text3))
     for m in re.finditer(r'\b([A-Za-z_$][\w$]*)\s*\.\s*(?:on|once|addListener|addEventListener)\s*\(', text3):
         name = m.group(1)
         if name in {'process', 'globalThis'}: continue  # already killed
+        if name in non_emitters:
+            spans.append((m.start(), _paren_end(text3, m.end() - 1)))
+            continue
         # Only a `.emit(` firing the SAME literal event on the same
         # emitter keeps the handler live — `emit('other')` cannot reach
         # `ee.on('x', cb)` (w55-ledger C3). A non-literal event name
@@ -983,7 +1717,7 @@ def _asserts(body, names=('assert', 'requireThat')):
     # (w43-fv M3), and only asserts in code that can actually run count
     # (w44-fixverify F-6). A body-scope shadow (const assert = () => {})
     # neutralizes its own name before matching (w48-ledger F-1).
-    live = _live_code(_blank_code(body))
+    live = _live_code(_blank_code(body), body)
     # Shadow detection runs on the UNLIVENED body — _live_code may blank
     # the declaration itself ('assert.equal' isn't a call of bare
     # 'assert'), hiding the shadow it created (w48-ledger F-1).
@@ -1010,7 +1744,39 @@ def _asserts(body, names=('assert', 'requireThat')):
         for spec in dm.group(1).split(','):
             nm = re.split(r'\s+as\s+|:', spec.strip())[-1].strip()
             if re.fullmatch(r'\w+', nm): extra.add(nm)
-    return len(re.findall(r'\b(?:' + '|'.join(re.escape(n) for n in extra) + r')(?:\.\w+)?\s*\(', live))
+    # The call must be on the trusted binding itself — `stub.assert(` is
+    # a member call on a host object, and `assert(args) {` is a method
+    # definition, not a call (w59-ledger F-12). The member-chain arms
+    # accept `assert?.ok(`, `assert . ok(`, `assert.ok.call(`,
+    # `assert?.(`, and the tagged-template call `assert`x`` — all real
+    # invocations (w60-fv F-8, w60-ledger F-12).
+    hits = []
+    apat = (r'(?<![\w$.])(?:' + '|'.join(re.escape(n) for n in extra) + r')'
+            r'(?:\s*\??\.\s*[\w$]+|\s*\[\s*[\'"`][\w$]+[\'"`]\s*\])*\s*(?:\?\s*\.?\s*)?(\(|`)')
+    for m in re.finditer(apat, live):
+        if m.group(1) == '`':
+            hits.append(m)
+            continue
+        p0 = live.index('(', m.start())
+        p1 = _paren_end(live, p0)
+        j = p1
+        while j < len(live) and live[j] in ' \t\n': j += 1
+        # A `(params) {` shape is a method definition, not a call — the
+        # param grammar now accepts defaults, destructured names, and
+        # `...rest` (w60-fv F-5).
+        # A destructured parameter may carry its own default —
+        # `{ x } = {}`, `[y] = []` — without one the arms refused and
+        # `assert({x}={}) {}` read as an assert call (w60-fv F-5).
+        # Param grammar via a top-level comma split — `{[^{}]*}` used to
+        # refuse nested destructure defaults like `{x:{y}}` and read
+        # `assert({x:{y}}){}` as a CALL (w61-fv F-5). `_split_top`
+        # balances `()[]{}` and skips strings.
+        PARAM = re.compile(r'\s*(?:\.\.\.\s*)?(?:[\w$]+|\{.*\}|\[.*\])\s*(?:=\s*\S.*)?\s*$', re.S)
+        params_txt = live[p0 + 1:p1 - 1]
+        pseg = _split_top(params_txt, ',') or [params_txt]
+        if j < len(live) and live[j] == '{' and all(PARAM.fullmatch(p) for p in pseg): continue
+        hits.append(m)
+    return len(hits)
 # A title citing N distinct requirement IDs owes N real assert calls —
 # `test('COV-001 COV-002', () => assert.ok(x))` once covered both rows
 # with a single assertion (w57-ledger F11).
@@ -1019,9 +1785,17 @@ def _title_id_count(title):
     if title not in _title_id_count_memo:
         _title_id_count_memo[title] = sum(1 for r in rows if _cites(title, r['id']))
     return _title_id_count_memo[title]
+_asserts_evidence_memo = {}
 def _asserts_evidence(body, names):
+    # _asserts pays _blank_code+_live_code per body — recomputing it per
+    # REQUIREMENT per body made the gate O(rows × bodies) (~100+ min at
+    # ~211 rows × ~2000 bodies). Memoize on the (body, names) pair:
+    # identical output, one analysis per body (w58 infra).
+    key = (body, frozenset(names) if names else None)
+    if key not in _asserts_evidence_memo:
+        _asserts_evidence_memo[key] = _asserts(body, names)
+    n = _asserts_evidence_memo[key]
     # None is falsy — files without a trusted assert binding still fail.
-    n = _asserts(body, names)
     return bool(n) and n >= max(1, _title_id_count(_test_title(body)))
 # A citing test file must bind production code — import a production
 # module (directly or through helpers) or spawn a repo script — otherwise
@@ -1072,30 +1846,47 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 # (w57-fv NEW-3).
 _SPAWN_DIR_ANCHOR = re.compile(r'__dirname|execPath|process\.cwd\s*\(')
 _SPAWN_REPO_SUFFIX = re.compile(r'\.(?:mjs|py|sh|json|cjs)\b')
-# A git spawn binds only when its subcommand touches THIS repo's tracked
-# content — `init` creates a different repo and `ls-remote` touches no
-# tree at all (w57-ledger F8).
-_GIT_TREE_OP = re.compile(r"(['\"])(?:ls-files|rev-parse|status|show|log|diff|add|checkout|cat-file|worktree|commit)\b")
-def _spawn_arg_contacts(args):
-    # A path literal counts only when it resolves inside the repo —
-    # '/tmp', 'C:\x' and '../escaped' never reach production code. A
+# A git spawn binds only when its subcommand TOUCHES the tree —
+# `init` creates a different repo and status/log/show/diff/ls-files/
+# rev-parse/cat-file are read-only inspection, not execution
+# (w58-ledger F10).
+_GIT_TREE_OP = re.compile(r"(['\"])(?:add|checkout|commit|worktree|restore|rm|mv|stash|apply|cherry-pick|merge|rebase|reset|clean|push|pull|fetch)\b")
+# The spawned binary itself must be able to EXECUTE code —
+# `execFileSync('true', ['src/x.mjs'])` reads nothing under test
+# (w58-ledger F10). An interpreter name, a node runtime expression
+# (execPath/argv[0]), or a repo script path counts.
+_SPAWN_INTERP = re.compile(r'^(?:node(?:\.exe)?|python\d*(?:\.\d+)?|bun|deno|sh|bash|zsh|tsx|ts-node|npx|uv|perl|ruby|php)$')
+_SPAWN_EXECPATH = re.compile(r'\b(?:process\s*\.\s*)?execPath\b|\bprocess\s*\.\s*argv\s*\[\s*0\s*\]')
+def _spawn_arg_contacts(args, anchor_dir=None):
+    # A path literal counts only when it resolves inside the repo AND
+    # exists — '/tmp', 'C:\x', '../escaped' and a nonexistent
+    # `./src/x.mjs` never reach production code (w58-ledger F10). A
     # template's static head must already point inside: `${base}/x`
-    # can't be proven and doesn't count.
-    lits = re.findall(r'[\'"`]([^\'"`]*)[\'"`]', args)
-    for lit in lits:
+    # can't be proven and doesn't count. Literals embedded inside a
+    # `-c`/`--eval` command blob resolve through the inner quotes.
+    lits = list(re.findall(r'[\'"`]([^\'"`]*)[\'"`]', args))
+    queue = list(lits)
+    seen = set()
+    while queue:
+        lit = queue.pop()
+        if lit in seen: continue
+        seen.add(lit)
         head = lit.split('${', 1)[0]
-        if not head or ('/' not in head and '\\' not in head): continue
-        cand = os.path.normpath(head) if os.path.isabs(head) else os.path.normpath(os.path.join(_REPO_ROOT, head))
-        try:
-            if os.path.commonpath((cand, str(_REPO_ROOT))) == str(_REPO_ROOT): return True
-        except ValueError:
-            continue
+        if head and ('/' in head or '\\' in head):
+            for base in ([str(anchor_dir)] if anchor_dir is not None else []) + [str(_REPO_ROOT)]:
+                cand = os.path.normpath(head) if os.path.isabs(head) else os.path.normpath(os.path.join(base, head))
+                try:
+                    if os.path.commonpath((cand, str(_REPO_ROOT))) == str(_REPO_ROOT) and os.path.isfile(cand): return True
+                except (ValueError, OSError):
+                    continue
+        for inner in re.findall(r'[\'"]([^\'"\n]*)[\'"]', lit):
+            if inner not in seen and ('/' in inner or '\\' in inner): queue.append(inner)
     # join(__dirname, 'x.mjs')/execPath + repo-suffix literal resolves to
     # repo code the regex cannot path-prove — anchor + suffix, never the
     # join( token alone (w57-fv NEW-3).
     if _SPAWN_DIR_ANCHOR.search(args) and any(_SPAWN_REPO_SUFFIX.search(x) for x in lits): return True
     return False
-def _spawn_contacts(live, text, names):
+def _spawn_contacts(live, text, names, anchor_dir=None):
     for n in names:
         for cm in re.finditer(r'\b' + re.escape(n) + r'\s*\(', live):
             # The call position comes from the live view (a dead call
@@ -1103,28 +1894,44 @@ def _spawn_contacts(live, text, names):
             # text — the live view blanks literal contents, so
             # 'scripts/x' would never name its path there (w55-ledger C3).
             args = text[cm.end():_paren_end(live, cm.end() - 1)]
-            # The bare `.mjs`-suffix arm is gone — `echo 'x.mjs'` minted
-            # contact by suffix alone; only a resolvable repo literal, a
-            # dir-anchored suffix, or a tree-op git subcommand counts
-            # (w57-ledger F8).
-            if _spawn_arg_contacts(args): return True
+            # `fork`/`Worker` always execute the repo arg under node —
+            # only the literal must resolve+exist. Every other family
+            # needs an executable binary first (w58-ledger F10).
+            if not re.search(r'fork|Worker', n):
+                bin_ok = bool(_SPAWN_EXECPATH.search(args))
+                if not bin_ok:
+                    binm = re.search(r'[\'"`]([^\'"`]*)[\'"`]', args)
+                    if binm:
+                        b = binm.group(1); bn = os.path.basename(b)
+                        if _SPAWN_INTERP.fullmatch(bn):
+                            bin_ok = True
+                        elif _SPAWN_REPO_SUFFIX.search(bn):
+                            for base in ([str(anchor_dir)] if anchor_dir is not None else []) + [str(_REPO_ROOT)]:
+                                bcand = os.path.normpath(b) if os.path.isabs(b) else os.path.normpath(os.path.join(base, b))
+                                if os.path.isfile(bcand): bin_ok = True; break
+                if not bin_ok:
+                    # `git` still binds on a tree-writing subcommand
+                    # (status/log/show/diff are inspection — w58 F10).
+                    if re.search(r"(['\"])git\1", args) and _GIT_TREE_OP.search(args): return True
+                    continue
+            if _spawn_arg_contacts(args, anchor_dir): return True
             if re.search(r"(['\"])git\1", args) and _GIT_TREE_OP.search(args): return True
     return False
-def _prod_binds(text):
+def _prod_binds(text, anchor_dir=None):
     blanked = _blank_code(text)
     # A bind inside dead code binds nothing — `if(false){ require('../src/x') }`,
     # an uninvoked helper, or a post-t.skip import is decorative evidence
     # (w55-fv M-1). The live-blanked view keeps positions aligned, so a
     # token whose own position died can't mint the bind, and a `node:` import's
     # bound names must be used in code that actually runs.
-    live = _live_code(blanked)
+    live = _live_code(blanked, text)
     for m in _PROD_BIND_TOKEN.finditer(text):
         if blanked[m.start()].isspace() or live[m.start()].isspace() or not _PROD_SPEC.fullmatch(m.group(2)): continue
         spec = m.group(2)
         if spec.startswith('node:'):
             names = _bind_names(text, m)
             if not any(re.search(r'\b' + re.escape(n) + r'\b', live[m.end():]) for n in names): continue
-            if not _spawn_contacts(live, text, names): continue
+            if not _spawn_contacts(live, text, names, anchor_dir): continue
         elif re.match(r'\.\.?/', spec):
             # `../src/../evil.mjs` fullmatches the bind pattern but
             # normalizes OUTSIDE the tree it claims — a spec binds only
@@ -1139,7 +1946,9 @@ def evidence_blocks(path):
         # Script files cite requirements inline — comments strip first so a
         # commented-out ID cannot mint a citation (w41-ledger M-1).
         return [_strip_comments(text)]
-    if not _prod_binds(_strip_comments(text)): return []
+    # `__dirname`-anchored spawn args resolve against the test file's
+    # own directory (w58-ledger F10).
+    if not _prod_binds(_strip_comments(text), path.parent): return []
     return _test_bodies(_strip_comments(text))
 _assert_names_memo = {}
 def _file_assert_names(p):

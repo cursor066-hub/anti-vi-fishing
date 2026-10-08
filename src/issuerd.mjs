@@ -708,10 +708,14 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
       // binding is still enforced by issuerAuthOk afterwards.
       const anyBearer = (scope) => {
         const auth = req.headers.authorization ?? '';
-        return Object.values(issuers).some(i => {
+        // The compare runs unconditionally in the loop head — inside a
+        // `.some()` callback body it is conditional on iteration, so a
+        // static gate cannot prove the credential resolves (w58 doctrine).
+        for (const i of Object.values(issuers)) {
           const d = bearerDigest(i, scope);
-          return d && (!i.token_expires_at || i.token_expires_at > clock()) && bearerMatches(auth, d);
-        });
+          if (bearerMatches(auth, d) && (!i.token_expires_at || i.token_expires_at > clock())) return true;
+        }
+        return false;
       };
       const noTokens = !Object.values(issuers).some(i => i.issue_token || i.read_token || i.issue_token_digest || i.read_token_digest);
       // A tokenless spec set is only servable behind an explicit opt-in —
@@ -739,10 +743,13 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
       };
       if (req.method === 'GET' && url.pathname === '/v1/issuers') {
         const auth = req.headers.authorization ?? '';
-        const holder = Object.values(issuers).find(i => {
+        // Same unconditional-compare doctrine as anyBearer — the
+        // credential check must not live inside a callback body.
+        let holder;
+        for (const i of Object.values(issuers)) {
           const d = bearerDigest(i, 'read');
-          return d && bearerMatches(auth, d) && (!i.token_expires_at || i.token_expires_at > clock());
-        });
+          if (bearerMatches(auth, d) && (!i.token_expires_at || i.token_expires_at > clock())) { holder = i; break; }
+        }
         if (!holder) {
           take('probe');
           // Refused listing probes land on the issuance chain too — the
@@ -838,7 +845,12 @@ export function createIssuerServer(issuers, { port = 8090, host = '127.0.0.1', c
         // 'refused' is logged only when the request is actually refused —
         // a tokenless open-loopback issue must not precede every success
         // with a phantom denial entry (w18-issuerd F-12).
-        try { gate('issue'); } catch (e) { if (!anyBearer('issue')) { take('probe'); refusalLog({ issuer: 'unknown', request_digest: logMac(request), refused: true, unauthenticated: true, code: e.code ?? 'INV-401-AUTH' }); } throw e; }
+        // The bearer verdict is evaluated once, unconditionally — the
+        // catch arm reuses it rather than re-evaluating inside a
+        // conditional body (w58 doctrine: a credential call inside
+        // catch{} resolves only some requests).
+        const issueAuthed = anyBearer('issue');
+        try { gate('issue'); } catch (e) { if (!issueAuthed) { take('probe'); refusalLog({ issuer: 'unknown', request_digest: logMac(request), refused: true, unauthenticated: true, code: e.code ?? 'INV-401-AUTH' }); } throw e; }
         take('issue');
         const issuer = resolveIssuer(m[1], request.tenant_id);
         // Authentication failures are logged to the issuance chain too —

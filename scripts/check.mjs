@@ -16,7 +16,7 @@ const SKIP = new Set(['node_modules', '.git', 'var', '__pycache__']);
 // .ts/.mts/.cts are live code on Node 24 type-stripping — a dispatch
 // file renamed that way escaped the audit silently (w57-ledger F6).
 const CODE_EXT = /\.(mjs|js|cjs|ts|mts|cts)$/;
-const ANY_EXT = /\.(mjs|js|cjs|ts)$/;
+const ANY_EXT = /\.(mjs|js|cjs|ts|mts|cts)$/;
 let files = [];
 // Every spawned helper gets a wall-clock ceiling — a hung subprocess must
 // fail the gate, never stall it forever (w23-supply F17). Fifteen minutes:
@@ -87,14 +87,14 @@ for (const file of files.filter(f => CODE_EXT.test(f) && existsSync(f))) {
 // run on every tracked text file: an unfinished marker anywhere (docs
 // included) is dishonest. vectors/keys.json stays the declared fixture
 // exemption.
-const SINK_EXT = /\.(mjs|js|cjs|ts|jsx|tsx|py|sh|bash|zsh|ps1|yml|yaml|html|htm|json)$/;
+const SINK_EXT = /\.(mjs|js|cjs|ts|mts|cts|jsx|tsx|py|sh|bash|zsh|ps1|yml|yaml|html|htm|json)$/;
 const SINK_RULES = [
   // The vm specifier is spelled in pieces so this file does not flag its
   // own rule table (w49-ledger F-1).
   // Member-invoked, parenthesized and concatenated spellings of the
   // same sink are equally unforgeable — plain identifier patterns could
   // not see them (w57-ledger F7).
-  ['dynamic eval', new RegExp(`\\beval\\s*\\(|new\\s+Function\\s*\\(|eval\\s*\\/\\*\\*\\/\\s*\\(|\\bFunction\\s*\\(|eval\\s*\\.\\s*(?:call|apply)\\s*\\(|new\\s*\\(\\s*Function\\s*\\)|\\(\\s*Function\\s*\\)\\s*\\(|['"]ev['"]\\s*\\+\\s*['"]al['"]|['"]e['"]\\s*\\+\\s*['"]val['"]|Reflect\\.(?:apply|construct)\\s*\\(\\s*(?:eval|Function)|node:${'v'}m|from\\s+['"](?:node:)?${'v'}m['"]|require\\s*\\(\\s*['"](?:node:)?${'v'}m['"]|import\\s*\\(\\s*['"](?:node:)?${'v'}m['"]|runIn(?:This|New)?Context`)],
+  ['dynamic eval', new RegExp(`\\beval\\s*\\(|eval\\s*\\?\\s*\\.\\s*\\(|eval\\s*\\?\\s*\\.\\s*(?:call|apply|bind)\\s*\\(|\\(\\s*0\\s*,\\s*eval\\s*\\)\\s*\\(|eval\\s*\\/\\*[^*]*\\*\\/\\s*\\(|eval\\s*\\.\\s*bind\\s*\\(|eval\\s*\\[['"](?:call|apply|bind)['"]\\]|new\\s+Function\\s*\\(|eval\\s*\\/\\*\\*\\/\\s*\\(|\\bFunction\\s*\\(|eval\\s*\\.\\s*(?:call|apply)\\s*\\(|new\\s*\\([^)]*\\bFunction\\b|\\(\\s*Function\\s*\\)\\s*\\(|\\b[A-Za-z_$][\\w$]*\\s*=\\s*Function\\s*;|Function\\s*\\.\\s*(?:call|apply|bind)\\s*\\(|\\.constructor\\s*(?:\\.\\s*constructor\\s*)+\\(|globalThis\\s*\\[[^\\]]*['"][^\\]]*\\]\\s*\\(|globalThis\\s*\\.\\s*eval|import\\s*\\(\\s*['"\`]data:|['"]ev['"]\\s*\\+\\s*['"]al['"]|['"]e['"]\\s*\\+\\s*['"]val['"]|Reflect\\.(?:apply|construct)\\s*\\(\\s*(?:eval|Function)|node:${'v'}m|from\\s+['"](?:node:)?${'v'}m['"]|require\\s*\\(\\s*['"](?:node:)?${'v'}m['"]|import\\s*\\(\\s*['"](?:node:)?${'v'}m['"]|runIn(?:This|New)?Context`)],
   ['string-timed code', /\bset(?:Timeout|Interval)\s*\(\s*['"`]/],
   ['embedded private key', /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
   ['cloud credential pattern', /\bAKIA[0-9A-Z]{16}\b/]
@@ -105,24 +105,24 @@ const SINK_RULES = [
 // dotted two-word spellings are the same marker — the alternation could
 // not see them (w54-ledger M-1).
 const MARKER_RULES = [
-  // Multi-char separators, letter-spacing, NBSP/tab and fullwidth
-  // spellings are the same marker — a separated or widened spelling
-  // still names an unfinished plant (w55-ledger H-2). The separator
-  // classes live inside the pattern so this comment names none of them.
-  ['unfinished code marker', new RegExp(`\\b(?:${'T'}[ \\t\\u00A0._-]*${'O'}[ \\t\\u00A0._-]*${'D'}[ \\t\\u00A0._-]*${'O'}|${'Ｔ'}[ \\t\\u00A0._-]*${'Ｏ'}[ \\t\\u00A0._-]*${'Ｄ'}[ \\t\\u00A0._-]*${'Ｏ'}|${'F'}[ \\t\\u00A0._-]*${'I'}[ \\t\\u00A0._-]*${'X'}[ \\t\\u00A0._-]*${'M'}[ \\t\\u00A0._-]*${'E'}|${'Ｆ'}[ \\t\\u00A0._-]*${'Ｉ'}[ \\t\\u00A0._-]*${'Ｘ'}[ \\t\\u00A0._-]*${'Ｍ'}[ \\t\\u00A0._-]*${'Ｅ'}|${'T' + 'BD'}|${'W' + 'IP'}|${'HA' + 'CK'})\\b`)],
+  // ANY non-alphanumeric run between marker letters is a separator —
+  // slashes, pluses, dashes, pipes, stars, spaces, em/en dashes all
+  // spell the same unfinished plant (w58-fv F-7). The letters are split
+  // literals so this table does not flag itself.
+  ['unfinished code marker', new RegExp(`\\b(?:${'T'}[^A-Za-z0-9]{0,3}${'O'}[^A-Za-z0-9]{0,3}${'D'}[^A-Za-z0-9]{0,3}${'O'}|${'Ｔ'}[^A-Za-z0-9]{0,3}${'Ｏ'}[^A-Za-z0-9]{0,3}${'Ｄ'}[^A-Za-z0-9]{0,3}${'Ｏ'}|${'F'}[^A-Za-z0-9]{0,3}${'I'}[^A-Za-z0-9]{0,3}${'X'}[^A-Za-z0-9]{0,3}${'M'}[^A-Za-z0-9]{0,3}${'E'}|${'Ｆ'}[^A-Za-z0-9]{0,3}${'Ｉ'}[^A-Za-z0-9]{0,3}${'Ｘ'}[^A-Za-z0-9]{0,3}${'Ｍ'}[^A-Za-z0-9]{0,3}${'Ｅ'}|${'T'}[^A-Za-z0-9]{0,3}${'B'}[^A-Za-z0-9]{0,3}${'D'}|${'W'}[^A-Za-z0-9]{0,3}${'I'}[^A-Za-z0-9]{0,3}${'P'}|${'H'}[^A-Za-z0-9]{0,3}${'A'}[^A-Za-z0-9]{0,3}${'C'}[^A-Za-z0-9]{0,3}${'K'})\\b`)],
   // The triple-X word followed by a colon is a planted unfinished-marker
   // label, not the ISO-4217 fixture value — the bare word stays exempt
-  // (w54-fv M-5).
-  ['unfinished code marker (xxx label)', new RegExp(`\\b${'XX' + 'X'}\\s*:`)]
+  // (w54-fv M-5); separated letter spellings are the same marker.
+  ['unfinished code marker (xxx label)', new RegExp(`\\b${'X'}[^A-Za-z0-9]{0,3}${'X'}[^A-Za-z0-9]{0,3}${'X'}\\s*:`)]
 ];
 // Case-insensitive on authored files: a lowercase marker is the same
-// unfinished code (w49-ledger F-1). reports/ is exempt — '# to'+'do N'
-// lines are generated TAP protocol fields, not authored markers; the few
-// files that legitimately name node:test's skip/defer vocabulary dodge
-// the literal word instead.
+// unfinished code (w49-ledger F-1). reports/ is exempt — its generated
+// TAP summary lines name the deferred-count protocol field, not authored
+// markers; the few files that legitimately name node:test's skip/defer
+// vocabulary dodge the literal word instead.
 const MARKER_LOOSE = [
-  ['unfinished code marker (any case)', new RegExp(`\\b(?:${'T'}[ \\t\\u00A0._-]*${'O'}[ \\t\\u00A0._-]*${'D'}[ \\t\\u00A0._-]*${'O'}|${'Ｔ'}[ \\t\\u00A0._-]*${'Ｏ'}[ \\t\\u00A0._-]*${'Ｄ'}[ \\t\\u00A0._-]*${'Ｏ'}|${'F'}[ \\t\\u00A0._-]*${'I'}[ \\t\\u00A0._-]*${'X'}[ \\t\\u00A0._-]*${'M'}[ \\t\\u00A0._-]*${'E'}|${'Ｆ'}[ \\t\\u00A0._-]*${'Ｉ'}[ \\t\\u00A0._-]*${'Ｘ'}[ \\t\\u00A0._-]*${'Ｍ'}[ \\t\\u00A0._-]*${'Ｅ'}|${'T' + 'BD'}|${'W' + 'IP'}|${'HA' + 'CK'})\\b`, 'i')],
-  ['unfinished code marker (xxx label any case)', new RegExp(`\\b${'XX' + 'X'}\\s*:`, 'i')]
+  ['unfinished code marker (any case)', new RegExp(`\\b(?:${'T'}[^A-Za-z0-9]{0,3}${'O'}[^A-Za-z0-9]{0,3}${'D'}[^A-Za-z0-9]{0,3}${'O'}|${'Ｔ'}[^A-Za-z0-9]{0,3}${'Ｏ'}[^A-Za-z0-9]{0,3}${'Ｄ'}[^A-Za-z0-9]{0,3}${'Ｏ'}|${'F'}[^A-Za-z0-9]{0,3}${'I'}[^A-Za-z0-9]{0,3}${'X'}[^A-Za-z0-9]{0,3}${'M'}[^A-Za-z0-9]{0,3}${'E'}|${'Ｆ'}[^A-Za-z0-9]{0,3}${'Ｉ'}[^A-Za-z0-9]{0,3}${'Ｘ'}[^A-Za-z0-9]{0,3}${'Ｍ'}[^A-Za-z0-9]{0,3}${'Ｅ'}|${'T'}[^A-Za-z0-9]{0,3}${'B'}[^A-Za-z0-9]{0,3}${'D'}|${'W'}[^A-Za-z0-9]{0,3}${'I'}[^A-Za-z0-9]{0,3}${'P'}|${'H'}[^A-Za-z0-9]{0,3}${'A'}[^A-Za-z0-9]{0,3}${'C'}[^A-Za-z0-9]{0,3}${'K'})\\b`, 'i')],
+  ['unfinished code marker (xxx label any case)', new RegExp(`\\b${'X'}[^A-Za-z0-9]{0,3}${'X'}[^A-Za-z0-9]{0,3}${'X'}\\s*:`, 'i')]
 ];
 // DOM-injection sinks matter in ANY code that renders — not only src/ and
 // web/: an .html asset or script-generated page outside those roots could
@@ -132,7 +132,7 @@ const MARKER_LOOSE = [
 const RENDER_ONLY = [
   // Bracket-member assignment, writeln, and the Function constructor are
   // the same sink under a different spelling (w56-ledger F10).
-  ['DOM injection', /\.(?:innerHTML|outerHTML)\s*(?:=|\+=)|\[\s*['"](?:innerHTML|outerHTML)['"]\s*\]\s*(?:=|\+=)|\[\s*['"](?:inner|outer)['"]\s*\+\s*['"]HTML['"]\s*\]\s*(?:=|\+=)|Reflect\.set\s*\([^)]*['"](?:inner|outer)HTML['"]|insertAdjacentHTML|(?:document|doc|d|el|target|element|node)\s*\.\s*write(?:ln)?\s*\(|new\s*\(?\s*Function\s*\)?\s*\(/]
+  ['DOM injection', /\.(?:innerHTML|outerHTML|srcdoc)\s*(?:=|\+=|\?\?=)|\[\s*['"](?:innerHTML|outerHTML|srcdoc)['"]\s*\]\s*(?:=|\+=|\?\?=)|\[\s*['"](?:inner|outer|srcdoc)['"]\s*\+\s*['"](?:HTML)?['"]\s*\]\s*(?:=|\+=|\?\?=)|Reflect\.set\s*\([^)]*['"](?:inner|outer|srcdoc)|Object\.assign\s*\([^)]*\binnerHTML\b|insertAdjacentHTML|(?:document|doc|d|el|target|element|node)\s*\.\s*write(?:ln)?\s*\(|document\s*\[[^\]]*writ[^\]]*\]|new\s*\(?\s*Function\s*\)?\s*\(/]
 ];
 for (const file of textFiles) {
   if (file === 'vectors/keys.json' || !existsSync(file) || isBinary(file)) continue;
@@ -179,7 +179,14 @@ const isValidationGuard = l => {
 // A route-arm `if` is the only `if` that bounds a handler scan — a
 // nested `if` inside the arm is part of the handler, not a boundary
 // (w55-ledger C4-c).
-const isRouteArmIf = l => isIf(l) && /(?:\bpath\b|req\.method|req\.url|url\.pathname)\s*===\s*'|\/\^/.test(l);
+// The compare half runs on the string/comment-blanked view so a
+// `path === '/x'` planted inside a literal can't pose as a route arm;
+// the `^/` half stays on code view — regex literal bodies are NOT
+// blanked there, so real `/^…/` dispatch still binds (w66-ledger F-1).
+const isRouteArmIf = l => {
+  const code = blankBlock(codeSpan(l), deadState());
+  return isIf(l) && (literalCmps(code, l, '\\bpath\\b|req\\.method\\b|req\\.url\\b|url\\.pathname\\b').some(c => c.op === '===' || c.op === '==') || /\/\^/.test(code));
+};
 // Dead short-circuit arms can never evaluate: `false && authorize(...)`
 // and `true || authorize(...)` carry the literal without ever executing
 // it — strip them before any auth-claim evidence is collected
@@ -236,42 +243,136 @@ const inString = (l, pos) => {
 // module state — a `false &&` spilling past one scan's window armed the
 // NEXT scan's first lines as dead, laundering real code across caller
 // boundaries (w56-ledger G-6). Each scan builds its own `deadState()`.
-const deadState = () => ({ pending: false, block: false });
-const deadContinues = m => !/;|\{|\}|,/.test(m);
+const deadState = () => ({ pending: false, block: false, pdepth: 0 });
+// Right bound of a dead `false &&`/`true ||` operand on its own line:
+// a `,`, `:` or ternary `?` at the operand's own depth, a `||` (only
+// the &&-arm — `false && a || b` evaluates `b`), or a `)`/`]` closing
+// a group opened before the operand — the `[^;{}]*` tail swallowed
+// live calls sitting in the same argument list (`helper(false && c,
+// authorize(...))` minted nothing, w61-ledger F-3).
+const deadTail = (s, orEnds) => {
+  let d = 0, q = null;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (q) { if (c === '\\') i++; else if (c === q) q = null; continue; }
+    if (c === "'" || c === '"' || c === '`') { q = c; continue; }
+    if (c === '(' || c === '[') { d++; continue; }
+    if (c === ')' || c === ']') { if (d === 0) return i; d--; continue; }
+    if (d !== 0) continue;
+    // `;`, `{` and `}` are statement/block boundaries — the dead span
+    // must not swallow past them or same-line statements mint nothing
+    // (w63-ledger F-1) and the brace ordinals mapping `lm` to `lraw`
+    // desync (w63-ledger F-2).
+    if (c === ',' || c === ':' || c === ';' || c === '{' || c === '}') return i;
+    if (c === '?' && s[i + 1] !== '.') return i;
+    if (orEnds && c === '|' && s[i + 1] === '|') return i;
+  }
+  return s.length;
+};
+// Braces inside a dead operand stay visible in `lm`: the twin `lraw`
+// never loses them, so dropping them here would desync the n-th `{`
+// ordinal map (w63-ledger F-2). Braces inside quote literals are not
+// structural — quote-tracked so a `'\'` escape cannot unclose a string.
+const braceKeep = seg => {
+  let q = null, out = '';
+  for (let i = 0; i < seg.length; i++) {
+    const ch = seg[i];
+    if (q) { if (ch === '\\') { out += '  '; i++; } else { if (ch === q) q = null; out += ' '; } continue; }
+    if (ch === "'" || ch === '"' || ch === '`') { q = ch; out += ' '; continue; }
+    out += ch === '{' || ch === '}' ? ch : ' ';
+  }
+  return out;
+};
+// Whether the dead-operand span carries past this line: a `;`/`{`/`}` at
+// paren depth 0 ends the statement, and so does a `,` — but a `,` inside
+// an unclosed call/`(` group is an ARGUMENT separator inside the dead
+// operand, so the span still owns the next line (w59-ledger F-4).
+const deadContinues = (m, depth = 0) => {
+  let d = depth;
+  for (const c of m) {
+    if (c === '(') d++;
+    else if (c === ')') d--;
+    else if (d <= 0 && (c === ';' || c === '{' || c === '}' || c === ',')) return { cont: false, depth: d };
+  }
+  return { cont: true, depth: d };
+};
+// A /* */ run is dead text too — its authorize-shaped content minted
+// evidence exactly like a //-comment did (w57-ledger F2). The blanker is
+// shared by every twin view (`lm`, `lraw`, and the depth arithmetic that
+// reads them): a `/* { */` surviving in only one view desyncs the brace
+// ordinals that map the twins and every depth-keyed decision
+// (w60-ledger F-1/F-4). `/*` is unambiguous — it ALWAYS opens a comment,
+// never division — and block comments span lines through `dead.block`.
+const blankBlock = (out, dead) => {
+  const chars = out.split('');
+  for (let i = 0; i < chars.length; i++) {
+    const c = chars[i];
+    if (dead.block) {
+      if (c === '*' && chars[i + 1] === '/') { chars[i] = ' '; chars[i + 1] = ' '; i++; dead.block = false; }
+      else chars[i] = ' ';
+      continue;
+    }
+    if (c === '/' && chars[i + 1] === '*' && !inString(chars.join(''), i)) { chars[i] = ' '; chars[i + 1] = ' '; i++; dead.block = true; }
+  }
+  return chars.join('');
+};
+// A line ending in an infix/continuation token cannot complete its
+// operand — the dead-operand span owns the next line. An expression-
+// complete tail (`x`, `f(x)`, `'`string`'`) ends by ASI and owns
+// nothing past the break (w60-ledger F-2/F-5).
+const opTailOf = s => /[(.,?:+\-*\/%^<>=!&|~`]/.test(s.trimEnd().at(-1) ?? '');
 const stripDead = (l, dead = deadState()) => {
   if (dead.pending) {
-    if (/^\s*(?:case\b|default\b|\}|\)|\])/.test(l)) dead.pending = false;
-    else { if (!deadContinues(l)) dead.pending = false; return ' '; }
+    // The dead operand owns this line unless a statement keyword opens
+    // a fresh statement — an operand-start identifier/call included,
+    // `false &&\nauthorize(...)` being exactly that shape (w60-ledger
+    // F-2/F-5). A comment-or-blank line inside the operand waits for
+    // the operand's start — pending unchanged.
+    const seg = blankBlock(stripComment(l), dead);
+    if (!/\S/.test(seg)) return ' ';
+    if (!/^\s*(?:if|for|while|switch|return|const|let|var|function|class|throw|import|export|else|do|case|default|break|continue|try|catch|finally|[{}])/.test(seg)) {
+      const nx = deadContinues(seg, dead.pdepth);
+      dead.pending = nx.cont && (nx.depth > 0 || opTailOf(seg));
+      dead.pdepth = nx.depth;
+      return ' ';
+    }
+    dead.pending = false; dead.pdepth = 0;
   }
   let out = stripComment(l);
-  // A /* */ run is dead text too — its authorize-shaped content minted
-  // evidence exactly like a //-comment did (w57-ledger F2). Block
-  // comments span lines through `dead.block`.
-  {
-    const chars = out.split('');
-    for (let i = 0; i < chars.length; i++) {
-      const c = chars[i];
-      if (dead.block) {
-        if (c === '*' && chars[i + 1] === '/') { chars[i] = ' '; chars[i + 1] = ' '; i++; dead.block = false; }
-        else chars[i] = ' ';
-        continue;
-      }
-      if (c === '/' && chars[i + 1] === '*' && !inString(chars.join(''), i)) { chars[i] = ' '; chars[i + 1] = ' '; i++; dead.block = true; }
-    }
-    out = chars.join('');
-  }
+  out = blankBlock(out, dead);
   const livePrefix = i => { const b = out.slice(0, i).trimEnd(); return /[=!<>]=+\s*$|[&^~%+\-*/!<>]\s*$/.test(b) && !/(?:\|\||&&|\?|:)\s*$/.test(b); };
   // Splice right-to-left: replacing earlier spans first would drift the
-  // indices the later matches were collected on.
-  for (const m of [...out.matchAll(/\b(?:false|0|null|undefined|!true)\s*&&[^;{}]*/g)].reverse()) {
+  // indices the later matches were collected on. A match terminated BY
+  // a `;`/`{`/`}` ended with its statement — only an unterminated
+  // operand (EOL mid-expression) may carry `pending` into the next
+  // line (w60-ledger F-2).
+  for (const m of [...out.matchAll(/\b(?:false|0|null|undefined|!true)\s*&&/g)].reverse()) {
     if (inString(out, m.index) || livePrefix(m.index)) continue;
-    if (deadContinues(m[0])) dead.pending = true;
-    out = out.slice(0, m.index) + ' ' + out.slice(m.index + m[0].length);
+    const tail = deadTail(out.slice(m.index + m[0].length), true);
+    const seg = out.slice(m.index + m[0].length, m.index + m[0].length + tail);
+    const nx = deadContinues(seg);
+    // The operand carries past the break only when it is genuinely
+    // unfinished — open depth or an operator tail; `false && x` ended
+    // by ASI owns no next line (w60-ledger F-2/F-5).
+    // `false &&` at line end carries the operand too — the `&&` itself is
+    // an unclosed operator tail whose operand starts on the next line
+    // (`false &&\nauthorize` is the exact launder shape; an empty seg at
+    // EOL read as complete and let the operand mint live, w60-ledger
+    // F-2/F-5 + w55-fv H-3 regressions).
+    const nxt = out[m.index + m[0].length + tail];
+    const carries = nx.cont && nxt !== ';' && nxt !== '}' && (nx.depth > 0 || opTailOf(seg) || (seg.trim() === '' && nxt === undefined));
+    if (carries) { dead.pending = true; dead.pdepth = nx.depth; }
+    out = out.slice(0, m.index) + ' ' + braceKeep(seg) + out.slice(m.index + m[0].length + tail);
   }
-  for (const m of [...out.matchAll(/\b(?:true|!false|1)\s*\|\|[^;{}]*/g)].reverse()) {
+  for (const m of [...out.matchAll(/\b(?:true|!false|1)\s*\|\|/g)].reverse()) {
     if (inString(out, m.index) || livePrefix(m.index)) continue;
-    if (deadContinues(m[0])) dead.pending = true;
-    out = out.slice(0, m.index) + ' ' + out.slice(m.index + m[0].length);
+    const tail = deadTail(out.slice(m.index + m[0].length), false);
+    const seg = out.slice(m.index + m[0].length, m.index + m[0].length + tail);
+    const nx = deadContinues(seg);
+    const nxt = out[m.index + m[0].length + tail];
+    const carries = nx.cont && nxt !== ';' && nxt !== '}' && (nx.depth > 0 || opTailOf(seg) || (seg.trim() === '' && nxt === undefined));
+    if (carries) { dead.pending = true; dead.pdepth = nx.depth; }
+    out = out.slice(0, m.index) + ' ' + braceKeep(seg) + out.slice(m.index + m[0].length + tail);
   }
   return out;
 };
@@ -283,12 +384,63 @@ const stripDead = (l, dead = deadState()) => {
 const maskStrings = (text, dead) => {
   const out = text.split('');
   let q = dead.str ?? null;
+  let rx = false, rxClass = false;
+  // `${ expr }` inside a template literal is live code, not string data —
+  // an `auth(req)` inside the interpolation dodged every call scan while
+  // the gate believed the row unauthenticated (w59-ledger F-7). The
+  // template's literal segments still mask; inside `${}`s braces carry
+  // the interpolation's own depth and strings mask recursively. `tStack`
+  // persists across calls via `dead` so a template spanning lines keeps
+  // its interpolation state.
+  const tStack = dead ? (dead.tstack ??= []) : [];
   for (let i = 0; i < out.length; i++) {
     const c = out[i];
-    if (q) { if (c === '\\') { out[i] = ' '; if (i + 1 < out.length) out[++i] = ' '; } else { out[i] = ' '; if (c === q) q = null; } continue; }
-    if (c === "'" || c === '"' || c === '`') { q = c; out[i] = ' '; }
+    if (rx) {
+      if (c === '\\') { out[i] = ' '; if (i + 1 < out.length) out[++i] = ' '; continue; }
+      if (c === '[') rxClass = true;
+      else if (c === ']') rxClass = false;
+      else if (c === '/' && !rxClass) rx = false;
+      out[i] = ' ';
+      continue;
+    }
+    if (q) {
+      if (c === '\\') { out[i] = ' '; if (i + 1 < out.length) out[++i] = ' '; continue; }
+      if (q === '`' && c === '$' && out[i + 1] === '{') { out[i] = ' '; out[i + 1] = ' '; i++; tStack.push(1); q = null; continue; }
+      out[i] = ' ';
+      if (c === q) q = null;
+      continue;
+    }
+    if (tStack.length) {
+      if (c === '{') tStack[tStack.length - 1]++;
+      else if (c === '}') {
+        tStack[tStack.length - 1]--;
+        if (tStack[tStack.length - 1] === 0) { tStack.pop(); q = '`'; out[i] = ' '; continue; }
+      } else if (c === "'" || c === '"' || c === '`') { q = c; out[i] = ' '; continue; }
+      else if (c === '/') {
+        let j = i - 1;
+        while (j >= 0 && out[j] === ' ') j--;
+        const prev = j < 0 ? '' : out[j];
+        const word = /([A-Za-z_$][\w$]*)\s*$/.exec(text.slice(0, i))?.[1] ?? '';
+        if (j < 0 || '=(:,[!&|?{};~^*%<>+-'.includes(prev) || /^(?:return|typeof|case|in|of|do|else|throw|delete|void|yield|await|new|instanceof)$/.test(word))
+          { rx = true; out[i] = ' '; continue; }
+      }
+      continue;
+    }
+    if (c === "'" || c === '"' || c === '`') { q = c; out[i] = ' '; continue; }
+    if (c === '/') {
+      // A `/` right after an operator, keyword or statement edge opens a
+      // regex literal — `/auth/` must not mint an auth call inside its
+      // body (w58-ledger F4). A `/` after a value (identifier, `)`, `]`,
+      // digit) is division.
+      let j = i - 1;
+      while (j >= 0 && out[j] === ' ') j--;
+      const prev = j < 0 ? '' : out[j];
+      const word = /([A-Za-z_$][\w$]*)\s*$/.exec(text.slice(0, i))?.[1] ?? '';
+      if (j < 0 || '=(:,[!&|?{};~^*%<>+-'.includes(prev) || /^(?:return|typeof|case|in|of|do|else|throw|delete|void|yield|await|new|instanceof)$/.test(word))
+        { rx = true; out[i] = ' '; continue; }
+    }
   }
-  dead.str = q === '`' ? q : null;
+  dead.str = tStack.length ? null : (q === '`' ? '`' : null);
   return out.join('');
 };
 // A call guarded by `cond &&`, `x ||`, a ternary or an inline `if` on
@@ -298,21 +450,1766 @@ const maskStrings = (text, dead) => {
 // keyword's own parentheses — `if (!auth(req)) return 401` — is the
 // condition itself: it evaluates unconditionally, and the operators
 // before it (`x && auth`) are what condition it (w57 h-3 parity).
-const guardedPrefix = (masked, callStart) => {
-  const stmt = masked.slice(Math.max(masked.lastIndexOf(';', callStart - 1), masked.lastIndexOf('}', callStart - 1), masked.lastIndexOf('{', callStart - 1)) + 1, callStart);
+const guardedPrefix = (masked, callStart, from) => {
+  // `from` is the provably-live arm's entry position: positions before
+  // it (the `else` keyword itself, the dead arm's edge) are not guards —
+  // but `cond &&` between the arm entry and the call still is (w62-fv
+  // F-1).
+  const floor = from === undefined || from < 0 ? 0 : from;
+  const stmt = masked.slice(Math.max(masked.lastIndexOf(';', callStart - 1), masked.lastIndexOf('}', callStart - 1), masked.lastIndexOf('{', callStart - 1), floor - 1) + 1, callStart);
   const open = [];
   for (let i = 0; i < stmt.length; i++) { if (stmt[i] === '(') open.push(i); else if (stmt[i] === ')') open.pop(); }
   for (let i = open.length - 1; i >= 0; i--) {
     if (/(?:^|[^\w$])(?:if|for|while|switch|catch)\s*$/.test(stmt.slice(0, open[i])))
       return /&&|\|\||\?/.test(stmt.slice(open[i] + 1));
   }
-  return /&&|\|\||\?|(?:^|[^\w$])if\s*\(|(?:^|[^\w$])(?:else|for|while|do)(?:\s|$)/.test(stmt);
+  return /&&|\|\||\?|=>|(?:^|[^\w$])if\s*\(|(?:^|[^\w$])(?:else|for|while|do|case|default)(?:\s|$)/.test(stmt);
 };
-// A verb-dispatch `m[N]` under any index spelling: `m['2']`, `m[+2]`,
-// `m[02]`, `m[2 ]` all dispatch exactly like `m[2]` — the sibling-arm
-// boundary must see every spelling (w57-ledger F4).
-const DISPATCH_IDX = "m\\s*\\[\\s*['\"]?\\s*\\+?\\s*\\d+\\s*['\"]?\\s*\\]";
-const DISPATCH_2 = new RegExp("m\\s*\\[\\s*['\"]?\\s*\\+?\\s*2\\s*['\"]?\\s*\\]");
+// A call inside a conditional BODY gates only a slice of requests and
+// cannot satisfy an unconditional 'authenticated' or role claim —
+// `if (x) { authorize }`, an else/case/catch/try arm, an arrow body, a
+// braceless `if (x)\n  authorize()`, a line broken after `&&`/`||`/`?`
+///`:` (w58-fv F-3, w58-ledger F5). The tracker walks masked lines:
+// `{`s after a control `)` (read back on the operand-live twin) or a
+// conditional keyword open conditional depths, and a dangling opener
+// makes the next statement conditional.
+// A static expression folder for dead-condition judgment — the regex
+// whitelist kept drifting one orthography behind (`0x0`, `''`, `void 0`,
+// `false||false`, `(x,false)`, `1===1===1`, `for(;false;)`, `i<0`,
+// `of ''`/`of new Set()`; w60-fv F-1, w60-ledger F-3/F-8). `litPrim`
+// returns the JS value of a statically-known expression (with LV_*
+// sentinels for unknown and for literal object/array/new forms), and
+// `litVal` folds that to truthiness: true / false / LV_NUL (provable
+// nullish — `x ?? y` cares) / null (not provable).
+const LV_NUL = Symbol('litNullish'), LV_UNK = Symbol('litUnknown'), LV_OBJ = Symbol('litObject'), LV_ARR = Symbol('litArray');
+const isLitMarker = v => v === LV_OBJ || v === LV_ARR || (typeof v === 'object' && v !== null && v.newCtor !== undefined);
+const truthyPrim = v => isLitMarker(v) ? true : Boolean(v);
+const topSplit = (t, ops) => {
+  // Split `t` at depth-0 occurrences of any op (skipping strings). A
+  // match at the expression start is a unary/sign, not a split point.
+  const parts = [], found = [];
+  let d = 0, cur = 0, i = 0, instr = null;
+  while (i < t.length) {
+    const c = t[i];
+    if (instr) { if (c === '\\') { i += 2; continue; } if (c === instr) instr = null; i++; continue; }
+    if (c === '"' || c === "'" || c === '`') { instr = c; i++; continue; }
+    if (c === '(' || c === '[' || c === '{') { d++; i++; continue; }
+    if (c === ')' || c === ']' || c === '}') { d--; i++; continue; }
+    if (d === 0 && i > cur) {
+      let hit = null;
+      for (const op of ops) {
+        if (!t.startsWith(op, i)) continue;
+        if (op === '>' && t[i - 1] === '=') break;       // `=>` arrow tail, not a comparison
+        hit = op; break;
+      }
+      if (hit) { parts.push(t.slice(cur, i)); found.push(hit); cur = i + hit.length; i = cur; continue; }
+    }
+    i++;
+  }
+  if (!found.length) return null;
+  parts.push(t.slice(cur));
+  return { parts, ops: found };
+};
+// Span-aware twin of topSplit — dispatch-purity checks need each operand's
+// position on the line so a verb-compare pair can be mapped inside it
+// (the masked view carries no literals to re-match) (w62-fv F-8).
+const splitSpans = (t, ops, base = 0) => {
+  const parts = [], found = [];
+  let d = 0, cur = 0, i = 0, instr = null;
+  while (i < t.length) {
+    const c = t[i];
+    if (instr) { if (c === '\\') { i += 2; continue; } if (c === instr) instr = null; i++; continue; }
+    if (c === '"' || c === "'" || c === '`') { instr = c; i++; continue; }
+    if (c === '(' || c === '[' || c === '{') { d++; i++; continue; }
+    if (c === ')' || c === ']' || c === '}') { d--; i++; continue; }
+    if (d === 0 && i > cur) {
+      let hit = null;
+      for (const op of ops) {
+        if (!t.startsWith(op, i)) continue;
+        if (op === '?' && t[i + 1] === '.') break;       // `?.` optional-chaining, not `?:` (w64-ledger F-4)
+        hit = op; break;
+      }
+      if (hit) { parts.push({ t: t.slice(cur, i), a: base + cur, b: base + i }); found.push(hit); cur = i + hit.length; i = cur; continue; }
+    }
+    i++;
+  }
+  if (!found.length) return null;
+  parts.push({ t: t.slice(cur), a: base + cur, b: base + t.length });
+  return { parts, ops: found };
+};
+// Operand classes on the masked view: a member-compare, a dispatcher
+// exec/test/match bind, or a compare on anything else are dispatch
+// shapes; a bare identifier, call, negation or `?:`-nested operand is a
+// runtime gate (w62-ledger F-3). DISP_MEMBER is assigned below — this
+// predicate only runs during scans, after the const initializes.
+const dispOperandCls = op => {
+  const t = op.trim();
+  // A comma-discard operand decides on its LAST expression only — the
+  // leading member compare in `(m[1]==='a', flag)` never gates it, so
+  // the whole operand is impure (w64-fv F-4).
+  let tt = t;
+  if (tt.startsWith('(') && tt.endsWith(')')) tt = tt.slice(1, -1).trim();
+  if (tt !== '') {
+    let d = 0, q = null;
+    for (let k = 0; k < tt.length; k++) {
+      const c = tt[k];
+      if (q !== null) { if (c === '\\') { k++; continue; } if (c === q) q = null; continue; }
+      if (c === "'" || c === '"' || c === '`') { q = c; continue; }
+      if (c === '(' || c === '[' || c === '{') d++;
+      else if (c === ')' || c === ']' || c === '}') d--;
+      else if (d === 0 && c === ',') return 'impure';
+    }
+  }
+  // `?.` is optional-chaining on the member itself (`m?.[1]==='a'`),
+  // not a `?:` gate — strip it before the ternary test (w64-ledger F-4).
+  if (t === '' || t.startsWith('!') || /[?:]/.test(t.replace(/\?\./g, ''))) return 'impure';
+  DISP_MEMBER.lastIndex = 0;
+  const member = DISP_MEMBER.test(t); DISP_MEMBER.lastIndex = 0;
+  const cmp = /[!=]==?/.test(t);
+  if (member && cmp) return /!={1,2}/.test(t) ? 'memberneg' : 'membercmp';
+  if (/\(\s*[A-Za-z_$][\w$]*\s*=[^=]/.test(t) && /\.(?:exec|test|match)\s*\(/.test(t)) return 'bind';
+  // A compare is serving-material only when it tests a dispatch field —
+  // `path === '/x'`, `req.method === 'GET'`. `flag === 'on'` /
+  // `kind === 'x'` gate on runtime state no request term controls, so
+  // under a `&&`/`||` exemption they must classify impure — otherwise
+  // `if ((m=/re/.exec(path)) && flag==='on') authorize` minted
+  // unconditional behind a flag the request cannot satisfy
+  // (w63-seal F-2).
+  if (cmp) return DISP_FIELD.test(t) ? 'othercmp' : 'impure';
+  return 'impure';
+};
+const DISP_FIELD = /\b(?:path|rawPath|rawTarget|target|url\.pathname|req\.(?:method|url|path|hostname?)|m)\b/;
+// A dispatch `if`/`while`/`for`/`switch` head whose every `||`-side is a
+// pure dispatch side carrying another verb's positive member-compare on
+// a member THIS row's verb also binds is another ROW's arm — dead scope
+// for this row, so a `;`-ended guard-return inside it does not
+// condition the tail (w56-ledger F7). A side needs at least one
+// bound-member compare to fail for this verb; an unbound member compare
+// or a guard (`early`, `m[2]!=='e'`, `x || early`) sitting beside it
+// cannot save the side — the bound conjunct already kills it for this
+// row (w63-fv F-3). Module scope: the tracker's sibArm/bracelessDead
+// checks and the collect-level sibling-line check share it.
+const siblingArm = (condPair, verbPos, verb, verbMembers, posMember, posVerb = null, proven = null) => {
+  if (condPair === null) return false;
+  const [cond, base] = condPair;
+  const cls = dispOperandCls;
+  const sides = splitSpans(cond, ['||'], base);
+  const parts = sides === null ? [{ t: cond, a: base, b: base + cond.length }] : sides.parts;
+  for (const side of parts) {
+    const s = splitSpans(side.t, ['&&', '??', ',', ':', '?'], side.a);
+    if (s !== null && s.ops.some(o => o !== '&&')) return false;
+    const ops = s === null ? [side] : s.parts;
+    // A side fails for this row the moment one `&&` conjunct folds
+    // statically false — a member compare for another verb on a member
+    // this verb binds, a negated self-compare, or the unbound-verb
+    // convention (w64-fv F-5). Every other operand is a live conjunct:
+    // it cannot make the side dead, and a side with no dead conjunct
+    // can still serve this row — the arm is no sibling then.
+    let dead = false;
+    for (const op of ops) {
+      const f = memberCmpFold(op.t, verb, verbMembers, posMember, posVerb, op.a, proven);
+      if (f !== null && f.verdict === 'const-false') { dead = true; break; }
+      // This row's own serving pair — OUR arm, not a sibling (a
+      // statically-false compare never serves, so it is folded first;
+      // w64-fv F-10: `flag && m[1]==='a'` is dead for every verb but
+      // 'a' — the live `flag` cannot resurrect the side).
+      if ((verbPos ?? []).some(p => p >= op.a && p < op.b)) return false;
+      if (f !== null) continue;   // const-true / foreign — a live conjunct
+      // A compound operand — a pair inside a `,`/`&&`/`||`/`?:`
+      // subexpression — gates the side rather than deciding it
+      // (w64-fv F-4).
+      if (compoundInner(op.t)) return false;
+      // A compare spelling the fold cannot parse (alias, resolved
+      // member): a bound-member pair for another verb is statically
+      // false for this row; everything else is a live conjunct
+      // (w63-fv F-3 keeps `m[2]==='x'` and `m[2]!=='e'` live guards).
+      // An unfolded `!==` is never a kill — its runtime gamble makes
+      // the arm conditional, not foreign-dead (w67-fv F-1).
+      if (dispOperandCls(op.t) !== 'memberneg') {
+        let pm;
+        for (const [p, mem] of posMember ?? []) if (p >= op.a && p < op.b) { pm = mem; break; }
+        if (pm !== undefined && verbMembers?.has(pm)) { dead = true; break; }
+      }
+    }
+    if (!dead) return false;
+  }
+  return true;
+};
+// A condition is request-controlled when every operand is dispatch
+// material — member compares, dispatch-field compares and regex binds:
+// `m[1]==='a'`, `path === '/x'`, `req.method === 'GET'`,
+// `(m = /re/.exec(path))`. `flag`, `early`, `kind === 'x'` and
+// non-`&&` compositions are not — a gate the request cannot satisfy is
+// never request-controlled (w59-fv F-2: an own-verb arm nested inside
+// a request gate re-includes as this row's code).
+const reqGateCond = (condPair, verb, verbMembers, posMember = null, posVerb = null, proven = null) => {
+  if (condPair === null) return false;
+  const [cond, base] = condPair;
+  const sides = splitSpans(cond, ['||'], base);
+  const parts = sides === null ? [{ t: cond, a: base, b: base + cond.length }] : sides.parts;
+  for (const side of parts) {
+    const s = splitSpans(side.t, ['&&', '??', ',', ':', '?'], side.a);
+    if (s !== null && s.ops.some(o => o !== '&&')) return false;
+    for (const op of (s === null ? [side] : s.parts)) {
+      const c2 = dispOperandCls(op.t);
+      if (c2 === 'membercmp' || c2 === 'memberneg') {
+        // A member compare on a member THIS row's verb never binds is a
+        // cross-member gate, not request material — it gates on runtime
+        // state the dispatch cannot satisfy (w64-ledger F-2: an `m[2]`
+        // check inside an m[1]-bound 'a' arm must stay conditional).
+        // A folded const-true drops out, a const-false kills its side —
+        // both are still dispatch material for the gate test.
+        const f = memberCmpFold(op.t, verb, verbMembers, posMember, posVerb, op.a, proven);
+        if (f !== null && (f.verdict === 'foreign' || f.verdict === 'const-false')) return false;
+        continue;
+      }
+      if (c2 !== 'othercmp' && c2 !== 'bind') return false;
+    }
+  }
+  return true;
+};
+const tailCtlCond = (prefix, kws = 'if|for|while') => {
+  const re = new RegExp(`\\b(${kws})\\s*\\(`, 'g');
+  let m = null;
+  for (;;) { const x = re.exec(prefix); if (!x) break; m = x; }
+  if (!m) return null;
+  const open = m.index + m[0].length - 1;
+  let d = 0, q = null;
+  for (let i = open; i < prefix.length; i++) {
+    const c = prefix[i];
+    if (q) { if (c === '\\') { i++; continue; } if (c === q) q = null; continue; }
+    if (c === "'" || c === '"' || c === '`') { q = c; continue; }
+    if (c === '(') d++;
+    else if (c === ')') { d--; if (d === 0) return /^\s*$/.test(prefix.slice(i + 1)) ? [prefix.slice(open + 1, i), open + 1, m[1]] : null; }
+  }
+  return null;
+};
+// `tailCtlCond`'s braced twin — `if (c) { return; }` — the head's `)`
+// must be followed by `{` (an arm body) rather than the return itself.
+// Braces only moved the w63 hole from unconditional-mint to
+// fully-invisible-mint (w64-fv F-1): the tail is dead for this row only
+// when the arm is the row's OWN dispatch — a sibling arm's exit never
+// ran for it, and any other live gate already conditioned the tail via
+// condTail.
+const bracedCtlCond = (prefix, kws = 'if|for|while') => {
+  const re = new RegExp(`\\b(${kws})\\s*\\(`, 'g');
+  let m = null;
+  for (;;) { const x = re.exec(prefix); if (!x) break; m = x; }
+  if (!m) return null;
+  const open = m.index + m[0].length - 1;
+  let d = 0, q = null;
+  for (let i = open; i < prefix.length; i++) {
+    const c = prefix[i];
+    if (q) { if (c === '\\') { i++; continue; } if (c === q) q = null; continue; }
+    if (c === "'" || c === '"' || c === '`') { q = c; continue; }
+    if (c === '(') d++;
+    else if (c === ')') { d--; if (d === 0) return /^\s*\{/.test(prefix.slice(i + 1)) ? [prefix.slice(open + 1, i), open + 1, m[1]] : null; }
+  }
+  return null;
+};
+const ternaryParts = t => {
+  // `a ? b : c` at depth 0 → [cond, a, b] — `?.`/`??` are not marks.
+  let d = 0, instr = null, q = -1;
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i];
+    if (instr) { if (c === '\\') i++; else if (c === instr) instr = null; continue; }
+    if (c === '"' || c === "'" || c === '`') { instr = c; continue; }
+    if (c === '(' || c === '[' || c === '{') d++;
+    else if (c === ')' || c === ']' || c === '}') d--;
+    else if (d === 0 && c === '?' && t[i + 1] !== '.' && t[i + 1] !== '?' && t[i - 1] !== '?') { q = i; break; }
+  }
+  if (q < 0) return null;
+  let d2 = 0, instr2 = null;
+  for (let j = q + 1; j < t.length; j++) {
+    const c = t[j];
+    if (instr2) { if (c === '\\') j++; else if (c === instr2) instr2 = null; continue; }
+    if (c === '"' || c === "'" || c === '`') { instr2 = c; continue; }
+    if (c === '(' || c === '[' || c === '{') d2++;
+    else if (c === ')' || c === ']' || c === '}') { if (d2 === 0) break; d2--; }
+    else if (d2 === 0 && c === ':') return [t.slice(0, q), t.slice(q + 1, j), t.slice(j + 1)];
+  }
+  return null;
+};
+const litPrim = (e0, known) => {
+  let t = e0.trim();
+  // Unwrap balanced outer parens: `(false)` folds like `false`.
+  while (t.startsWith('(')) {
+    let d = 0, close = -1;
+    for (let i = 0; i < t.length; i++) { const c = t[i]; if (c === '(') d++; else if (c === ')') { d--; if (d === 0) { close = i; break; } } }
+    if (close !== t.length - 1) break;
+    t = t.slice(1, -1).trim();
+  }
+  if (!t) return LV_UNK;
+  const comma = topSplit(t, [',']); if (comma) return litPrim(comma.parts[comma.parts.length - 1], known);
+  const ter = ternaryParts(t);
+  if (ter) { const c = litVal(ter[0], known); if (c === true) return litPrim(ter[1], known); if (c === false || c === LV_NUL) return litPrim(ter[2], known); const a = litPrim(ter[1], known), b = litPrim(ter[2], known); return a !== LV_UNK && a === b ? a : LV_UNK; }
+  for (const op of ['??', '||', '&&']) {
+    const s = topSplit(t, [op]); if (!s) continue;
+    const vals = s.parts.map(p => litPrim(p, known));
+    if (op === '??') { for (let i = 0; i < vals.length - 1; i++) { if (vals[i] === LV_UNK) return LV_UNK; if (vals[i] !== null && vals[i] !== undefined) return vals[i]; } return vals[vals.length - 1]; }
+    if (op === '||') { for (const v of vals) { if (v === LV_UNK) return LV_UNK; if (truthyPrim(v)) return v; } return vals[vals.length - 1]; }
+    for (const v of vals) { if (v === LV_UNK) return LV_UNK; if (!truthyPrim(v)) return v; }
+    return vals[vals.length - 1];
+  }
+  // Comparison binds tighter than the logic arms — `1===1===1` folds
+  // left-associatively ((1===1)===1 → true===1 → false), `a instanceof
+  // K` against a provable literal left (w60-fv F-7).
+  const cm = topSplit(t, ['===', '!==', 'instanceof', '>=', '<=', '==', '!=', '>', '<']);
+  if (cm) {
+    let acc = litPrim(cm.parts[0], known);
+    for (let i = 0; i < cm.ops.length; i++) {
+      const op = cm.ops[i];
+      if (acc === LV_UNK) return LV_UNK;
+      if (op === 'instanceof') {
+        const rn = /^\s*([A-Za-z_$][\w$]*)\s*$/.exec(cm.parts[i + 1])?.[1];
+        if (!rn) return LV_UNK;
+        if (acc === LV_OBJ) { acc = rn === 'Object'; continue; }
+        if (acc === LV_ARR) { acc = rn === 'Array' || rn === 'Object'; continue; }
+        if (typeof acc === 'object' && acc !== null && acc.newCtor !== undefined) { acc = rn === acc.newCtor || rn === 'Object'; continue; }
+        return LV_UNK;
+      }
+      const b = litPrim(cm.parts[i + 1], known);
+      if (b === LV_UNK) return LV_UNK;
+      if (isLitMarker(acc) || isLitMarker(b)) return LV_UNK;
+      acc = op === '===' ? acc === b : op === '!==' ? acc !== b : op === '==' ? acc == b : op === '!=' ? acc != b : op === '>=' ? acc >= b : op === '<=' ? acc <= b : op === '>' ? acc > b : acc < b;
+    }
+    return acc;
+  }
+  if (t === 'true') return true;
+  if (t === 'false') return false;
+  if (t === 'null') return null;
+  if (t === 'undefined') return undefined;
+  if (t === 'NaN') return NaN;
+  if (t === 'Infinity') return Infinity;
+  if (/^void\s/.test(t)) return undefined;
+  if (/^typeof\s/.test(t)) return 'x';
+  const sm = /^(['"`])((?:\\.|(?!\1)[^\\])*)\1$/s.exec(t);
+  if (sm) {
+    if (sm[1] === '`' && sm[2].includes('${')) return LV_UNK;
+    return sm[2].replace(/\\([\\'"`nrtb0])/g, (m, c) => ({ n: '\n', r: '\r', t: '\t', b: '\b', '0': '\x00' })[c] ?? c);
+  }
+  if (/^[A-Za-z_$][\w$]*$/.test(t)) return known?.get(t) ?? LV_UNK;
+  if (/^[+-]?(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|\d[\d_]*(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?[nN]?$/.test(t)) {
+    const n = Number(t.replace(/_/g, '').replace(/[nN]$/, ''));
+    return Number.isNaN(n) ? LV_UNK : n;
+  }
+  if (t.startsWith('!')) { const v = litVal(t.slice(1), known); return v === null ? LV_UNK : v !== true; }
+  if (/^[+-]/.test(t)) { const n = litPrim(t.slice(1), known); if (n === LV_UNK || isLitMarker(n)) return LV_UNK; const num = Number(n); return Number.isNaN(num) ? LV_UNK : (t[0] === '-' ? -num : num); }
+  if (/^\{[\s\S]*\}$/.test(t)) return LV_OBJ;
+  if (/^\[[\s\S]*\]$/.test(t)) return LV_ARR;
+  const nm = /^new\s+([A-Za-z_$][\w$]*)/.exec(t); if (nm) return { newCtor: nm[1] };
+  if (/\)\s*=>|^[\s\S]*=>|^\s*(?:async\s+)?function\b|^\s*class\b/.test(t)) return LV_OBJ;
+  const fm = /^(Boolean|Number|String)\s*\(([\s\S]*)\)$/.exec(t);
+  if (fm) {
+    const v = litPrim(fm[2], known);
+    if (v === LV_UNK) return LV_UNK;
+    if (fm[1] === 'Boolean') return truthyPrim(v);
+    if (fm[1] === 'Number') return isLitMarker(v) ? LV_UNK : Number(v);
+    return isLitMarker(v) ? LV_UNK : String(v);
+  }
+  return LV_UNK;
+};
+const litVal = (e, known) => {
+  const v = litPrim(e, known);
+  if (v === LV_UNK) return null;
+  if (v === null || v === undefined) return LV_NUL;
+  return truthyPrim(v);
+};
+// The dominant-control-spot predicate shared by the arm-of-pair and the
+// sibling-exemption logic: a `(` after one of these characters nests a
+// sub-operand, not a condition scope (w56-ledger F-5).
+const TRANSPARENT_PAREN_PRED = new Set(['(', '&', '|', '!', '?', ':', ',', '']);
+// Whether a position inside a paren nest sits at the dominant control
+// spot — `hit(c, k)` is invoked at depth 0 of the term (w56-ledger F-5).
+const logicalScan = (lm, from, to, hit) => {
+  let d = 0;
+  for (let k = from; k < to; k++) {
+    const c = lm[k];
+    if (c === '(') {
+      let j = k - 1; while (j >= from && lm[j] === ' ') j--;
+      if (!TRANSPARENT_PAREN_PRED.has(j >= from ? lm[j] : '')) d++;
+    } else if (c === '[' || c === '{') d++;
+    else if (c === ')' || c === ']' || c === '}') d--;
+    else if (d === 0 && hit(c, k)) return true;
+  }
+  return false;
+};
+// Walk back from a member-compare position to the `(` that owns it —
+// `if`/`else`/`while`/`for`/`switch`/`return`/`case` heads open the span;
+// call args, index brackets and operand positions mint nothing.
+const armOf = (lm, pos) => {
+  let d = 0, open = -1;
+  for (let k = pos - 1; k >= 0; k--) {
+    const c = lm[k];
+    if (c === ')') { d++; continue; }
+    if (c !== '(') continue;
+    if (d > 0) { d--; continue; }
+    let j = k - 1; while (j >= 0 && (lm[j] === ' ' || lm[j] === '\t')) j--;
+    const ch = j >= 0 ? lm[j] : '';
+    const word = /[\w$]+$/.exec(lm.slice(Math.max(0, j - 40), j + 1))?.[0] ?? '';
+    if (word === 'if' || word === 'while' || word === 'for' || word === 'switch' || word === 'return' || word === 'case') { open = k; break; }
+    if (word !== '' || ch === ')' || ch === ']' || ch === '.') return null;
+    if ('=+-*/%<>^~[{'.includes(ch)) return null;
+  }
+  if (open < 0) return null;
+  d = 0; let close = lm.length;
+  for (let k = open; k < lm.length; k++) {
+    const c = lm[k];
+    if (c === '(') d++;
+    else if (c === ')') { d--; if (d === 0) { close = k; break; } }
+  }
+  let last = open + 1; const terms = [];
+  for (let k = open + 1; k < close; k++) {
+    const c = lm[k];
+    if (c === '(') d++;
+    else if (c === ')' || c === ']' || c === '}') d--;
+    else if (d === 0 && c === '|' && lm[k + 1] === '|') { terms.push([last, k]); k++; last = k + 1; }
+  }
+  terms.push([last, close]);
+  let term = null;
+  for (const ts of terms) if (pos >= ts[0] && pos < ts[1]) { term = ts; break; }
+  return { open, term };
+};
+// A top-level `&&`, `?`, or `:` inside the term makes the compare a
+// conjunct — `m===v && x` serves v only when x also holds (or is
+// statically dead), and `?:` arms are conditional by shape. `?.` and
+// `??` are members/nullish, not conditionals.
+const conditionalTerm = (lm, term) => {
+  if (!term) return true;
+  return logicalScan(lm, term[0], term[1], (c, k) => (c === '&' && lm[k + 1] === '&') || (c === '?' && lm[k + 1] !== '.' && lm[k + 1] !== '?') || c === ':');
+};
+// `!(member===v)` / `!member===v` / `!member` — a `!` at logical depth 0
+// before the member negates the compare.
+const negatedCompare = (lm, term, memberStart) => {
+  if (!term) return true;
+  return logicalScan(lm, term[0], memberStart, (c, k) => c === '!' && lm[k + 1] !== '=');
+};
+// `default:` mints its arm under every verb no case label binds —
+// emitted as a sentinel pair verb so `p.verb === v` still reads the
+// row's own cases while `pairServes` widens it (w64-fv F-6).
+const DEFAULT_CASE = Symbol('defaultCase');
+// A member compare folds against this row's verb: `m[N]==='v'` /
+// `m[N]!=='v'` on a member the verb binds — or on any member for a verb
+// that binds none, where the queried verb IS the compared value by
+// convention (w64-fv F-5/F-10) — is statically decidable; on a member
+// the verb never binds it is a real cross-member gate ('foreign').
+// Returns null when the operand isn't a plain `m[N]` compare.
+const memberCmpFold = (t, verb, verbMembers, posMember = null, posVerb = null, base = 0, proven = null) => {
+  if (verb === null || verb === undefined) return null;
+  const x = /^\s*\(?\s*m\s*(?:\?\s*\.\s*)?(?:\[\s*([^\]]+)\s*\]|(?:\?\s*\.\s*|\.\s*)at\s*(?:\?\s*\.\s*)?\(\s*([^)]*)\))\s*([!=]={2,3})\s*([^)]*?)\s*\)?\s*$/.exec(t);
+  if (!x) return null;
+  const idx = DISP_IDX_EVAL(x[1] ?? x[2] ?? '', x[1] === undefined);
+  if (idx === null) return null;
+  const member = `m[${idx}]`;
+  // The compared literal is mask-blanked in the tracker view
+  // (`m[2]===   `); resolve it through the pair maps when the text
+  // lost it so folds still decide on the real value (w64).
+  let v = null;
+  const rhs = (x[4] ?? '').trim();
+  const q = /^'([^']*)'$|^"([^"]*)"$|^`([^`]*)`$/.exec(rhs);
+  if (q !== null) v = q[1] ?? q[2] ?? q[3];
+  if (v === null && rhs === '' && posVerb !== null)
+    for (const [p, mv] of posVerb)
+      if (p >= base && p < base + t.length && (posMember === null || posMember.get(p) === member)) { v = mv; break; }
+  // A negated compare on an UNPROVEN member is a real runtime gamble,
+  // not a static fold: `m[2]!=='y'` is decidable only when a POSITIVE
+  // compare proves the member discriminates — then an unbound verb
+  // rides it conventionally and `!=='v'` folds (w64-fv F-5). With no
+  // positive vote the implicit-member convention does not reach `!==`:
+  // 'x'-requests may carry 'y' dynamically (w67-fv F-1).
+  if (x[3][0] === '!' && proven !== null && !proven.has(member)) return null;
+  if (verbMembers !== undefined && verbMembers !== null && verbMembers.size !== 0 && !verbMembers.has(member)) return { member, verdict: 'foreign' };
+  if (v === null || v === DEFAULT_CASE || typeof v !== 'string') return null;
+  const eq = x[3][0] !== '!';
+  return { member, verdict: eq === (v === verb) ? 'const-true' : 'const-false' };
+};
+// A bound pair nested inside a compound operand does not serve: `,`
+// discards it (`(m[1]==='a', flag)`), `&&`/`||`/`?:` conjoin it to
+// runtime state (`(flag || m[1]==='a')`). The operand is a gate, not
+// dispatch material (w64-fv F-4).
+const compoundInner = t => {
+  let tt = t.trim();
+  for (;;) {
+    if (!tt.startsWith('(') || !tt.endsWith(')')) break;
+    let d = 0, wraps = true;
+    for (let k = 0; k < tt.length; k++) {
+      const c = tt[k];
+      if (c === '(') d++;
+      else if (c === ')') { d--; if (d === 0 && k < tt.length - 1) { wraps = false; break; } }
+    }
+    if (!wraps || d !== 0) break;
+    tt = tt.slice(1, -1).trim();
+  }
+  return /&&|\|\||,|\?(?![.?])|:(?!:)/.test(tt);
+};
+const dispatchPure = (condPair, verbPos = null, verb = null, verbMembers = null, posMember = null, posVerb = null, proven = null) => {
+  if (condPair === null) return false;
+  const [cond, base] = condPair;
+  const cls = dispOperandCls;
+  const sideOps = side => {
+    const s = splitSpans(side.t, ['&&', '??', ',', ':', '?'], side.a);
+    if (s === null) return [side];
+    if (s.ops.some(o => o !== '&&')) return null;
+    return s.parts;
+  };
+  // A pure side is all-`&&`-operands of dispatch shape. For the row's
+  // own verb the arm must additionally SERVE it: a single-side head
+  // serves when some operand is our verb's member-compare or a
+  // dispatcher bind — `req.method==='GET' && (m=/x/.exec(path))`
+  // defines what an 'a' request even is (w62-check). Under `||` a bind
+  // no longer serves: it only gates the request (the regex can still
+  // reject 'a'), so an alternation arm needs a side whose positive
+  // member-compare the pair scan bound to this verb —
+  // `m[1]==='a' || m[1]==='b'`/`m[1]==='a' || gate` still fire for
+  // every 'a' request, `bind || fallback` never does (w59-fv F-1).
+  // Another verb's member compare or a negated member gates the side
+  // like any conjunct — `m[1]==='a' && m[2]==='b'` is 'b'-conditional
+  // here; `x==='y'` alone serves no verb at all.
+  // A bound pair nested inside a `,`/`&&`/`||`/`?:` operand does not
+  // serve — the comma discards it and the joiners conjoin it to
+  // runtime state the request cannot satisfy (w64-fv F-4).
+  const vcPos = op => !compoundInner(op.t) && (verbPos ?? []).some(p => p >= op.a && p < op.b);
+  // An operand containing a bound pair position IS a dispatch compare
+  // whatever its spelling — a resolved alias (`sub === 'a'`) carries
+  // no `m[N]` surface yet bound through dispAliases (w63-seal F-2
+  // fallout: the field narrowing classified it impure).
+  // A member compare folded against this row's verb is still dispatch
+  // material — `m[1]!=='b'` beside `m[1]==='a'` is a tautology, not a
+  // gate, for 'a' (w64-fv F-5); a compare on a member this verb never
+  // binds stays a live conjunct.
+  const foldCls = op => {
+    const c2 = cls(op.t);
+    if (c2 !== 'membercmp' && c2 !== 'memberneg') return { cls: c2 };
+    const f = memberCmpFold(op.t, verb, verbMembers, posMember, posVerb, op.a, proven);
+    if (f !== null && f.verdict === 'const-true') return { cls: 'folded' };
+    return { cls: c2, foreign: f !== null && f.verdict === 'foreign', constFalse: f !== null && f.verdict === 'const-false' };
+  };
+  const opPure = op => { const fc = foldCls(op); return vcPos(op) || fc.cls !== 'impure'; };
+  // An operand containing a pair position IS this verb's positive
+  // compare — whatever its spelling (`m[N]`, a resolved alias, a
+  // `case` label). Other member-compares and negated members are
+  // gates here (w60-fv F-4).
+  const opServe = op => vcPos(op) || cls(op.t) === 'othercmp' || cls(op.t) === 'bind' || foldCls(op).cls === 'folded';
+  // A statically-false conjunct kills the whole head for this row —
+  // `m[1]==='a' && m[1]!=='b'` never fires for 'b', so it is neither
+  // 'b''s arm nor a gate: the sibling check marks it dead.
+  const pureSide = side => {
+    const ops = sideOps(side);
+    return ops !== null && ops.every(opPure) && !ops.some(op => { const fc = foldCls(op); return fc.foreign || fc.constFalse; }) ? ops : null;
+  };
+  const sides = splitSpans(cond, ['||'], base);
+  if (sides === null) {
+    const ops = pureSide({ t: cond, a: base, b: base + cond.length });
+    if (ops === null) return false;
+    // No bound pair on the line: the arm is dispatch-shaped only when
+    // EVERY conjunct serves the request shape — dispatch-field compares
+    // (`path`, `req.method`, `url`) or regex binds. A member compare on
+    // an unbound member (`m[1]!=='health'`, `q==='x'`) is a gate the
+    // request may fail, so it keeps the arm conditional (w63-seal F-2).
+    if (verbPos === null) return ops.every(op => cls(op.t) === 'bind' || cls(op.t) === 'othercmp');
+    return ops.some(op => vcPos(op) || cls(op.t) === 'bind');
+  }
+  if (verbPos === null) return sides.parts.every(s => pureSide(s) !== null);
+  // A side serves when every conjunct is dispatch material — a bound
+  // pair, a dispatch-field compare, a bind, or a member fold that is
+  // statically true for this row (`m[1]!=='b'` serves every verb but
+  // 'b', so `m[1]==='a' || m[1]!=='b'` is unconditional for 'c',
+  // w64-fv F-5) — and at least one actually serves.
+  return sides.parts.some(side => {
+    const ops = sideOps(side);
+    return ops !== null && ops.every(opServe) && ops.some(op => vcPos(op) || foldCls(op).cls === 'folded');
+  });
+};
+// Whether this row's verb is served by pair `p`: its own case/compare,
+// a verb that falls through into the pair's arm, a `default` arm when
+// the verb has no case anywhere in the switch, or an arm after an
+// un-exited `default` (w64-fv F-6).
+const pairServes = (p, verb, caseMap) =>
+  // Only an operator-negated compare fails to serve its verb: a
+  // conjunct-gated pair (`flag && m[1]==='a'`) still IS 'a''s arm
+  // (w67-ledger F-3).
+  p.opNeg !== true
+  && (p.verb === verb
+    || p.fall?.has(verb)
+    || (p.verb === DEFAULT_CASE && !caseMap?.get(p.sw?.key)?.allCases?.has(verb))
+    || (p.fall?.has(DEFAULT_CASE) && !caseMap?.get(p.sw?.key)?.allCases?.has(verb)));
+// The positive member-compare pairs a masked line carries: `m[N]==='v'`
+// in `if`/`else if`/`while`/`case`/ternary arms, alias-resolved compares,
+// and `switch(m[N])` case labels — with fall-through and `default`
+// semantics (w64-fv F-6). `sw` is the caller's live switch stack;
+// `verb`/`verbMembers` let `&&`-conjunct folds keep a pair whose extra
+// conjuncts are statically true for this row (w64-fv F-5).
+const pairsForLine = (l, lm, i, stmtDepth, sw, aliases, verb, verbMembers, allCases) => {
+  const out = [];
+  // A `switch (<member>)` opens a dispatch frame whose `case 'v'`
+  // literals compare exactly like `m[N]==='v'` arms — unjudged switches
+  // minted a bare 'any' for every verb (w61-ledger F-5). `default` is a
+  // sentinel pair that serves every verb no case binds (w64-fv F-6).
+  {
+    while (sw.length && stmtDepth <= sw.at(-1).depth) sw.pop();
+    for (const sm of l.matchAll(/\bswitch\s*\(/g)) {
+      if (lm[sm.index] === ' ') continue;
+      let d = 0, k = sm.index + sm[0].length, end = -1;
+      for (; k < l.length; k++) { const c = l[k]; if (c === '(') d++; else if (c === ')') { if (d === 0) { end = k; break; } d--; } }
+      if (end < 0) continue;
+      const op = l.slice(sm.index + sm[0].length, end);
+      // Parens/`??`/`,`/alias wrappers on the operand all dispatch on
+      // the member beneath them (w65-fv F-5).
+      const member = switchOperandMember(op, aliases, i * 1e7 + sm.index);
+      if (member !== null) sw.push({ member, depth: stmtDepth - 1, at: sm.index, key: i * 1e7 + sm.index, open: null, openExit: false, flow: new Set(), allCases: new Set(), hasDefault: false, segFrom: 0 });
+    }
+    const top = sw.at(-1);
+    if (top) {
+      const labels = [];
+      for (const cm of l.matchAll(/\b(?:case\s*(?:'([^']+)'|"([^"]+)"|`([^`]+)`)|default\s*:)/g))
+        if (lm[cm.index] !== ' ' && (stmtDepth > top.depth || cm.index > top.at)) labels.push(cm);
+      if (top.open !== null && /\b(?:break|return|throw|continue)\b/.test(l.slice(0, labels.length ? labels[0].index : l.length))) top.openExit = true;
+      for (const cm of labels) {
+        if (top.open !== null) {
+          if (!top.openExit && !/\b(?:break|return|throw|continue)\b/.test(l.slice(top.segFrom, cm.index))) top.flow.add(top.open);
+          top.open = null; top.openExit = false;
+        }
+        const isD = cm[1] === undefined && cm[2] === undefined && cm[3] === undefined;
+        const v2 = isD ? DEFAULT_CASE : (cm[1] ?? cm[2] ?? cm[3]);
+        out.push({ member: top.member, verb: v2, pos: cm.index, sw: top, fall: new Set(top.flow) });
+        if (isD) { top.hasDefault = true; top.open = DEFAULT_CASE; }
+        else { top.allCases.add(v2); top.flow.delete(v2); top.open = v2; }
+        top.segFrom = cm.index + cm[0].length;
+      }
+      allCases?.set(top.key, top);
+    }
+  }
+  for (const x of l.matchAll(DISP_MEMBER)) {
+    if (lm[x.index] === ' ') continue;
+    const idx = DISP_IDX_EVAL(x[1] ?? x[2] ?? '', x[1] === undefined);
+    if (idx === null) continue;
+    const cmp = /^\s*([!=]={2,3})\s*'([^']+)'/.exec(l.slice(x.index + x[0].length));
+    if (!cmp) continue;
+    // A chained `===`/`!==` right after the literal makes the whole
+    // expression a different comparison — `m[1]==='a'===false` is true
+    // iff `m[1]!=='a'` — so the extracted compare's polarity inverts
+    // (w67-ledger F-2). Bind no pair; the arm gates like any runtime
+    // expression.
+    if (/^\s*[!=]={2,3}/.test(l.slice(x.index + x[0].length + cmp[0].length))) continue;
+    const a = armOf(lm, x.index);
+    if (!a) continue;
+    if (negatedCompare(lm, a.term, x.index)) continue;
+    // A `m[N]!=='v'` compare never serves 'v' — its arm runs for every
+    // OTHER value — but the pair still seeds the pos maps so
+    // memberCmpFold resolves the masked literal and folds it
+    // statically (`m[1]!=='b'` is true for 'a', false for 'b',
+    // w64-fv F-5). `neg` keeps it out of every serving set.
+    // `opNeg` marks operator negation only — it excludes the pair from
+    // serving sets and votes. The conjunct-gated mark below (`neg` on
+    // an un-droppable `&&` sibling) excludes serving but still VOTES —
+    // `flag && m[2]==='y'` proves `m[2]` discriminates 'y' (w67-ledger F-3).
+    if (cmp[1][0] === '!') { out.push({ member: `m[${idx}]`, verb: cmp[2], pos: x.index, sw: null, fall: null, neg: true, opNeg: true }); continue; }
+    if (conditionalTerm(lm, a.term)) {
+      // A top-level `&&` sibling that folds statically-true for this
+      // verb is dead weight — `m[1]==='a' && m[1]!=='b'` IS 'a''s arm
+      // (w64-fv F-5); any other conjunct keeps the arm conditional.
+      const s = splitSpans(lm.slice(a.term[0], a.term[1]), ['&&', '??', ',', ':', '?'], a.term[0]);
+      if (s === null || s.ops.some(o => o !== '&&')) continue;
+      let droppable = true;
+      for (const op of s.parts) {
+        if (x.index >= op.a && x.index < op.b) continue;
+        const f = memberCmpFold(l.slice(op.a, op.b), verb, verbMembers);
+        if (f === null || f.verdict !== 'const-true') { droppable = false; break; }
+      }
+      // An un-droppable conjunct makes the pair non-serving, but the
+      // pair still seeds the pos maps — `flag && m[1]==='a'` is 'a''s
+      // arm for the fold and dead for every other verb (w64-fv F-10).
+      if (!droppable) { out.push({ member: `m[${idx}]`, verb: cmp[2], pos: x.index, sw: null, fall: null, neg: true }); continue; }
+    }
+    out.push({ member: `m[${idx}]`, verb: cmp[2], pos: x.index, sw: null, fall: null });
+  }
+  for (const nm of aliases.hist.keys()) {
+    const esc = nm.replace(/\$/g, '\\$');
+    // Whole-dispatcher alias — `q[N]==='verb'` dispatches like
+    // `m[N]==='verb'` — only when the binding live AT THIS COMPARE's
+    // position is the whole dispatcher (w61-ledger F-5, w63-fv F-6).
+    const re = new RegExp(`\\b${esc}\\s*(?:\\?\\s*\\.\\s*)?(?:\\[\\s*([^\\]]+)\\]|(?:\\?\\s*\\.\\s*|\\.\\s*)at\\s*\\?\\s*\\.?\\s*\\(\\s*([^)]*)\\))`, 'g');
+    for (const x of l.matchAll(re)) {
+      if (lm[x.index] === ' ') continue;
+      if (aliases.at(nm, i * 1e7 + x.index) !== 'm') continue;
+      const idx = DISP_IDX_EVAL(x[1] ?? x[2] ?? '', x[1] === undefined);
+      if (idx === null) continue;
+      const cmp = /^\s*([!=]={2,3})\s*'([^']+)'/.exec(l.slice(x.index + x[0].length));
+      if (!cmp) continue;
+      // Same chained-comparison polarity guard as the `m[N]` site
+      // (w67-ledger F-2).
+      if (/^\s*[!=]={2,3}/.test(l.slice(x.index + x[0].length + cmp[0].length))) continue;
+      const a = armOf(lm, x.index);
+      if (!a) continue;
+      if (negatedCompare(lm, a.term, x.index)) continue;
+      // A `m[N]!=='v'` compare never serves 'v' — its arm runs for
+      // every OTHER value — but the pair still seeds the pos maps so
+      // memberCmpFold resolves the masked literal and folds it
+      // statically (`m[1]!=='b'` is true for 'a', false for 'b',
+      // w64-fv F-5). `neg` keeps it out of every serving set.
+      if (cmp[1][0] === '!') { out.push({ member: `m[${idx}]`, verb: cmp[2], pos: x.index, sw: null, fall: null, neg: true }); continue; }
+      if (conditionalTerm(lm, a.term)) continue;
+      out.push({ member: `m[${idx}]`, verb: cmp[2], pos: x.index, sw: null, fall: null });
+    }
+    const v = new RegExp(`\\b${esc}\\s*={2,3}\\s*'([^']+)'`).exec(l);
+    if (v && lm[v.index] !== ' ') {
+      const resolved = aliases.at(nm, i * 1e7 + v.index);
+      const a = armOf(lm, v.index);
+      // The pair binds the RESOLVED member at the compare's own
+      // position — two spellings of one member contradict through the
+      // frame's pair set (w60-fv F-4, w63-fv F-6).
+      if (resolved !== undefined && resolved !== 'm' && a && !negatedCompare(lm, a.term, v.index) && !conditionalTerm(lm, a.term)) out.push({ member: resolved, verb: v[1], pos: v.index, sw: null, fall: null });
+    }
+  }
+  return out;
+};
+// A route-arm `if` bounds a handler scan only when the ROUTE signature
+// sits in the line's LEADING `if` condition AND that head carries no
+// member-compare pair — `if (m[1]==='a' && path==='/x')` is a verb arm
+// (w64-ledger F-1), and a second `if` mid-line is never a boundary
+// (w64-fv F-2).
+const routeArmBoundary = (l, lm, i, sw, aliases) => {
+  if (!isIf(l)) return false;
+  const ih = /\bif\s*\(/.exec(l);
+  if (!ih) return false;
+  let d = 0, end = -1;
+  for (let k = ih.index + ih[0].length; k < l.length; k++) { const c = l[k]; if (c === '(') d++; else if (c === ')') { if (d === 0) { end = k; break; } d--; } }
+  if (end < 0) return false;
+  const cond = l.slice(ih.index + ih[0].length, end);
+  // Detect the dispatch compare on the masked twin of the same span —
+  // a `path === '/x'`/`req.method === 'X'` planted inside a string
+  // literal can't pose as the boundary (w66-ledger F-1).
+  const condM = lm.slice(ih.index + ih[0].length, end);
+  // `lm` blanks regex bodies along with strings — the `/^` dispatch
+  // arm reads the code view where regex contents survive (l is already
+  // comment-free); the literal-compare arm needs `lm`'s masking.
+  if (!(literalCmps(condM, cond, '\\bpath\\b|req\\.method\\b|req\\.url\\b|url\\.pathname\\b').some(c => c.op === '===' || c.op === '==') || /\/\^/.test(codeSpan(cond)))) return false;
+  return !pairsForLine(l, lm, i, 0, sw.slice(), aliases).some(p => p.pos >= ih.index + ih[0].length && p.pos < end);
+};
+const deadCond = prev => {
+  let d = 0, close = -1;
+  for (let k = prev.length - 1; k >= 0; k--) {
+    const c = prev[k];
+    if (c === ')') { if (d === 0) close = k; d++; }
+    else if (c === '(') {
+      d--;
+      if (d === 0) {
+        const head = /([A-Za-z_$][\w$]*)\s*$/.exec(prev.slice(0, k))?.[1] ?? '';
+        const cond = prev.slice(k + 1, close);
+        if (/^(?:if|while)$/.test(head)) {
+          const v = litVal(cond, null);
+          return v === false || v === LV_NUL;
+        }
+        if (head !== 'for') return false;
+        // `for` heads are three spellings: classic `init;cond;step`
+        // (dead when the middle clause folds falsy — the init's own
+        // bound values count, so `let i=0;i<0` is dead), `of`/`in`
+        // iteration (dead over a provably-empty iterable), and the
+        // infinite `;;` form (live). (w60-fv F-1, w60-ledger F-3.)
+        const s = topSplit(cond, [';']);
+        if (!s) {
+          const om = /\b(of|in)\s+([\s\S]+?)\s*$/.exec(cond);
+          if (!om) return false;
+          const operand = litPrim(om[2], null);
+          const emptyCtor = (typeof operand === 'object' && operand !== null && operand.newCtor !== undefined)
+            && /^new\s+[A-Za-z_$][\w$]*\s*(?:\(\s*(?:\[\s*\])?\s*\)|$)/.test(om[2]);
+          if (om[1] === 'in')
+            // `in` iterates KEYS: dead only over provably keyless
+            // operands — `in {a:1}`/`in [1]` DO run (the flat LV_OBJ/
+            // LV_ARR markers mis-dead-spanned them, w61-fv F-7).
+            return operand === null || operand === undefined
+              || typeof operand === 'number' || typeof operand === 'boolean' || operand === ''
+              || /^\s*\{\s*\}$/.test(om[2]) || /^\s*\[\s*\]$/.test(om[2])
+              || (emptyCtor && /^(?:Set|Map|WeakMap|WeakSet|Array|Object)$/.test(operand.newCtor));
+          // `of`: dead over a provably-empty iterable (`''`, `[]`,
+          // fresh empty containers) or a non-iterable operand that
+          // throws before the body (`{}`, null, numbers, booleans —
+          // `of 5`/`of ''` used to stay live, w61-ledger F-4); `of [1]`
+          // iterates and must NOT dead-span (w61-fv F-7).
+          return operand === '' || operand === null || operand === undefined
+            || typeof operand === 'number' || typeof operand === 'boolean'
+            || operand === LV_OBJ || /^\s*\[\s*\]$/.test(om[2])
+            || (emptyCtor && /^(?:Set|Map|WeakMap|WeakSet|Array)$/.test(operand.newCtor));
+        }
+        if (s.parts.length !== 3) return false;
+        const mid = s.parts[1].trim();
+        if (!mid) return false;
+        const known = new Map();
+        for (const decl of topSplit(s.parts[0], [','])?.parts ?? [s.parts[0]]) {
+          const dm = /^(?:const|let|var)?\s*([A-Za-z_$][\w$]*)\s*=\s*([\s\S]+)$/.exec(decl.trim());
+          if (dm) { const v = litPrim(dm[2], known); if (v !== LV_UNK) known.set(dm[1], v); }
+        }
+        const v = litVal(mid, known);
+        return v === false || v === LV_NUL;
+      }
+    }
+  }
+  return false;
+};
+const condTracker = () => {
+  // {d, g}: d = the frame's body depth; g = the body carried a
+  // dominating exit (`return`/`throw`/`break`/`continue`), so closing
+  // the frame leaves the tail conditional instead of restoring the
+  // unconditional span (w63-fv F-1).
+  const condDepths = [];
+  // Tail-conditional marks: a `}` that closed a live conditional frame
+  // whose body exited (return/throw/…) leaves everything after it gated
+  // on the frame's condition (w63-fv F-1). Kept separate from real
+  // containing conditions — a call under ONLY tail marks still resolves
+  // for every request that reaches it (the earlier arm not firing IS
+  // the reachability condition of every later statement), so the
+  // credential-resolution scans may look through them (condPosDeep).
+  const condTail = [];
+  const deadDepths = new Set();
+  // Depth → opening-head kind for every entry in deadDepths — persists
+  // across lines like its sibling so a `}` closing a dead arm on a
+  // LATER line still knows the arm was an `if` and can arm its else's
+  // live latch (a per-line map dropped multiline dead arms' elses into
+  // conditional limbo — w61-fv F-9's own gap under w63-fv F-4).
+  const deadHeads = new Map();
+  let pending = false;
+  // A braceless provably-dead condition (`if (0) x()`) dead-spans its
+  // single statement exactly like the braced arm — the `}`-free form
+  // minted `any` where `if (0) { x() }` minted nothing (w60 gate hole).
+  // `{depth, nestedIf}` — cleared at `;`, at a `}` closing a scope at
+  // or above the statement's own lexical depth (an object literal's `}`
+  // used to clear it early and mint, w61-fv F-1), at a binding `else`,
+  // or at EOL when the trailing token makes the statement ASI-complete
+  // (a dead `if (0) x = f(p)` bled the dead span onto the next line's
+  // live statement, w61-fv F-8).
+  let bracelessDead = null;
+  // The else-arm of a proven-dead `if` is provably LIVE — its statement
+  // runs unconditionally where the dead arm never did (w61-fv F-9);
+  // `{depth}`, cleared at the same boundaries (one statement arm).
+  let bracelessLive = null;
+  // A LIVE braceless `if`'s else-arm is gated on `!cond` — one
+  // statement of conditional scope, cleared at `;`, a `}` at or
+  // shallower than the arm's own block, or an EOL-closing tail
+  // (w63-fv F-4: `if (c) x(); else authorize` minted unconditional).
+  let bracelessCond = null;
+  // Set when a `}` closes a proven-dead braced arm — the else of a dead
+  // `if` is provably live; consumed by the next significant token.
+  let deadElseExpected = null;
+  // The else-arm of OUR OWN dispatch `if` is dead scope for this verb —
+  // `if (m[1]==='a') x(); else authorize` can never run for an 'a'
+  // request, yet it minted 'a' unconditionally (w63-fv F-4).
+  // `pendingIfOurs` tracks the innermost braceless `if` awaiting a body
+  // or an `else` — a nested `if` displaces it (the else binds the INNER
+  // one). `deadElseArm` = {depth, arm} once armed.
+  // `pendingIfs` is a STACK of innermost braceless `if`s awaiting a
+  // body or an `else` — a nested `if` displaces the outer (the else
+  // binds the INNER one) and the stack restores it once the inner
+  // statement closes (w64-ledger F-5). Each entry: {depth, cls, cond,
+  // bodyDone} where cls is 'ours' (this row's dispatch — its else is
+  // dead for us), 'sibling' (another row's arm — its else is our live
+  // arm), or 'cond' (a real gate). `pendCls` classifies the pending
+  // head — defined inside `line` since it reads that call's verb
+  // context.
+  let pendingIfs = [], deadElseArm = null, lastIfWasBraced = false;
+  // `ownCaseDepth` = the body depth of this row's own `case`/`default`
+  // label — its arm mints unconditionally like a braced own-dispatch
+  // arm (w64-fv F-6: `case 'a': authorize` IS 'a''s arm).
+  let ownCaseDepth = -1, ownCaseColon = -1;
+  // `oursIfArm` = the `{`-body depth of THIS row's braced dispatch arm;
+  // when its `}` pops, `oursElseExpected` latches so a following `else`
+  // (and every `else` of the same chain) is dead scope for this verb —
+  // `if (m[1]==='a') { x(); } else authorize` can never run for 'a'
+  // (w63-fv F-4, braced twin of the braceless latch).
+  let oursIfArm = -1, oursIfNested = false, oursElseExpected = null;
+  // Dispatch-chain failure ledger keyed by arm-head depth: the final
+  // `else` of a chain runs for this row only when every prior head
+  // failed for it. true — every head so far is dead-for-this-verb
+  // (bound-member sibling arm, literal-dead cond, ours-else dead
+  // scope); 'ours' — this row already took an arm (its else is dead
+  // for this verb); false — a live head this verb might satisfy (the
+  // else is conditional, never unconditional). A chain without a
+  // member-bound foreign head is not a dispatch chain for this row
+  // at all (w63-fv F-4's "live for everyone else").
+  const chainFailed = new Map();
+  // Parallel ledger: whether EVERY head of the accumulated chain was
+  // request-controlled (member/dispatch-field compares and regex binds
+  // only) — consulted by else-arm `bracelessCond` mints (w59-fv F-2).
+  const chainFailedReq = new Map();
+  // Callable-body `{` depths — a `return` inside a nested function or
+  // arrow exits THAT callable, never the route's flow, so it must not
+  // arm the guarded-tail latch on enclosing frames (w63-fv F-1
+  // fallout: `() => { return g }` left the tail conditional). Persists
+  // across lines — a multi-line callable stays a boundary.
+  const callScopes = new Set();
+  // The word owning the `(` matching a trailing `)` — `if (`/`catch (`
+  // gate their body; `for`/`while`/`switch`/`function` do not (w58
+  // doctrine: a loop body is the handler's own scope). Runs on the
+  // raw-masked twin (`lraw`) so a dead-operand blanked `)` cannot hide
+  // the brace's owner (w59-ledger F-6).
+  const parenOwner = prev => {
+    let d = 0;
+    for (let k = prev.length - 1; k >= 0; k--) {
+      const c = prev[k];
+      if (c === ')') d++;
+      else if (c === '(') {
+        d--;
+        if (d === 0) return /([A-Za-z_$][\w$]*)\s*$/.exec(prev.slice(0, k))?.[1] ?? '';
+      }
+    }
+    return null;
+  };
+  // A literal-false condition makes its block provably dead — not merely
+  // conditional: `while (false)`, `for (const x of [])`, `if (false)`,
+  // `else if (0)` bodies never run at all, so an authorize inside can
+  // neither mint a role nor break an 'unauthenticated' claim
+  // (w59-ledger F-6). `prev` ends with the condition's `)` (whitespace
+  // tolerated); the cond slice ends at that `)`, not at the line end.
+  // `line` walks one masked line at start depth `sd`. `mode` 'ours'
+  // marks the row's own dispatch `{` — its body is the row's entry
+  // scope and is unconditional even though its opener is an `if`;
+  // 'sibling' marks a dispatch arm for a DIFFERENT verb — that arm is
+  // dead for this row rather than conditional, so an own-verb arm
+  // nested inside it still mints unconditionally (w56-fv F-2).
+  const line = (lm, sd, mode, lraw, forUncond = false, verbPos = null, allPos = null, verbMembers = null, posMember = null, verb = null, posVerb = null, swServed = null, negPos = null, aliasCtx = null, l0 = null) => {
+    // The literal-bearing twin of `lm` — same length, so lm-space
+    // offsets slice it verbatim. `lraw`/`lm` blank string contents, so
+    // `req.method === 'X'` reads go through `lit` (w65-fv F-8).
+    const lit = l0 ?? lm;
+      // An unbound verb rides the member its literal names (positive or
+      // negated compare, gated or not) — 'x' names m[2] via `m[2]==='x'`,
+      // so compares on m[1] are foreign live gates for it; a verb named
+      // nowhere rides the implicit member (w64-fv F-5 ride doctrine).
+      const memberDead = verb !== null && (verbMembers?.size ?? 0) === 0
+        ? (aliasCtx?.ride?.get(verb) !== undefined ? new Set([aliasCtx.ride.get(verb)]) : (aliasCtx?.implicit?.() ?? IMPLICIT_ROW_MEMBER))
+        : verbMembers;
+    // A plurality arm resting on a member the row does not prove to be
+    // a verb discriminator is a model gamble for an unbound verb:
+    // `if (m[2]==='y')` may match a resource value an x-request
+    // carries, so the arm is conditional — not dead — and its else
+    // mints conditional, never unconditional (w66-fv F-5). A member is
+    // proven when at least two distinct verbs dispatch on it in the
+    // row (a single compare is an id-filter); a verb bound on the
+    // member itself always counts (it proves the member for itself).
+    const pluralGamble = hc => {
+      if (hc === null || (verbMembers?.size ?? 0) !== 0) return false;
+      const pv = aliasCtx?.plural ?? null;
+      for (const [p, mem] of posMember ?? []) {
+        // A NEGATED compare is exempt from the gamble: `m[1]!=='a'`
+        // fails for 'a' through the row's OWN binding (an a-request
+        // carries 'a'), not through a foreign-verb verdict — it stays
+        // statically dead regardless of whether the member is a proven
+        // discriminator (w66-fv F-5 vs w59-fv F-1).
+        if (negPos?.has(p)) continue;
+        // A verb named on THIS member carries its own literal
+        // conventionally — 'b' (`m[1]!=='b'`) provably fails
+        // `m[1]==='a'`, so the arm folds dead and the else is 'b''s
+        // live arm unconditionally; only a verb named on ANOTHER member
+        // (or nowhere) may ride the compare's value — its arms are a
+        // real gamble (w64-fv F-5 vs w66-fv F-5, w62-check).
+        if ([...(aliasCtx?.ride ?? [])].some(([v, mb]) => v === verb && mb === mem)) continue;
+        if (p >= hc[1] && p < hc[1] + hc[0].length && (pv?.get(mem)?.size ?? 0) < 2) return true;
+      }
+      return false;
+    };
+    // A foreign bound-member pair inside the head makes it another
+    // row's arm even under an own-verb line — `if (m[1]==='a')
+    // if (m[2]==='x') x; else y` binds the inner if for 'a', which is
+    // 'x''s arm, never 'a''s (w64-ledger F-5).
+    const pendCls = hc => {
+      if (hc === null) return 'cond';
+      // A NEGATED compare's verb is the value the member must differ
+      // from — `m[1]!=='b'` sits on 'a''s own member and is statically
+      // true for 'a', so it is not a foreign pair (w64-fv F-5).
+      const foreign = posVerb !== null && [...posVerb.entries()].some(([p, v]) => v !== verb && !negPos?.has(p) && verbMembers?.has(posMember?.get(p)) && p >= hc[1] && p < hc[1] + hc[0].length);
+      if (!foreign && mode === 'ours' && dispatchPure(hc, verbPos, verb, verbMembers, posMember, posVerb, aliasCtx?.plural)) return 'ours';
+      if (siblingArm(hc, verbPos, verb, memberDead, posMember, posVerb, aliasCtx?.plural)) return pluralGamble(hc) ? 'siblingPlural' : 'sibling';
+      if (methodCmpDead(hc !== null ? [lit.slice(hc[1], hc[1] + hc[0].length), hc[1], hc[2]] : hc, aliasCtx?.rowMethod ?? null)) return 'sibling';
+      // A statically-true head (`m[1]!=='a'` under every verb but 'a',
+      // `if (true)`) always enters its arm — the body is unconditional
+      // and the `else` dead (w65-fv F-6). 'true' shares the ours-arm's
+      // else-deadness but joins no ownDepth — it satisfied no outer
+      // gate, so it cannot absorb request-gates nested under it.
+      if (condTrueCond(hc, verb, verbMembers, posMember, posVerb, lit, aliasCtx?.rowMethod ?? null, aliasCtx?.plural)) return 'true';
+      return 'cond';
+    };
+    const condPos = new Uint8Array(lm.length), condPosDeep = new Uint8Array(lm.length), livePos = new Uint8Array(lm.length), liveArm = new Int32Array(lm.length);
+    // `{` positions on the operand-live twin — stripDead COMPACTS dead
+    // operands out of `lm`, so an `lraw.slice(0, ci)` offset would map
+    // wrong. `{`s are dead-span boundaries and survive in both views,
+    // so the n-th `{` in `lm` is the n-th `{` in `lraw` (w59-ledger F-6).
+    const rawBraces = [];
+    if (lraw) for (let i = 0; i < lraw.length; i++) if (lraw[i] === '{') rawBraces.push(i);
+    let ld = sd, pendingUsed = pending, armBraceTaken = false, braceN = 0, pd = 0;
+    let bracelessIfArm = -1, bracelessIfCond = null;
+    // Stale chain entries below this line's entry depth are dropped —
+    // a `}`-pop chain consult needs only entries for still-open scopes.
+    for (const d of [...chainFailed.keys()]) if (d > sd) chainFailed.delete(d);
+    for (const d of [...chainFailedReq.keys()]) if (d > sd) chainFailedReq.delete(d);
+    pending = false;
+    // A dead statement's operand tail decides at the NEXT line's head:
+    // `x = a\n+b` is one statement — an operator/continuer-led line keeps
+    // the dead span (w62-fv F-3). An `else` head stays dead here so the
+    // in-loop arm flip can claim it live; every other non-continuer head
+    // means ASI applied and the span is over.
+    if (bracelessDead) {
+      const elseH = /^\s*else\b/.test(lm);
+      const contH = /^\s*(?:\+\+|--|\+|-|\*\*?|\/|%|\(|\[|\.|`|,|\?\??|&&|\|\||[&|^<>~=:!])/.test(lm);
+      if (!elseH && !contH) bracelessDead = null;
+    }
+    for (let ci = 0; ci < lm.length; ci++) {
+      const c = lm[ci];
+      // A `case`/`default` label or a `}` at/below the arm depth ends
+      // the previous label's arm — the next label gets its own verdict.
+      // A `case`/`default` label ends the previous case body — the
+      // word sits BEFORE the `:`; `cond ? x :` is excluded by the `?`
+      // between the word and the colon (w64-fv F-6).
+      if (ownCaseDepth >= 0 && ((c === '}' && ld <= ownCaseDepth) || (pd === 0 && c === ':' && /\b(?:case|default)\b[^?:{};]*$/.test(lm.slice(0, ci))))) { ownCaseDepth = -1; ownCaseColon = -1; }
+      // `:` closing a `case 'v':`/`default:` label — when the label
+      // serves THIS row's verb its arm is this row's own dispatch arm:
+      // `case 'a': authorize` mints unconditionally for 'a' (w64-fv
+      // F-6); `default:` serves every verb no case binds.
+      if (c === ':' && pd === 0 && /(?:\bcase\b[^;]*|\bdefault)\s*$/.test(lm.slice(0, ci))) {
+        // The label ending AT this colon — its `case`/`default` keyword
+        // position is what a served pair binds; a slice from a pair pos
+        // would always start at that pair's own keyword (w64-fv F-6).
+        const lm6 = /\b(?:case|default)\b[^?:{};]*$/.exec(lm.slice(0, ci));
+        const ownLabel = lm6 !== null && (verbPos ?? []).includes(lm6.index);
+        if (ownLabel) { ownCaseDepth = ld; ownCaseColon = ci; }
+      }
+      // The live-statement clear runs BEFORE the dead arm: the `;` that
+      // ends a dead braceless statement and arms the else-live span is
+      // the DEAD statement's edge — clearing here would self-consume the
+      // arm in the same position (w61-fv F-9).
+      if (bracelessLive && pd === 0 && (c === ';' || (c === '}' && ld <= bracelessLive.depth))) bracelessLive = null;
+      // The ours-`if` else-arm is one statement — `;` ends it, `}`
+      // closing its depth ends it (w63-fv F-4).
+      // The else-chain of an ours `if` keeps its dead scope past `;`:
+      // `else if (b) x; else y` — the `;` ends the else-if's body but a
+      // further `else` of the chain is still dead, so the latch re-arms
+      // as `oursElseExpected` at the arm's own depth (w63-fv F-4). `}`
+      // at-or-below the arm depth closes the whole chain for good.
+      if (deadElseArm && pd === 0 && (c === ';' || c === '}') && ld <= deadElseArm.depth) {
+        if (c === ';' && ld === deadElseArm.depth) oursElseExpected = deadElseArm.depth;
+        deadElseArm = null;
+      }
+      // A `}` that just closed a BRACED dead-if body leaves its `else`
+      // as the live arm: the next non-space, non-`else` token expires the
+      // latch — `if (0) {x} else authorize` mints unconditionally
+      // (w61-fv F-9, braced twin of the braceless case). The arm was
+      // dead-for-this-verb, so the else is unconditional only when the
+      // chain ledger says this row failed EVERY prior head — an ours
+      // chain's else is dead scope, a live-head chain's else is
+      // conditional (w63-fv F-4's else for everyone else).
+      if (deadElseExpected !== null && pd === 0 && !/\s/.test(c)) {
+        if (c === 'e' && /^else\b/.test(lm.slice(ci))) {
+          const cf = chainFailed.get(deadElseExpected);
+          if (cf === 'ours') deadElseArm = { depth: deadElseExpected, arm: ci + 4 };
+          else if (cf === false || cf === 'plural') bracelessCond = { depth: deadElseExpected, arm: ci + 4, req: cf === 'plural' ? false : chainFailedReq.get(deadElseExpected) === true };
+          else bracelessLive = { depth: deadElseExpected, arm: ci + 4 };
+        }
+        deadElseExpected = null;
+      }
+      // The `else` after a BRACED ours-dispatch arm is dead scope for
+      // this verb — latch `deadElseArm` on it the same way the braceless
+      // pendingIfOurs path does (w63-fv F-4, braced variant). A `;` does
+      // not expire the latch — it is the empty statement that may sit
+      // between arm and else (`if (a) {x}; else`, and it is the `;` that
+      // re-armed the latch inside an else-if chain).
+      if (oursElseExpected !== null && pd === 0 && !/\s/.test(c) && c !== ';') {
+        if (c === 'e' && /^else\b/.test(lm.slice(ci))) deadElseArm = { depth: oursElseExpected, arm: ci + 4 };
+        oursElseExpected = null;
+      }
+      if (bracelessDead && pd === 0) {
+        if (c === ';') {
+          // `if (0) x; else y` — the `;` does not detach the else: it
+          // binds this dead `if`, so its arm is the live one (w61-fv F-9).
+          // With a nested `if` in the dead span the else binds THAT if
+          // instead and stays dead (w61-fv F-1).
+          const elseAhead = /^\s*else\b/.test(lm.slice(ci + 1));
+          if (elseAhead && !bracelessDead.nestedIf) {
+            const dead9 = bracelessDead.depth;
+            const cf = chainFailed.get(dead9), arm = ci + 1 + /^\s*else\b/.exec(lm.slice(ci + 1))[0].length;
+            bracelessDead = null;
+            if (cf === 'ours') deadElseArm = { depth: dead9, arm };
+            else if (cf === false || cf === 'plural') bracelessCond = { depth: dead9, arm, req: cf === 'plural' ? false : chainFailedReq.get(dead9) === true };
+            else bracelessLive = { depth: dead9, arm };
+          }
+          else if (!elseAhead) bracelessDead = null;
+        } else if (c === '}' && ld <= bracelessDead.depth) bracelessDead = null;
+        else if (c === 'e' && /^else\b/.test(lm.slice(ci)) && ld <= bracelessDead.depth && !bracelessDead.nestedIf) {
+          const cf = chainFailed.get(bracelessDead.depth);
+          const dead9 = bracelessDead.depth;
+          bracelessDead = null;
+          if (cf === 'ours') deadElseArm = { depth: dead9, arm: ci + 4 };
+          else if (cf === false || cf === 'plural') bracelessCond = { depth: dead9, arm: ci + 4, req: cf === 'plural' ? false : chainFailedReq.get(dead9) === true };
+          else bracelessLive = { depth: dead9, arm: ci + 4 };
+        }
+      }
+      // An `else` binds the innermost pending braceless `if` — when
+      // that `if` is THIS row's dispatch, its else-arm is dead scope
+      // for this verb (w63-fv F-4). A nested if displaced the pending
+      // head, so the bind consumes whatever is pending.
+      if (c === 'e' && pd === 0 && /^else\b/.test(lm.slice(ci)) && !/[\w$]/.test(lm[ci - 1] ?? ' ') && pendingIfs.length && !lastIfWasBraced && !deadElseArm) {
+        // The else binds the INNERMOST pending `if` — a nested
+        // braceless `if` displaced the outer (w64-ledger F-5): pop it
+        // and latch by its class — ours-else is dead scope, sibling-
+        // else is the LIVE arm, a real gate keeps the else
+        // conditional.
+        const pe = pendingIfs.pop();
+        if (pe.cls === 'ours' || pe.cls === 'true') deadElseArm = { depth: pe.depth, arm: ci + 4 };
+        else if (pe.cls === 'sibling') bracelessLive = { depth: pe.depth, arm: ci + 4 };
+        else if (!bracelessLive && !deadElseArm) bracelessCond = { depth: ld, arm: ci + 4, req: reqGateCond(pe.cond ?? null, verb, verbMembers, posMember, posVerb, aliasCtx?.plural) };
+      } else if (pendingIfs.length && pd === 0 && ((c === '}' && ld <= pendingIfs.at(-1).depth)
+          || (pendingIfs.at(-1).bodyDone && !/\s/.test(c) && !(c === 'e' && /^else\b/.test(lm.slice(ci)))))) {
+        // The innermost pending `if`'s statement closed — restore the
+        // OUTER pending `if` and mark its body done (w64-ledger F-5:
+        // the displaced outer must see its `else` again).
+        while (pendingIfs.length && pendingIfs.at(-1).bodyDone) pendingIfs.pop();
+        if (pendingIfs.length) pendingIfs.at(-1).bodyDone = true;
+      }
+      if (c === '{') {
+        // The brace-owner analysis needs a view where dead-operand
+        // blanking left operators intact: stripDead eats `false &&` and
+        // the `)` after it, so the masked `lm` cannot prove a `)` ever
+        // closed the condition. `lraw` is the string-masked but operand-
+        // live twin — the `)` test, the paren-owner word, the dead-
+        // condition read, and the else/catch probes all run on it.
+        const rawCi = lraw ? rawBraces[braceN] : undefined;
+        const prevR = rawCi !== undefined ? lraw.slice(0, rawCi) : lm.slice(0, ci);
+        braceN++;
+        const parenHead = /\)\s*$/.test(prevR) ? parenOwner(prevR) : null;
+        ld++;
+        // A `{` opened inside an armed ours-else scope is dead — `else {`
+        // or `else if (...) {` bodies cannot run for this verb (w63-fv
+        // F-4). Marker 'oursElse' keeps the `}` from latching the
+        // dead-arm else-as-live path (the else of a dead ours-else-if is
+        // dead too, never live).
+        const elseDead = deadDepths.size === 0 && deadElseArm !== null && ld === deadElseArm.depth + 1;
+        // A `{` whose `if` head is a SIBLING verb's pure dispatch arm is
+        // dead scope for this row — 'a' requests never satisfy
+        // `m[1]==='b'` — and its `else` is the live arm through the
+        // usual dead-if latch: `if (m[1]==='b') {x} else authorize`
+        // mints for 'a' (w63-fv F-4 sibling direction). Runs on `lm` —
+        // pair/posMember positions are lm-space.
+        const sibHc = parenHead === 'if' ? headCond(lm.slice(0, ci).trimEnd()) : null;
+        const sibArmCmp = sibHc !== null && siblingArm(sibHc, verbPos, verb, memberDead, posMember, posVerb);
+        const sibArmPlural = sibArmCmp && pluralGamble(sibHc);
+        const sibArm = sibArmCmp || (parenHead === 'if' && methodCmpDead(headCond(lit.slice(0, ci).trimEnd()), aliasCtx?.rowMethod ?? null));
+        // A `switch (member)` whose case set is COMPLETE on this line
+        // and serves no verb this row binds is dead scope in full —
+        // `switch(m[1]){case'x':x}` never runs for 'a' (w64-fv F-6).
+        // `swServed` comes from this line's pair scan; an incomplete
+        // switch is left to its own label frames instead.
+        const hc8 = parenHead === 'switch' ? headCond(prevR) : null;
+        const swMemberBound = hc8 !== null && (() => {
+          const memb = switchOperandMember(lraw === null || lraw === undefined ? hc8[0] : lraw.slice(hc8[1], hc8[1] + hc8[0].length), aliasCtx?.aliases ?? null, (aliasCtx?.posBase ?? 0) + hc8[1]);
+          return memb !== null && (memberDead?.has(memb) === true);
+        })();
+        const swDead = hc8 !== null && swServed !== null && swServed.get(hc8[2]) === true && swMemberBound;
+        // Whether this switch head discriminates on a member this row
+        // binds (or on anything for a bound-nowhere row) — its `req`
+        // then lets an own `case`/`default` arm consume the gate like
+        // a dispatch `if` does (w64-fv F-6).
+        const swMember = hc8 !== null && (() => {
+          const memb = switchOperandMember(lraw === null || lraw === undefined ? hc8[0] : lraw.slice(hc8[1], hc8[1] + hc8[0].length), aliasCtx?.aliases ?? null, (aliasCtx?.posBase ?? 0) + hc8[1]);
+          return memb === null || (memberDead?.size ?? 0) === 0 || memberDead.has(memb);
+        })();
+        if (deadDepths.size > 0 || elseDead || sibArm || swDead || (parenHead !== null && deadCond(prevR))) { deadDepths.add(ld); deadHeads.set(ld, elseDead ? 'oursElse' : parenHead); }
+        else {
+          let cond;
+          // The 'ours' exemption claims only the ROW's dispatch arm —
+          // the `if` head that owns this line's first statement. A
+          // second-statement `if`, or a `while`/`for`/`switch`/`catch`
+          // head anywhere, gates on its own condition; only callable
+          // bodies (`function`, `f(x) {`) are dispatch-invoked and stay
+          // unconditional (w62-fv F-2).
+          // A chain continuation counts as first-statement too — the
+          // leading `}` closes the previous arm and `else if (cond)` is
+          // still this row's dispatch when the pair scan says so
+          // (w56-fv F-2). Any other `;`/`{`/`}` before the `if` makes it
+          // a second statement and the exemption dies (w62-fv F-2).
+          const firstStmt = !/[;{}]/.test(prevR.replace(/^\s*}+\s*else\b(\s*if\b)?/, ''));
+          // A same-line nested control head before the dispatch `if` —
+          // `if (x) if (m[1]==='a') {` — gates the arm on the OUTER
+          // condition: the inner head's purity cannot absorb it, and
+          // `firstStmt` only watched `;{}` (w63-fv F-5).
+          const hc5 = parenHead === 'if' ? headCond(prevR) : null;
+          const nestedHead = hc5 !== null && /\b(?:if|for|while|switch)\s*\(/.test(prevR.slice(0, Math.max(0, hc5[2])));
+          // An `else if` chain continuation is first-statement too —
+          // the earlier `if` closed by `} else` is a chain sibling, not
+          // a gate-nester, so `if (a) {..} else if (m[1]==='b') {`
+          // still claims 'b''s own dispatch arm (w64-fv F-7).
+          const chainCont = hc5 !== null && /}\s*else\s*$/.test(prevR.slice(0, hc5[2]));
+          // An unbound verb's arm is the one the fold proves it always
+          // enters — `m[1]==='a' || m[1]!=='b'` is unconditional for
+          // 'c' even though no positive pair serves it (w64-fv F-5).
+          const ownRow = mode === 'ours' || (mode === null && (verbMembers?.size ?? 0) === 0);
+          if (ownRow && !armBraceTaken && parenHead === 'if' && (chainCont || (firstStmt && !nestedHead)) && dispatchPure(headCond(prevR), verbPos, verb, verbMembers, posMember, posVerb, aliasCtx?.plural)) { cond = false; armBraceTaken = true; oursIfNested = oursIfArm >= 0; oursIfArm = ld; }
+          else if (parenHead !== null) {
+            // Callable bodies (`function(req,res) {`, `f(x) {`) run in
+            // their handler's own scope — `function` heads on registered
+            // handlers are invoked by the dispatch itself (marking them
+            // conditional dropped the gate on 8 routes, w61-fv F-9
+            // regression). Uninvoked DECLARED functions stay dead via
+            // deadFnLines regardless (w61-ledger F-2). Control heads
+            // (`while (cond) {`, `for`, `switch`, `catch`) gate their
+            // bodies on the head's own condition (w62-fv F-2).
+            if (parenHead === 'if' && !enclosingGate(lm, lit, hc5?.[2] ?? ci, verb, verbMembers, posMember, posVerb, aliasCtx?.rowMethod ?? null, aliasCtx?.plural) && condTrue(prevR, verb, verbMembers, posMember, posVerb, lit, aliasCtx?.rowMethod ?? null, aliasCtx?.plural)) cond = false;
+            else if (parenHead === 'if' || parenHead === 'catch' || parenHead === 'while' || parenHead === 'switch') cond = mode !== 'sibling';
+            // A `for (x of/in coll)` head enumerates a collection — calls
+            // inside its body are iteration-wide, and under forUncond
+            // (the credential-resolution scan) they are not a gate.
+            else if (parenHead === 'for') cond = forUncond ? false : mode !== 'sibling';
+            else cond = false;
+          }
+          // try/finally bodies run unconditionally — only else/catch/
+          // arrow/case/default bodies gate a slice of requests (w58: a
+          // `try {` arm wrongly marked authenticateToken conditional).
+          // An else-block whose `if` was proven dead is the live arm —
+          // its body runs unconditionally (w61-fv F-9).
+          else if (/(?:\b(?:else|catch)\b|=>\s*$|\bcase\b[^;]*:\s*$|\bdefault\s*:\s*$)/.test(prevR)) {
+            // This row's own `case`/`default` label opens its own arm —
+            // unconditional like the dispatch `if` arm (w64-fv F-6).
+            const ownLabel = (() => { const lm6 = /\b(?:case|default)\b[^?:{};]*$/.exec(prevR); return lm6 !== null && (verbPos ?? []).includes(lm6.index); })();
+            // The chain ledger (chainFailed/deadElseExpected) already
+            // mints the else unconditional exactly when every head in
+            // the chain is provably dead for this verb — a bare `else`
+            // under an unbound verb must NOT be promoted unconditionally:
+            // foreign-member and non-member heads are live gates for it
+            // (w65-fv F-1).
+            if (bracelessLive) { bracelessLive = null; cond = false; }
+            else cond = ownLabel ? false : mode !== 'sibling';
+          }
+          else if (pendingUsed) cond = mode !== 'sibling';
+          else cond = false;
+          if (cond) condDepths.push({ d: ld, g: false, req: reqGateCond(headCond(prevR), verb, verbMembers, posMember, posVerb, aliasCtx?.plural) || swMember });
+        }
+        // Chain ledger for the else-arm consult: record how this `if`
+        // arm resolves for THIS row — a bound-member sibling arm or a
+        // literal-dead cond fails for it, an ours-dispatch or ours-else
+        // head is one this row takes ('ours'), anything else is a live
+        // head this verb might satisfy. An arm inside an already-dead
+        // region updates nothing — its chain is moot (w63-fv F-4).
+        if (parenHead === 'if' && (deadDepths.size === 0 || (deadDepths.size === 1 && deadDepths.has(ld)))) {
+          const hc9 = headCond(prevR);
+          const kwS = hc9 ? hc9[2] : -1;
+          const cont = kwS >= 0 && /\belse\s*$/.test(prevR.slice(0, kwS));
+          const res = elseDead ? 'ours' : (condTrue(prevR, verb, verbMembers, posMember, posVerb, lit, aliasCtx?.rowMethod ?? null, aliasCtx?.plural) || oursIfArm === ld ? 'ours' : (sibArm || deadCond(prevR) ? (sibArmPlural ? 'plural' : true) : false));
+          const prev9 = chainFailed.get(ld - 1);
+          chainFailed.set(ld - 1, cont ? (prev9 === 'ours' || res === 'ours' ? 'ours' : (prev9 === false || res === false ? false : (prev9 === 'plural' || res === 'plural' ? 'plural' : true))) : res);
+          const resReq = reqGateCond(hc9, verb, verbMembers, posMember, posVerb, aliasCtx?.plural), prevReq = chainFailedReq.get(ld - 1) ?? false;
+          chainFailedReq.set(ld - 1, cont ? (prevReq && resReq) : resReq);
+        }
+        // A callable body's `{` opens a return-scope boundary — exits
+        // inside it do not guard the enclosing route flow (w63-fv F-1).
+        if ((parenHead !== null && !/^(?:if|catch|while|switch|for)$/.test(parenHead)) || (parenHead === null && /=>\s*$/.test(prevR))) callScopes.add(ld);
+      } else if (c === '}') {
+        const deadHead = deadHeads.get(ld);
+        const wasDead = deadDepths.delete(ld);
+        deadHeads.delete(ld);
+        let guarded = false;
+        const poppedGates = [];
+        while (condDepths.length && condDepths[condDepths.length - 1].d >= ld) { const e = condDepths.pop(); if (e.g) guarded = true; poppedGates.push(e); }
+        while (condTail.length && condTail[condTail.length - 1].d >= ld) condTail.pop();
+        callScopes.delete(ld);
+        ld--;
+        // A `}` ending the else-arm's own block or any enclosing scope
+        // ends the conditional statement — post-decrement ld <= depth
+        // catches the arm's `{`-block (opened at depth+1) and every
+        // shallower close; an inner `}` stays inside the arm.
+        if (bracelessCond && ld <= bracelessCond.depth) bracelessCond = null;
+        // A popped conditional frame whose body exited keeps the tail
+        // gated — `if (cond) { return; } authorize` is conditional on
+        // `!cond`, not free (w63-fv F-1). The marker lives until the
+        // enclosing scope's own `}` pops it. A frame dead-for-this-verb
+        // mints no mark: its exits never ran for this row, so the tail
+        // stays free.
+        if (guarded && !wasDead) condTail.push({ d: ld, g: false, req: poppedGates.length > 0 && poppedGates.every(e => e.req) });
+        // A `}` closing a proven-dead arm: its `else` is the live arm —
+        // latch the enclosing depth so the next `else` marks live
+        // (w61-fv F-9, braced arm). Only a dead `if` arms it: `else`
+        // cannot bind a dead while/for body in real JS (w62-ledger F-5).
+        if (wasDead && deadHead === 'if') deadElseExpected = ld;
+        // The `}` that pops the braced ours-dispatch arm latches the
+        // else-expect: a following `else` is dead scope for this verb
+        // (w63-fv F-4).
+        if (oursIfArm === ld + 1) { oursIfArm = -1; oursIfNested = false; oursElseExpected = ld; }
+        // A `}` returning to the pending statement's own depth ends that
+        // statement — unless an `else` still binds it. A `}` deeper than
+        // sd only closes a block inside the arm (w63-fv F-4 gate).
+        if (ld <= sd && !/^\s*else\b/.test(lm.slice(ci + 1))) pendingUsed = false;
+      } else if (c === ';') {
+        // A `;` ends the pending arm only at the arm's own depth — one
+        // inside the arm's braces is part of it; and when an `else`
+        // still binds, the statement continues into the else arm
+        // (`if (c) if (0) {x}; else y` keeps y gated on !c).
+        if (ld <= sd && !/^\s*else\b/.test(lm.slice(ci + 1))) pendingUsed = false;
+        // The else-arm statement ends at `;` — a following `else` keeps
+        // it (the next else still gates on the same failed head).
+        if (bracelessCond && !/^\s*else\b/.test(lm.slice(ci + 1))) bracelessCond = null;
+        // A braceless `if (c) return|throw|continue|break;` guards the
+        // rest of the enclosing scope — statements after it run only
+        // when the guard failed, so they are conditional on `c`
+        // (w62-ledger F-3). Same tail-conditional semantics as the
+        // braced `}`-pop propagation.
+        if (bracelessIfArm >= 0) {
+          if (/^(?:return|throw|continue|break)\b/.test(lm.slice(bracelessIfArm, ci).trim()) && (!siblingArm(bracelessIfCond, verbPos, verb, memberDead, posMember, posVerb, aliasCtx?.plural) || pluralGamble(bracelessIfCond))) condTail.push({ d: ld, g: false, req: reqGateCond(bracelessIfCond, verb, verbMembers, posMember, posVerb, aliasCtx?.plural) });
+          bracelessIfArm = -1;
+          bracelessIfCond = null;
+        }
+        // The `;` that ends a pending braceless `if`'s body — an `else`
+        // may still bind across it; the next real token detaches the
+        // pending head (w63-fv F-4).
+        if (pendingIfs.length) pendingIfs.at(-1).bodyDone = true;
+      }
+      else if (c === '(') pd++;
+      else if (c === ')') {
+        // The `)` of a deadCond-proven control head with no `{` after
+        // owns its braceless body statement — dead, not conditional.
+        const prevR = lm.slice(0, ci + 1).trimEnd();
+        const head = /\)\s*$/.test(prevR) ? parenOwner(prevR) : null;
+        if (head === 'if' && bracelessDead) bracelessDead.nestedIf = true;
+        // `else if` — the `if` is itself the dead-arm's live else body,
+        // so its OWN body gates on its condition again: end the live
+        // span at the `)` and let the prefix guard score the body
+        // (w61-fv F-9 follow-through).
+        // A control head's `)` ends the live arm's statement — a new
+        // statement follows, gated by its own condition. `if` covers the
+        // `else if` chain; while/for/switch/catch leak identically when
+        // left out (w62-ledger F-1).
+        else if (bracelessLive && (head === 'if' || head === 'while' || head === 'for' || head === 'switch' || head === 'catch')) bracelessLive = null;
+        // `while (0)` that TERMINATES a `do {…}`/`do x` block is a
+        // statement end, not a head — the next statement runs
+        // unconditionally and must not be dead-spanned (w61-fv F-9).
+        let doTail = false;
+        if (head === 'while') {
+          const wi = prevR.lastIndexOf('while');
+          const preW = prevR.slice(0, wi);
+          let jw = preW.length - 1;
+          while (jw >= 0 && /\s/.test(preW[jw])) jw--;
+          if (jw >= 0 && preW[jw] === '}') {
+            let d = 1, k = jw - 1;
+            for (; k >= 0; k--) { const cc = preW[k]; if (cc === '}') d++; else if (cc === '{') { d--; if (d === 0) break; } }
+            if (k >= 0) {
+              let lj = k - 1; while (lj >= 0 && /\s/.test(preW[lj])) lj--;
+              doTail = /[\w$]+$/.exec(preW.slice(0, lj + 1))?.[0] === 'do';
+            }
+          } else {
+            const bs = Math.max(preW.lastIndexOf(';'), preW.lastIndexOf('{'), preW.lastIndexOf('}'));
+            const seg = preW.slice(bs + 1);
+            doTail = /\bdo\b/.test(seg) && !/\b(?:if|else|while|for|switch|catch|case)\b/.test(seg);
+          }
+        }
+        // A control head inside an existing dead span merges into it —
+        // re-arming fresh would let ITS `;` end the outer statement
+        // early and mint (`if (0) if (0) y; else z` stays dead).
+        // A `while` closing a `do` block owns nothing — the statement
+        // after it runs unconditionally (w61-fv F-9).
+        if (doTail && !bracelessDead) bracelessLive = { depth: ld, arm: ci + 1 };
+        // A braceless `if`/`while`/`for` arm is remembered: if it ends
+        // in a guard (`return`/`throw`/`continue`/`break`), its `;`
+        // marks the rest of the block conditional — `while (cond)
+        // return;` gates the tail exactly like `if (cond) return;`
+        // (w63-fv F-2). `while` closing a `do` block owns no body.
+        if (head === 'if' || head === 'for' || (head === 'while' && !doTail)) {
+          let j = ci + 1;
+          while (j < lm.length && /\s/.test(lm[j])) j++;
+          const braceless = j >= lm.length || lm[j] !== '{';
+          bracelessIfArm = braceless ? ci + 1 : -1;
+          bracelessIfCond = bracelessIfArm >= 0 ? headCond(prevR) : null;
+          if (head === 'if') {
+            // Innermost pending `if` — an `else` binds this one, not
+            // any outer arm. Its class is this row's verdict on the
+            // head: ours (dispatch), sibling (another row's arm), or a
+            // real gate (w64-ledger F-5 — nested foreign-member heads
+            // must NOT latch ours even under an own-verb line).
+            lastIfWasBraced = !braceless;
+            if (braceless) {
+              const pcls = pendCls(headCond(prevR));
+              pendingIfs.push({ depth: ld, cls: pcls, cond: headCond(prevR), bodyDone: false });
+              // A braceless `if` whose arm this row provably enters —
+              // statically true (`if (true)`) or this verb's own dispatch
+              // member compare — extends the live floor instead of
+              // ending it, so `if (true) if (m[1]==='a') authorize`
+              // mints unconditionally like the braced twin. An unproven
+              // enclosing pending `if` still gates it: `if (x)
+              // if (m[1]==='a')` must not read live through the outer
+              // gate (w66-fv F-6).
+              if ((pcls === 'true' || pcls === 'ours')
+                  && !pendingIfs.some(p => p.cls === 'cond' || p.cls === 'sibling' || p.cls === 'siblingPlural')) {
+                if (bracelessLive && ld === bracelessLive.depth) bracelessLive.arm = ci + 1;
+                else if (!bracelessLive) bracelessLive = { depth: ld, arm: ci + 1 };
+              }
+              else if (bracelessLive) bracelessLive = null;
+            }
+          }
+        }
+        if (!bracelessDead && (head === 'if' || head === 'for' || (head === 'while' && !doTail)) && deadCond(prevR)) {
+          let j = ci + 1;
+          while (j < lm.length && /\s/.test(lm[j])) j++;
+          if (j >= lm.length || lm[j] !== '{') bracelessDead = { depth: ld, nestedIf: false };
+        }
+        // A braceless `if` on a sibling verb's pure dispatch arm — dead
+        // for this row even under a plurality gamble (the gamble only
+        // relaxes the ELSE via the 'plural' chain verdict — dead-arming
+        // stays defensible, w66-fv F-5).
+        if (!bracelessDead && head === 'if') {
+          const hcB = headCond(prevR);
+          if (siblingArm(hcB, verbPos, verb, memberDead, posMember, posVerb, aliasCtx?.plural) || methodCmpDead(headCond(lit.slice(0, ci + 1).trimEnd()), aliasCtx?.rowMethod ?? null)) bracelessDead = { depth: ld, nestedIf: false };
+        }
+        // The braceless twin of the `{`-handler chain ledger — a `)`
+        // that closed an `if` head resolves this arm for this row
+        // (bound-member sibling arm or literal-dead cond fails, ours
+        // takes it, anything else is a live head) so the `else` latch
+        // can tell unconditional from conditional (w63-fv F-4).
+        if (head === 'if' && deadDepths.size === 0) {
+          const hc9 = bracelessIfCond ?? headCond(prevR);
+          const kwS = hc9 ? hc9[2] : -1;
+          const cont = kwS >= 0 && /\belse\s*$/.test(prevR.slice(0, kwS));
+          // A 'siblingPlural' arm is dead for this row but its else is
+          // a model gamble — 'plural' beats `bracelessDead` so the
+          // else mints conditional, never unconditional (w66-fv F-5).
+          const res = pendingIfs.at(-1)?.cls === 'siblingPlural' ? 'plural' : (bracelessDead ? true : (pendingIfs.at(-1)?.cls === 'ours' || pendingIfs.at(-1)?.cls === 'true' ? 'ours' : (pendingIfs.at(-1)?.cls === 'sibling' ? true : false)));
+          const prev9 = chainFailed.get(ld);
+          chainFailed.set(ld, cont ? (prev9 === 'ours' || res === 'ours' ? 'ours' : (prev9 === false || res === false ? false : (prev9 === 'plural' || res === 'plural' ? 'plural' : true))) : res);
+          const resReq = reqGateCond(hc9, verb, verbMembers, posMember, posVerb, aliasCtx?.plural), prevReq = chainFailedReq.get(ld) ?? false;
+          chainFailedReq.set(ld, cont ? (prevReq && resReq) : resReq);
+        }
+        pd--;
+      }
+      // A `return`/`throw`/`break`/`continue` inside a live conditional
+      // frame exits its scope — closing that frame must leave the tail
+      // conditional, not restore the unconditional span (w63-fv F-1).
+      // Every enclosing frame is marked (a nested exit still gates the
+      // outer block's tail) — but exits inside a nested CALLABLE body
+      // leave the route flow untouched (`callScopes`, w63-fv F-1).
+      if (condDepths.length && callScopes.size === 0 && /^(?:return|throw|break|continue)\b/.test(lm.slice(ci)) && !/[\w$]/.test(lm[ci - 1] ?? ' '))
+        for (const e of condDepths) if (e.d <= ld) e.g = true;
+      // `pendingUsed` marks the whole statement conditional — a real
+      // gate edge (`if (c)`, `&&`, `?`, `:`) stays conditional even
+      // inside a provably-live arm: the arm is live only when entered.
+      // A bare `else`/`=>` tail is the arm OPENER, not a gate — its
+      // body positions keep the live-arm exemption (w61-fv F-9).
+      // An own-verb dispatch arm consumes the request-controlled gates
+      // that enclose it — `if (m[1]==='a') { if (m[2]==='x') { authorize
+      // (['spy']); } }` mints 'spy' for x: the m[1] constraint is part of
+      // the row's request binding, not a disqualifying condition
+      // (w59-fv F-2/w56-fv F-2). Marks opened INSIDE the arm (d >
+      // ownDepth) and non-request gates (`flag`, `x || early`) still
+      // condition.
+      // The exemption claims only a NESTED own-verb arm — the row's head
+      // arm itself consumes nothing: a request-controlled guard inside
+      // it (`if (m[2]==='x') return; authorize`) still conditions the
+      // tail (w63-fv F-3).
+      const ownDepth = (oursIfArm >= 0 && oursIfNested) ? oursIfArm : Math.max(pendingIfs.findLast(p => p.cls === 'ours')?.depth ?? -1, ownCaseDepth);
+      const inOwn = ownDepth >= 0 && ld >= ownDepth;
+      const gates = e => !(inOwn && e.req && e.d <= ownDepth);
+      condPos[ci] = deadDepths.size > 0 || bracelessDead || deadElseArm ? 2 : (condDepths.some(e => gates(e) && e.d <= ld) || condTail.some(e => gates(e) && e.d <= ld) || (bracelessCond !== null && !(inOwn && bracelessCond.req && bracelessCond.depth <= ownDepth)) || (pendingUsed && !(pendingUsed === 'arm' && bracelessLive && ld <= bracelessLive.depth)) ? 1 : 0);
+      // Scope-only view for credential-resolution scans: containing
+      // conditions and pending gates count, propagated exit-tails do
+      // not — a call after `if (a) {…return…}` still resolves for every
+      // request that reaches it.
+      condPosDeep[ci] = deadDepths.size > 0 || bracelessDead || deadElseArm ? 2 : (condDepths.some(e => gates(e) && e.d <= ld) || (pendingUsed && !(pendingUsed === 'arm' && bracelessLive && ld <= bracelessLive.depth)) ? 1 : 0);
+      // Positions a provably-live arm cover — the syntactic prefix
+      // guard cannot see the dead-state, so `else authorize` / a
+      // do-`while` tail would read conditional without this (w61-fv
+      // F-9). 'Live' means provably-IN-the-arm, not exempt from guards:
+      // the caller rescans the span between the arm's entry and the
+      // call, so `else cond && authorize` still mints conditional
+      // (w62-fv F-1).
+      // An own `case`/`default` arm's body is live from its `:` on —
+      // guardedPrefix would otherwise read the `case`/`default` word in
+      // the same statement as a guard and drop a mint this row's own
+      // switch arm already verified (w64-fv F-6).
+      const inOwnCase = ownCaseDepth >= 0 && ld >= ownCaseDepth;
+      livePos[ci] = (bracelessLive || inOwnCase) ? 1 : 0;
+      liveArm[ci] = bracelessLive ? bracelessLive.arm ?? -1 : (inOwnCase ? ownCaseColon + 1 : -1);
+    }
+    if (bracelessCond && lm.slice(bracelessCond.arm ?? 0).trim() !== ''
+        && (/[A-Za-z0-9_$)\]}'"`]$/.test(lm.trimEnd()) || /(?:\+\+|--)$/.test(lm.trimEnd()))) bracelessCond = null;
+    bracelessIfArm = -1;
+    // The live arm's statement ends where any statement ends — an EOL on
+    // an expression tail after the arm's own content means ASI closed
+    // it; carrying the latch into the next statement mints unconditional
+    // through any guard (w62-ledger F-1/F-2). `else` alone at EOL keeps
+    // it — the arm's body statement hasn't arrived yet.
+    if (bracelessLive && lm.slice(bracelessLive.arm ?? 0).trim() !== ''
+        && (/[A-Za-z0-9_$)\]}'"`]$/.test(lm.trimEnd()) || /(?:\+\+|--)$/.test(lm.trimEnd()))) bracelessLive = null;
+    // A line ending on a conditional opener or a short-circuit/ternary
+    // edge makes the NEXT statement conditional (braceless body or a
+    // broken expression operand). `else`/`=>` ends open an ARM — its
+    // positions keep the live-arm exemption; every other opener is a
+    // real gate whose conditional survives into the arm (w63-fv F-4
+    // fallout: `if (c)` newline `if (0){x} else auth` over-minted).
+    const tail = lm.trimEnd();
+    // A control head's condition may itself contain parens: `if (f(x))`
+    // ends on a balanced `)` that a `[^()]*` extraction can never match,
+    // which left `pending` unset and minted the next statement
+    // UNCONDITIONAL (w67-ledger F-1). Detect the head with the
+    // balanced-paren scan instead — a trailing `)` whose matcher's
+    // keyword is a control word is a gate head whatever the condition
+    // held — and a control keyword whose paren never closes is an open
+    // head, gating the same way.
+    const eolHead = tail.endsWith(')') ? headCond(tail) : null;
+    const eolKw = eolHead !== null && eolHead[2] >= 0 ? tail.slice(eolHead[2], eolHead[1] - 1).trim() : null;
+    const eolCtrl = eolKw !== null && /^(?:if|for|while|switch|catch)$/.test(eolKw);
+    const eolCtrlOpen = (() => {
+      const m = /\b(?:if|for|while|switch|catch)\s*\(/.exec(tail);
+      if (m === null) return false;
+      let d = 0;
+      for (let k = tail.indexOf('(', m.index); k < tail.length; k++) {
+        if (tail[k] === '(') d++;
+        else if (tail[k] === ')') d--;
+      }
+      return d > 0;
+    })();
+    if (!/[;{}]\s*$/.test(tail)
+        && (eolCtrl || eolCtrlOpen || /(?:\b(?:if|for|while|switch|catch)\s*(?:\([^()]*\)\s*)?|\belse\b|\bcatch\b|=>|&&|\|\||\?|:)\s*$/.test(tail))) pending = /(?:\belse\b|=>)\s*$/.test(tail) ? 'arm'
+        // A braceless `if` this row provably enters gates nothing — its
+        // body runs unconditionally, so `if (true)`/`if (m[1]==='a')`
+        // (this row's own member) never carries 'gate' into the next
+        // statement. An unproven enclosing pending `if` still gates
+        // through it (w66-fv F-6).
+        : ((eolKw === 'if' || /\bif\s*\([^()]*\)\s*$/.test(tail))
+            && ['ours', 'true'].includes(pendCls(eolHead ?? headCond(tail)))
+            && !pendingIfs.some(p => p.cls === 'cond' || p.cls === 'sibling' || p.cls === 'siblingPlural')
+          ? false : 'gate');
+    return { condPos, condPosDeep, livePos, liveArm, endDepth: ld };
+  };
+  // The dispatch `if`'s paren condition — between the `(` matching the
+  // `)` that ends `prev` — must be dispatch-pure for the arm exemption:
+  // every top-level `&&`-joined operand a compare or a dispatcher
+  // exec-bind. A bare operand (`req.isAdmin`, `other`, `f(x)`, `!x`) or
+  // any `||`/`??`/`,`/`?`/`:`-mixing is an extra runtime gate — the arm
+  // body is conditional on it (w62-ledger F-3).
+  const headCond = prev => {
+    let d = 0, closePos = -1;
+    for (let k = prev.length - 1; k >= 0; k--) {
+      const c = prev[k];
+      // The head's own closer is the first `)` walking back — a trailing
+      // space before `{` must not leak it into the operand (w65-ledger
+      // F-3b: `switch (m.at(1)) {` vs `switch (m.at(1)){` flipped dead↔live).
+      if (c === ')') { d++; if (closePos === -1) closePos = k; }
+      else if (c === '(') {
+        d--;
+        if (d === 0) {
+          const kw = /([A-Za-z_$][\w$]*)\s*$/.exec(prev.slice(0, k));
+          return [prev.slice(k + 1, closePos), k + 1, kw ? k - kw[0].length : -1];
+        }
+      }
+    }
+    return null;
+  };
+  // A whole-condition statically TRUE for this row — a truthy literal
+  // (`if (true)`), a member compare folding const-true for this verb
+  // (`m[1]!=='a'` under a verb that never equals 'a'), or an `&&`/`||`
+  // composition of them. The arm mints unconditional and its `else` is
+  // dead — the dual of deadCond (w65-fv F-6). `&&` chains prove true
+  // only when EVERY operand does; an `||` side proves true when one of
+  // its sides does.
+  const condTrueCond = (hc, verb, verbMembers, posMember, posVerb, litC = null, rowM = null, proven = null) => {
+    if (hc === null) return false;
+    const provable = op => {
+      const raw = op.t.trim();
+      // `op.t` comes from the MASKED cond — string literals inside it
+      // are blanked. `op.a/op.b` carry its line offsets so `lit`
+      // (the literal-bearing twin) answers the method literal
+      // (w65-fv F-8).
+      const tR = (litC ?? '').slice(op.a, op.b);
+      const v = litVal(raw, null);
+      if (v === true) return true;
+      if (v === false || v === LV_NUL) return false;
+      const f = memberCmpFold(raw, verb, verbMembers, posMember, posVerb, op.a, proven);
+      if (f !== null) return f.verdict === 'const-true';
+      // `req.method === <row's own>` / `!== <other>` is statically true
+      // for this row — dead weight, never a gate (w65-fv F-8). The
+      // operand must BE the compare — `!`/`f(...)`/`===x` wrappers and
+      // literals planted inside strings or comments don't fold
+      // (w66-fv F-2/F-3/F-4, w66-ledger F-1). `rowM` may be a Set for
+      // `a || b` heads (w66-fv F-3).
+      const mc = wholeOperandCmp(blankBlock(codeSpan(tR), deadState()), tR, 'req\\.method');
+      if (mc !== null) {
+        if (rowM === null) return false;
+        const rowSet = rowM instanceof Set ? rowM : new Set([rowM]);
+        const eq = rowSet.has(mc.value);
+        if (mc.op[0] === '!') return eq ? (rowSet.size === 1 ? false : null) : true;
+        return eq ? (rowSet.size === 1 ? true : null) : false;
+      }
+      return null;
+    };
+    const sides = splitSpans(hc[0], ['||'], hc[1]);
+    for (const side of (sides === null ? [{ t: hc[0], a: hc[1], b: hc[1] + hc[0].length }] : sides.parts)) {
+      const conj = splitSpans(side.t, ['&&'], side.a);
+      const parts = conj === null ? [side] : conj.parts;
+      if (parts.every(op => provable(op) === true)) return true;
+    }
+    return false;
+  };
+  const condTrue = (prev, verb, verbMembers, posMember, posVerb, litC = null, rowM = null, proven = null) => {
+    const hc = headCond(prev);
+    // hc[2] is the keyword's START — the head word sits at its front.
+    const head = hc !== null ? /^([A-Za-z_$][\w$]*)/.exec(prev.slice(hc[2]))?.[1] ?? '' : '';
+    return head === 'if' && condTrueCond(hc, verb, verbMembers, posMember, posVerb, litC, rowM, proven);
+  };
+  // `if (g1) if (g2) {` — every control head between the last
+  // statement boundary (`;`/`{`/`}`) and this arm's keyword encloses
+  // the arm. A `condTrue` head may only skip the gate when each
+  // enclosing head is itself provably entered; an unproven `if (x)`
+  // keeps the arm conditional (w65-fv F-1 follow-through — the
+  // outer gate is not the arm's own dispatch).
+  const enclosingGate = (lmC, litC, kwAbs, verb, verbMembers, posMember, posVerb, rowM, proven = null) => {
+    const txt = lmC.slice(0, kwAbs);
+    // A `;`/`{`/`}` inside an enclosing `(…)`/`[…]` belongs to the head
+    // that owns it — `for(;;)` init/step separators, `f({x:1})` call
+    // args, `arr[{a}]` subscripts — not a statement boundary. Count
+    // them only at paren/bracket depth 0 or enclosing heads like
+    // `for(;;) if (…)` hide entirely and never gate (w66-ledger F-2).
+    let bound = -1, pd = 0, bd = 0;
+    for (let k = 0; k < txt.length; k++) {
+      const c = txt[k];
+      if (c === '(') pd++;
+      else if (c === ')') pd--;
+      else if (c === '[') bd++;
+      else if (c === ']') bd--;
+      else if (pd === 0 && bd === 0 && (c === ';' || c === '{' || c === '}')) bound = k;
+    }
+    const re = /\b(?:if|while|for|switch|catch)\s*\(/g;
+    re.lastIndex = bound + 1;
+    let im;
+    while ((im = re.exec(txt)) !== null) {
+      const open = im.index + im[0].length - 1;
+      let d = 0, close = -1;
+      for (let k = open; k < kwAbs; k++) {
+        const c = lmC[k];
+        if (c === '(') d++;
+        else if (c === ')') { d--; if (d === 0) { close = k; break; } }
+      }
+      if (close === -1) return true;
+      if (!condTrueCond([litC.slice(open + 1, close), open + 1, close], verb, verbMembers, posMember, posVerb, litC, rowM, proven)) return true;
+      re.lastIndex = close;
+    }
+    return false;
+  };
+
+  return { line };
+};
+// A verb-dispatch `m[N]` under every index spelling — quoted, hex,
+// octal, binary, float, unary-plus, optional-chain, `.at()` — and
+// aliases bound by `sub = m[2]` / `const {2: sub} = m` all dispatch
+// exactly like `m[2]` (w58-fv F-4). The index expression is parsed, not
+// regex-spelled.
+const DISP_IDX_EVAL = (expr, trunc = false) => {
+  const t = expr.trim().replace(/^\++/, '');
+  const q = /^['"`]([^'"`]+)['"`]?$/.exec(t);
+  const raw = (q ? q[1] : t).trim();
+  return /^\d+$/.test(raw) ? parseInt(raw, 10)
+    : /^0x[0-9a-f]+$/i.test(raw) ? parseInt(raw, 16)
+    : /^0o[0-7]+$/i.test(raw) ? parseInt(raw, 8)
+    : /^0b[01]+$/i.test(raw) ? parseInt(raw, 2)
+    // `m.at(1.9)` ToIntegerOrInfinity's → m[1]; `m[1.9]` reads property
+    // '1.9' — undefined on a match array, never m[1] (w65-ledger F-2).
+    : /^\d*\.\d+$/.test(raw) ? (v => trunc ? Math.trunc(v) : (v === Math.trunc(v) ? v : null))(parseFloat(raw))
+    : null;
+};
+// Index-bearing member access on `m` — `m[…]`/`m?.[…]`/`m.at(…)` — plus
+// the alias spellings (`sub === 'verb'` where `sub` was bound to
+// `m[N]`). Matches run on the UNMASKED line so quoted digits survive;
+// the caller rejects positions the masked twin proves are inside a
+// literal (w58-fv F-4).
+const DISP_MEMBER = /\bm\s*(?:\?\s*\.\s*)?(?:\[\s*([^\]]+)\]|(?:\?\s*\.\s*|\.\s*)at\s*(?:\?\s*\.\s*)?\(\s*([^)]*)\))/g;
+// The member a `switch (<operand>)` discriminates on — the operand may
+// carry wrapper syntax that isn't the member itself: balanced outer
+// parens (`switch ((m[1]))`), a discarded `,` head (`(x, m[1])`), a
+// `??`/`||` fallback tail (`m[1] ?? ''` still tests m[1]), or an alias
+// bound to `m` (`let m2 = m; switch (m2[1])` — w65-fv F-5). Returns
+// 'm[N]', another resolved member, or null when the operand isn't a
+// member at all.
+const switchOperandMember = (op, aliases, pos) => {
+  let o = op.trim();
+  for (let guard = 0; guard < 8; guard++) {
+    let changed = false;
+    if (o.startsWith('(') && o.endsWith(')')) {
+      let d = 0, wraps = true;
+      for (let k = 0; k < o.length; k++) { const c = o[k]; if (c === '(') d++; else if (c === ')') { d--; if (d === 0 && k < o.length - 1) { wraps = false; break; } } }
+      if (wraps && d === 0) { o = o.slice(1, -1).trim(); changed = true; }
+    }
+    if (!changed) {
+      const cs = splitSpans(o, [','], 0);
+      if (cs !== null && cs.parts.length > 1) { o = cs.parts.at(-1).t.trim(); changed = true; }
+    }
+    if (!changed) {
+      const ns = splitSpans(o, ['??', '||'], 0);
+      if (ns !== null && ns.parts.length > 1) { o = ns.parts[0].t.trim(); changed = true; }
+    }
+    if (!changed) break;
+  }
+  DISP_MEMBER.lastIndex = 0;
+  const dm = DISP_MEMBER.exec(o);
+  if (dm !== null && dm[0].trim() === o) {
+    const idx = DISP_IDX_EVAL(dm[1] ?? dm[2] ?? '', dm[1] === undefined);
+    return idx === null ? null : `m[${idx}]`;
+  }
+  const am = /^([A-Za-z_$][\w$]*)\s*(?:\[\s*([^\]]+)\s*\]|(?:\?\s*\.\s*|\.\s*)at\s*(?:\?\s*\.\s*)?\(\s*([^)]*)\))$/.exec(o);
+  if (am !== null && aliases !== null) {
+    const r = aliases.at(am[1], pos);
+    if (r === 'm') { const idx = DISP_IDX_EVAL(am[2] ?? am[3] ?? '', am[2] === undefined); return idx === null ? null : `m[${idx}]`; }
+    if (r !== undefined) return r;
+  }
+  if (aliases !== null) {
+    const r = aliases.at(o, pos);
+    if (r !== undefined) return r === 'm' ? null : r;
+  }
+  return null;
+};
+const dispAliases = lines => {
+  // name → [{pos, member}] — bindings are POSITIONAL: a compare sees
+  // only the last assignment before it — `q[1]==='a'` before `q = m`
+  // never bound (TDZ/TypeError at runtime, minted anyway: w63-fv F-6);
+  // a `q = <non-alias>` rebind kills only compares AFTER it. `member`
+  // null marks a kill. `pos` = line*1e7 + char offset.
+  const hist = new Map();
+  const push = (nm, pos, member) => {
+    const arr = hist.get(nm) ?? [];
+    arr.push({ pos, member });
+    hist.set(nm, arr);
+  };
+  const at = (nm, pos) => {
+    const arr = hist.get(nm);
+    if (!arr) return undefined;
+    let v;
+    for (const b of arr) { if (b.pos > pos) break; v = b.member; }
+    return v === null ? undefined : v;
+  };
+  const dead = deadState();
+  let li = 0;
+  for (const l0 of lines) {
+    const base = li++ * 1e7;
+    const s = maskStrings(stripDead(l0, dead), dead);
+    for (const m of s.matchAll(/\b(?:const|let|var)?\s*([A-Za-z_$][\w$]*)\s*=\s*(?:m\s*(?:\?\s*\.\s*)?(?:\[\s*([^\]]+)\]|(?:\?\s*\.\s*|\.\s*)at\s*(?:\?\s*\.\s*)?\(\s*([^)]*)\))|([A-Za-z_$][\w$]*))/g)) {
+      // Chained aliases (`sub2 = sub`) resolve through the binding live
+      // AT THIS POSITION — member binding, not surface binding
+      // (w63-fv F-6). `const q = m` binds the WHOLE dispatcher — `q[N]`
+      // then dispatches exactly like `m[N]` (w61-ledger F-5).
+      const resolved = m[4] === 'm' ? 'm' : m[4] !== undefined ? at(m[4], base + m.index) : null;
+      const idx = resolved ?? (() => { const v = DISP_IDX_EVAL(m[2] ?? m[3] ?? '', m[2] === undefined); return v === null ? null : `m[${v}]`; })();
+      if (idx !== null) push(m[1], base + m.index, idx);
+    }
+    const d = /\b(?:const|let|var)\s*\{([^}]*)\}\s*=\s*m\b/.exec(s);
+    if (d) for (const mm of d[1].matchAll(/['"`]?(\d+)['"`]?\s*:\s*([A-Za-z_$][\w$]*)/g)) push(mm[2], base + d.index, `m[${mm[1]}]`);
+    // A `name = <anything not m[…]>` rebinding kills the alias FROM ITS
+    // POSITION — earlier compares keep the live binding (w63-fv F-6;
+    // w59-ledger F-5).
+    for (const m of s.matchAll(/\b([A-Za-z_$][\w$]*)\s*(?<![=!<>])=(?![=])\s*/g)) {
+      if (!hist.has(m[1])) continue;
+      const rhs = s.slice(m.index + m[0].length);
+      if (/^m\s*(?:\?\s*\.\s*)?(?:\[|(?:\?\s*\.\s*|\.\s*)at\s*(?:\?\s*\.\s*)?\()/.test(rhs)) continue;
+      // `name = m` binds the whole dispatcher, not a member — it keeps
+      // the alias instead of reading as a non-m rebind (w61-ledger F-5).
+      if (/^m\s*(?:[;,]|$)/.test(rhs)) continue;
+      // An identifier RHS keeps the binding only when that identifier is
+      // itself a live alias AT THIS POSITION — `x = undefined` kills.
+      const ident = /^([A-Za-z_$][\w$]*)\s*(?:[;,]|$)/.exec(rhs)?.[1];
+      if (!(ident && at(ident, base + m.index) !== undefined)) push(m[1], base + m.index, null);
+    }
+  }
+  return { hist, at };
+};
+const DISPATCH_2 = new RegExp("m\\s*(?:\\?\\s*\\.\\s*)?(?:\\[|(?:\\?\\s*\\.\\s*|\\.\\s*)at\\s*\\?\\s*\\.?\\s*\\()");
 // A role gate may name its set through a module-scope constant —
 // `authorize(p, ADMIN_SET)` gates exactly as honestly as the literal
 // array, and treating it as no gate turns a real role check into a
@@ -349,8 +2246,161 @@ const roleSets = lines => {
       defs.set(c[1], [...(defs.get(c[2]) ?? []), ...roleArgs(c[3])]);
     for (const p of s.matchAll(/\b([A-Za-z_$][\w$]*)\s*\.\s*push\s*\(([^)]*)\)/g))
       if (defs.has(p[1])) defs.get(p[1]).push(...roleArgs(p[2]));
+    // Membership-changing mutations the declarator/alias arms cannot
+    // read: `S[i] = 'r'` may carry a role, and splice/pop/shift/fill/
+    // sort/unshift/reverse or a `.length` write leaves the set
+    // unenumerable — drop it rather than guess (fail closed —
+    // authorize(p, S) then resolves no roles and the row flags,
+    // w58-ledger F11).
+    for (const p of s.matchAll(/\b([A-Za-z_$][\w$]*)\s*\[\s*[^\]]+\]\s*=(?!=)\s*([^;]+)/g))
+      if (defs.has(p[1])) defs.get(p[1]).push(...roleArgs(p[2]));
+    for (const p of s.matchAll(/\b([A-Za-z_$][\w$]*)\s*\.\s*(?:splice|pop|shift|unshift|fill|sort|reverse|copyWithin)\s*\(/g))
+      defs.delete(p[1]);
+    const lenm = /\b([A-Za-z_$][\w$]*)\s*\.\s*length\s*=\s*([^;]+)/.exec(s);
+    if (lenm && defs.has(lenm[1])) { if (lenm[2].trim() === '0') defs.set(lenm[1], []); else defs.delete(lenm[1]); }
   }
   return defs;
+};
+// A verb bound nowhere still lives on the row's dispatch member —
+// the first capture group — so `m[1]==='a'` folds dead for it while
+// foreign-member arms stay conditional (w64: unbound-verb parity).
+const IMPLICIT_ROW_MEMBER = new Set(['m[1]']);
+// A quoted literal is fully blanked on the masked view — quotes
+// included — so a compare survives there only as `<name> <op>` followed
+// by whitespace. `lit`/`l` carries the same positions unblanked: detect
+// the compare on the masked twin, then read the literal token from the
+// raw view at the identical span — a compare planted inside a string or
+// regex literal has its code side blanked and can never match
+// (w66-ledger F-1). Returns {op, value, a, b}: op is the operator,
+// value the DECODED literal text, a/b the operand-relative span of the
+// whole compare. `\\xNN`/`\\uNNNN`/escape sequences decode before
+// compare — `'\\u0047ET'` IS 'GET' and folds as such (w66-fv F-4).
+const litDecode = v => {
+  if (typeof v !== 'string' || !v.includes('\\')) return v;
+  // Full JS single-line literal decode — JSON.parse cannot read `\xNN`,
+  // `\u{X..}` or octal escapes, so `req.method === 'G\x45T'` folded to
+  // its raw text and escaped a method-dead arm (w66-fv F-4). Left to
+  // right, `\\` first so an escaped backslash never arms an escape.
+  let out = '', i = 0;
+  while (i < v.length) {
+    const c = v[i];
+    if (c !== '\\') { out += c; i++; continue; }
+    const n = v[i + 1] ?? '';
+    if (n === '\\') { out += '\\'; i += 2; }
+    else if (n === 'x' && /^[0-9a-fA-F]{2}$/.test(v.slice(i + 2, i + 4))) { out += String.fromCharCode(parseInt(v.slice(i + 2, i + 4), 16)); i += 4; }
+    else if (n === 'u' && /^[0-9a-fA-F]{4}$/.test(v.slice(i + 2, i + 6))) { out += String.fromCharCode(parseInt(v.slice(i + 2, i + 6), 16)); i += 6; }
+    else if (n === 'u' && v[i + 2] === '{') {
+      const e = v.indexOf('}', i + 3), cp = e > 0 ? parseInt(v.slice(i + 3, e), 16) : NaN;
+      if (Number.isFinite(cp)) { out += String.fromCodePoint(cp); i = e + 1; } else { out += v[i + 1]; i += 2; }
+    }
+    else if (/[0-7]/.test(n)) { const m8 = /^[0-7]{1,3}/.exec(v.slice(i + 1))[0]; out += String.fromCharCode(parseInt(m8, 8) & 0xFF); i += 1 + m8.length; }
+    else if (n === 'n') { out += '\n'; i += 2; }
+    else if (n === 'r') { out += '\r'; i += 2; }
+    else if (n === 't') { out += '\t'; i += 2; }
+    else if (n === 'b') { out += '\b'; i += 2; }
+    else if (n === 'f') { out += '\f'; i += 2; }
+    else if (n === 'v') { out += '\v'; i += 2; }
+    else if (n === '\n') { i += 2; }
+    else if (n === '') { i += 1; }
+    else { out += n; i += 2; }
+  }
+  return out;
+};
+const literalCmps = (masked, raw, nameSrc) => {
+  const out = [];
+  if (masked === null || raw === null || masked === undefined || raw === undefined) return out;
+  const fwd = new RegExp(`\\b(?:${nameSrc})\\s*([!=]={2,3})`, 'g');
+  let m;
+  while ((m = fwd.exec(masked)) !== null) {
+    let p = m.index + m[0].length;
+    while (p < raw.length && (raw[p] === ' ' || raw[p] === '\t')) p++;
+    const q = raw[p];
+    if (q === "'" || q === '"' || q === '`') {
+      let close = p + 1;
+      while (close < raw.length && raw[close] !== q) { if (raw[close] === '\\') close++; close++; }
+      if (close < raw.length) {
+        out.push({ op: m[1], value: litDecode(raw.slice(p + 1, close)), a: m.index, b: close + 1 });
+        fwd.lastIndex = close;
+        continue;
+      }
+    }
+    fwd.lastIndex = m.index + m[0].length;
+  }
+  const rev = new RegExp(`([!=]={2,3})\\s*\\b(?:${nameSrc})\\b`, 'g');
+  while ((m = rev.exec(masked)) !== null) {
+    let p = m.index - 1;
+    while (p >= 0 && (raw[p] === ' ' || raw[p] === '\t')) p--;
+    const q = raw[p];
+    if (q === "'" || q === '"' || q === '`') {
+      let open = p - 1;
+      while (open >= 0 && raw[open] !== q) open--;
+      // A `\'` inside the literal ends the backward scan early — the
+      // compare simply misses the fold (conservative, never launders).
+      if (open >= 0 && !raw.slice(open + 1, p).includes('\\'))
+        out.push({ op: m[1], value: litDecode(raw.slice(open + 1, p)), a: open, b: m.index + m[0].length });
+    }
+  }
+  return out;
+};
+// The compare must BE the operand modulo balanced outer parens — a
+// `!`, a call wrap, or a further `===`/`!==` around it changes the
+// semantics the fold would claim: `!(req.method==='PUT')` is TRUE under
+// a GET row, `f(req.method==='PUT')` is opaque, `(…===x)===false`
+// flips it (w66-fv F-2). Strip parens, then the detected span must
+// cover the operand text completely.
+const wholeOperandCmp = (masked, raw, nameSrc) => {
+  let mp = masked.trim(), rp = raw.trim();
+  // A leading balanced-paren wrap trims identically on both views —
+  // positions stay aligned because the mask is length-preserving.
+  while (mp.startsWith('(') && mp.endsWith(')')) {
+    let d = 0, ok = false;
+    for (let k = 0; k < mp.length; k++) {
+      const c = mp[k];
+      if (c === '(') d++;
+      else if (c === ')') { d--; if (d === 0) { ok = k === mp.length - 1; break; } }
+    }
+    if (!ok) break;
+    mp = mp.slice(1, -1).trim(); rp = rp.slice(1, -1).trim();
+  }
+  for (const c of literalCmps(mp, rp, nameSrc)) {
+    if (mp.slice(0, c.a).trim() === '' && mp.slice(c.b).trim() === '') return c;
+  }
+  return null;
+};
+// Whether every `||`-side of a condition carries a conjunct provably
+// false under this row's own method — `req.method === 'X'` with
+// X outside the head's method set, or `req.method !== 'X'` when the
+// set forces X exactly. `rowMethods` is a literal or a Set for `a || b`
+// heads (w66-fv F-3). Only exact literals decide; `path`/regex
+// comparisons are the route boundary's domain, not this fold's
+// (w65-fv F-8). Detection runs on a fresh mask of the operand so a
+// compare planted inside a string or comment never folds, and the
+// operand must BE the compare — a `!`/`f(...)`/`===x` wrapper defeats
+// it (w66-fv F-2, w66-ledger F-1).
+const methodCmpDead = (condPair, rowMethods) => {
+  if (condPair === null || rowMethods === null || rowMethods === undefined) return false;
+  const rowSet = rowMethods instanceof Set ? rowMethods : new Set([rowMethods]);
+  if (rowSet.size === 0) return false;
+  const [cond, base] = condPair;
+  const sides = splitSpans(cond, ['||'], base);
+  const parts = sides === null ? [{ t: cond, a: base, b: base + cond.length }] : sides.parts;
+  for (const side of parts) {
+    const s = splitSpans(side.t, ['&&', '??', ',', ':', '?'], side.a);
+    if (s !== null && s.ops.some(o => o !== '&&')) return false;
+    const ops = s === null ? [side] : s.parts;
+    let dead = false;
+    for (const op of ops) {
+      const c = wholeOperandCmp(blankBlock(codeSpan(op.t), deadState()), op.t, 'req\\.method');
+      if (c === null) continue;
+      const neg = c.op[0] === '!';
+      const eq = rowSet.has(c.value);
+      // `=== X` is provably false when X lies outside the head's set;
+      // `!== X` is provably false only when the set forces X exactly.
+      if (neg ? (rowSet.size === 1 && eq) : !eq) { dead = true; break; }
+    }
+    if (!dead) return false;
+  }
+  return true;
 };
 // === end shared source scanners ===
 {
@@ -370,16 +2420,176 @@ const roleSets = lines => {
       rows.push({ path, method, roles: m[1].split(',').map(s => s.trim()), listener: op['x-listener'] ?? null });
     }
   }
-  const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unauthenticated', 'issuer bearer token']);
+const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unauthenticated', 'issuer bearer token']);
   const sortR = r => [...r].sort().join(',');
+  // A function body that is never invoked can mint no gate — `const g =
+  // (req) => { authorize(...) };` declares a credential the row never
+  // resolves (w59-ledger F-1). Compute the dead line set once per scan
+  // window: a declaration is live iff its name is CALLED anywhere in the
+  // window (hoisting makes call position irrelevant — `g()` before or
+  // after the decl both keep it live). Method shorthand and property
+  // values are not covered: a name-only match inside the decl itself
+  // (`function g(`) is excluded from call evidence so it cannot
+  // self-register.
+  const deadFnLines = (lines, lo, hi) => {
+    const bound = Math.min(hi, lines.length);
+    const d0 = deadState();
+    const ml = [];
+    for (let i = lo; i < bound; i++) ml.push(maskStrings(stripDead(lines[i], d0), d0));
+    // Declaration spellings: `const g = ()=>`/`g = x =>`, `function g(`,
+    // `function* g(`, `async function(*/)? g(`, `const g = async
+    // function*(`, object members `g: function`/`g: async ()=>`/method
+    // shorthand `g(p){`, and class members `static g()`/`get g()`/
+    // `set g(v)`/`#g()`/`*g()`/`static async *g()` (w60-fv F-2,
+    // w60-ledger F-6).
+    const PARAMS = String.raw`(?:\([\s\S]*?\)|[A-Za-z_$][\w$]*)`;
+    const declRe = new RegExp([
+      String.raw`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:function\s*\*?\s*)?${PARAMS}\s*=>`,
+      String.raw`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?function\s*\*?\s*[A-Za-z_$]*\s*\(`,
+      String.raw`\b(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)\s*\(`,
+      String.raw`\b([A-Za-z_$][\w$]*)\s*:\s*(?:async\s+)?function\s*\*?\s*[A-Za-z_$]*\s*\(`,
+      String.raw`\b([A-Za-z_$][\w$]*)\s*:\s*(?:async\s+)?${PARAMS}\s*=>`,
+      String.raw`(?:(?:^|[{,\s])|(?:\b(?:static|async|get|set)\s+)+|\*\s*)([#]?[A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{`,
+    ].join('|'), 'g');
+    const decls = [];
+    const declPos = new Set();
+    for (let i = 0; i < ml.length; i++)
+      for (const dm of ml[i].matchAll(declRe)) {
+        const g = dm[1] !== undefined ? 1 : dm[2] !== undefined ? 2 : dm[3] !== undefined ? 3 : dm[4] !== undefined ? 4 : dm[5] !== undefined ? 5 : 6;
+        const name = dm[g];
+        if (!name || name === 'if' || name === 'for' || name === 'while' || name === 'switch' || name === 'catch' || name === 'return' || name === 'function') continue;
+        // The method-shorthand arm only counts a label position — `g()`
+        // following `return`/`(`/`,` is a call, not a decl.
+        if (g === 6) {
+          const pre = ml[i].slice(0, dm.index).trimEnd();
+          if (/[\w$.)\]]\s*$/.test(pre) && !/\b(?:static|async|get|set)\s*$|\*\s*$/.test(pre) && !/[{;,=:(]\s*$/.test(pre) && pre !== '') continue;
+        }
+        const nameAt = dm[0].lastIndexOf(name);
+        declPos.add(`${i}:${dm.index + nameAt}`);
+        decls.push({ name, li: i, start: dm.index + dm[0].length, group: g });
+      }
+    // Each decl's body span — the escape scan needs it so a self-
+    // reference inside the body (`g()` in g's own body — a recursive call
+    // is not an entry) cannot count as an escape, while a `g()` placed
+    // AFTER the decl's own `}` on the same line still counts
+    // (w61-ledger F-2's self-ref PoC, w60-fv F-2/F-6).
+    for (const d of decls) {
+      let j = d.li, dd = 0, seen = false;
+      d.bodyStart = -1; d.bodyEnd = -1;
+      for (; j < ml.length; j++) {
+        const seg = j === d.li ? ml[j].slice(d.start) : ml[j];
+        const off = j === d.li ? d.start : 0;
+        for (let k = 0; k < seg.length; k++) {
+          const ch = seg[k];
+          if (ch === '{') { dd++; if (d.bodyStart < 0) d.bodyStart = off + k; seen = true; }
+          else if (ch === '}') { dd--; if (seen && dd <= 0) { d.bodyEnd = off + k; break; } }
+        }
+        if (seen && dd <= 0) break;
+      }
+      if (!seen) for (j = d.li; j < ml.length; j++) { const sc = ml[j].indexOf(';'); if (sc >= 0) { d.bodyEnd = sc; break; } }
+      d.end = j;
+      // Inside = strictly between the body's own start and end positions.
+      d.inBody = (i, wi) => {
+        if (i < d.li || i > d.end) return false;
+        const s = d.bodyStart >= 0 ? d.bodyStart : d.start;
+        const e = d.bodyEnd >= 0 ? d.bodyEnd : Infinity;
+        if (i === d.li && wi < s) return false;
+        if (i === d.end && wi > e) return false;
+        return true;
+      };
+    }
+    // A declaration is dead only when NOTHING outside its own decl name
+    // invokes it — a use POSITION is not an invocation: `x = g`, `foo(g)`,
+    // `typeof g`, `return g`, `g === null`, `!g` all referenced or flowed
+    // the name while the body stayed unreachable, yet minted liveness
+    // anyway (w61-ledger F-2). Escapes are only PROVABLE invocations:
+    // `g(`, `g?.(`, `(g)(`, tagged template `g\``, `new g`,
+    // `g.call`/`.apply`/`.bind`, a member call `.g(` on a member decl, and
+    // `g` inside a known callback-consumer's argument list
+    // (setTimeout/setInterval/queueMicrotask/requestAnimationFrame/
+    // nextTick and `.then|.catch|.finally|.on|.once|.addEventListener|.
+    // forEach|.map|.filter|.reduce|.find|.sort|.flatMap|.every|.some` —
+    // those receivers invoke their callback args). Excluded positions:
+    // `.g` member reads, `g:`-key positions, `function g`/`g: function`
+    // headers, decl name tokens, and occurrences inside the decl's own
+    // body.
+    const CALLBACK_CONSUMER = /(?:\bsetTimeout|\bsetInterval|\bqueueMicrotask|\brequestAnimationFrame|\bnextTick|\.(?:then|catch|finally|on|once|addEventListener|forEach|map|filter|reduce|find|sort|flatMap|every|some))\s*\([^)]*$/;
+    const escapes = new Set();
+    for (const d of decls) {
+      if (escapes.has(d.name)) continue;
+      const word = new RegExp(`\\b${d.name.replace(/\$/g, '\\$')}\\b`, 'g');
+      for (let i = 0; i < ml.length; i++) {
+        let found = false;
+        for (const wm of ml[i].matchAll(word)) {
+          const wi = wm.index;
+          if (declPos.has(`${i}:${wi}`)) continue;
+          if (d.inBody(i, wi)) continue;                     // self-reference inside its own body
+          const before = ml[i].slice(0, wi).trimEnd();
+          const after = ml[i].slice(wi + d.name.length);
+          const memberDecl = d.group >= 4;
+          if (/^\s*:/.test(after)) continue;                 // `g:` object key
+          if (/\bfunction\s*\*?\s*$/.test(before)) continue; // `function g` header
+          if (/^\s*:\s*(?:async\s+)?function/.test(after)) continue; // `g: function`
+          if (/[.$]\s*$/.test(before)) {
+            // `.g` is a member read — except `.g(`/`.g?.(` invokes a
+            // member-decl's body (`o.g()` on `{ g() {} }`).
+            if (memberDecl && /^\s*(?:\(|\?\s*\.\s*\()/.test(after)) { escapes.add(d.name); found = true; break; }
+            continue;
+          }
+          // Tagged-template `g`x`` — maskStrings blanks the backticks on
+          // the masked view, so the raw line supplies the tell (positions
+          // align — maskStrings preserves them).
+          const rawAfter = lines[lo + i].slice(wi + d.name.length);
+          if (/^\s*\(/.test(after) || /^\s*\?\s*\.\s*\(/.test(after) || /^\s*`/.test(rawAfter)
+            || /^\s*\.\s*(?:call|apply|bind)\b/.test(after) || /^\s*\?\s*\.\s*(?:call|apply|bind)\b/.test(after)
+            || (/\(\s*$/.test(before) && /^\s*\)\s*\(/.test(after))
+            || /\bnew\s*$/.test(before)
+            || CALLBACK_CONSUMER.test(before)) {
+            escapes.add(d.name); found = true; break;
+          }
+        }
+        if (found) break;
+      }
+    }
+    const dead = new Set();
+    for (const d of decls) {
+      if (escapes.has(d.name)) continue;
+      for (let k = d.li; k <= d.end && k < ml.length; k++) dead.add(lo + k);
+    }
+    return dead;
+  };
   const collectAuthorize = (lines, from, depth, breakIf = true, verb = null) => {
+    // `undefined` and `null` are the same "no verb bound" — only
+    // `null` reads as unbound downstream; normalize so the two
+    // spellings never pick different member doctrine (w65-ledger F-5).
+    verb = verb ?? null;
+    // `undefined` (omitted arg) and `null` (explicit) must pick the same
+    // dead-member doctrine — normalize once at the boundary (w65-ledger
+    // F-5: NONROLE's omitted-verb call took IMPLICIT_ROW_MEMBER while
+    // authorizeAt's default took the raw set).
+    verb ??= null;
     const defs = roleSets(lines);
+    const aliases = dispAliases(lines);
+    const deadFn = deadFnLines(lines, from, from + depth);
     const found = new Set();
     let depthCur = 0;
     const skipStack = [];
     let skipIndent = null;
+    const chainSets = new Map();
+    // `switch (<dispatch member>)` frames — case literals inside bind
+    // their member the way else-if compares do (w61-ledger F-5).
+    const switchStack = [];
+    // {allCases, hasDefault} per popped switch frame, keyed
+    // line*1e7+pos — `pairServes` consults it for labels whose frame
+    // already closed (w64-fv F-6).
+    const switchCaseMap = new Map();
     let ourChainDepth = null;
     const dead = deadState();
+    // `deadM` feeds a parallel masking pipeline: the string-masked but
+    // operand-live twin of each line — stripDead's operand blanking can
+    // erase the `)` a brace-owner needs, so the brace analysis runs on
+    // this view instead (w59-ledger F-6).
+    const deadM = deadState();
     // An unconditional `return` inside this row's arm ends its dispatch —
     // an authorize placed AFTER it can never gate this verb, only
     // sibling rows that didn't return early (w56-ledger F7). `deadArmDepth`
@@ -390,19 +2600,185 @@ const roleSets = lines => {
     // exiting) plus each dispatched sub-arm's body depth (w56-ledger F7).
     const deadDepths = new Set();
     let tailDead = false;
+    // Route-chain depth at the row's head — a route boundary is a
+    // same-chain `if`, never a nested mid-row gate (w65-fv F-8).
+    let rowBase = -1;
+    // Members this row's verb dispatches on — accumulates as the scan
+    // sees this verb's member-compare pairs; siblingArm consults it to
+    // prove disjointness is same-member, not same-line (w63-fv F-3).
+    const verbMemberSet = new Set();
+    // The row's own method — the literal its route head compares
+    // `req.method` against. A mid-row `if (req.method === 'X')` with a
+    // different X is statically dead (its else is the row's live arm);
+    // the route boundary only fires at route-chain depth so that arm
+    // pair is folded honestly instead of hiding the grant (w65-fv F-8).
+    // The head's method binding comes from compares inside its own
+    // condition, read on the comment/string-masked view — a literal
+    // inside a string or a `//` tail can't fabricate the binding
+    // (w66-fv F-3). `a || b` heads bind a SET of methods; a side
+    // without a method compare leaves the row unbound, `&&`-joined
+    // distinct literals make the head dead code. `switch`/`&&`-heads
+    // fall through to unbound — conservative.
+    const rowMethod = (() => {
+      const src = lines[from] ?? '';
+      const masked = blankBlock(maskStrings(stripComment(src), deadState()), deadState());
+      const ih = /\bif\s*\(/.exec(masked);
+      if (!ih) return null;
+      let d = 0, close = -1;
+      for (let k = ih.index + ih[0].length; k < masked.length; k++) {
+        const c = masked[k];
+        if (c === '(') d++;
+        else if (c === ')') { d--; if (d === 0) { close = k; break; } }
+      }
+      if (close === -1) return null;
+      const condM = masked.slice(ih.index + ih[0].length, close);
+      const condR = src.slice(ih.index + ih[0].length, close);
+      const sides = splitSpans(condM, ['||'], 0);
+      const methods = new Set();
+      for (const side of (sides === null ? [{ t: condM, a: 0 }] : sides.parts)) {
+        const cmps = literalCmps(side.t, condR.slice(side.a, side.a + side.t.length), 'req\\.method')
+          .filter(c => c.op === '===' || c.op === '==');
+        if (cmps.length === 0) return null;
+        const sideVals = new Set(cmps.map(c => c.value));
+        if (sideVals.size > 1) continue;   // `A && B` — impossible side
+        methods.add([...sideVals][0]);
+      }
+      return methods.size === 1 ? [...methods][0] : methods;
+    })();
+    // Seed it row-wide: a sibling arm consults the set BEFORE the line
+    // that binds the verb (`if(m[1]==='abort')` precedes
+    // `if(m[1]==='acknowledge')`, w59-fv F-2 — incremental accumulation
+    // left the earlier arm unprovable and broke w63-fv F-3's
+    // bound-member disjointness test). The SAME pair extractor the
+    // scan uses runs here on the comment-stripped, masked line —
+    // direct `m[N]==='<verb>'`/`m?.[N]`/`m.at(N)`, whole-dispatcher
+    // aliases resolved at their own position, `switch(m[N])`/`case
+    // '<verb>'` frames — so a compare inside `/* */` can no longer
+    // phantom-bind a member and a re-bound alias keeps only its last
+    // binding (w64-fv F-8, w64-ledger F-3).
+    // The member an unbound verb implicitly dispatches on is the row's
+    // OWN dispatch member — the plurality of its pair members across
+    // the row (multiplexed rows bind verbs on m[2], so an unbound
+    // verb's `m[1]` gate is foreign, not dead — w65-fv F-7). A row
+    // carrying no pairs keeps the historical m[1].
+    // `rowVerbSets` counts the DISTINCT verbs bound per member — a
+    // plurality member is a proven discriminator only when at least
+    // two verbs dispatch on it; a single compare is an id-filter, not
+    // a dispatch chain (w66-fv F-5).
+    const rowMemberVotes = new Map();
+    const rowVerbSets = new Map();
+    // `rowVerbRide` — verb -> the member its literal names ANYWHERE in
+    // the row (positive or negated compare, gated or not). The verb
+    // rides that member conventionally: compares on it fold by the
+    // verb's own literal; compares on a DIFFERENT member are live
+    // gambles for it. A verb named nowhere rides the implicit member
+    // (w64-fv F-5 convention). Vote gating must NOT hide the name —
+    // `m[2]==='x'` inside a foreign arm still names 'x' on m[2] even
+    // though it casts no vote (w67-ledger F-4 vs w56-ledger F7).
+    const rowVerbRide = new Map();
+    const implicitSet = () => {
+      let best = null, n = 0;
+      for (const [mb, c] of rowMemberVotes) if (c > n) { best = mb; n = c; }
+      return best === null ? IMPLICIT_ROW_MEMBER : new Set([best]);
+    };
+    if (verb !== null) {
+      const seedStack = [], seedCases = new Map();
+      let swDepth = 0;
+      // Vote scoping (w67-ledger F-4): a member compare counts as a
+      // verb-discriminating vote only at the row's own dispatch level —
+      // inside the arm of a nested `m`-rebind (the `m` there binds a
+      // DIFFERENT dispatcher, so `m[2]==='z'` carries foreign values)
+      // or inside any other control arm (`if (flag)`, a per-verb
+      // `if (m[2]==='y')`, a case body) the compare is gated and never
+      // a dispatch site. Dispatch levels are arms of dispatcher-binding
+      // heads (`if ((m = /re/))`) and of `switch` frames — compare
+      // positions inside their direct bodies vote; deeper ones don't.
+      const openFrames = [];   // {kind:'rowBind'|'other', d:number|null, startPos:number}
+      const gateRanges = [];   // [startPos, endPos) absolute i2*1e7+char
+      // A position is gated inside a closed range OR inside an `other`
+      // frame still open at the compare's line (the frame's range only
+      // lands when its `}` arrives).
+      const gatedAt = ap => gateRanges.some(([a, b]) => ap >= a && ap < b)
+        || openFrames.some(f => f.kind !== 'rowBind' && f.startPos <= ap);
+      for (let i2 = from; i2 < Math.min(from + depth, lines.length); i2++) {
+        const l2 = stripDead(lines[i2], deadM), lm2 = maskStrings(stripComment(l2), deadM);
+        const swBefore = swDepth;
+        const wn = new Set(['m']);
+        for (const nm of aliases.hist.keys()) if (aliases.at(nm, i2 * 1e7) === 'm') wn.add(nm);
+        const evts = [];
+        for (const b of lm2.matchAll(/[{}]/g)) evts.push({ pos: b.index, t: b[0] });
+        for (const hm of lm2.matchAll(/\b(?:if|for|while|switch|catch|else|case|default)\b/g)) evts.push({ pos: hm.index, t: 'kw', kw: hm[0] });
+        evts.sort((a, b) => a.pos - b.pos);
+        let curD = swDepth;
+        for (const e of evts) {
+          if (e.t === '{') { curD++; continue; }
+          if (e.t === '}') {
+            curD--;
+            for (let fi = openFrames.length - 1; fi >= 0; fi--) {
+              const f = openFrames[fi];
+              if (f.d !== null && f.d > curD) {
+                if (f.kind !== 'rowBind') gateRanges.push([f.startPos, i2 * 1e7 + e.pos]);
+                openFrames.splice(fi, 1);
+              }
+            }
+            continue;
+          }
+          // Control keyword — read its paren condition (if any) and arm opener.
+          let k2 = e.pos + e.kw.length;
+          while (k2 < lm2.length && /\s/.test(lm2[k2])) k2++;
+          if (e.kw === 'else' && lm2.slice(k2, k2 + 2) === 'if') continue; // the `if` pushes its own frame
+          if ((e.kw === 'case' || e.kw === 'default')) {
+            // A case/default body gates its interior until the next
+            // case label or the switch's close — an `other` frame at
+            // the current depth (closed by the switch's `}`).
+            for (let fi = openFrames.length - 1; fi >= 0; fi--) if (openFrames[fi].caseLvl) { gateRanges.push([openFrames[fi].startPos, i2 * 1e7 + e.pos]); openFrames.splice(fi, 1); }
+            let colon = lm2.indexOf(':', e.pos + e.kw.length);
+            if (colon < 0) colon = lm2.length;
+            openFrames.push({ kind: 'other', d: curD, caseLvl: true, startPos: i2 * 1e7 + colon + 1 });
+            continue;
+          }
+          let condTxt = null, condEnd = k2;
+          if (lm2[k2] === '(') {
+            const c0 = k2;
+            let d2 = 0;
+            for (k2 = c0; k2 < lm2.length; k2++) { if (lm2[k2] === '(') d2++; else if (lm2[k2] === ')') { d2--; if (d2 === 0) break; } }
+            condTxt = lm2.slice(c0 + 1, k2); condEnd = k2 + 1;
+          }
+          let k3 = condEnd;
+          while (k3 < lm2.length && /\s/.test(lm2[k3])) k3++;
+          const assignsM = condTxt !== null && [...wn].some(nm => new RegExp(`\\b${nm.replace(/\$/g, '\\$')}\\s*=(?![=!<>])`).test(condTxt));
+          const kind = (e.kw === 'switch' || (assignsM && !openFrames.some(f => f.kind === 'rowBind'))) ? 'rowBind' : 'other';
+          if (lm2[k3] === '{') openFrames.push({ kind, d: curD + 1, caseLvl: false, startPos: i2 * 1e7 + k3 + 1 });
+          else if (kind !== 'rowBind') {
+            // Braceless arm covers the rest of the line; a head ending
+            // the line gates the next statement (≈ the next line).
+            const endLine = lm2.slice(k3).trim() === '' ? i2 + 2 : i2 + 1;
+            gateRanges.push([i2 * 1e7 + (condTxt === null ? k3 : condEnd), endLine * 1e7]);
+          }
+        }
+        swDepth = curD;
+        for (const p of pairsForLine(stripComment(l2), lm2, i2, swBefore, seedStack, aliases, verb, verbMemberSet, seedCases)) {
+          if (typeof p.verb === 'string' && p.verb !== '' && p.member !== null && p.member !== undefined && !rowVerbRide.has(p.verb)) rowVerbRide.set(p.verb, p.member);
+          if (gatedAt(i2 * 1e7 + p.pos)) continue;
+          rowMemberVotes.set(p.member, (rowMemberVotes.get(p.member) ?? 0) + 1);
+          if (p.verb === verb && p.opNeg !== true) verbMemberSet.add(p.member);
+          if (typeof p.verb === 'string' && p.verb !== '' && p.opNeg !== true) {
+            let vs = rowVerbSets.get(p.member); if (vs === undefined) rowVerbSets.set(p.member, vs = new Set());
+            vs.add(p.verb);
+          }
+        }
+      }
+    }
+    // Conditional bodies (`if/else/case/catch/try/=>`/braceless/
+    // line-broken operands) cannot satisfy unconditional claims
+    // (w58-fv F-3) — the tracker persists across the scanned lines.
+    const tracker = condTracker();
     // Any authorize call seen (guarded or not) is reported via `.any` — a
     // conditional gate still breaks an 'unauthenticated' claim even
     // though it cannot satisfy a role claim (w57-ledger F3).
     const sawAny = { v: false };
     for (let i = from; i < Math.min(from + depth, lines.length); i++) {
-      // Only a route-arm-shaped `if` bounds the scan — a nested `if`
-      // inside the handler is part of the handler and its gate still
-      // counts (w55-ledger C4-c: `if (p.tenant_id) { authorize }` hid a
-      // real role gate under an 'authenticated' claim).
-      if (i !== from && breakIf && isRouteArmIf(lines[i]) && !isValidationGuard(lines[i])) break;
-      const cs = codeSpan(lines[i]);
-      const opens = (cs.match(/\{/g) ?? []).length;
-      const closes = (cs.match(/\}/g) ?? []).length;
+
       // A multiplexed arm (one regex `if` serving several contract paths)
       // dispatches sub-routes through inner `if (m[N] === 'x')` tests —
       // an authorize inside a sibling's sub-route belongs to that row,
@@ -416,21 +2792,117 @@ const roleSets = lines => {
       // continuation of a sibling chain is sibling too: it serves the
       // chain's catch-all row, not this verb — excluding it errs toward
       // flagging, never laundering.
+      if (i === from) rowBase = depthCur;
       let l = stripDead(lines[i], dead);
       // `lm` is the string-blanked twin: call detection runs on it so an
       // authorize/dispatch/return inside a string literal mints nothing;
       // the verb argument is read back from `l` at the same position
-      // (w57-ledger F2/F4).
+      // (w57-ledger F2/F4). `deadPre` snapshots the line-entry string
+      // state so the return-cut re-mask starts from the same template
+      // context instead of a fresh object (w58-ledger F4).
+      const deadPre = { pending: false, block: dead.block, str: dead.str };
       const lm = maskStrings(l, dead);
-      const disp = verb && i !== from ? [...lm.matchAll(new RegExp(DISPATCH_IDX + '\\s*===', 'g'))]
-        .map(x => { const v = new RegExp(DISPATCH_IDX + "\\s*===\\s*'([^']+)'").exec(l.slice(x.index)); return v ? v[1] : null; }).filter(Boolean) : [];
+      // Only a ROUTE-ARM boundary stops the scan — `isRouteArmIf`'s
+      // literal-regex boundary matched `else`-chained arms and inner
+      // dispatch `if`s as if they were new routes, so a second arm on
+      // the same line retro-poisoned mints already taken (w64-fv F-2)
+      // and a nested `if` inside a handler's arm hid its gate
+      // (w64-ledger F-1). The real boundary: a dispatch-compare `if`
+      // whose arm this row does not serve, sitting at or above the
+      // row's own arm depth — only that terminates the row's window.
+      const enclosingClosesEarly = (() => { let bal = 0, enc = 0; for (const ch of lm) { if (ch === '{') bal++; else if (ch === '}') { if (bal > 0) bal--; else enc++; } } return enc; })();
+      // The boundary needs the route-chain depth: the row head sits at
+      // `rowBase` (the dispatch's own depth); a nested `if` deeper than
+      // that is a mid-row gate, never a new route — even a
+      // route-shaped one (`if (req.method === 'PUT') {…} else {…}`)
+      // whose else is the row's live arm (w65-fv F-8).
+      if (i !== from && breakIf && depthCur - enclosingClosesEarly <= rowBase && routeArmBoundary(l, lm, i, switchStack, aliases) && !isValidationGuard(lines[i])) break;
+      // Depth arithmetic reads the fully-masked view — `//`/`/* */`
+      // comments, string bodies and dead operands all blank — so every
+      // `{`/`}` counted here is real structure. A phantom `/* } */`
+      // previously desynced every depth-keyed decision downstream
+      // (chainSets, skipStack, ourChainDepth, deadDepths) (w60-ledger
+      // F-4).
+      const opens = (lm.match(/\{/g) ?? []).length;
+      const closes = (lm.match(/\}/g) ?? []).length;
+      // `}` first matches THIS line's own opens — only a `}` that
+      // outlives them is an enclosing close. A self-contained inner
+      // block on one line (`if (m[1]==='a') { authorize(...) }`) must
+      // not pop the sibling frame it sits inside (w60-fv F-3).
+      const enclosingCloses = enclosingClosesEarly;
+      // Dispatch verbs are read from the UNMASKED `l` (the masked twin
+      // blanks quoted digits), each position checked against `lm` so a
+      // dispatch spelling inside a string literal mints nothing
+      // (w58-fv F-4).
+      // Verb-dispatch compares are polarity- and conjunction-aware: a
+      // compare names the verbs its arm serves unconditionally only when
+      // the compare is POSITIVE (===/==, never !==/!= or a `!`-enclosed
+      // member) AND its ||-term carries no top-level `&&`/`?:` — a
+      // negated or conjunct-weakened compare's arm can never run for
+      // that verb (or runs only under the extra conjunct), so its
+      // authorize mints nothing (w59-fv F-1).
+      // Pairs bind on the arm-head line too — `if (m[1]==='a') {…}`
+      // scanned for verb 'b' must see the a-pair so the arm classifies
+      // as sibling/dead for 'b', not 'ours' by default (w63-seal F-3).
+      const pairs0 = verb ? pairsForLine(l, lm, i, depthCur - closes, switchStack, aliases, verb, verbMemberSet, switchCaseMap) : [];
+      // Whether each switch opened on this line is COMPLETE here —
+      // a `switch(m[1]){case'x':x}` whole-line form dead-marks for
+      // every verb it doesn't serve, instead of leaking conditional
+      // mints through its unjudged cases (w64-fv F-6). Incomplete
+      // switches stay frame-driven: their labels mint per-line.
+      const swServed = new Map();
+      if (verb !== null) {
+        for (const f of switchStack) if (Math.floor(f.key / 1e7) === i) {
+          let d2 = 0, done = false;
+          for (let k = f.at; k < l.length; k++) { const c2 = l[k]; if (c2 === '{') d2++; else if (c2 === '}') { d2--; if (d2 === 0) { done = true; break; } } }
+          swServed.set(f.at, done && !f.allCases.has(verb) && !f.hasDefault);
+        }
+      }
       const afterCloses = depthCur - closes;
+      const isElse = /^\s*\}?\s*else\b/.test(l);
+      // An `else if` that repeats a (member,verb) pair an earlier arm of
+      // the same chain already consumed can never run — every matching
+      // request was taken by the earlier arm. Chains are tracked per
+      // statement depth: a fresh `if` starts a new chain at its depth,
+      // each `else if` adds its compares, and the chain dissolves once
+      // the scan leaves that depth. A dead arm mints nothing — not even
+      // '.any' — and a nested own-verb arm inside it cannot re-arm
+      // (w59-ledger F-3).
+      for (const d of [...chainSets.keys()]) if (d > afterCloses) chainSets.delete(d);
+      // Key by position — a DEFAULT_CASE sentinel verb cannot stringify.
+      const pairKey = p => `${p.member}|${p.pos}`;
+      let deadArm = false;
+      let pairs = pairs0;
+      if (pairs.length > 0) {
+        // `afterCloses` is the statement depth — a `} else` still carries
+        // the closing `}` in depthCur, so its chain keyed at the `if`'s
+        // depth is one level shallower (w59-ledger F-3).
+        const chainD = afterCloses;
+        if (isElse) {
+          const consumed = new Set(chainSets.get(chainD) ?? []);
+          const elseAt = /\belse\b/.exec(l)?.index ?? -1;
+          const livePairs = [];
+          for (const p of pairs) {
+            if (p.pos > elseAt && consumed.has(pairKey(p))) continue;
+            livePairs.push(p);
+            consumed.add(pairKey(p));
+          }
+          deadArm = livePairs.length === 0;
+          pairs = livePairs;
+          chainSets.set(chainD, consumed);
+        } else {
+          chainSets.set(chainD, new Set(pairs.map(pairKey)));
+        }
+      }
       let popped = false;
-      while (skipStack.length && afterCloses < skipStack[skipStack.length - 1].d) { skipStack.pop(); popped = true; }
+      // A `}` swallowed by this line's own opens leaves the enclosing
+      // frame intact — a self-contained inner block on one line must not
+      // pop the sibling/ours frame it sits inside (w60-fv F-3).
+      const afterEnclosing = depthCur - enclosingCloses;
+      while (skipStack.length && afterEnclosing < skipStack[skipStack.length - 1].d) { skipStack.pop(); popped = true; }
       // A braceless sibling body stays excluded while following lines
       // keep a deeper indent than the dispatch line (blank lines ride).
       if (skipIndent !== null && l.trim() !== '' && (/^\s*/.exec(l)[0].length <= skipIndent || /^\s*\}/.test(l))) skipIndent = null;
-      const isElse = /^\s*\}?\s*else\b/.test(l);
       // The dispatch chain OUR verb rides ends at our arm's closing `}` —
       // a `} else` past it serves the catch-all row, never ours. A chain
       // with more else-arms keeps the marker until a non-else line drops
@@ -441,20 +2913,138 @@ const roleSets = lines => {
       }
       const topIsSib = skipStack.length > 0 && !skipStack[skipStack.length - 1].ours;
       const inSib = topIsSib;
-      const sibling = disp.length > 0 && !disp.includes(verb);
-      const ours = disp.length > 0 && disp.includes(verb);
-      // A `} else` continuing a sibling chain — or our own chain once our
-      // arm closed — is sibling too: its catch-all roles must not bleed
-      // into this row. A dispatch naming THIS verb is ours even inside a
-      // sibling region: `if (m[2]==='ourverb')` nested in arm-a is this
-      // row's gate, not arm-a's.
-      const elseSibling = isElse && !ours && (popped || inSib || ourChainClosed);
-      const excluded = (inSib && !ours) || skipIndent !== null || sibling || elseSibling;
-      if (sibling || elseSibling) {
+      // Members this row's verb dispatches on, accumulated across the
+      // scan — a sibling arm is provably disjoint only when its member
+      // compare binds a member THIS verb also binds (w63-fv F-3).
+      for (const p of pairs0) if (p.verb === verb && p.opNeg !== true) verbMemberSet.add(p.member);
+      // An unbound verb rides the member its literal names (positive or
+      // negated compare anywhere in the row), else the implicit member:
+      // 'x' names m[2] via `m[2]==='x'`, so `m[1]==='a'` is a foreign
+      // live gate for it — not its dead arm (w64-fv F-5 ride doctrine).
+      const verbDeadSet = () => verbMemberSet.size === 0
+        ? (rowVerbRide.has(verb) ? new Set([rowVerbRide.get(verb)]) : implicitSet())
+        : verbMemberSet;
+      const posMemberMap = new Map(pairs0.map(p => [p.pos, p.member]));
+      const posVerbMap = new Map(pairs0.map(p => [p.pos, p.verb]));
+      const negPosSet = new Set(pairs0.filter(p => p.opNeg === true).map(p => p.pos));
+      // `verbPosLine` = positions this row serves — own compares AND
+      // fall-through/`default` coverage (w64-fv F-6).
+      const verbPosLine = pairs.filter(p => pairServes(p, verb, switchCaseMap)).map(p => p.pos);
+      // A line is sibling territory for this row only when EVERY
+      // control head on it provably fails for this verb — every
+      // `if`/`else if`/`while`/`for`/`switch` head a bound-member
+      // foreign dispatch arm and every `case` compare under a bound
+      // member. A head this verb might satisfy (`if (flag)`,
+      // a plurality-gamble compare,
+      // `m[2]==='x'` for an m[1]-bound row, a do-`while` tail it just
+      // evaluated) makes the line conditional territory: 'b' still
+      // rides it, and the else of `if (m[1]==='a')` is 'b''s arm, so
+      // the whole line cannot be 'a''s row either (w63-fv F-4).
+      const sibling = (() => {
+        if (pairs.length === 0 || pairs.some(p => pairServes(p, verb, switchCaseMap))) return false;
+        // A line with an `else` tail is never wholly dead — failing
+        // every prior head lands the verb inside the else arm, so
+        // `if (m[1]==='b') {…} else authorize` still serves 'a', and
+        // for a bound-nowhere verb the else arm IS its only arm
+        // (w63-fv F-4, w64-fv F-7 — the veto holds unbound too).
+        if (/\belse\b/.test(lm)) return false;
+        const headWord = open => {
+          let j = open - 1; while (j >= 0 && (lm[j] === ' ' || lm[j] === '\t')) j--;
+          return /[\w$]+$/.exec(lm.slice(Math.max(0, j - 40), j + 1))?.[0] ?? '';
+        };
+        const headDead = open => {
+          let d = 0, close = -1;
+          for (let k = open; k < lm.length; k++) { const c = lm[k]; if (c === '(') d++; else if (c === ')') { d--; if (d === 0) { close = k; break; } } }
+          const hcO = [lm.slice(open + 1, close), open + 1];
+          // Dead-arming a plurality arm stays defensible — the gamble
+          // only relaxes the ELSE to conditional, through `pendCls`'s
+          // 'siblingPlural' class (w66-fv F-5).
+          const sib = siblingArm(hcO, verbPosLine, verb, verbDeadSet(), posMemberMap, posVerbMap);
+          return close >= 0 && (sib || methodCmpDead([l.slice(open + 1, close), open + 1], rowMethod));
+        };
+        for (const p of pairs) {
+          const a = armOf(lm, p.pos);
+          // A `case`/`default` pair's pos sits ON the label keyword —
+          // the arm has no parens of its own, so armOf cannot walk
+          // back to it; the dispatch member it binds is the switch's
+          // operand (w61 F-5, w64-fv F-6).
+          if (a === null && !/^(?:case|default)\b/.test(lm.slice(p.pos))) return false;
+          const w = a === null ? 'case' : headWord(a.open);
+          if (w === 'case' || w === 'switch' || w === 'default') { if (verbMemberSet.size !== 0 && !verbDeadSet().has(p.member)) return false; continue; }
+          if (w !== 'if' && w !== 'while' && w !== 'for' && w !== 'switch') return false;
+          if (w === 'while' && /\}\s*while\s*$/.test(lm.slice(0, a.open))) return false;
+          if (!headDead(a.open)) return false;
+        }
+        // An `if`/`while`/`for`/`switch` head carrying NO pair still
+        // counts — a live head this verb might satisfy rides the line
+        // too. Heads inside an arm that is already dead for this verb
+        // stay unreachable for it: demoting to conditional territory
+        // lands on the same verdict (w63-fv F-4).
+        for (const hm of lm.matchAll(/\b(?:if|while|for|switch)\s*\(/g)) {
+          const open = hm.index + hm[0].length - 1;
+          let d = 0, close = -1;
+          for (let k = open; k < lm.length; k++) { const c = lm[k]; if (c === '(') d++; else if (c === ')') { d--; if (d === 0) { close = k; break; } } }
+          if (close < 0) return false;
+          if (!pairs.some(p => p.pos > open && p.pos < close)) {
+            // A `switch (m[N])` head binds a member operand — for a
+            // foreign row (no member bound anywhere) every case is dead
+            // dispatch, and for a row bound on that member the cases
+            // carry the arm semantics — only a cross-member switch head
+            // is a live guard for this verb (w61-ledger F-5).
+            const swc = lm.slice(open + 1, close);
+            const swmMember = switchOperandMember(swc, aliases, i * 1e7 + open + 1);
+            const swBound = swmMember !== null && verbDeadSet().has(swmMember);
+            if (!swBound && !siblingArm([swc, open + 1], verbPosLine, verb, verbDeadSet(), posMemberMap, posVerbMap, rowVerbSets)) return false;
+          }
+        }
+        return true;
+      })();
+      // An own-verb arm nested inside a sibling region mints only when it
+      // can actually run: a nested compare on the SAME member as an
+      // enclosing sibling arm's compare but naming a DIFFERENT verb is
+      // statically dead (`if(m[2]==='abort'){ if(m[2]==='acknowledge')`),
+      // so its authorize mints nothing (w59-fv F-2). Different members
+      // (m[1] vs m[2]) or the else of a sibling chain stay reachable.
+      const contradict = p => skipStack.some(s => s.ours === false && Array.isArray(s.pairs) && s.pairs.some(sp => sp.member === p.member && sp.verb !== p.verb));
+      const ours = pairs.some(p => pairServes(p, verb, switchCaseMap) && !contradict(p));
+      // An `else`/`else if` after OUR arm already closed is dead for
+      // this row even when it repeats our verb — the earlier arm
+      // consumed every matching request, so its authorize mints nothing
+      // (w59-ledger F-3). A `} else` continuing a FOREIGN chain is NOT
+      // dead for this row — this verb reaches it whenever it failed
+      // every prior head: the member-bound tracker latches decide
+      // unconditional vs conditional per arm (w63-fv F-4's else for
+      // everyone else). Before our arm, an else carrying our verb is
+      // genuinely ours.
+      const elseSibling = isElse && (ourChainClosed || (!ours && (popped || inSib) && verbMemberSet.size === 0));
+      const inDead = skipStack.some(s => s.dead);
+      const excluded = deadArm || inDead || (inSib && !ours) || skipIndent !== null || elseSibling || sibling;
+      // A braceless own-verb dispatch (`if (m[N]==='our') authorize(...)`)
+      // runs its body unconditionally for this row — the guarded-call
+      // doctrine would otherwise swallow the mint while the contract
+      // claims a role (w60-ledger F-7). Positions past the condition's
+      // closing `)` are the body.
+      let oursBraceEnd = -1;
+      if (ours && !lm.includes('{')) {
+        const ih = /\bif\s*\(/.exec(lm);
+        if (ih) {
+          let dd = 0, k = ih.index + ih[0].length;
+          for (; k < lm.length; k++) { const c = lm[k]; if (c === '(') dd++; else if (c === ')') { dd--; if (dd <= 0) break; } }
+          if (dd <= 0) oursBraceEnd = k;
+        }
+      }
+      // Walk the masked line for conditional-body state on EVERY line
+      // (sibling `if{` blocks still open/close depths). The row's own
+      // dispatch `{` is the unconditional entry scope; a sibling arm's
+      // block is dead scope for this row — not conditional — so an
+      // own-verb arm nested inside it still mints (w58-fv F-3,
+      // w56-fv F-2).
+      const scan = tracker.line(lm, depthCur, i === from || ours ? 'ours' : (sibling || elseSibling) ? 'sibling' : null, maskStrings(blankBlock(stripComment(lines[i]), deadM), deadM), false, i === from && pairs0.length === 0 ? null : verbPosLine, pairs0.map(p => p.pos), verbMemberSet, posMemberMap, verb, posVerbMap, swServed, negPosSet, { aliases, posBase: i * 1e7, implicit: implicitSet, rowMethod, plural: rowVerbSets, ride: rowVerbRide }, l);
+      if (sibling || elseSibling || deadArm) {
         const lastOpen = l.lastIndexOf('{'), lastClose = l.lastIndexOf('}');
         // An unmatched last `{` opens a block whose interior continues
         // past this line; otherwise the body is braceless (indent-bound).
-        if (lastOpen > lastClose) skipStack.push({ d: afterCloses + opens, ours: false });
+        if (lastOpen > lastClose) skipStack.push({ d: afterCloses + opens, ours: false, pairs: sibling ? pairs : [], dead: deadArm });
         else if (opens === 0) skipIndent = /^\s*/.exec(l)[0].length;
       }
       // A dispatch carrying THIS verb opens our arm — inside a sibling
@@ -466,12 +3056,45 @@ const roleSets = lines => {
       // enclosing region's tail for this verb exactly like the braced
       // arm does (w56-ledger F7).
       if (ours) {
-        if (l.includes('{')) deadDepths.add(depthCur + 1); else deadDepths.add(depthCur);
-        if (l.lastIndexOf('{') > l.lastIndexOf('}')) {
+        if (lm.includes('{')) deadDepths.add(depthCur + 1); else deadDepths.add(depthCur);
+        if (lm.lastIndexOf('{') > lm.lastIndexOf('}')) {
           if (skipStack.length > 0) skipStack.push({ d: afterCloses + opens, ours: true });
           else ourChainDepth = afterCloses + opens;
         }
       } else if (i === from && opens > 0) deadDepths.add(depthCur + 1);
+      // `ownDispatch(prefix, verbPos)` — the trailing braceless `if`
+      // before a return/throw is THIS row's dispatch (and only this
+      // row's dispatch) when some `||`-side unconditionally serves the
+      // verb: every top-level `&&` operand on that side is a compare or
+      // a dispatcher exec/test/match bind, and at least one is a
+      // positive member-compare the pair scan bound to this verb (or a
+      // bind). Other-verb member-compares and negated members gate the
+      // side like any conjunct (w62-fv F-8).
+      const ownDispatch = (prefix, verbPos, posMember = null, posVerb = null) => {
+        if (typeof verb !== 'string' || verb === '') return false;
+        const t = tailCtlCond(prefix, 'if');
+        if (!t) return false;
+        const [cond, base] = t;
+        const vcPos = op => (verbPos ?? []).some(p => p >= op.a && p < op.b);
+        const sides = splitSpans(cond, ['||'], base);
+        const parts = sides === null ? [{ t: cond, a: base, b: base + cond.length }] : sides.parts;
+        return parts.some(side => {
+          const s = splitSpans(side.t, ['&&', '??', ',', ':', '?'], side.a);
+          if (s !== null && s.ops.some(o => o !== '&&')) return false;
+          const ops = s === null ? [side] : s.parts;
+          return ops.every(op => {
+            const c2 = dispOperandCls(op.t);
+            // A member compare statically true for this row is dead
+            // weight — `m[1]==='a' && m[1]!=='b'` is still 'a''s own
+            // arm (w64-fv F-5); a cross-member compare is a live gate.
+            if (c2 === 'membercmp' || c2 === 'memberneg') {
+              const f = memberCmpFold(op.t, verb, verbMemberSet, posMember, posVerb, op.a, rowVerbSets);
+              if (f !== null) return f.verdict === 'const-true';
+            }
+            return vcPos(op) || c2 === 'othercmp' || c2 === 'bind';
+          }) && ops.some(vcPos);
+        });
+      };
       if (!excluded && !tailDead) {
         // A `return` at a dominating depth kills the row's tail — cut
         // the line at it, latch dead, and stop crediting authorizes that
@@ -482,28 +3105,49 @@ const roleSets = lines => {
           // already subtracted this line's `}` chars, so a self-contained
           // `{ ... }` later on the same line would under-read the depth at
           // the return (w56-ledger F7 self-test).
+          // Whether the pending `return`/`throw` owns this row's tail.
+          // A control-armed exit — braceless `if (c) return` OR braced
+          // `if (c) { return; }` (w64-fv F-1: braces only moved the
+          // w63 hole) — keeps the tail conditional unless the arm is
+          // the row's OWN dispatch (`if (m[N]==='ourverb') return send`,
+          // any shape), which is unconditional for this row and kills
+          // it. A sibling arm's exit never ran for this row; any other
+          // live gate already conditioned the tail via condTail.
+          const armScoped = prefix => {
+            const br = bracedCtlCond(prefix, 'if|for|while');
+            if (br !== null) return ours && dispatchPure([br[0], br[1]], verbPosLine, verb, verbMemberSet, posMemberMap, posVerbMap, rowVerbSets);
+            const bc = tailCtlCond(prefix, 'if|for|while');
+            if (bc !== null) return ours && ownDispatch(prefix, verbPosLine, posMemberMap, posVerbMap);
+            return !/\belse\s*$/.test(prefix);
+          };
           let ld = depthCur, cut = -1;
           for (let ci = 0; ci < lm.length; ci++) {
             const c = lm[ci];
             if (c === '{') ld++;
             else if (c === '}') ld--;
             else if (deadDepths.has(ld) && /^(?:return|throw)\b/.test(lm.slice(ci)) && !/[\w$]/.test(lm[ci - 1] ?? ' ')
-              // A `return`/`throw` that is the braceless body of an
-              // if/else/for/while on this line is conditional — it
-              // dominates nothing and the row's tail stays live
-              // (w56-ledger F7) — UNLESS the braceless if is THIS verb's
-              // own dispatch: an `if (m[N]==='ourverb') return send(...)`
-              // is unconditional for this row and its tail is dead
-              // (w57-fv NEW-1). Statements after an unconditional throw
-              // are the same dead evidence (w57-ledger F3/F13).
-              && (ours || !/\b(?:if|for|while)\s*\([^;{]*\)\s*$|\belse(?:\s+if\s*\([^;{]*\))?\s*$/.test(lm.slice(0, ci)))) { cut = ci; break; }
+              && armScoped(lm.slice(0, ci))) { cut = ci; break; }
           }
           if (cut !== -1) { l = l.slice(0, cut); tailDead = true; }
         }
-        const lmx = maskStrings(l, { pending: false, block: dead.block });
+        const lmx = maskStrings(l, deadPre);
         for (const m of lmx.matchAll(/authorize\(\s*p\s*,\s*[^\s)]/g)) {
+          // Dead scope mints nothing at all — not even '.any' — since
+          // the call can never execute (w59-ledger F-6).
+          if (scan.condPos[m.index] === 2 || deadFn.has(i)) continue;
           sawAny.v = true;
-          if (guardedPrefix(lmx, m.index)) continue;  // conditional gate — cannot satisfy a role claim (w57-ledger F3)
+          // A conditional gate — guarded statement prefix or a body
+          // under if/else/case/catch/try/=> — cannot satisfy a role
+          // claim (w57-ledger F3, w58-fv F-3). Positions past a
+          // braceless own-dispatch `)` are the row's unconditional body,
+          // not a guarded statement (w60-ledger F-7).
+          // Positions past the own dispatch `)` are the row's body —
+          // but a nested `if` inside it still guards: floor the prefix
+          // scan at the `)` rather than skipping it, so
+          // `if (m[1]==='a') if (m[2]==='x') authorize` stays
+          // conditional for 'a' (w64-ledger F-5).
+          const bodyFloor = oursBraceEnd >= 0 && m.index > oursBraceEnd ? oursBraceEnd + 1 : undefined;
+          if (scan.condPos[m.index] || guardedPrefix(lmx, m.index, scan.livePos[m.index] ? scan.liveArm[m.index] : bodyFloor)) continue;
           const args = l.slice(m.index);
           const am = /authorize\(\s*p\s*,\s*\[([^\]]+)\]/.exec(args);
           if (am) { for (const r of am[1].split(',')) found.add(r.trim().replace(/['"]/g, '')); continue; }
@@ -522,15 +3166,21 @@ const roleSets = lines => {
     const defs = roleSets(fabric);
     const found = new Set();
     const fdead = deadState();
+    const fdeadM = deadState();
+    const ftrack = condTracker();
+    let fdepth = 1;
     for (let i = idx; i < Math.min(idx + 140, fabric.length); i++) {
       if (i !== idx && /^\s{2}(async )?[a-zA-Z_]+\(/.test(fabric[i])) break;
       const fl = stripDead(fabric[i], fdead), fm = maskStrings(fl, fdead);
+      const fscan = ftrack.line(fm, i === idx ? 1 : fdepth, false, maskStrings(blankBlock(stripComment(fabric[i]), fdeadM), fdeadM));
+      fdepth = fscan.endDepth;
       // Comments and string literals carry no gate — the call is found on
       // the masked view, its argument read back from the stripped line,
-      // and a same-statement `cond && authorize` is a conditional gate
-      // that cannot satisfy a role claim (w57-ledger F2/F3).
+      // and a same-statement `cond && authorize` or a conditional body
+      // is a conditional gate that cannot satisfy a role claim
+      // (w57-ledger F2/F3, w58-fv F-3).
       for (const m of fm.matchAll(/this\.authorize\(\s*p\s*,\s*[^\s)]/g)) {
-        if (guardedPrefix(fm, m.index)) continue;
+        if (fscan.condPos[m.index] || guardedPrefix(fm, m.index, fscan.livePos[m.index] ? fscan.liveArm[m.index] : undefined)) continue;
         const args = fl.slice(m.index);
         const am = /this\.authorize\(\s*p\s*,\s*\[([^\]]+)\]/.exec(args);
         if (am) { for (const r of am[1].split(',')) found.add(r.trim().replace(/['"]/g, '')); continue; }
@@ -566,19 +3216,41 @@ const roleSets = lines => {
       }
       return t;
     };
-    const hi = lines.findIndex((l, i) =>
-      isIf(l) && condText(i).includes(`req.method === '${r.method.toUpperCase()}'`) &&
-      (condText(i).includes(`path === '${r.path}'`) || condText(i).includes(`url.pathname === '${r.path}'`) || condText(i).includes(`req.url === '${r.path}'`) || (param && /\^\\\//.test(condText(i)) && staticSegs.every(s => condText(i).includes(s)))));
+    // A candidate `if` whose own condition is provably dead is a decoy —
+    // it carries our literals to win `hi` while its arm can never run,
+    // shadowing the real arm that does (w59-ledger F-2). Literal-false
+    // first operands and `&&`-conjoined dead operands both mark it dead.
+    const deadIfCond = t =>
+      /\(\s*(?:false|!true|!1|0+|null|undefined|''|"")\s*&&/.test(t) ||
+      /&&\s*(?:false|!true|!1|0+|null|undefined|''|"")\s*(?:\)|&&)/.test(t) ||
+      /\(\s*(?:false|!true|!1|0+|null|undefined|''|"")\s*\)\s*(?:\{|$)/.test(t);
+    // `hi` must bind the arm whose OWN condition carries the contract's
+    // method/path compare — a decoy `if` repeating the clause inside a
+    // string literal wins `hi` on raw text while its arm can never run
+    // as this route (w66-ledger F-1). Compares are detected on the
+    // string/comment-blanked view and their literals read back from the
+    // raw cond at the same span; the `/^…/`-regex arm reads the code
+    // view where regex bodies survive.
+    const hi = lines.findIndex((l, i) => {
+      if (!isIf(l)) return false;
+      const raw = condText(i), code = blankBlock(codeSpan(raw), deadState());
+      // `''`/`""` dead literals vanish on the masked view — deadIfCond
+      // keeps reading raw (its string-spoof direction only over-claims).
+      if (deadIfCond(raw)) return false;
+      if (!literalCmps(code, raw, 'req\\.method').some(c => (c.op === '===' || c.op === '==') && c.value === r.method.toUpperCase())) return false;
+      const pathOk = literalCmps(code, raw, '\\bpath\\b|url\\.pathname\\b|req\\.url\\b').some(c => (c.op === '===' || c.op === '==') && c.value === r.path);
+      return pathOk || (param && /\^\\\//.test(code) && staticSegs.every(s => code.includes(s)));
+    });
     // The handler window: the dispatch arm until the next ROUTE boundary.
     // A nested `if` inside the arm's own block is part of the handler, not
     // a boundary — a real auth call one `if` deep is reachability-true
     // (w54-ledger H-3). The boundary is an `if` at the arm's own depth.
     const windowEnd = () => {
       if (hi === -1) return hi;
-      // The arm-bounded window: 40 lines truncated long handlers and let
-      // a late authorize hide behind a lying 'unauthenticated' claim
-      // (w57-ledger F5).
-      const end = Math.min(hi + 160, lines.length);
+      // The arm-bounded window runs to the route boundary or file end —
+      // any fixed cap truncates long handlers and lets a late authorize
+      // hide behind a lying 'unauthenticated' claim (w58-ledger F12).
+      const end = lines.length;
       let depth = 0;
       // A multi-line `if (` condition continues until its block opens, and
       // a brace-less arm's body is the next statement — neither may close
@@ -634,17 +3306,36 @@ const roleSets = lines => {
     // Evidence regexes run on the STRING-BLANKED twin: a 'auth(req)' or
     // authorize-shaped literal inside a string or /* */ comment mints
     // nothing (w57-ledger F2).
-    const windowMasked = hi === -1 ? '' : (() => { const d = deadState(); return lines.slice(hi, wEnd).map(x => maskStrings(stripDead(x, d), d)).join('\n'); })();
+    // Never-invoked function bodies are dead scope — blanked from the
+    // window so their evidence mints nothing (w59-ledger F-1).
+    const windowDeadFn = hi === -1 ? new Set() : deadFnLines(lines, hi, wEnd);
+    const windowMasked = hi === -1 ? '' : (() => { const d = deadState(); return lines.slice(hi, wEnd).map((x, j) => windowDeadFn.has(hi + j) ? ' ' : maskStrings(stripDead(x, d), d)).join('\n'); })();
     // An unconditional claim ('authenticated', 'token holder',
     // 'issuer bearer token') needs at least one UNGUARDED credential
     // call — `flag && auth(req)` serves unauthenticated traffic and is
     // not a gate (w57-ledger F3). Each masked line is checked per
     // call position.
-    const AUTH_CALL = /auth\(req|authenticateToken|authBreakglass\(|authorize\(|anyBearer\(|bearerMatches\(|issuerAuthOk\(|bearerDigest\(/g;
+    // Every spelling requires a real CALL — `typeof authenticateToken`
+    // or a bare member-read minted on the unparenthesized arm
+    // (w58-ledger F6); custom credential helpers count too
+    // (w58-ledger F13).
+    const AUTH_CALL = /\b(?:auth|authenticateToken|authBreakglass|authorize|anyBearer|bearerMatches|issuerAuthOk|bearerDigest|verifyJwt|bearer|verifyBearer|checkAuth)\s*\(\s*(?:req\b|p\b|request\b)?/g;
     const unguardedAuth = hi === -1 ? false : (() => {
       const d = deadState();
-      return lines.slice(hi, wEnd).map(x => maskStrings(stripDead(x, d), d))
-        .some(ml => [...ml.matchAll(AUTH_CALL)].some(m => !guardedPrefix(ml, m.index)));
+      const dM = deadState();
+      const tr = condTracker();
+      let sd = 0;
+      for (let i = hi; i < wEnd; i++) {
+        const ml = maskStrings(stripDead(lines[i], d), d);
+        // Iteration over a collection is a credential resolver's
+        // traversal, not a gate — `for` bodies count as unguarded scope
+        // here (while/if/switch arms stay conditional).
+        const scan = tr.line(ml, sd, i === hi ? 'ours' : null, maskStrings(blankBlock(stripComment(lines[i]), dM), dM), true);
+        sd = scan.endDepth;
+        for (const m of ml.matchAll(AUTH_CALL))
+          if (!windowDeadFn.has(i) && !scan.condPosDeep[m.index] && !guardedPrefix(ml, m.index, scan.livePos[m.index] ? scan.liveArm[m.index] : undefined)) return true;
+      }
+      return false;
     })();
     if (r.roles.length === 1 && NONROLE.has(r.roles[0])) {
       // Non-role claims are still contract claims: 'unauthenticated' must
@@ -657,7 +3348,7 @@ const roleSets = lines => {
       // handler longer than the window hid its authorize behind a lying
       // 'unauthenticated' row (w57-ledger F5).
       const gate = collectAuthorize(lines, hi, Math.max(2, wEnd - hi));
-      if (r.roles[0] === 'unauthenticated' && (gate.any || /auth\(req|authenticateToken/.test(windowMasked))) { console.error(`route-role parity: ${r.method} ${r.path} — claims unauthenticated but the handler authenticates`); failed = true; continue; }
+      if (r.roles[0] === 'unauthenticated' && (gate.any || new RegExp(AUTH_CALL.source).test(windowMasked))) { console.error(`route-role parity: ${r.method} ${r.path} — claims unauthenticated but the handler authenticates`); failed = true; continue; }
       if (r.roles[0] === 'token holder' && !unguardedAuth) { console.error(`route-role parity: ${r.method} ${r.path} — claims token holder but no credential resolves`); failed = true; continue; }
       if (r.roles[0] === 'issuer bearer token' && !unguardedAuth) { console.error(`route-role parity: ${r.method} ${r.path} — claims issuer bearer token but no bearer gate resolves`); failed = true; continue; }
       if (r.roles[0] !== 'unauthenticated' && gate.any) { console.error(`route-role parity: ${r.method} ${r.path} — claims '${r.roles[0]}' but a role gate [${gate.roles ?? []}] resolves`); failed = true; continue; }
@@ -692,8 +3383,12 @@ const roleSets = lines => {
         const armDepth = rows.at(-1)?.stmtDepth ?? 1;
         let braceless = false;
         const priorDead = deadState();
+        const priorDeadM = deadState();
+        const ptrack = condTracker();
         for (const r of rows.slice(1, -1)) {
           const l = lines[r.i];
+          const pl0 = stripDead(l, priorDead), pm = maskStrings(pl0, priorDead);
+          const pscan = ptrack.line(pm, r.stmtDepth, false, maskStrings(blankBlock(stripComment(l), priorDeadM), priorDeadM));
           if (r.stmtDepth !== armDepth) continue;
           const cs = codeSpan(l);
           // A braceless `if (c)`/`else`/`for`/`while` at arm depth makes
@@ -721,10 +3416,9 @@ const roleSets = lines => {
             continue;
           }
           if (/^\s*(?:async\s+)?function\s/.test(l)) continue;
-          const pl = stripDead(l, priorDead), pm = maskStrings(pl, priorDead);
-          priorCalls.push(pl);
-          for (const am of pm.matchAll(/auth\(req|authenticateToken|authBreakglass\(|authorize\(/g))
-            if (!guardedPrefix(pm, am.index)) priorAuthed = true;
+          priorCalls.push(pl0);
+          for (const am of pm.matchAll(/\b(?:auth|authenticateToken|authBreakglass|authorize|verifyJwt|bearer)\s*\(\s*(?:req\b|p\b|request\b)?/g))
+            if (!pscan.condPosDeep[am.index] && !guardedPrefix(pm, am.index, pscan.livePos[am.index] ? pscan.liveArm[am.index] : undefined)) priorAuthed = true;
         }
       }
       if ((r.roles[0] === 'authenticated' || r.roles[0] === 'bound subject')
@@ -832,6 +3526,16 @@ const roleSets = lines => {
     // switch, an includes-set) stays invisible and is flagged when it
     // reaches a serving line (w51-ledger H-2).
     for (const m of code.matchAll(/\b(?:const|let|var)\s+(\w+)\s*=\s*(req\.method|req\.url|path|url\.pathname)\b/g)) if (m[1] !== 'path' && !aliases.has(m[1])) aliases.set(m[1], m[2]);
+    // Rebound RECEIVERS dispatch the same requests under a name the
+    // audit cannot read — `const request = req` makes `request.method`/
+    // `request.url`/`request.headers` invisible to both the
+    // unauditable-flag arm and routeSeen (w58-ledger F2). Alias the
+    // receiver so `X.method` resolves to `req.method`. A createServer
+    // callback's first parameter is the request object by definition.
+    for (const m of code.matchAll(/\b(?:const|let|var)?\s*([A-Za-z_$][\w$]*)\s*=\s*(req|request)\b(?!\s*[.\[])/g))
+      if (!['req', 'request'].includes(m[1]) && !aliases.has(m[1])) aliases.set(m[1], 'req');
+    const cbp = /createServer\s*\((?:[^(),]*,\s*)?(?:async\s+)?\(\s*([A-Za-z_$][\w$]*)\s*,/.exec(code);
+    if (cbp && !['req', 'request', 'res', 'response'].includes(cbp[1]) && !aliases.has(cbp[1])) aliases.set(cbp[1], 'req');
     let eff = pending.map(c => c.text).join(' ') + (tentative ? tentative.text : '') + code;
     for (const [n, tok] of aliases) eff = eff.replace(new RegExp(`\\b${n}\\b`, 'g'), tok === 'url.pathname' ? 'path' : tok);
     // Dispatch shapes this gate cannot see are failures, not skips:
@@ -887,10 +3591,11 @@ const roleSets = lines => {
   // second handler file is undocumented live code (w50-ledger H-2). The
   // scan is recursive: a nested file or a helper script cannot slip a
   // handler past the audit (w51-ledger H-2).
-  // issuerd.mjs is exempt from THIS outside-scan because auditDispatch()
-  // above already audits its dispatch — it is declared in openapi under
-  // x-listener (w52-ledger M-6). cli.mjs only imports the audited
-  // server.mjs surface; check.mjs is this file.
+  // issuerd.mjs and cli.mjs are exempt from THIS outside-scan because
+  // auditDispatch() already audits their dispatch — issuerd is declared
+  // in openapi under x-listener, cli only instantiates the audited
+  // server factory (w58-ledger F2). check.mjs is this file.
+  auditDispatch(readFileSync('src/cli.mjs', 'utf8').split('\n'));
   const auditExempt = new Set(['src/server.mjs', 'src/issuerd.mjs', 'src/cli.mjs', 'scripts/check.mjs']);
   // The scan rides the TRACKED-file enumeration, not a directory walk: a
   // .cjs helper, a dispatch file outside src|scripts|web, or a symlink

@@ -26,6 +26,31 @@ const legacyDekAad = (tenant, kind, id) => `${tenant}/${kind}/${id}/dek`;
   // previous slash form sat inside the legacy records-AAD space and let a
   // raw-writer transplant a sealed receipt into a records row (w18-crypto F1).
 const idemAad = (tenant, scope, key) => canonical({ idempotency: true, tenant, scope, key });
+// The fold-residue keep triggers — canonical CREATE text shared by every
+// emitter (guards install, heal-path recreate, fabric drain recreate).
+// A heal that re-created the pre-w60 text used to silently drop the
+// `fold_floor_retired` arms for the rest of the process lifetime, and
+// _installIntegrityGuards' legacy map accepted the downgrade as expected
+// legacy text (w61-runtime F-1 / w61-seal F-2): one emitter, one source.
+export const RESIDUE_KEEP_TRIGGERS = [
+  ['fold_residue_keep', "CREATE TRIGGER fold_residue_keep BEFORE DELETE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' OR OLD.key='fold_floor_retired' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END"],
+  ['fold_residue_keep_upd', "CREATE TRIGGER fold_residue_keep_upd BEFORE UPDATE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' OR OLD.key='fold_floor_retired' OR NEW.key='fold_floor_healed' OR substr(NEW.key,1,18)='fold_floor_healed.' OR NEW.key='fold_floor_retired' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END"],
+  ['fold_residue_keep_ins', "CREATE TRIGGER fold_residue_keep_ins BEFORE INSERT ON meta_kv WHEN NEW.key='fold_floor_healed' OR substr(NEW.key,1,18)='fold_floor_healed.' OR NEW.key='fold_floor_retired' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END"],
+];
+
+// Envelope-scan duplicate-member coverage for every level the pipeline
+// reads: sqlite's json_extract/json_each resolve the FIRST duplicate member
+// while JSON.parse consumers resolve the LAST, so a spliced dup can hide a
+// field from the scan on a row that still verifies — making the row a
+// candidate is the only honest answer (w65-runtime F-1). One shared
+// fragment: every audit-envelope scanning query appends it identically.
+// The lifecycle_carryover element level needs je.type='object' guarding —
+// json_each on a scalar element raises 'malformed JSON' and fails the scan.
+// The fifth clause descends one level further — dup keys inside an
+// element's own `metadata` object (w66-runtime F-1). Coverage still stops
+// at lc[*].metadata.*: deeper free-form nesting has no schema-defined
+// sub-object, and no scan selects on those paths.
+export const DUP_KEY_PROBE = ` OR EXISTS (SELECT 1 FROM json_each(envelope,'$') GROUP BY "key" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload') GROUP BY "key" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload.metadata') GROUP BY "key" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload.metadata.lifecycle_carryover') je, json_each(CASE WHEN je.type='object' THEN je.value ELSE '{}' END) jk GROUP BY je.key, jk.key HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload.metadata.lifecycle_carryover') je2, json_each(CASE WHEN je2.type='object' AND json_type(je2.value,'$.metadata')='object' THEN json_extract(je2.value,'$.metadata') ELSE '{}' END) jm GROUP BY je2.key, jm.key HAVING COUNT(*)>1)`;
 
 
 
@@ -128,7 +153,7 @@ export class Store {
     // reads the LAST — must always be a candidate: canonical writers
     // never mint dups, so any dup at root or $.payload is adversarial
     // evidence the JS parse must see (w45-fv HIGH).
-    for (const row of this._stmt("SELECT seq,envelope FROM audit WHERE tenant=? AND json_valid(envelope) AND (json_extract(envelope,'$.payload.type') IN ('AUTHORITY_REVOKED','KEY_ROTATED','AUDIT_SEALED','AUDIT_SEAL_CARRY') OR EXISTS (SELECT 1 FROM json_each(envelope,'$') GROUP BY \"key\" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload') GROUP BY \"key\" HAVING COUNT(*)>1))").all(tenant)) {
+    for (const row of this._stmt("SELECT seq,envelope FROM audit WHERE tenant=? AND json_valid(envelope) AND (json_extract(envelope,'$.payload.type') IN ('AUTHORITY_REVOKED','KEY_ROTATED','AUDIT_SEALED','AUDIT_SEAL_CARRY')" + DUP_KEY_PROBE + ")").all(tenant)) {
       let env; try { env = JSON.parse(row.envelope); } catch { continue; }
       const pl = env?.payload, meta = pl?.metadata;
       // Earliest death wins — a second death event must never extend a
@@ -215,8 +240,10 @@ export class Store {
       // A bare UPDATE rewrites the marker with no delete firing at all —
       // cover the update arm identically (w47-fixverify HIGH-1). No code
       // path ever UPDATEs the marker row; only the sanctioned
-      // drop+delete+recreate sequence may touch it.
-      ['aad_marker_keep_upd', "CREATE TRIGGER aad_marker_keep_upd BEFORE UPDATE ON meta_kv WHEN OLD.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END", 'aad migration marker is evidence'],
+      // drop+delete+recreate sequence may touch it. NEW.key is covered
+      // too — a rename-in (`UPDATE meta_kv SET key='aad_migration'` on an
+      // innocent row) mints the marker without any INSERT (w58-fv F-2).
+      ['aad_marker_keep_upd', "CREATE TRIGGER aad_marker_keep_upd BEFORE UPDATE ON meta_kv WHEN OLD.key='aad_migration' OR NEW.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END", 'aad migration marker is evidence'],
       // INSERT OR REPLACE never fires BEFORE DELETE — recursive_triggers
       // is off, so the implicit conflict-delete skips every guard and a
       // REPLACE rewrote the marker silently (w48-store W48-4). The
@@ -229,18 +256,41 @@ export class Store {
       // The sanctioned write/retire paths drop+recreate these verbatim
       // inside their own transactions; an attacker's delete now aborts
       // in-band like the aad marker's.
-      ['fold_residue_keep', "CREATE TRIGGER fold_residue_keep BEFORE DELETE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END", 'fold-floor residue is evidence'],
-      ['fold_residue_keep_upd', "CREATE TRIGGER fold_residue_keep_upd BEFORE UPDATE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END", 'fold-floor residue is evidence'],
-      ['fold_residue_keep_ins', "CREATE TRIGGER fold_residue_keep_ins BEFORE INSERT ON meta_kv WHEN NEW.key='fold_floor_healed' OR substr(NEW.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END", 'fold-floor residue is evidence'],
+      // `fold_floor_retired` joins the family (w60-seal F-1): the durable
+      // consumption marker is evidence exactly like the heal rows.
+      ...RESIDUE_KEEP_TRIGGERS.map(([name, sql]) => [name, sql, 'fold-floor residue is evidence']),
     ];
+    // Pre-w58 verbatim texts of the triggers we have since hardened — a
+    // database written by the previous build stores THAT text, so the
+    // text-check below would wedge on an honest upgrade. Legacy-verbatim
+    // bodies are dropped and recreated to current text; any other shape
+    // is tamper evidence and still fails (w58-fv F-2).
+    const legacyGuardText = new Map([
+      ['aad_marker_keep_upd', ["CREATE TRIGGER aad_marker_keep_upd BEFORE UPDATE ON meta_kv WHEN OLD.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END"]],
+      ['fold_residue_keep', ["CREATE TRIGGER fold_residue_keep BEFORE DELETE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END"]],
+      ['fold_residue_keep_upd', [
+        "CREATE TRIGGER fold_residue_keep_upd BEFORE UPDATE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END",
+        "CREATE TRIGGER fold_residue_keep_upd BEFORE UPDATE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' OR NEW.key='fold_floor_healed' OR substr(NEW.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END"
+      ]],
+      ['fold_residue_keep_ins', ["CREATE TRIGGER fold_residue_keep_ins BEFORE INSERT ON meta_kv WHEN NEW.key='fold_floor_healed' OR substr(NEW.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END"]]
+    ]);
     const norm = s => (s ?? '').replace(/\s+/g, ' ').trim();
     for (const [name, sql] of guards) this.db.exec(`CREATE TRIGGER IF NOT EXISTS ${sql.slice('CREATE TRIGGER '.length)}`);
     // Text check: the STORED body must equal our literal — feature tests
     // (WHEN present, RAISE literal) are evadable by WHERE-gated bodies
     // (w21-store F-1).
     const triggers = new Map(this._stmt("SELECT name, sql FROM sqlite_master WHERE type='trigger'").all().map(x => [x.name, x.sql ?? '']));
-    for (const [name, sql] of guards)
-      if (norm(triggers.get(name)) !== norm(sql)) throw new InvariantError('INV-503-STORAGE', `integrity trigger missing or tampered: ${name}`, 503);
+    for (const [name, sql] of guards) {
+      const stored = norm(triggers.get(name));
+      if (stored === norm(sql)) continue;
+      if ((legacyGuardText.get(name) ?? []).some(t => stored === norm(t))) {
+        this.db.exec(`DROP TRIGGER "${name}"`);
+        this.db.exec(`CREATE TRIGGER ${sql.slice('CREATE TRIGGER '.length)}`);
+        triggers.set(name, sql);
+        continue;
+      }
+      throw new InvariantError('INV-503-STORAGE', `integrity trigger missing or tampered: ${name}`, 503);
+    }
     // Enumeration, not just existence: a file-writer can plant EXTRA
     // triggers whose names or bodies smuggle SQL into our own privileged
     // paths (DROP TRIGGER batch, the seal's delete pass, or any ordinary
@@ -300,10 +350,18 @@ export class Store {
     requireThat(probe(() => { this.db.exec('DROP TRIGGER aad_marker_keep_ins'); this._stmt("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', '{}')").run(pt); this._stmt("DELETE FROM meta_kv WHERE tenant=? AND key='aad_migration'").run(pt); }, 'aad migration marker is evidence'), 'INV-503-STORAGE', 'aad_migration marker delete trigger not enforced', 503);
     requireThat(probe(() => { this.db.exec('DROP TRIGGER aad_marker_keep_ins'); this._stmt("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', '{}')").run(pt); this._stmt("UPDATE meta_kv SET value='{}' WHERE tenant=? AND key='aad_migration'").run(pt); }, 'aad migration marker is evidence'), 'INV-503-STORAGE', 'aad_migration marker update trigger not enforced', 503);
     requireThat(probe(() => { this._stmt("INSERT INTO meta_kv VALUES(?, 'aad_migration', '{}')").run(pt); }, 'aad migration marker is evidence'), 'INV-503-STORAGE', 'aad_migration marker insert trigger not enforced', 503);
-    // Same three arms for the heal-residue plane (w57-runtime F-1).
+    // Same three arms for the heal-residue plane (w57-runtime F-1) —
+    // exercised on the keyed form AND the legacy bare key AND a second
+    // key suffix, so a guard that only covers one spelling cannot pass
+    // (w58-fv F-1). The rename-in arm mints evidence by moving an
+    // innocent row onto a residue key (w58-fv F-2).
     requireThat(probe(() => { this.db.exec('DROP TRIGGER fold_residue_keep_ins'); this._stmt("INSERT OR REPLACE INTO meta_kv VALUES(?, 'fold_floor_healed.1', '{}')").run(pt); this._stmt("DELETE FROM meta_kv WHERE tenant=? AND key='fold_floor_healed.1'").run(pt); }, 'fold-floor residue is evidence'), 'INV-503-STORAGE', 'fold-floor residue delete trigger not enforced', 503);
+    requireThat(probe(() => { this.db.exec('DROP TRIGGER fold_residue_keep_ins'); this._stmt("INSERT OR REPLACE INTO meta_kv VALUES(?, 'fold_floor_healed.2', '{}')").run(pt); this._stmt("DELETE FROM meta_kv WHERE tenant=? AND key='fold_floor_healed.2'").run(pt); }, 'fold-floor residue is evidence'), 'INV-503-STORAGE', 'fold-floor residue delete trigger not enforced on second key', 503);
+    requireThat(probe(() => { this.db.exec('DROP TRIGGER fold_residue_keep_ins'); this._stmt("INSERT OR REPLACE INTO meta_kv VALUES(?, 'fold_floor_healed', '{}')").run(pt); this._stmt("DELETE FROM meta_kv WHERE tenant=? AND key='fold_floor_healed'").run(pt); }, 'fold-floor residue is evidence'), 'INV-503-STORAGE', 'fold-floor residue delete trigger not enforced on bare key', 503);
     requireThat(probe(() => { this.db.exec('DROP TRIGGER fold_residue_keep_ins'); this._stmt("INSERT OR REPLACE INTO meta_kv VALUES(?, 'fold_floor_healed.1', '{}')").run(pt); this._stmt("UPDATE meta_kv SET value='{}' WHERE tenant=? AND key='fold_floor_healed.1'").run(pt); }, 'fold-floor residue is evidence'), 'INV-503-STORAGE', 'fold-floor residue update trigger not enforced', 503);
+    requireThat(probe(() => { this.db.exec('DROP TRIGGER fold_residue_keep_ins'); this._stmt("INSERT INTO meta_kv VALUES(?, 'innocent', 'x')").run(pt); this._stmt("UPDATE meta_kv SET key='fold_floor_healed.9' WHERE tenant=? AND key='innocent'").run(pt); }, 'fold-floor residue is evidence'), 'INV-503-STORAGE', 'fold-floor residue rename-in not enforced', 503);
     requireThat(probe(() => { this._stmt("INSERT INTO meta_kv VALUES(?, 'fold_floor_healed.1', '{}')").run(pt); }, 'fold-floor residue is evidence'), 'INV-503-STORAGE', 'fold-floor residue insert trigger not enforced', 503);
+    requireThat(probe(() => { this.db.exec('DROP TRIGGER aad_marker_keep_ins'); this._stmt("INSERT INTO meta_kv VALUES(?, 'aad_probe', 'x')").run(pt); this._stmt("UPDATE meta_kv SET key='aad_migration' WHERE tenant=? AND key='aad_probe'").run(pt); }, 'aad migration marker is evidence'), 'INV-503-STORAGE', 'aad_migration rename-in not enforced', 503);
     // The counter-arm: a BEFORE INSERT RAISE(IGNORE) throws nothing and
     // fires no guard — the write just vanishes while every caller reads
     // success (w48-fixverify CRITICAL). Probe that the ledger's most
@@ -346,7 +404,7 @@ export class Store {
       } catch { /* forged or unverifiable tail row — keep walking back */ }
     }
     requireThat(floorSeeded || this._stmt('SELECT COUNT(*) n FROM audit').get().n === 0, 'INV-409-AUDIT-TAMPER', 'Audit tail carries no verifiable entry — ledger tamper', 409);
-    for (const row of this._stmt("SELECT tenant,envelope FROM audit WHERE json_valid(envelope) AND (json_extract(envelope,'$.payload.type')='CLOCK_RECOVERED' OR EXISTS (SELECT 1 FROM json_each(envelope,'$') GROUP BY \"key\" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload') GROUP BY \"key\" HAVING COUNT(*)>1)) ORDER BY rowid DESC LIMIT 512").all()) {
+    for (const row of this._stmt("SELECT tenant,envelope FROM audit WHERE json_valid(envelope) AND (json_extract(envelope,'$.payload.type')='CLOCK_RECOVERED'" + DUP_KEY_PROBE + ") ORDER BY rowid DESC LIMIT 512").all()) {
       try {
         const env = JSON.parse(row.envelope);
         if (env?.payload?.type !== 'CLOCK_RECOVERED') continue;
@@ -758,7 +816,7 @@ export class Store {
         if (typeof env?.payload?.time === 'number' && Number.isFinite(env.payload.time) && env.payload.time > (this._chainFloor ?? 0)) this._chainFloor = env.payload.time;
       } catch { /* unverifiable head — floor holds its last attested value */ }
     }
-    for (const row of this._stmt("SELECT tenant,envelope FROM audit WHERE json_valid(envelope) AND (json_extract(envelope,'$.payload.type')='CLOCK_RECOVERED' OR EXISTS (SELECT 1 FROM json_each(envelope,'$') GROUP BY \"key\" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload') GROUP BY \"key\" HAVING COUNT(*)>1)) ORDER BY rowid DESC LIMIT 512").all()) {
+    for (const row of this._stmt("SELECT tenant,envelope FROM audit WHERE json_valid(envelope) AND (json_extract(envelope,'$.payload.type')='CLOCK_RECOVERED'" + DUP_KEY_PROBE + ") ORDER BY rowid DESC LIMIT 512").all()) {
       try {
         const env = JSON.parse(row.envelope);
         if (env?.payload?.type !== 'CLOCK_RECOVERED') continue;
@@ -943,7 +1001,20 @@ export class Store {
     const floorPriorParts = typeof floorPrior === 'string' ? floorPrior.split(':') : null;
     const floorPriorSeq = floorPriorParts !== null && /^\d+$/.test(floorPriorParts[0]) ? Number(floorPriorParts[0]) : undefined;
     const floorPriorWellFormed = floorPriorParts !== null && floorPriorParts.length === 2 && Number.isSafeInteger(floorPriorSeq) && floorPriorSeq >= 1 && floorPriorParts[1] !== '';
-    const divergentMarker = floorPrior !== undefined && !floorPriorWellFormed ? String(floorPrior).slice(0, 200) : undefined;
+    // A marker naming a seq ahead of every committed row is never honest:
+    // marker writes are atomic with their row's append, so a committed
+    // marker's seq is always <= the committed tip at this snapshot —
+    // `floorPriorSeq > last.seq` is a plant that would wedge the guarded
+    // UPSERT (and every later epoch attestation) forever (w66-seal F-2).
+    const floorPriorAhead = floorPriorSeq !== undefined && floorPriorSeq > (last?.seq ?? 0);
+    // A well-formed in-range marker whose hash half names bytes the
+    // stored row does not carry is a transplant: the guarded UPSERT
+    // only loses to seq, so it survived every honest append unnamed
+    // (w67-fv N-1). Name it divergent like the malformed/ahead shapes.
+    const floorPriorForeign = floorPriorWellFormed && !floorPriorAhead
+      ? this._stmt('SELECT hash FROM audit WHERE tenant=? AND seq=?').get(tenant, floorPriorSeq)?.hash !== floorPriorParts[1]
+      : false;
+    const divergentMarker = floorPrior !== undefined && (!floorPriorWellFormed || floorPriorAhead || floorPriorForeign) ? String(floorPrior).slice(0, 200) : undefined;
     // The key is reserved evidence: a caller-supplied fold_floor_divergent
     // must never ride the signed envelope verbatim when no divergence was
     // observed — it would let a file-writer pair planted residue with a
@@ -1083,24 +1154,47 @@ export class Store {
       const delta = this._totalChanges() - before;
       requireThat(delta <= 1, 'INV-409-INTEGRITY', `fold-floor marker produced ${delta} row writes in one statement — foreign trigger side-effects`, 409);
       let stored = this._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor'").get(tenant)?.value;
-      if (stored !== undefined && !(typeof stored === 'string' && /^\d+:/.test(stored))) {
-        // The refused update left planted garbage in place — overwrite it
-        // outright. A real foreign trigger fighting the heal re-fires on
-        // this write and the re-probe below still convicts.
-        this._stmt("UPDATE meta_kv SET value=? WHERE tenant=? AND key='fold_floor'").run(`${entry.sequence}:${hash}`, tenant);
+      const storedParts = typeof stored === 'string' ? stored.split(':') : null;
+      const storedSeqProbe = storedParts !== null && /^\d+$/.test(storedParts[0]) ? Number(storedParts[0]) : undefined;
+      const storedWellFormed = storedParts !== null && storedParts.length === 2 && Number.isSafeInteger(storedSeqProbe) && storedSeqProbe >= 1 && storedParts[1] !== '';
+      // A well-formed-shaped marker ahead of every row we can see is a
+      // plant: the guarded UPSERT refuses it (stored CAST >= excluded) and
+      // so does every FUTURE honest mint — the epoch attestation would
+      // stay broken forever while `/^\d+:/` kept passing it (w66-seal
+      // F-2). Compare against the visible committed tip — a concurrent
+      // commit's marker legitimately exceeds our own entry.sequence but
+      // never exceeds the tip it was written for.
+      const tipNow = this._stmt('SELECT MAX(seq) m FROM audit WHERE tenant=?').get(tenant)?.m ?? entry.sequence;
+      // An in-range marker must also bind the real hash of the row it
+      // names: the guarded UPSERT only loses to a stored seq >= our own,
+      // so a survivor naming OUR seq (or a peer's just-committed row)
+      // with foreign bytes is a forge that otherwise stands until the
+      // next append silently overwrites it — the envelope already names
+      // the divergence and the residue pointer must land (w67-fv N-1).
+      const storedRef = storedWellFormed && Number.isSafeInteger(storedSeqProbe) && storedSeqProbe <= tipNow
+        ? this._stmt('SELECT hash FROM audit WHERE tenant=? AND seq=?').get(tenant, storedSeqProbe)
+        : undefined;
+      if (stored !== undefined && !(storedWellFormed && storedSeqProbe <= tipNow && storedRef !== undefined && storedRef.hash === storedParts[1])) {
+        // The refused update left a divergent marker in place — overwrite
+        // it outright (with the TRUE tip when a concurrent commit is
+        // visible, else our own entry). A real foreign trigger fighting
+        // the heal re-fires on this write and the re-probe below still
+        // convicts.
+        const tipRowNow = tipNow === entry.sequence ? { seq: entry.sequence, hash } : this._stmt('SELECT seq, hash FROM audit WHERE tenant=? AND seq=?').get(tenant, tipNow);
+        this._stmt("UPDATE meta_kv SET value=? WHERE tenant=? AND key='fold_floor'").run(`${tipRowNow?.seq ?? entry.sequence}:${tipRowNow?.hash ?? hash}`, tenant);
         stored = this._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor'").get(tenant)?.value;
       }
-      if (floorPrior !== undefined && !floorPriorWellFormed && stored !== floorPrior) {
+      if (floorPrior !== undefined && (!floorPriorWellFormed || floorPriorAhead || floorPriorForeign) && stored !== floorPrior) {
         // Evidence, not laundering: the residue row is a POINTER into the
         // signed chain — this append's own envelope already carries
         // fold_floor_divergent, so the row can be verified against
         // anchored bytes and a planted residue cannot mint a phantom conviction
         // (w56-store MED). It survives until a report retires it — never
         // deleted on first read (w56-store HIGH). Written ONLY when the
-        // marker actually changed — a well-formed-shaped but divergent
-        // marker (an unreachable seq the guarded update refuses) is left
-        // standing as evidence on purpose, not 'healed', so it writes no
-        // pointer (w56-seal parity). Landed-check it like every security
+        // marker actually changed. An ahead-of-tip marker is no longer
+        // left standing (w66-seal F-2 reversed that w56 doctrine: standing
+        // forever meant wedged forever — it is healed above and writes
+        // its pointer here like any other divergence). Landed-check it like every security
         // write: a foreign RAISE(IGNORE) trigger eating this insert must
         // convict (w56-store LOW). The row is keyed PER HEAL — two heals
         // before a report must both reach the surface, never overwrite
@@ -1111,22 +1205,45 @@ export class Store {
         // dropped verbatim for this sanctioned write and recreated
         // immediately — a file-writer delete aborts in-band instead of
         // erasing the conviction (w57-runtime F-1).
-        const residueKey = `fold_floor_healed.${entry.sequence}`;
+        const residueKeyBase = `fold_floor_healed.${entry.sequence}`;
         const residueClaim = `${entry.sequence}:${String(floorPrior).slice(0, 200)}`;
+        // A row already standing at the heal's own key is itself evidence
+        // — a prior heal's unconsumed claim or a plant — and must never
+        // be absorbed by this write (w64-seal F-6). Land under a sibling
+        // `.N` suffix instead: the prefix scan + value-matched drains and
+        // the claim union all cover it, and both contents reach the
+        // report. Same claim at a sibling is the idempotent re-heal.
+        let residueKey = residueKeyBase;
+        {
+          let v = this._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key=?").get(tenant, residueKey)?.value;
+          for (let i = 2; v !== undefined && v !== residueClaim; i++) {
+            requireThat(i <= 64, 'INV-409-INTEGRITY', 'fold-floor healed residue key space exhausted — planted sibling rows', 409);
+            residueKey = `${residueKeyBase}.${i}`;
+            v = this._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key=?").get(tenant, residueKey)?.value;
+          }
+        }
         this.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
         this.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
         this.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
         try { this._stmt("INSERT INTO meta_kv VALUES(?,?,?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, residueKey, residueClaim); }
         finally {
-          this.db.exec("CREATE TRIGGER IF NOT EXISTS fold_residue_keep BEFORE DELETE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
-          this.db.exec("CREATE TRIGGER IF NOT EXISTS fold_residue_keep_upd BEFORE UPDATE ON meta_kv WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
-          this.db.exec("CREATE TRIGGER IF NOT EXISTS fold_residue_keep_ins BEFORE INSERT ON meta_kv WHEN NEW.key='fold_floor_healed' OR substr(NEW.key,1,18)='fold_floor_healed.' BEGIN SELECT RAISE(ABORT, 'fold-floor residue is evidence'); END");
+          // Plain CREATE, not IF NOT EXISTS — a planted impostor under
+          // our name must not keep the recreate a no-op (w58-fv F-1);
+          // the drops above already cleared any same-named row. Emitted
+          // from the shared RESIDUE_KEEP_TRIGGERS text — a local stale
+          // copy once downgraded the `fold_floor_retired` arms invisibly
+          // for the rest of the process lifetime (w61-runtime F-1).
+          for (const [, sql] of RESIDUE_KEEP_TRIGGERS) this.db.exec(sql);
         }
         const landedResidue = this._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key=?").get(tenant, residueKey)?.value;
         requireThat(landedResidue === residueClaim, 'INV-409-INTEGRITY', 'fold-floor healed residue refused after write — foreign trigger side-effects', 409);
       }
       const storedSeq = typeof stored === 'string' && /^\d+:/.test(stored) ? Number(stored.split(':')[0]) : undefined;
-      requireThat(storedSeq !== undefined && storedSeq >= entry.sequence, 'INV-409-INTEGRITY', `fold-floor marker write ${stored === undefined ? 'missing' : 'refused'} after write — foreign trigger side-effects`, 409);
+      // The upper bound matters as much as the lower: a `\d+`-shaped
+      // ahead-of-tip plant surviving the heal (a foreign trigger eating
+      // the overwrite) still satisfies `>= entry.sequence` — convict it
+      // (w66-seal F-2).
+      requireThat(storedSeq !== undefined && storedSeq >= entry.sequence && storedSeq <= tipNow, 'INV-409-INTEGRITY', `fold-floor marker write ${stored === undefined ? 'missing' : 'refused'} after write — foreign trigger side-effects`, 409);
     }));
     // Post-commit ordering: only a landed entry may move the anchors and
     // ratchet the detector (w23 W23-05). Our own head is the newest
