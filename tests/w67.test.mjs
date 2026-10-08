@@ -218,35 +218,44 @@ test('w67-seal F-1: a marker whose pinned row the cut murders is deleted, not le
 });
 
 // ============================================================================
-// w67-runtime F-1: a deferred apply over a marker that no longer
-// authenticates names the drop — the queued claims were the drain's only
-// suppression copy, so the refusal lands a bounded-claims flag.
+// w67-runtime F-1 (doctrine refined by w70-seal F-4): a standing marker
+// that cannot authenticate is no longer a wedge — the drain murders it
+// inside its guarded span and names the kill, so the deferred apply
+// meets NO standing marker and lands the queued claims rather than
+// naming a drop. `floor_marker_retired_deferred_dropped` still covers
+// the narrower window where a peer plants a dead marker between the
+// drain's murder and the apply's savepoint re-read.
 // ============================================================================
-test('w67-runtime F-1: a deferred mint refused by a dead standing marker is named', t => {
+test('w67-runtime F-1: a dead standing marker is murdered and the deferred mint lands', t => {
   const h = fixture(t);
   h.ready(); h.ready();
   // The drain during this append runs inside the head-mint seal window,
   // so its merged set lands in the deferred queue with a HEALTHY plane.
   healOnce(h, 'deferred-drop');
-  // Then the standing marker is murdered between queue and apply — the
-  // apply must flag the drop instead of silently keeping the queue's
-  // only suppression copy inside the already-minted F_R_R rows.
+  // Then the standing marker is murdered between queue and apply — under
+  // the murdered-marker doctrine the drain kills it inside the guarded
+  // span and the apply lands the deferred set instead of flagging a drop.
   dropResidueGuards(h);
   h.f.store.db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme','fold_floor_retired',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value")
     .run(JSON.stringify({ claims: ['junk'], env: { garbage: true } }));
   // The apply runs only behind a committed cut — corrupt a row so the
-  // seal really cuts, then the apply meets the dead marker and flags.
+  // seal really cuts, then the drain meets the dead marker and murders it.
   dropAuditGuards(h);
   const tip0 = h.f.store.db.prepare("SELECT MAX(seq) m FROM audit WHERE tenant='acme'").get().m;
   h.f.store.db.prepare("UPDATE audit SET hash='00' WHERE tenant='acme' AND seq=?").run(tip0);
   h.f.invalidateAuditIndex('acme');
-  h.f.sealAuditChain(h.p('security'));
-  // The apply's flag lands after that seal's attestation snapshot — the
-  // NEXT consult surfaces it (same doctrine as every late-landing flag).
+  const seal1 = h.f.sealAuditChain(h.p('security'));
+  const kinds1 = (seal1?.head_watermark_tampered ?? []).map(e => e.kind);
+  assert.ok(kinds1.includes('floor_marker_retired_murdered'),
+    `the dead marker is murdered and named: ${JSON.stringify(kinds1)}`);
+  // The deferred apply landed the queued claims under a fresh signed env —
+  // the drain's suppression copy reached the durable marker after all.
   const seal2 = h.f.sealAuditChain(h.p('security'));
-  const entries = seal2.head_watermark_tampered ?? [];
-  assert.ok(entries.some(e => e.kind === 'floor_marker_retired_deferred_dropped'),
-    `the refused deferred mint names itself: ${JSON.stringify(entries)}`);
+  const row = h.f.store.db.prepare("SELECT value FROM meta_kv WHERE tenant='acme' AND key='fold_floor_retired'").get()?.value;
+  assert.ok(row !== undefined, 'the deferred apply landed a standing marker');
+  const landed = (JSON.parse(row).env?.payload?.fold_floor_retired ?? []).concat(JSON.parse(row).claims ?? []);
+  assert.ok(landed.some(c => c.endsWith(':deferred-drop')),
+    `the deferred claims landed in the fresh marker: ${row.slice(0, 300)}`);
   h.close();
 });
 

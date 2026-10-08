@@ -151,11 +151,17 @@ test('w69-ledger F-6: regex/predicate/negated heads still bound the row', () => 
 // w69-ledger F-7: a labeled `break`/`continue` exits its named target —
 // it marks every frame it unwinds like return/throw (the old bound=null
 // path marked nothing and left the in-loop tail unconditional).
+// w70-ledger F-1 refined the doctrine further: the exit kills only its
+// named statement's interior — for the verb whose own arm proves the
+// break fires, content past it inside the labeled loop is DEAD
+// (any:false), not merely conditional. For verbs whose arm never fires,
+// the interior mints conditional (the loop still carries a reachable
+// exit for some verb — loop-exit doctrine, w63-fv F-1).
 // ============================================================================
 test('w69-ledger F-7: a labeled break gates the frames it exits', () => {
   const row = [HEAD2, "  lbl: for (;;) {", "    if (m[2]==='y') { break lbl; }", "    authorize(p, ['adm']);", "  }", '}'];
-  { const r = collectRun(row, 'y'); assert.equal(r.any, true); assert.equal(r.roles, null, `'y' exits via the label — the in-loop tail cannot mint unconditional: ${JSON.stringify(r)}`); }
-  { const r = collectRun(row, 'x'); assert.equal(r.roles, null, `'x' never enters the break arm — the tail is gated, not dead (conservative mark, like return/break doctrine): ${JSON.stringify(r)}`); }
+  { const r = collectRun(row, 'y'); assert.equal(r.any, false, `'y' provably exits the labeled loop — the in-loop tail is dead for it: ${JSON.stringify(r)}`); }
+  { const r = collectRun(row, 'x'); assert.equal(r.any, true); assert.equal(r.roles, null, `'x' never enters the break arm — the tail is gated, not dead (conservative mark, like return/break doctrine): ${JSON.stringify(r)}`); }
 });
 
 // ============================================================================
@@ -232,9 +238,13 @@ test('w69-seal F-2/F-5: a defeated murder-delete names the murdered claims durab
 
 // ============================================================================
 // w69-runtime F-2 + w69-seal F-3: a non-integrity fault in the deferred
-// apply is AVAILABILITY, not a conviction — INV-503 propagates, the
-// queue is retained, and the next seal replays the same claims. No bare
-// marker_defeated may latch for a transient fault.
+// apply is AVAILABILITY, not a conviction — the queue is retained and
+// the next seal replays the same claims. No bare marker_defeated may
+// latch for a transient fault.
+// Doctrine updated w70-seal F-2: the apply runs in the seal's finally —
+// a throw there REPLACED the committed seal's result and reported the
+// sealed chain as denied. The fault now rides the delivered shape as
+// `deferred_apply_error` (same convention as `vault_persist_error`).
 // ============================================================================
 test('w69-runtime F-2: a busy deferred apply retries with its claims intact', t => {
   const h = fixture(t);
@@ -251,12 +261,12 @@ test('w69-runtime F-2: a busy deferred apply retries with its claims intact', t 
     if (armed && String(sql).includes('SAVEPOINT deferred_mint')) throw Object.assign(new Error('database is locked'), { errcode: 5 });
     return origExec(sql);
   };
-  let e1 = null;
-  try { h.f.sealAuditChain(h.p('security')); } catch (e) { e1 = e; }
-  assert.ok(e1 !== null, 'the apply fault propagates out of sealAuditChain');
-  assert.equal(e1.code, 'INV-503-LEDGER', `a transient apply fault is availability, not conviction: ${e1.code}`);
+  const res1 = h.f.sealAuditChain(h.p('security'));
   armed = false;
   h.f.store.db.exec = origExec;
+  assert.ok(res1 !== null && typeof res1 === 'object', 'the committed seal still returns its result — the apply fault cannot claim the ledger denied it');
+  assert.ok(typeof res1.deferred_apply_error === 'string' && res1.deferred_apply_error.length > 0,
+    `the transient apply fault rides the committed result, availability-class: ${JSON.stringify(res1).slice(0, 400)}`);
   const seal2 = h.f.sealAuditChain(h.p('security'));
   const row = h.f.store.db.prepare("SELECT value FROM meta_kv WHERE tenant='acme' AND key='fold_floor_retired'").get()?.value;
   assert.ok(row !== undefined, 'the retained queue replays on the next seal');

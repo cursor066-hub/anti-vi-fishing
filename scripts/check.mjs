@@ -481,8 +481,8 @@ const guardedPrefix = (masked, callStart, from) => {
 // sentinels for unknown and for literal object/array/new forms), and
 // `litVal` folds that to truthiness: true / false / LV_NUL (provable
 // nullish — `x ?? y` cares) / null (not provable).
-const LV_NUL = Symbol('litNullish'), LV_UNK = Symbol('litUnknown'), LV_OBJ = Symbol('litObject'), LV_ARR = Symbol('litArray');
-const isLitMarker = v => v === LV_OBJ || v === LV_ARR || (typeof v === 'object' && v !== null && v.newCtor !== undefined);
+const LV_NUL = Symbol('litNullish'), LV_UNK = Symbol('litUnknown'), LV_OBJ = Symbol('litObject'), LV_ARR = Symbol('litArray'), LV_TYPEOF = Symbol('litTypeof');
+const isLitMarker = v => v === LV_OBJ || v === LV_ARR || v === LV_TYPEOF || (typeof v === 'object' && v !== null && v.newCtor !== undefined);
 const truthyPrim = v => isLitMarker(v) ? true : Boolean(v);
 const topSplit = (t, ops) => {
   // Split `t` at depth-0 occurrences of any op (skipping strings). A
@@ -505,6 +505,10 @@ const topSplit = (t, ops) => {
         // the shift layer whole, w69-ledger F-3).
         if ((op === '<' || op === '<=') && (t[i + 1] === '<' || t[i - 1] === '<')) continue;
         if ((op === '>' || op === '>=') && (t[i + 1] === '>' || t[i - 1] === '>')) continue;
+        // `**` is exponentiation — a bare `*` inside it never opens the
+        // multiplicative layer (`2 ** 3` must reach the `**` fold whole,
+        // w70-fv F-2).
+        if (op === '*' && (t[i + 1] === '*' || t[i - 1] === '*')) continue;
         // A `+`/`-` with an empty operand to its left is a unary sign,
         // not a split point — `a - -1` must split once at the binary
         // minus, and `1e-5`/`1e+3` exponents carry their sign inside
@@ -827,11 +831,28 @@ const litPrim = (e0, known) => {
       const b = litPrim(s.parts[i + 1], known);
       if (acc === LV_UNK || b === LV_UNK || isLitMarker(acc) || isLitMarker(b)) return LV_UNK;
       if (s.ops[i] === '+' && (typeof acc === 'string' || typeof b === 'string')) { acc = f(acc, s.ops[i], b); continue; }
+      // JS coerces a non-numeric literal through `Number` deterministically
+      // — `'a' * 2` is NaN, `NaN - 1` is NaN — so NaN propagates into the
+      // fold and a `NaN === x` downstream still folds honestly (w70-ledger F-3).
       const na = Number(acc), nb = Number(b);
-      if (Number.isNaN(na) || Number.isNaN(nb)) return LV_UNK;
       acc = f(na, s.ops[i], nb);
     }
     return acc;
+  }
+  // Exponentiation binds tighter than `*`/`/` and associates RIGHT —
+  // `2 ** 3 ** 2` is 512, not 64 — so this layer folds the operand list
+  // right-to-left, unlike the same-precedence chains above (w70-fv F-2).
+  {
+    const s = topSplit(t, ['**']);
+    if (s) {
+      let acc = litPrim(s.parts[s.parts.length - 1], known);
+      for (let i = s.parts.length - 2; i >= 0; i--) {
+        const b = litPrim(s.parts[i], known);
+        if (acc === LV_UNK || b === LV_UNK || isLitMarker(acc) || isLitMarker(b)) return LV_UNK;
+        acc = Number(b) ** Number(acc);
+      }
+      return acc;
+    }
   }
   if (t === 'true') return true;
   if (t === 'false') return false;
@@ -840,7 +861,25 @@ const litPrim = (e0, known) => {
   if (t === 'NaN') return NaN;
   if (t === 'Infinity') return Infinity;
   if (/^void\s/.test(t)) return undefined;
-  if (/^typeof\s/.test(t)) return 'x';
+  // `typeof` folds to the operand's real type string — `typeof 'a'` is
+  // 'string', not a stand-in that mis-compares downstream (w70-ledger
+  // F-3: folding to 'x' dead-armed `typeof v === 'string'` live code).
+  // An unknowable operand yields the LV_TYPEOF marker — provably a
+  // nonempty type string whose comparisons cannot fold.
+  if (/^typeof\s/.test(t)) {
+    const tv = litPrim(t.slice(6), known);
+    if (tv === LV_UNK) return LV_TYPEOF;
+    if (tv === LV_TYPEOF) return 'string';
+    if (typeof tv === 'string') return 'string';
+    if (typeof tv === 'number' || typeof tv === 'bigint') return 'number';
+    if (typeof tv === 'boolean') return 'boolean';
+    if (tv === null) return 'object';
+    if (tv === undefined) return 'undefined';
+    if (tv === LV_ARR) return 'object';
+    if (typeof tv === 'object' && tv.newCtor !== undefined) return tv.newCtor === 'Function' ? 'function' : 'object';
+    if (tv === LV_OBJ) return /^\s*(?:async\s+)?(?:function|class)\b|=>/.test(t.slice(6)) ? 'function' : 'object';
+    return LV_TYPEOF;
+  }
   const sm = /^(['"`])((?:\\.|(?!\1)[^\\])*)\1$/s.exec(t);
   if (sm) {
     if (sm[1] === '`' && sm[2].includes('${')) return LV_UNK;
@@ -975,21 +1014,26 @@ const memberCmpFold = (t, verb, verbMembers, posMember = null, posVerb = null, b
   if (verb === null || verb === undefined) return null;
   // Wrapping parens and comma operands hide the deciding compare —
   // `(a = 1, m[2]==='x')` evaluates as `m[2]==='x'` (w69-ledger F-4).
+  // They can nest: `(0, (0, m[2]==='x'))` needs unwrap↔split until the
+  // deciding compare is exposed (w70-fv F-3).
   let tt = t;
   for (;;) {
-    const s = tt.trim();
-    if (!s.startsWith('(') || !s.endsWith(')')) break;
-    let d = 0, ok = false;
-    for (let k = 0; k < s.length; k++) {
-      if (s[k] === '(') d++;
-      else if (s[k] === ')') { d--; if (d === 0) { ok = k === s.length - 1; break; } }
+    let s = tt.trim();
+    let changed = false;
+    for (;;) {
+      if (!s.startsWith('(') || !s.endsWith(')')) break;
+      let d = 0, ok = false;
+      for (let k = 0; k < s.length; k++) {
+        if (s[k] === '(') d++;
+        else if (s[k] === ')') { d--; if (d === 0) { ok = k === s.length - 1; break; } }
+      }
+      if (!ok) break;
+      s = s.slice(1, -1).trim(); changed = true;
     }
-    if (!ok) break;
-    tt = s.slice(1, -1);
-  }
-  {
-    const cs = topSplit(tt, [',']);
-    if (cs !== null) tt = cs.parts[cs.parts.length - 1];
+    const cs = topSplit(s, [',']);
+    if (cs !== null) { s = cs.parts[cs.parts.length - 1]; changed = true; }
+    tt = s;
+    if (!changed) break;
   }
   let x = /^\s*\(?\s*m\s*(?:\?\s*\.\s*)?(?:\[\s*([^\]]+)\s*\]|(?:\?\s*\.\s*|\.\s*)at\s*(?:\?\s*\.\s*)?\(\s*([^)]*)\))\s*([!=]={2,3})\s*([^)]*?)\s*\)?\s*$/.exec(tt);
   let member = null, cmpOp = null, rhsT = '';
@@ -1364,13 +1408,27 @@ const routeArmBoundary = (l, lm, i, sw, aliases) => {
     for (const m of cs.matchAll(/\b([A-Za-z_$][\w$.[\]]*)\s*\.\s*(?:match(?:All)?|startsWith|endsWith|includes)\s*\(/g)) if (/(?:path|url)/i.test(m[1])) return true;
     return false;
   })();
+  // A compare whose operand is DERIVED from a path-ish field is the same
+  // boundary — `path.slice(0,4)==='/v1'`, `path.split('/')[1]==='x'`,
+  // `req.url.at(0)==='/'`, `path.indexOf('/a')===0`. On the masked view a
+  // string-literal side is blanked whitespace, so `<chain> <op> <blank>`
+  // covers quoted literals while numbers/keywords stay visible
+  // (w70-ledger F-2).
+  const pathDerivedCmp = (() => {
+    const nameish = String.raw`(?:\bpath\b|\breq\.url\b|\breq\.path\b|\burl\.pathname\b|\bpathname\b)`;
+    const chain = String.raw`(?:\s*(?:\.\s*[A-Za-z_$][\w$]*|\[[^\]]*\])(?:\s*\([^()]*\))?)+`;
+    const opCls = String.raw`(?:[!=]={2,3}|[<>]=?)`;
+    const litTail = String.raw`(?:\s*(?:\d[\d_]*(?:\.[\d_]*)?|true|false|null|undefined|NaN)\b|\s+(?=$|[^\w$]))`;
+    const litHead = String.raw`(?:\d[\d_]*(?:\.[\d_]*)?\b|true\b|false\b|null\b|undefined\b|NaN\b|(?<=[(&|!?:;,^])\s+)`;
+    return new RegExp(`${nameish}${chain}${opCls}${litTail}|${litHead}${opCls}\s*${nameish}${chain}`).test(condM);
+  })();
   // A negated field literal (`path !== '/y'`) discriminates routes the
   // same as a positive one — it is a boundary on its own (w69-ledger
   // F-6: it used to count only when a `/^` regex rode along).
-  if (!(literalCmps(condM, cond, '\\bpath\\b|req\\.method\\b|req\\.url\\b|url\\.pathname\\b').some(c => c.op === '===' || c.op === '==' || c.op === '!==' || c.op === '!=') || /\/\^/.test(codeSpan(cond)) || reBind)) return false;
+  if (!(literalCmps(condM, cond, '\\bpath\\b|req\\.method\\b|req\\.url\\b|url\\.pathname\\b').some(c => c.op === '===' || c.op === '==' || c.op === '!==' || c.op === '!=') || /\/\^/.test(codeSpan(cond)) || reBind || pathDerivedCmp)) return false;
   return !pairsForLine(l, lm, i, 0, sw.slice(), aliases).some(p => p.pos >= ih.index + ih[0].length && p.pos < end);
 };
-const deadCond = prev => {
+const deadCond = (prev, prevLit = null) => {
   let d = 0, close = -1;
   for (let k = prev.length - 1; k >= 0; k--) {
     const c = prev[k];
@@ -1382,7 +1440,17 @@ const deadCond = prev => {
         const cond = prev.slice(k + 1, close);
         if (/^(?:if|while)$/.test(head)) {
           const v = litVal(cond, null);
-          return v === false || v === LV_NUL;
+          if (v === false || v === LV_NUL) return true;
+          // `prev` is the literal-blanked twin — `typeof 'a' === 'string'`
+          // and `'a' * 2 === 5` survive masking as unparseable shells and
+          // can only fold on the literal-bearing `lit` view (w70-ledger
+          // F-3 follow-through). Any operand carrying live identifiers
+          // still yields LV_UNK there, so this never over-kills.
+          if (prevLit !== null) {
+            const v2 = litVal(prevLit.slice(k + 1, close), null);
+            return v2 === false || v2 === LV_NUL;
+          }
+          return false;
         }
         if (head !== 'for') return false;
         // `for` heads are three spellings: classic `init;cond;step`
@@ -1424,7 +1492,13 @@ const deadCond = prev => {
           if (dm) { const v = litPrim(dm[2], known); if (v !== LV_UNK) known.set(dm[1], v); }
         }
         const v = litVal(mid, known);
-        return v === false || v === LV_NUL;
+        if (v === false || v === LV_NUL) return true;
+        if (prevLit !== null) {
+          const midLit = prevLit.slice(k + 1, close);
+          const s2 = topSplit(midLit, [';']);
+          if (s2 && s2.parts.length === 3) { const v2 = litVal(s2.parts[1].trim(), known); return v2 === false || v2 === LV_NUL; }
+        }
+        return false;
       }
     }
   }
@@ -1793,7 +1867,7 @@ const condTracker = () => {
           const memb = switchOperandMember(lraw === null || lraw === undefined ? hc8[0] : lraw.slice(hc8[1], hc8[1] + hc8[0].length), aliasCtx?.aliases ?? null, (aliasCtx?.posBase ?? 0) + hc8[1]);
           return memb === null || (memberDead?.size ?? 0) === 0 || memberDead.has(memb);
         })();
-        if (deadDepths.size > 0 || elseDead || sibArm || swDead || (parenHead !== null && deadCond(prevR))) { deadDepths.add(ld); deadHeads.set(ld, elseDead ? 'oursElse' : parenHead); }
+        if (deadDepths.size > 0 || elseDead || sibArm || swDead || (parenHead !== null && deadCond(prevR, lit))) { deadDepths.add(ld); deadHeads.set(ld, elseDead ? 'oursElse' : parenHead); }
         else {
           let cond;
           // The 'ours' exemption claims only the ROW's dispatch arm —
@@ -1876,7 +1950,7 @@ const condTracker = () => {
           const hc9 = headCond(prevR);
           const kwS = hc9 ? hc9[2] : -1;
           const cont = kwS >= 0 && /\belse\s*$/.test(prevR.slice(0, kwS));
-          const res = elseDead ? 'ours' : (condTrue(prevR, verb, verbMembers, posMember, posVerb, lit, aliasCtx?.rowMethod ?? null, aliasCtx?.plural) || oursIfArm === ld ? 'ours' : (sibArm || deadCond(prevR) ? (sibArmPlural ? 'plural' : true) : false));
+          const res = elseDead ? 'ours' : (condTrue(prevR, verb, verbMembers, posMember, posVerb, lit, aliasCtx?.rowMethod ?? null, aliasCtx?.plural) || oursIfArm === ld ? 'ours' : (sibArm || deadCond(prevR, lit) ? (sibArmPlural ? 'plural' : true) : false));
           const prev9 = chainFailed.get(ld - 1);
           chainFailed.set(ld - 1, cont ? (prev9 === 'ours' || res === 'ours' ? 'ours' : (prev9 === false || res === false ? false : (prev9 === 'plural' || res === 'plural' ? 'plural' : true))) : res);
           const resReq = reqGateCond(hc9, verb, verbMembers, posMember, posVerb, aliasCtx?.plural), prevReq = chainFailedReq.get(ld - 1) ?? false;
@@ -2026,7 +2100,7 @@ const condTracker = () => {
             }
           }
         }
-        if (!bracelessDead && (head === 'if' || head === 'for' || (head === 'while' && !doTail)) && deadCond(prevR)) {
+        if (!bracelessDead && (head === 'if' || head === 'for' || (head === 'while' && !doTail)) && deadCond(prevR, lit)) {
           let j = ci + 1;
           while (j < lm.length && /\s/.test(lm[j])) j++;
           if (j >= lm.length || lm[j] !== '{') bracelessDead = { depth: ld, nestedIf: false };
@@ -2217,6 +2291,15 @@ const condTracker = () => {
       const v = litVal(raw, null);
       if (v === true) return true;
       if (v === false || v === LV_NUL) return false;
+      // The literal-blanked `raw` leaves `typeof 'a' === 'string'` /
+      // `'a' * 2 === 5` unparseable — retry the fold on the literal-
+      // bearing twin `tR`; operands with live identifiers still yield
+      // LV_UNK there, so nothing over-folds (w70-ledger F-3).
+      if (tR !== raw) {
+        const v2 = litVal(tR, null);
+        if (v2 === true) return true;
+        if (v2 === false || v2 === LV_NUL) return false;
+      }
       const f = memberCmpFold(raw, verb, verbMembers, posMember, posVerb, op.a, proven);
       if (f !== null) return f.verdict === 'const-true';
       // `req.method === <row's own>` / `!== <other>` is statically true
@@ -2645,6 +2728,10 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
     // shorthand `g(p){`, and class members `static g()`/`get g()`/
     // `set g(v)`/`#g()`/`*g()`/`static async *g()` (w60-fv F-2,
     // w60-ledger F-6).
+    // `eval`/`new Function` can invoke any name by string — the escape
+    // scan below cannot see those calls, so nothing is provably dead
+    // while either appears in the window (w70-ledger F-4).
+    if (ml.some(t => /\beval\s*\(|\bnew\s+Function\b/.test(t))) return new Set();
     const PARAMS = String.raw`(?:\([\s\S]*?\)|[A-Za-z_$][\w$]*)`;
     const declRe = new RegExp([
       String.raw`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:function\s*\*?\s*)?${PARAMS}\s*=>`,
@@ -2709,14 +2796,16 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
     // `g(`, `g?.(`, `(g)(`, tagged template `g\``, `new g`,
     // `g.call`/`.apply`/`.bind`, a member call `.g(` on a member decl, and
     // `g` inside a known callback-consumer's argument list
-    // (setTimeout/setInterval/queueMicrotask/requestAnimationFrame/
-    // nextTick and `.then|.catch|.finally|.on|.once|.addEventListener|.
-    // forEach|.map|.filter|.reduce|.find|.sort|.flatMap|.every|.some` —
-    // those receivers invoke their callback args). Excluded positions:
+    // (setTimeout/setInterval/setImmediate/queueMicrotask/
+    // requestAnimationFrame/nextTick, bare addEventListener,
+    // Reflect.apply/Reflect.construct, and `.then|.catch|.finally|.on|.
+    // once|.addEventListener|.forEach|.map|.filter|.reduce|.find|.sort|
+    // .flatMap|.every|.some` — those receivers invoke their callback
+    // args) (w70-ledger F-4). Excluded positions:
     // `.g` member reads, `g:`-key positions, `function g`/`g: function`
     // headers, decl name tokens, and occurrences inside the decl's own
     // body.
-    const CALLBACK_CONSUMER = /(?:\bsetTimeout|\bsetInterval|\bqueueMicrotask|\brequestAnimationFrame|\bnextTick|\.(?:then|catch|finally|on|once|addEventListener|forEach|map|filter|reduce|find|sort|flatMap|every|some))\s*\([^)]*$/;
+    const CALLBACK_CONSUMER = /(?:\bsetTimeout|\bsetInterval|\bsetImmediate|\bqueueMicrotask|\brequestAnimationFrame|\bnextTick|\baddEventListener|\bReflect\s*\.\s*(?:apply|construct)|\.(?:then|catch|finally|on|once|addEventListener|forEach|map|filter|reduce|find|sort|flatMap|every|some))\s*\([^)]*$/;
     const escapes = new Set();
     for (const d of decls) {
       if (escapes.has(d.name)) continue;
@@ -2803,6 +2892,18 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
     // exiting) plus each dispatched sub-arm's body depth (w56-ledger F7).
     const deadDepths = new Set();
     let tailDead = false;
+    // Labeled exits: `break lbl` / `continue lbl` leave the statement
+    // `lbl` names — everything deeper than the labeled statement's own
+    // head depth is dead for this verb until that statement ends, the
+    // way a dominating `return` kills the tail but scoped to the label.
+    // `lblStack` is the enclosing labels the window can see ({name,
+    // boundD = depth inside the labeled statement, iter = the target is
+    // an iteration statement a `continue` may name}); `lblDead` holds
+    // the dead spans a reachable labeled exit opened. An unresolved
+    // label or a `continue` naming a non-iteration statement poisons the
+    // tail like an unparseable construct (w70-ledger F-1).
+    const lblStack = [];
+    const lblDead = [];
     // Route-chain depth at the row's head — a route boundary is a
     // same-chain `if`, never a nested mid-row gate (w65-fv F-8).
     let rowBase = -1;
@@ -3106,6 +3207,31 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
         }
       }
       const afterCloses = depthCur - closes;
+      // Label bookkeeping for `break lbl`/`continue lbl`: expire labels
+      // and dead spans whose statement ended (content depth dropped
+      // below the labeled statement's interior), refine a label pending
+      // from an earlier EOL against this line's first token, then bind
+      // the labels this line declares. A label sits at a statement
+      // boundary (line start or after `;`/`:`/`{`/`}`), never `case`/
+      // `default`; its interior depth is one past the depth at its `:`
+      // (w70-ledger F-1). Expiry reads the depth after LEADING `}` only
+      // — a `}` closing a nested block later in the line does not end
+      // the labeled statement that encloses it.
+      const leadD = (() => { let d = depthCur; for (let k = 0; k < lm.length && /[\s}]/.test(lm[k]); k++) if (lm[k] === '}') d--; return d; })();
+      for (let li = lblStack.length - 1; li >= 0; li--) if (lblStack[li].boundD > leadD) lblStack.splice(li, 1);
+      for (let li = lblDead.length - 1; li >= 0; li--) if (lblDead[li].d > leadD) lblDead.splice(li, 1);
+      for (const s of lblStack) if (s.iter === null) {
+        const t = lm.trimStart();
+        if (t !== '') s.iter = /^(?:for|while|do)\b/.test(t);
+      }
+      for (const mLab of lm.matchAll(/(?:^|[;:{}])\s*([A-Za-z_$][\w$]*)\s*:/g)) {
+        if (mLab[1] === 'case' || mLab[1] === 'default') continue;
+        let dl = 0;
+        for (let k = 0; k < mLab.index + mLab[0].length; k++) { const c2 = lm[k]; if (c2 === '{') dl++; else if (c2 === '}') dl--; }
+        const rest = lm.slice(mLab.index + mLab[0].length).trimStart();
+        lblStack.push({ name: mLab[1], boundD: depthCur + dl + 1,
+          iter: /^(?:for|while|do)\b/.test(rest) ? true : (rest === '' ? null : false) });
+      }
       const isElse = /^\s*\}?\s*else\b/.test(l);
       // An `else if` that repeats a (member,verb) pair an earlier arm of
       // the same chain already consumed can never run — every matching
@@ -3347,7 +3473,7 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
         // the line at it, latch dead, and stop crediting authorizes that
         // sit past the exit (w56-ledger F7). A return nested deeper
         // (inside its own `{`) is conditional and kills nothing.
-        if (deadDepths.size > 0) {
+        if (deadDepths.size > 0 || /(?:break|continue)\s+[A-Za-z_$]/.test(lm)) {
           // `ld` must start at the line's opening depth — `afterCloses`
           // already subtracted this line's `}` chars, so a self-contained
           // `{ ... }` later on the same line would under-read the depth at
@@ -3374,6 +3500,21 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
             else if (c === '}') ld--;
             else if (deadDepths.has(ld) && /^(?:return|throw)\b/.test(lm.slice(ci)) && !/[\w$]/.test(lm[ci - 1] ?? ' ')
               && armScoped(lm.slice(0, ci))) { cut = ci; break; }
+            else {
+              // A reachable `break lbl`/`continue lbl` leaves the labeled
+              // statement entirely — its interior past the exit is dead
+              // for this verb until the statement ends (w70-ledger F-1).
+              // An unresolved label or a `continue` naming a non-
+              // iteration statement poisons the tail (the file cannot
+              // run): cut + latch like a dominating return.
+              const lb = /^(?:break|continue)\s+([A-Za-z_$][\w$]*)\b/.exec(lm.slice(ci));
+              if (lb !== null && !/[\w$]/.test(lm[ci - 1] ?? ' ') && armScoped(lm.slice(0, ci))) {
+                const tgt = lblStack.findLast(s => s.name === lb[1]);
+                if (tgt === undefined) { cut = ci; break; }
+                if (/^continue\b/.test(lm.slice(ci)) && tgt.iter !== true) { cut = ci; break; }
+                lblDead.push({ d: tgt.boundD });
+              }
+            }
           }
           if (cut !== -1) { l = l.slice(0, cut); tailDead = true; }
         }
@@ -3382,6 +3523,16 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
           // Dead scope mints nothing at all — not even '.any' — since
           // the call can never execute (w59-ledger F-6).
           if (scan.condPos[m.index] === 2 || deadFn.has(i)) continue;
+          // Inside a dead span a reachable `break lbl`/`continue lbl`
+          // opened — positions deeper than the labeled statement's head
+          // are dead for this verb until the statement ends (w70-ledger
+          // F-1). Depth is read position-exact so content past the
+          // statement's own `}` on the same line still mints.
+          if (lblDead.length > 0) {
+            let dd = depthCur;
+            for (let k = 0; k < m.index; k++) { const c2 = lmx[k]; if (c2 === '{') dd++; else if (c2 === '}') dd--; }
+            if (lblDead.some(s => dd >= s.d)) continue;
+          }
           sawAny.v = true;
           // A conditional gate — guarded statement prefix or a body
           // under if/else/case/catch/try/=> — cannot satisfy a role

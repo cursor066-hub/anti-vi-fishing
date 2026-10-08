@@ -1542,9 +1542,25 @@ export class Fabric {
     // rollback and would mint suppression over residue rows the failed
     // delete left standing (w67-fv F-2).
     let deferredAdd = null;
+    // The murder of a non-authenticating standing marker is named only
+    // AFTER the savepoint commits — a flag latched inside the try would
+    // claim a delete the rollback just un-happened (w70-seal F-4).
+    let murderedPrev = null;
     db.exec('SAVEPOINT residue_drain');
     try {
       let env, merged;
+      // The standing marker is read once per drain — the retire arm uses
+      // it for `prior`, and the murder gate below uses it for every drain.
+      const prev = db.prepare("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(tenant)?.value;
+      // A standing marker that does not authenticate no longer stands
+      // forever: leaving it in place wedged every future mint — the mint
+      // gate refused to overwrite it and the keep triggers made it
+      // immortal, so a planted row permanently killed the suppression
+      // plane (w70-seal F-4). It is murdered below inside this same
+      // guarded span; the consult's forged/unauthenticated flag already
+      // carries the conviction, and the murder names itself as a claim.
+      let prevAuthed = null;
+      try { prevAuthed = prev === undefined ? null : this.#retiredClaimsOf(tenant, JSON.parse(prev)); } catch { prevAuthed = null; }
       if (Array.isArray(retired) && retired.length) {
         // The consumption record lands BEFORE the value delete: a wedged
         // marker write aborts the whole savepoint, leaving the residue
@@ -1554,17 +1570,10 @@ export class Fabric {
         // rewrite the row without firing them — an unsigned marker was a
         // write-to-retire oracle for any heal claim (w61-seal F-1), so
         // the claim set now lives inside an audit-signed envelope.
-        const prev = db.prepare("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(tenant)?.value;
-        // A standing marker that does not authenticate is left in place —
-        // overwriting it would shrink its coverage under the corrupt
-        // row's name; the residue consult names it on the next pass
-        // instead (w63-runtime F-6). The gate below suppresses only the
-        // MINT — a drain running under a seal still queues its consumed
-        // set so the post-commit apply can name what it could not
-        // anchor, instead of the claims dying with the residue rows
-        // (w67-runtime F-1).
-        let prevAuthed = null;
-        try { prevAuthed = prev === undefined ? null : this.#retiredClaimsOf(tenant, JSON.parse(prev)); } catch { prevAuthed = null; }
+        // The gate below suppresses only the MINT — a drain running under
+        // a seal still queues its consumed set so the post-commit apply
+        // can name what it could not anchor, instead of the claims dying
+        // with the residue rows (w67-runtime F-1).
         {
           let prior = [];
           // A replay that failed to land leaves its claims inside the
@@ -1579,7 +1588,11 @@ export class Fabric {
           // marker's suppression, so carrying its claims here would
           // re-sign them under a fresh marker_seq and launder the
           // aged-out set back into the window (w69-runtime F-3).
-          const prevFresh = (() => { try { return Number.isSafeInteger(prevAuthed?.markerSeq) && prevAuthed.markerSeq >= (this._chainFacts(tenant).throughSeq ?? 0) - 8192; } catch { return false; } })();
+          // A cursor that never established a tip proves nothing about
+          // freshness — `tip === 0` (empty/unstabilized chain) would make
+          // `markerSeq >= -8192` vacuously true and fail the window open
+          // (w70-fv F-1).
+          const prevFresh = (() => { try { const tip = this._chainFacts(tenant).throughSeq ?? 0; return tip > 0 && Number.isSafeInteger(prevAuthed?.markerSeq) && prevAuthed.markerSeq >= tip - 8192; } catch { return false; } })();
           try { prior = prevFresh ? [...new Set([...prevAuthed.retired, ...prevAuthed.retiring])] : []; } catch { prior = []; }
         // Freshly retired claims head the merge — a full marker never evicts
         // this drain's own binding in favour of older prior claims
@@ -1606,8 +1619,11 @@ export class Fabric {
         // (w69-seal NIT). Pre-cap drops count too: fresh claims past
         // the 2048 split budget never entered the union — dropped, not
         // evicted, but still claims the signed set refused to carry
-        // (w69-runtime F-7).
-        const priorEvicted = (prevAuthed?.priorEvicted ?? 0) + (mergedSet.size - merged.length) + Math.max(0, retired.length - 2048);
+        // (w69-runtime F-7). The carried count follows the same freshness
+        // window as the claims it accounts for — a stale marker's
+        // counter otherwise launders into the fresh write it no longer
+        // speaks for (w70-runtime F-2).
+        const priorEvicted = (prevFresh ? (prevAuthed?.priorEvicted ?? 0) : 0) + (mergedSet.size - merged.length) + Math.max(0, retired.length - 2048);
         // A seal in flight rewinds/renumbers the table under a second
         // snapshot: a marker minted now pins the pre-cut tip and convicts
         // as `floor_marker_forged` on the next consult though the mint
@@ -1642,6 +1658,22 @@ export class Fabric {
       db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
       db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
       db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
+      // A marker that failed authentication is murdered inside the same
+      // guarded span — immortal-under-triggers it wedged every later
+      // mint while the mint gate refused to overwrite it (w70-seal F-4).
+      // The consult already flagged its content forged/unauthenticated;
+      // the murder names the row it killed post-commit so the delete is
+      // never anonymous. The mint stays refused this pass — the fresh
+      // write re-anchors on the next drain, so nothing from the
+      // unverifiable row is laundered into a signature it could not earn.
+      if (prev !== undefined && prevAuthed === null) {
+        db.prepare("DELETE FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").run(tenant);
+        // Same landed-probe doctrine as the pin-murder above: a foreign
+        // RAISE(IGNORE) eating this delete leaves the wedge standing.
+        const back = db.prepare("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(tenant)?.value;
+        requireThat(back === undefined, 'INV-409-INTEGRITY', 'fold-floor retired marker delete defeated — foreign trigger side-effects', 409);
+        murderedPrev = String(prev).slice(0, 120);
+      }
       if (env !== undefined) {
         db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES (?, 'fold_floor_retired', ?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, JSON.stringify({ claims: merged, env }));
         // Landed probe: the UPSERT is the only write in the drain that
@@ -1659,8 +1691,9 @@ export class Fabric {
         db.prepare(`DELETE FROM meta_kv WHERE tenant=? AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.') AND value IN (${chunk.map(() => '?').join(',')})`).run(tenant, ...chunk);
       }
       for (const [, sql] of RESIDUE_KEEP_TRIGGERS) db.exec(sql);
-    } catch (e) { deferredAdd = null; try { db.exec('ROLLBACK TO residue_drain'); } catch { /* savepoint may already be gone */ } throw e; }
+    } catch (e) { deferredAdd = null; murderedPrev = null; try { db.exec('ROLLBACK TO residue_drain'); } catch { /* savepoint may already be gone */ } throw e; }
     finally { try { db.exec('RELEASE residue_drain'); } catch { /* rolled back or never opened */ } }
+    if (murderedPrev !== null) this.#wmTamperClaim(tenant, 'floor_marker_retired_murdered', murderedPrev);
     if (deferredAdd) {
       const q = this.#deferredRetiredMints.get(tenant) ?? new Set();
       for (const c of deferredAdd) q.add(c);
@@ -1730,7 +1763,7 @@ export class Fabric {
       // not an anonymous seq:0 slot (w69-runtime F-5).
       const murderedClaims = (Array.isArray(pl?.fold_floor_retired) ? pl.fold_floor_retired : []).map(c => String(c).slice(0, 120));
       this.#wmTamperClaimList(t, 'floor_marker_retired_marker_defeated', murderedClaims);
-      requireThat(back === undefined, 'INV-409-INTEGRITY', 'fold-floor retired marker delete defeated — foreign trigger side-effects', 409, { marker_defeated: 'fold_floor_retired', claims: murderedClaims });
+      requireThat(back === undefined, 'INV-409-INTEGRITY', 'fold-floor retired marker delete defeated — foreign trigger side-effects', 409, { marker_defeated: 'fold_floor_retired', claims: murderedClaims.slice(0, 64), claims_total: murderedClaims.length });
     }
     return true;
   }
@@ -1751,64 +1784,79 @@ export class Fabric {
     // they replay on the next seal (w69-runtime F-2).
     const queued = [...q].map(c => String(c).slice(0, 120));
     const db = this.store.db;
-    const prev = (() => { try { return this.store._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(tenant)?.value; } catch { return undefined; } })();
-    let prior = [];
-    let pa = null;
-    if (prev !== undefined) {
-      try { pa = this.#retiredClaimsOf(tenant, JSON.parse(prev)); } catch { pa = null; }
-      if (pa === null) {
-        // A non-authenticating standing marker is left for the consult
-        // to name — the deferred set cannot overwrite it. A silent drop
-        // would leave the queue's only suppression copy inside the
-        // already-minted F_R_R rows: the drop itself is evidence, so
-        // name it with the same bounded claims convention as the other
-        // rejected-claim flags (w67-runtime F-1).
-        this.#wmTamperClaimList(tenant, 'floor_marker_retired_deferred_dropped', queued);
-        this.#deferredRetiredMints.delete(tenant);
-        return;
-      }
-      // `retiring` holds claims an interrupted replay left in flight —
-      // the next marker write absorbs them into `retired` instead of
-      // stranding them unsigned (w67-fv F-3). The absorb honors the
-      // consult's recency window: a pin-valid marker stale by more than
-      // the 8192 horizon gated its `retiring` away, and folding it into
-      // the fresh env here would launder the gated set into a marker
-      // that passes the window (w68-runtime F-4).
-      const markerFresh = Number.isSafeInteger(pa.markerSeq) && pa.markerSeq >= (this._chainFacts(tenant).throughSeq ?? 0) - 8192;
-      // `retired` honors the same window as `retiring` — carrying a
-      // stale marker's claims into the fresh env launders the set the
-      // consult just gated out (w69-runtime F-3).
-      prior = markerFresh ? [...new Set([...pa.retired, ...pa.retiring])] : [];
-    }
-    // The deferred set unions the standing marker's own retired claims
-    // before the cap — a peer marker write between commit and apply is
-    // never clobbered out of the durable set (w67-runtime F-4). Queue
-    // order is drain order, not freshness: a later drain's fresh claims
-    // would sit behind an earlier drain's priors and be evicted under
-    // the prior_evicted label — re-derive freshness instead: claims the
-    // standing marker does not yet carry head the union like the
-    // drain's own retired set does (w67-seal F-4).
-    const priorSet = new Set(prior);
-    const fresh = [...q].filter(c => !priorSet.has(c));
-    // The union spans the FULL prior set — slicing priors before the
-    // union would hide the very eviction `prior_evicted` signs: the cap
-    // must count what it dropped, not what it never saw (w66-runtime
-    // F-2, w67-seal F-4 keeps the fresh-first order).
-    const unionSet = new Set([...fresh.slice(0, 2048), ...prior]);
-    const merged = [...unionSet].slice(0, 4096);
-    // Pre-cap drops count like union-overflow ones: a fresh claim past
-    // the 2048 budget was refused by the signed set exactly like the
-    // tail the slice dropped (w69-runtime F-7).
-    const env = this.#mintRetiredEnvelope(tenant, merged, (pa?.priorEvicted ?? 0) + (unionSet.size - merged.length) + Math.max(0, fresh.length - 2048));
     // Same savepoint doctrine as the drain's note: the trigger drops,
     // the write and the landed probe are one atomic span — a mid-span
     // fault rolls back to guards-intact, never leaves them absent on
-    // disk (w67-runtime F-3, w58-store F-2).
+    // disk (w67-runtime F-3, w58-store F-2). The standing marker is
+    // RE-READ inside the savepoint — a peer write between the drain's
+    // commit and this apply merges into `prior` here, where a snapshot
+    // taken earlier would clobber it (w70-seal F-5).
     try {
       db.exec('SAVEPOINT deferred_mint');
       db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
       db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
       db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
+      const prev = db.prepare("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(tenant)?.value;
+      let prior = [];
+      let pa = null;
+      let markerFresh = false;
+      if (prev !== undefined) {
+        try { pa = this.#retiredClaimsOf(tenant, JSON.parse(prev)); } catch { pa = null; }
+        if (pa === null) {
+          // A non-authenticating standing marker is left for the consult
+          // to name — the deferred set cannot overwrite it. A silent drop
+          // would leave the queue's only suppression copy inside the
+          // already-minted F_R_R rows: the drop itself is evidence, so
+          // name it with the same bounded claims convention as the other
+          // rejected-claim flags (w67-runtime F-1).
+          this.#wmTamperClaimList(tenant, 'floor_marker_retired_deferred_dropped', queued);
+          this.#deferredRetiredMints.delete(tenant);
+          try { db.exec('ROLLBACK TO deferred_mint'); } catch { /* savepoint may already be gone */ }
+          // If the rollback itself was defeated the guards stay dropped —
+          // restore them best-effort rather than leave the residue plane
+          // unguarded (CREATE on a live trigger errors harmlessly).
+          try { for (const [, sql] of RESIDUE_KEEP_TRIGGERS) db.exec(sql); } catch { /* meta_kv gone — the consult names it */ }
+          return;
+        }
+        // `retiring` holds claims an interrupted replay left in flight —
+        // the next marker write absorbs them into `retired` instead of
+        // stranding them unsigned (w67-fv F-3). The absorb honors the
+        // consult's recency window: a pin-valid marker stale by more than
+        // the 8192 horizon gated its `retiring` away, and folding it into
+        // the fresh env here would launder the gated set into a marker
+        // that passes the window (w68-runtime F-4). An unreadable chain
+        // tip degrades to NOT-fresh like the drain sibling — the throw
+        // must not escape unwrapped into the seal's post-commit catch
+        // (w70-seal F-6).
+        try { const tip = this._chainFacts(tenant).throughSeq ?? 0; markerFresh = tip > 0 && Number.isSafeInteger(pa.markerSeq) && pa.markerSeq >= tip - 8192; } catch { markerFresh = false; }
+        // `retired` honors the same window as `retiring` — carrying a
+        // stale marker's claims into the fresh env launders the set the
+        // consult just gated out (w69-runtime F-3).
+        prior = markerFresh ? [...new Set([...pa.retired, ...pa.retiring])] : [];
+      }
+      // The deferred set unions the standing marker's own retired claims
+      // before the cap — a peer marker write between commit and apply is
+      // never clobbered out of the durable set (w67-runtime F-4). Queue
+      // order is drain order, not freshness: a later drain's fresh claims
+      // would sit behind an earlier drain's priors and be evicted under
+      // the prior_evicted label — re-derive freshness instead: claims the
+      // standing marker does not yet carry head the union like the
+      // drain's own retired set does (w67-seal F-4).
+      const priorSet = new Set(prior);
+      const fresh = [...q].filter(c => !priorSet.has(c));
+      // The union spans the FULL prior set — slicing priors before the
+      // union would hide the very eviction `prior_evicted` signs: the cap
+      // must count what it dropped, not what it never saw (w66-runtime
+      // F-2, w67-seal F-4 keeps the fresh-first order).
+      const unionSet = new Set([...fresh.slice(0, 2048), ...prior]);
+      const merged = [...unionSet].slice(0, 4096);
+      // Pre-cap drops count like union-overflow ones: a fresh claim past
+      // the 2048 budget was refused by the signed set exactly like the
+      // tail the slice dropped (w69-runtime F-7). The standing env's
+      // own evictions carry forward only under the same freshness window
+      // as its claims — a stale marker's counter otherwise launders
+      // through the fresh write (w70-runtime F-2).
+      const env = this.#mintRetiredEnvelope(tenant, merged, (markerFresh ? (pa?.priorEvicted ?? 0) : 0) + (unionSet.size - merged.length) + Math.max(0, fresh.length - 2048));
       db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES (?, 'fold_floor_retired', ?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, JSON.stringify({ claims: merged, env }));
       const back = db.prepare("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(tenant)?.value;
       const backClaims = (() => { try { return this.#retiredClaimsOf(tenant, JSON.parse(back ?? 'null'))?.retired ?? null; } catch { return null; } })();
@@ -1818,29 +1866,30 @@ export class Fabric {
       try { db.exec('ROLLBACK TO deferred_mint'); } catch { /* savepoint may already be gone */ }
       // The replay's own caller swallows every fault — an eaten marker
       // write would otherwise be the only residue write that convicts
-      // nothing. Name it like the drain sibling does (w67-seal F-3) —
-      // and split infrastructure faults off as availability, not
-      // convictions: a BUSY apply must retry, not mint tamper evidence
-      // (the same errcode split the drain applies, w63-runtime F-3;
-      // the queue survives this throw either way — w69-runtime F-2).
+      // nothing. Name it like the drain sibling does (w67-seal F-3).
+      // Classification reads the ERRCODE, never the message: a foreign
+      // trigger's abort (errcode 1811) reports its RAISE text verbatim
+      // as `e.message`, so the message-regex used to let an attacker
+      // steer a defeat into a silent 503 retry wedge (w70-seal F-3). A
+      // trigger cannot mint errcode 5/6 — genuine cross-connection
+      // BUSY/LOCKED is the only honest retry.
       if (e instanceof InvariantError) {
         if (e?.code === 'INV-409-INTEGRITY') this.#wmTamperClaimList(tenant, 'floor_marker_retired_marker_defeated', queued);
         throw e;
       }
       const msg = e?.message ?? '';
       const base = typeof e?.errcode === 'number' ? e.errcode & 0xFF : null;
-      if (/no such table|no such column|not a database|malformed/i.test(msg)) {
-        this.#wmTamperClaimList(tenant, 'floor_marker_retired_marker_defeated', queued);
-        throw new InvariantError('INV-409-INTEGRITY', 'Deferred retired-mint apply hit a dropped or diverged meta_kv — tamper evidence', 409, { cause: e });
-      }
-      if (e?.errcode === 5 || e?.errcode === 6 || base === 5 || base === 6 || /database .*locked/i.test(msg))
+      if (base === 5 || base === 6)
         throw new InvariantError('INV-503-LEDGER', 'Deferred retired-mint apply hit ledger contention — retry', 503, { cause: e });
       if (base !== null && [8, 10, 11, 13, 14, 15].includes(base))
         throw new InvariantError('INV-503-STORAGE', `Deferred retired-mint apply hit a storage fault: ${msg}`, 503, { cause: e });
-      // An unclassified fault still names the claims it dropped — the
-      // queue's evidence rides the flag while the fault propagates.
+      // Everything else — a foreign trigger abort, a constraint the
+      // honest UPSERT cannot hit, a schema break — is a refused write:
+      // evidence, not contention. The flag names the claims it dropped
+      // and the error crosses the boundary as an InvariantError, never
+      // as a raw SqliteError whose code belongs to nobody (w70-seal F-1).
       this.#wmTamperClaimList(tenant, 'floor_marker_retired_marker_defeated', queued);
-      throw e;
+      throw new InvariantError('INV-409-INTEGRITY', 'Deferred retired-mint apply defeated by a foreign or diverged write path', 409, { cause: e });
     }
     finally { try { db.exec('RELEASE deferred_mint'); } catch { /* rolled back or never opened */ } }
     this.#deferredRetiredMints.delete(tenant);
@@ -2044,16 +2093,24 @@ export class Fabric {
             // flood that pushed priors off the cap is named on the
             // report, not silent churn inside the marker (w67-runtime
             // F-2).
-            if (authed.priorEvicted > 0) {
+            // `scan.seq === 0` means the shape probe never stabilized —
+            // an unproven cursor, not an empty ledger — and must not
+            // vouch for any marker: `seq >= -8192` would be vacuously
+            // true and a stale env's retired set would quietly drain
+            // standing residue (w70-fv F-1).
+            const markerFresh = scan.seq > 0 && Number.isSafeInteger(authed.markerSeq) && authed.markerSeq >= scan.seq - 8192;
+            if (markerFresh && authed.priorEvicted > 0) {
               // A signed eviction count is durable evidence — the latch
               // keeps the LARGEST count signed so far: a rewritten
               // marker with a smaller count must not shrink the latched
               // total before any report names it (w68-runtime F-5b).
+              // The latch honors the same recency window as the claims
+              // it counts — a backdated env's counter is replay, not
+              // fresh evidence (w70-runtime F-2).
               const ev = this.#wmTamper.get(t);
               const prevDropped = (ev?.kind === 'floor_marker_retired_evicted' ? ev : ev?.masked?.get('floor_marker_retired_evicted'))?.claims_dropped;
               this.#wmTamperSet(t, { kind: 'floor_marker_retired_evicted', seq: 0, claims_dropped: Math.max(prevDropped ?? 0, authed.priorEvicted) });
             }
-            const markerFresh = Number.isSafeInteger(authed.markerSeq) && authed.markerSeq >= scan.seq - 8192;
             retiring = new Set(markerFresh ? authed.retiring : []);
             // `retired` takes the same recency window: a backdated env
             // must not suppress present-day convictions (w64-seal F-2).
@@ -2218,7 +2275,11 @@ export class Fabric {
       const base = typeof e?.errcode === 'number' ? e.errcode & 0xFF : null;
       if (/no such table|no such column|not a database|malformed/i.test(msg))
         throw new InvariantError('INV-409-INTEGRITY', 'Residue marker consult failed (meta_kv dropped or diverged) — tamper evidence', 409, { cause: e });
-      if (e?.errcode === 5 || e?.errcode === 6 || base === 5 || base === 6 || /database .*locked/i.test(msg))
+      // Errcode-only like the deferred-apply arm: a foreign trigger's
+      // RAISE text IS `e.message`, so a message-regex let attacker-chosen
+      // 'database is locked' steer a defeat into the retry class
+      // (w70-seal F-3). A trigger cannot mint errcode 5/6.
+      if (base === 5 || base === 6)
         throw new InvariantError('INV-503-LEDGER', 'Residue marker consult hit ledger contention — retry', 503, { cause: e });
       if (base !== null && [8, 10, 11, 13, 14, 15].includes(base))
         throw new InvariantError('INV-503-STORAGE', `Residue marker consult hit a storage fault: ${msg}`, 503, { cause: e });
@@ -2561,7 +2622,6 @@ export class Fabric {
             let pa = null;
             try { pa = this.#retiredClaimsOf(tenant, JSON.parse(prev)); } catch { pa = null; }
             prevCorrupt = pa === null;
-            prevEvicted = pa?.priorEvicted ?? 0;
             // Union the standing marker's `retiring` set exactly like
             // the drain does (:1605) — a batch interrupted between the
             // note and its F_R_R commit left claims in `retiring`;
@@ -2573,7 +2633,11 @@ export class Fabric {
             // `retiring` gated away, and folding it into the fresh env
             // would launder the gated set into a marker that passes the
             // window (w68-runtime F-4).
-            const prevFresh = Number.isSafeInteger(pa?.markerSeq) && pa.markerSeq >= committedTip - 8192;
+            const prevFresh = committedTip > 0 && Number.isSafeInteger(pa?.markerSeq) && pa.markerSeq >= committedTip - 8192;
+            // The carried eviction count follows the same window as the
+            // claims — a stale marker's counter is replay, not fresh
+            // accounting (w70-runtime F-2).
+            prevEvicted = prevFresh ? (pa?.priorEvicted ?? 0) : 0;
             // `retired` carries only while the marker is fresh — a stale
             // marker's claims re-signed under a new marker_seq would
             // launder the aged-out set back inside the consult's window
@@ -2673,7 +2737,10 @@ export class Fabric {
         const base = typeof e?.errcode === 'number' ? e.errcode & 0xFF : null;
         if (/no such table|no such column|not a database|malformed/i.test(msg))
           throw new InvariantError('INV-409-INTEGRITY', 'Residue retire failed (meta_kv dropped or diverged) — tamper evidence', 409, { cause: e });
-        if (e?.errcode === 5 || e?.errcode === 6 || base === 5 || base === 6 || /database .*locked/i.test(msg))
+        // Errcode-only like the deferred-apply arm — attacker-chosen
+        // RAISE text can no longer steer a defeat into the retry class
+        // (w70-seal F-3).
+        if (base === 5 || base === 6)
           throw new InvariantError('INV-503-LEDGER', 'Residue retire hit ledger contention — retry', 503, { cause: e });
         if (base !== null && [8, 10, 11, 13, 14, 15].includes(base))
           throw new InvariantError('INV-503-STORAGE', `Residue retire hit a storage fault: ${msg}`, 503, { cause: e });
@@ -2793,22 +2860,28 @@ export class Fabric {
   // a re-fire must MERGE into the standing flag — the same-kind replace
   // let a second drop before any delivered report evict the first's
   // claims sample and count (w68-runtime F-2). `claims_dropped` counts
-  // distinct claims beyond the last-16 sample, frozen while the seen
-  // window rolls (same bound doctrine as #wmTamperClaim).
+  // every distinct claim the flag ever named beyond the last-16 sample —
+  // monotone, so the rolling seen-window cannot un-count evictions
+  // (w70-runtime F-3).
   #wmTamperClaimList(tenant, kind, claimsIn) {
     const cur = this.#wmTamper.get(tenant);
     const prev = cur === undefined ? undefined : (cur.kind === kind ? cur : cur.masked?.get(kind));
     const seen = prev?._claimsSeen ?? new Set();
     for (const x of prev?.claims ?? []) seen.add(x);
-    const rolling = seen.size >= 8192;
+    // `seenTotal` counts every distinct claim the flag has ever named —
+    // the 8192 window forgets evicted claims but must not un-count them,
+    // or a sustained flood silently shrinks `claims_dropped` back to the
+    // sample bound (w70-runtime F-3).
+    let seenTotal = prev?._seenTotal ?? seen.size;
     for (const c0 of claimsIn ?? []) {
       const c = String(c0).slice(0, 120);
+      if (!seen.has(c)) seenTotal += 1;
       seen.add(c);
       if (seen.size > 8192) seen.delete(seen.values().next().value);
     }
     const claims = [...seen].slice(-16);
-    const claims_dropped = rolling ? (prev?.claims_dropped ?? 0) : Math.max(0, seen.size - 16);
-    this.#wmTamperSet(tenant, { kind, seq: 0, claims, claims_dropped, _claimsSeen: seen });
+    const claims_dropped = Math.max(0, seenTotal - 16);
+    this.#wmTamperSet(tenant, { kind, seq: 0, claims, claims_dropped, _claimsSeen: seen, _seenTotal: seenTotal });
   }
   // The 'signed' half of an abandoned-watermark attestation must mean the
   // envelope actually verifies under this tenant's audit keys — a
@@ -3719,14 +3792,23 @@ export class Fabric {
     // it carries — the attestation otherwise only rides the result shapes
     // (w39-seal F-10).
     let sealCommitted = false;
-    try { const sealedResult = this._sealAuditChain(p, t, iid, sealPreTamperEntries); sealCommitted = true; return sealedResult; }
+    // Snapshot the retained deferred-mint queue at seal entry: an aborted
+    // seal restores it unioned with whatever drains queue mid-seal — the
+    // wholesale delete below used to erase both (w70-runtime F-1). The
+    // drain mutates the mapped Set in place, so snapshot a copy.
+    const deferredSnapshot = this.#deferredRetiredMints.get(t) ? new Set(this.#deferredRetiredMints.get(t)) : null;
+    let committedResult = null;
+    let sealFault = null;
+    try { const sealedResult = this._sealAuditChain(p, t, iid, sealPreTamperEntries); sealCommitted = true; committedResult = sealedResult; return sealedResult; }
     catch (e) {
       if (e instanceof InvariantError && (this.#wmTamper.size || sealPreTamperEntries.length)) {
         const seen = new Set(), attested = [];
         // Live flags first — a flag retired and re-latched mid-seal at a
         // newer seq must name the newest evidence position, not the stale
         // snapshot's (w55-fv L-2). Dedupe on kind+seq+marker (w57-seal F1).
-        for (const e2 of [...(this.#wmTamperAttest(t).head_watermark_tampered ?? []), ...sealPreTamperEntries])
+        // Entries the error already carries keep their place — a nested
+        // attestation must not be overwritten, only unioned (w70-seal N-2).
+        for (const e2 of [...(e.details?.head_watermark_tampered ?? []), ...(this.#wmTamperAttest(t).head_watermark_tampered ?? []), ...sealPreTamperEntries])
           if (e2 && !seen.has(`${e2.kind}:${e2.seq ?? ''}:${e2.healed_marker ?? ''}`)) { seen.add(`${e2.kind}:${e2.seq ?? ''}:${e2.healed_marker ?? ''}`); attested.push(e2); }
         e.details = { ...(e.details ?? {}), ...(attested.length ? { head_watermark_tampered: attested } : {}) };
         // A refusal is NOT an attestation surface: an attacker can induce
@@ -3740,6 +3822,7 @@ export class Fabric {
       // conviction the throw erased has to reach the next report
       // (w69-seal F-2).
       if (e instanceof InvariantError && e.details?.marker_defeated !== undefined) this.#wmTamperClaimList(t, 'floor_marker_retired_marker_defeated', Array.isArray(e.details.claims) ? e.details.claims : []);
+      sealFault = e;
       throw e;
     }
     finally {
@@ -3754,18 +3837,38 @@ export class Fabric {
       // the deletes landed either way (w67-seal F-2).
       const sealTxLanded = this.#sealTxCommitted?.delete(t) === true;
       if (sealCommitted || sealTxLanded) {
+        let applyErr = null;
         try { this.#applyDeferredRetiredMints?.(t); }
-        catch (e) {
-          // Only an integrity defeat mints the conviction — the apply's
-          // own catch already named it with the claim sample after its
-          // savepoint rollback. A transient fault (SQLITE_BUSY at the
-          // savepoint, a full disk) is no tamper: minting the kind here
-          // would pin a conviction on a defeat that never happened —
-          // propagate the real error instead (w69-seal F-3).
-          if (e?.code !== 'INV-409-INTEGRITY') throw e;
+        catch (e2) {
+          // The apply's own catch already named an integrity defeat with
+          // the claim sample after its savepoint rollback — the flag
+          // carries the conviction, not this catch. A transient fault
+          // (SQLITE_BUSY at the savepoint, a full disk) is no tamper, and
+          // minting the kind here would pin a conviction on a defeat
+          // that never happened (w69-seal F-3). Every fault — 409 or
+          // otherwise — rides the result below; nothing is swallowed on
+          // a duck-typed `.code` string (w70-runtime F-4).
+          applyErr = e2;
+        }
+        if (applyErr !== null) {
+          // The seal COMMITTED — throwing from finally would replace its
+          // result object and report the sealed chain as denied. Ride
+          // the fault on the delivered shape exactly like
+          // `vault_persist_error` does; the apply retained the queue, so
+          // the next seal retries (w70-seal F-2).
+          const msg = applyErr instanceof Error ? applyErr.message : String(applyErr);
+          if (committedResult !== null) committedResult.deferred_apply_error = msg;
+          else if (sealFault instanceof InvariantError) sealFault.details = { ...(sealFault.details ?? {}), deferred_apply_error: msg };
         }
       }
-      else this.#deferredRetiredMints.delete(t);
+      else {
+        // Aborted: restore the entry snapshot unioned with anything
+        // drains queued while the seal was armed — the wholesale delete
+        // used to drop both copies (w70-runtime F-1).
+        const restored = new Set([...(deferredSnapshot ?? []), ...(this.#deferredRetiredMints.get(t) ?? [])]);
+        if (restored.size) this.#deferredRetiredMints.set(t, restored);
+        else this.#deferredRetiredMints.delete(t);
+      }
     }
   }
   _sealAuditChain(p, t, iid, sealPreTamperEntries = []) {

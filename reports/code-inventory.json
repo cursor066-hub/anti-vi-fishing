@@ -42,8 +42,8 @@
       "bytes": 470
     },
     "src/fabric.mjs": {
-      "lines": 10028,
-      "bytes": 758686
+      "lines": 10131,
+      "bytes": 765884
     },
     "src/issuerd.mjs": {
       "lines": 954,
@@ -114,8 +114,8 @@
       "bytes": 1523
     },
     "scripts/check.mjs": {
-      "lines": 3918,
-      "bytes": 236687
+      "lines": 4069,
+      "bytes": 245974
     },
     "scripts/generate-contracts.mjs": {
       "lines": 120,
@@ -138,8 +138,8 @@
       "bytes": 7158
     },
     "scripts/report.mjs": {
-      "lines": 254,
-      "bytes": 18356
+      "lines": 258,
+      "bytes": 18669
     },
     "scripts/restore-check.mjs": {
       "lines": 170,
@@ -558,8 +558,8 @@
       "bytes": 22754
     },
     "tests/w63.test.mjs": {
-      "lines": 395,
-      "bytes": 25934
+      "lines": 406,
+      "bytes": 26786
     },
     "tests/w64.test.mjs": {
       "lines": 379,
@@ -574,16 +574,16 @@
       "bytes": 19892
     },
     "tests/w67.test.mjs": {
-      "lines": 299,
-      "bytes": 19109
+      "lines": 308,
+      "bytes": 19868
     },
     "tests/w68.test.mjs": {
       "lines": 217,
       "bytes": 13007
     },
     "tests/w69.test.mjs": {
-      "lines": 458,
-      "bytes": 30212
+      "lines": 468,
+      "bytes": 31037
     },
     "tests/w7-dek.test.mjs": {
       "lines": 118,
@@ -596,6 +596,10 @@
     "tests/w7-seam.test.mjs": {
       "lines": 184,
       "bytes": 13822
+    },
+    "tests/w70.test.mjs": {
+      "lines": 490,
+      "bytes": 33355
     },
     "tests/w8-canonical.test.mjs": {
       "lines": 161,
@@ -634,6 +638,6 @@
       "bytes": 6499
     }
   },
-  "total_files": 158,
-  "total_lines": 51083
+  "total_files": 159,
+  "total_lines": 51861
 }

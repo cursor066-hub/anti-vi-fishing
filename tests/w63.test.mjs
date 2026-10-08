@@ -320,6 +320,13 @@ test('w63-runtime F-2: a stale retiring note cannot mute the echo', t => {
 // ============================================================================
 // w63-runtime F-6: a corrupt standing marker is never overwritten by the
 // retiring note — the consult names it again on the next pass.
+// Doctrine updated w70-seal F-4: never-overwritten used to mean IMMORTAL —
+// the keep triggers made the corrupt row undeletable while the mint gate
+// refused to cover it, so one planted row wedged the suppression plane
+// forever. The drain now MURDERS the row inside its guarded span (flagged
+// `floor_marker_retired_murdered` post-commit); the invariant that
+// survives is the one F-6 actually guarded — corrupt content is never
+// laundered into a signed envelope.
 // ============================================================================
 test('w63-runtime F-6: a corrupt marker is not silently overwritten', t => {
   const h = fixture(t);
@@ -334,10 +341,14 @@ test('w63-runtime F-6: a corrupt marker is not silently overwritten', t => {
   // savepoint must not have laundered it into a fresh signed envelope.
   healOnce(h, 'second');
   const kinds2 = sealKinds(h);
-  assert.ok(kinds2.includes('floor_marker_retired_malformed') || kinds2.includes('floor_marker_retired_unauthenticated'),
-    `the corrupt marker persists as evidence through the next cycle: ${kinds2}`);
+  // The murder flag rides the first report that observed the kill — the
+  // malformed conviction may already have retired on delivery, so the
+  // honest check is: the corrupt bytes are gone from disk AND were
+  // convicted, never covered by a signed envelope.
+  assert.ok(kinds2.includes('floor_marker_retired_murdered') || kinds2.includes('floor_marker_retired_malformed') || kinds2.includes('floor_marker_retired_unauthenticated') || kinds1.includes('floor_marker_retired_murdered'),
+    `the corrupt marker's conviction survives the cycle: ${kinds2} / ${kinds1}`);
   const raw = h.f.store.db.prepare("SELECT value FROM meta_kv WHERE tenant='acme' AND key='fold_floor_retired'").get()?.value;
-  assert.equal(raw, 'not json', 'the corrupt value is still on disk — no note overwrote it');
+  assert.notEqual(raw, 'not json', 'the corrupt value was murdered, not overwritten nor laundered');
   h.close();
 });
 
