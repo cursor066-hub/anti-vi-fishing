@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { fixture, hasCode, installPolicy, setTenant, runtimeInput, runtimeRequest, coverageIdentity } from './helpers.mjs';
+import { fixture, hasCode, installPolicy, setTenant, runtimeInput, runtimeRequest, coverageIdentity, suspendTable } from './helpers.mjs';
 import { signed, verifySigned, generateKey } from '../src/crypto.mjs';
 import { digest, clone } from '../src/canonical.mjs';
 import { signAcknowledgement } from '../src/ceremony.mjs';
@@ -156,8 +156,9 @@ test('RUN-009: denial, throttle, quarantine and infrastructure failure produce d
   assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap2)), e => { codes.add(e.code); return true; });
   // infrastructure failure — a missing table wraps into a stable gate code
   const cap3 = h.f.runtime.issue(h.p(), runtimeInput());
-  h.f.store.db.exec('DROP TABLE usage');
+  const __r = suspendTable(h.f.store.db, 'usage');
   assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap3)), e => { codes.add(e.code); return true; });
+  __r();
   // quarantine
   h.f.revoke(h.p('security'), { kind: 'device', id: 'operator-device', reason: 'Contain' });
   assert.throws(() => h.f.runtime.consume(h.p(), runtimeRequest(cap3)), e => { codes.add(e.code); return true; });

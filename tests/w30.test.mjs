@@ -226,8 +226,10 @@ ${sql}
 c.commit(); c.close()`]);
 }
 const dropAndDelete = (dir, table) => surgery(dir, `
-for n in [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='${table}'").fetchall()]: c.execute('DROP TRIGGER '+n)
-c.execute('DELETE FROM ${table}')`);
+guards = c.execute("SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name='${table}'").fetchall()
+for n,sql in guards: c.execute('DROP TRIGGER '+n)
+c.execute('DELETE FROM ${table}')
+for n,sql in guards: c.execute(sql)`);
 
 function mkInput(h, overrides = {}) {
   const resource = `res-${randomUUID()}`;

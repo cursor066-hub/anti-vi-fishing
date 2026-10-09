@@ -24,8 +24,9 @@ const beneChild = (h, n) => { const r = h.proposed('finance.beneficiary.create',
 const compositeOf = (h, children) => { const r = h.proposed('action.composite', { children }, { action: { type: 'action.composite', target_resource: 'composite-ledger', purpose: 'Batch' } }); h.approve(r, 2); return { record: r, certificate: h.f.certificate(h.p(), r.capsule.capsule_id) }; };
 const jitCert = h => { const r = h.proposed('identity.jit.grant', { subject_id: 'operator', resources: ['dataset-1'], actions: ['data.read'], destinations: ['customer-vault'], columns: ['id'], row_ids: ['row-1'], ttl_ms: 300000, reason: 'Incident', roles: [] }, { action: { type: 'identity.jit.grant', target_resource: 'jit-grants', purpose: 'JIT' } }); h.evidence(r, { kind: 'identity_proof' }); h.evidence(r, { kind: 'identity_proof', issuer: 'registry' }); h.approve(r, 2); return { record: r, certificate: h.f.certificate(h.p(), r.capsule.capsule_id) }; };
 const dropAuditGuards = h => {
-  for (const tr of h.f.store.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all())
-    h.f.store.db.exec(`DROP TRIGGER "${tr.name}"`);
+  const rows = h.f.store.db.prepare("SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all();
+  for (const tr of rows) h.f.store.db.exec(`DROP TRIGGER "${tr.name}"`);
+  return () => { for (const tr of rows) if (tr.sql) h.f.store.db.exec(tr.sql); };
 };
 async function httpFixture(t, serverOpts = {}) {
   const h = fixture(t), app = createServer(h.f, { port: 0, origin: 'http://127.0.0.1:17777', ...serverOpts });
@@ -402,13 +403,14 @@ test('w44-store H-3a: a respelled AUTHORITY_REVOKED still folds the death window
   // fold only cares about the signed row.
   h.f.store.audit('acme', 'AUTHORITY_REVOKED', 'security', 'key:dead-kid-1', { reason: 'compromise' }, h.now());
   const row = h.f.store.db.prepare("SELECT seq,envelope FROM audit WHERE tenant='acme' AND json_valid(envelope) AND json_extract(envelope,'$.payload.type')='AUTHORITY_REVOKED' ORDER BY seq DESC LIMIT 1").get();
-  dropAuditGuards(h);
+  const __r = dropAuditGuards(h);
   const respelled = row.envelope.replace('"type":"AUTHORITY_REVOKED"', '"\\u0074ype":"AUTHORITY_REVOKED"');
   assert.notEqual(respelled, row.envelope);
   // The respelled text parses to the identical payload — it verifies and
   // folds normally, so the row must NOT vanish from the death window.
   assert.equal(JSON.parse(respelled).payload.type, 'AUTHORITY_REVOKED');
   h.f.store.db.prepare('UPDATE audit SET envelope=? WHERE tenant=? AND seq=?').run(respelled, 'acme', row.seq);
+  __r();
   h.f.invalidateAuditIndex('acme');
   assert.equal(h.f.store._auditKeyDeaths('acme').has('dead-kid-1'), true, 'parsed-type scan survives the respell');
   assert.equal(h.f._keyDeaths('acme').has('dead-kid-1'), true, 'chain-facts scan survives the respell');

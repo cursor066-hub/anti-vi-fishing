@@ -9,7 +9,7 @@ import { fixture, plantAadMarker } from './helpers.mjs';
 import { Fabric } from '../src/fabric.mjs';
 import { hashBytes } from '../src/canonical.mjs';
 
-const dropAuditTriggers = db => { for (const tr of db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all()) db.exec(`DROP TRIGGER "${String(tr.name).replace(/"/g, '""')}"`); };
+const dropAuditTriggers = db => { const rows = db.prepare("SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all(); for (const tr of rows) db.exec(`DROP TRIGGER "${String(tr.name).replace(/"/g, '""')}"`); return () => { for (const tr of rows) if (tr.sql) db.exec(tr.sql); }; };
 
 test('w46-store M-1: a rolled-back revocation cannot keep minting phantom deaths through the tx-window memo', t => {
   const h = fixture(t);
@@ -138,8 +138,9 @@ test('w46-store L-1: a rewritten envelope under a borrowed verified hash no long
   // the envelope bytes to attacker-chosen content — under the hash-only
   // key the next append would have chained on a lie without re-verifying.
   const evil = JSON.stringify({ payload: { type: 'AUTHORITY_REVOKED', reference: 'principal:everyone', actor: 'attacker', time: 1 }, signature: 'f'.repeat(88), key_id: 'audit' });
-  dropAuditTriggers(h.f.store.db);
+  const __r = dropAuditTriggers(h.f.store.db);
   h.f.store.db.prepare('UPDATE audit SET envelope=? WHERE tenant=? AND seq=?').run(evil, tenant, head.seq);
+  __r();
   assert.throws(() => h.f.store.audit(tenant, 'CONFIG_SNAPSHOT', 'security', 'after-murder', {}, h.now()),
     e => e?.code === 'INV-409-AUDIT-TAMPER', 'the head check re-fires when the bytes under a known hash diverge');
   h.close();

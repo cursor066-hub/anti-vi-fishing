@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fixture, designateSuccessor } from './helpers.mjs';
 import { Fabric } from '../src/fabric.mjs';
+import { RESIDUE_KEEP_TRIGGERS } from '../src/store.mjs';
 const probeFile = src => {
   const dir = mkdtempSync(join(tmpdir(), 'gate-probe-'));
   const file = join(dir, 'probe.mjs');
@@ -44,6 +45,9 @@ const dropResidueGuards = h => {
   h.f.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
   h.f.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
 };
+// w76-fv F-1: the schema-version pin convicts a dropped guard set at the next
+// guarded call — plants restore the canonical set before the seal runs.
+const restoreResidueGuards = h => { for (const [name, sql] of RESIDUE_KEEP_TRIGGERS) { try { h.f.store.db.exec(sql); } catch (e) { if (!/already exists/.test(String(e?.message ?? e))) throw e; } } };
 const healOnce = (h, garbage) => {
   h.f.store.db.prepare("UPDATE meta_kv SET value=? WHERE tenant='acme' AND key='fold_floor'").run(garbage);
   h.f.store.audit('acme', 'PROBE', 'actor', null, {}, h.f.clock());
@@ -52,6 +56,7 @@ const putMarker = (h, env, claims = null) => {
   dropResidueGuards(h);
   h.f.store.db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme','fold_floor_retired',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value")
     .run(JSON.stringify({ claims: claims ?? (env ? JSON.parse(env.payload ?? '{}')?.fold_floor_retired ?? [] : []), env }));
+  restoreResidueGuards(h);
 };
 const sealKinds = h => (h.f.sealAuditChain(h.p('security')).head_watermark_tampered ?? []).map(e => e.kind);
 const committedTip = h => h.f.store.db.prepare("SELECT MAX(seq) m FROM audit WHERE tenant='acme'").get().m;
@@ -59,16 +64,21 @@ const tipHashAt = (h, seq) => h.f.store.db.prepare("SELECT hash FROM audit WHERE
 
 // ============================================================================
 // w64-fv F-5/F-10: negated member compares fold against the bound member —
-// `m[1]==='a' || m[1]!=='b'` is dead scope for 'b' (both sides false) and
-// unconditional for 'c' (right side tautologically true); the `&&` twin
-// mints unconditional for 'a' and dead for 'b'.
+// `m[1]==='a' || m[1]!=='b'` is dead scope for 'b' (both sides false —
+// 'b' can never satisfy its own exclusion, a deterministic fold). For an
+// UNBOUND outsider 'c' a lone positive vote is only an id-filter, not a
+// dispatch discriminator — the `!==` side mints conditional (w68-ledger
+// F-1); two positive votes prove the member and restore the fold.
 // ============================================================================
-test('w64-fv F-5: ||-memberneg folds dead for the excluded verb, unconditional for outsiders', () => {
+test('w64-fv F-5: ||-memberneg folds dead for the excluded verb, conditional for outsiders under a lone vote', () => {
   const dead = collectRun([HEAD, "  if (m[1]==='a' || m[1]!=='b') { authorize(p,['r']); }", '}'], 'b');
   assert.equal(dead.roles, null, `b can never enter: ${JSON.stringify(dead)}`);
   assert.equal(dead.any, false, 'b mints no reachability evidence either');
-  const uncond = collectRun([HEAD, "  if (m[1]==='a' || m[1]!=='b') { authorize(p,['r']); }", '}'], 'c');
-  assert.deepEqual(uncond.roles, ['r'], `c always enters via the right side: ${JSON.stringify(uncond)}`);
+  const cond = collectRun([HEAD, "  if (m[1]==='a' || m[1]!=='b') { authorize(p,['r']); }", '}'], 'c');
+  assert.equal(cond.roles, null, `lone 'a' vote is an id-filter — conditional for c: ${JSON.stringify(cond)}`);
+  assert.equal(cond.any, true);
+  const proven2 = collectRun([HEAD, "  if (m[1]==='d') { serve(); }", "  if (m[1]==='a' || m[1]!=='b') { authorize(p,['r']); }", '}'], 'c');
+  assert.deepEqual(proven2.roles, ['r'], `two positive votes prove the member — c folds back to unconditional: ${JSON.stringify(proven2)}`);
   const taut = collectRun([HEAD, "  if (m[1]==='a' && m[1]!=='b') { authorize(p,['r']); }", '}'], 'a');
   assert.deepEqual(taut.roles, ['r'], `the &&-tautology is unconditional for 'a': ${JSON.stringify(taut)}`);
   const deadAnd = collectRun([HEAD, "  if (m[1]==='a' && m[1]!=='b') { authorize(p,['r']); }", '}'], 'b');
@@ -256,6 +266,7 @@ test('w64-seal F-3: unsafe-integer claim seqs flag premature, never mint', t => 
   // `\d+:` filter passes it; the seq itself is dishonest.
   dropResidueGuards(h);
   h.f.store.db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme','fold_floor_healed.9',?)").run('99999999999999999999:x');
+  restoreResidueGuards(h);
   const kinds = sealKinds(h);
   assert.ok(kinds.includes('floor_marker_residue_premature') || kinds.includes('floor_marker_retired_unshaped') || kinds.includes('floor_marker_healed_unanchored'),
     `the unsafe seq is flagged: ${kinds}`);
@@ -342,6 +353,7 @@ test('w64-runtime F-2: a dup-key respelled mint stays on the residue plane', t =
   const mintedClaims = env.payload.metadata?.retired_claims ?? env.payload.retired_claims ?? [];
   assert.ok(mintedClaims.length > 0, 'the mint carries claims');
   for (const c of mintedClaims) h.f.store.db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme',?,?)").run(`fold_floor_healed.r${Math.random()}`.slice(0, 60), c);
+  restoreResidueGuards(h);
   const f2 = new Fabric(h.setup.config, h.directory, () => h.now());
   try {
     const kinds = (f2.sealAuditChain(h.p('security')).head_watermark_tampered ?? []).map(e => e.kind);
@@ -364,6 +376,7 @@ test('w64-seal F-6: an occupied residue key lands the heal on a sibling', t => {
   const nextSeq = committedTip(h) + 1;
   dropResidueGuards(h);
   h.f.store.db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme',?,?)").run(`fold_floor_healed.${nextSeq}`, `${nextSeq}:planted`);
+  restoreResidueGuards(h);
   healOnce(h, 'occupied');
   const rows = residueRows(h).map(r => r.key);
   assert.ok(rows.includes(`fold_floor_healed.${nextSeq}`), 'the planted row still stands');

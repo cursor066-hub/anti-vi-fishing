@@ -131,8 +131,9 @@ test('w51-http F3b: repin on an unreachable issuer convicts durably like the dri
 // destroyed attestation, mint claims about a stale prescan tip, or accept a
 // moved chain under the write lock ---
 const dropAuditGuards = h => {
-  for (const tr of h.f.store.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all())
-    h.f.store.db.exec(`DROP TRIGGER "${tr.name}"`);
+  const rows = h.f.store.db.prepare("SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all();
+  for (const tr of rows) h.f.store.db.exec(`DROP TRIGGER "${tr.name}"`);
+  return () => { for (const tr of rows) if (tr.sql) h.f.store.db.exec(tr.sql); };
 };
 const corruptAt = (h, seq) =>
   h.f.store.db.prepare("UPDATE audit SET envelope=? WHERE tenant='acme' AND seq=?")
@@ -141,15 +142,17 @@ const corruptAt = (h, seq) =>
 test('w51-seal F-1: murdering a tip seal keeps the reconstruction wedge armed', t => {
   const h = fixture(t);
   for (let i = 0; i < 3; i++) h.f.store.audit('acme', 'W51_PAD', 'operator', `pad-${i}`, {}, h.now());
-  dropAuditGuards(h);
+  const __r0 = dropAuditGuards(h);
   corruptAt(h, h.f.store.db.prepare("SELECT seq FROM audit WHERE tenant='acme' AND envelope LIKE '%pad-0%'").get().seq);
+  __r0();
   const r0 = h.f.sealAuditChain(h.p('security'));
   assert.equal(r0.sealed, true);
   assert.ok((h.f._auditIndex('acme').sealDroppedEvents ?? 0) >= 1, 'precondition: the fresh seal attests dropped rows');
   // Murder the tip AUDIT_SEALED row: the chain still verifies (nothing
   // references the tip forward) but the signed head still attests it.
-  dropAuditGuards(h);
+  const __r1 = dropAuditGuards(h);
   h.f.store.db.prepare("DELETE FROM audit WHERE tenant='acme' AND seq=(SELECT MAX(seq) FROM audit WHERE tenant='acme')").run();
+  __r1();
   const r1 = h.f.sealAuditChain(h.p('security'));
   assert.equal(r1.head_regressed, true, 'the re-anchor attests the abandoned head');
   const idx = h.f._auditIndex('acme');

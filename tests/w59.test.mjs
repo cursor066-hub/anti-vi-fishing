@@ -60,14 +60,27 @@ const probeFile = src => {
 
 const residueRows = h => h.f.store.db.prepare(
   "SELECT key,value FROM meta_kv WHERE tenant='acme' AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.')").all();
+// w76-fv F-1: the schema-version pin convicts a dropped guard set at the
+// next guarded call — snapshot the canonical trigger text before the graft
+// and restore it after (the pin re-verifies and re-pins silently).
+let _residueSnap = [];
 const dropResidueGuards = h => {
+  _residueSnap = h.f.store.db.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name LIKE 'fold_residue_keep%'").all();
   h.f.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
   h.f.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
   h.f.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
 };
+const restoreResidueGuards = h => {
+  for (const tr of _residueSnap) { try { h.f.store.db.exec(tr.sql); } catch (e) { if (!/already exists/.test(String(e?.message ?? e))) throw e; } }
+};
+let _auditSnap = [];
 const dropAuditGuards = h => {
-  for (const tr of h.f.store.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all())
+  _auditSnap = h.f.store.db.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all();
+  for (const tr of _auditSnap)
     h.f.store.db.exec(`DROP TRIGGER "${tr.name}"`);
+};
+const restoreAuditGuards = h => {
+  for (const tr of _auditSnap) { try { h.f.store.db.exec(tr.sql); } catch (e) { if (!/already exists/.test(String(e?.message ?? e))) throw e; } }
 };
 const healOnce = (h, garbage) => {
   h.f.store.db.prepare("UPDATE meta_kv SET value=? WHERE tenant='acme' AND key='fold_floor'").run(garbage);
@@ -128,6 +141,7 @@ test('w59-seal F-1/F-3: value-matched retire; wiped rows still mint the consumpt
   // A planted echo at a key the rebuilt keyset never names.
   dropResidueGuards(h);
   h.f.store.db.prepare("INSERT INTO meta_kv VALUES('acme','fold_floor_healed.77777',?)").run(claimVal);
+  restoreResidueGuards(h);
   const seal = h.f.sealAuditChain(h.p('security'));
   assert.ok((seal.head_watermark_tampered ?? []).some(e => e.kind === 'floor_marker_healed' && e.healed_marker === 'victim-claim'));
   assert.equal(residueRows(h).length, 0, 'the planted echo dies with the claim it carries');
@@ -138,6 +152,7 @@ test('w59-seal F-1/F-3: value-matched retire; wiped rows still mint the consumpt
   assert.ok(JSON.parse(retired[0].envelope).payload.metadata.retired_claims.includes(claimVal));
   dropResidueGuards(h);
   h.f.store.db.prepare("INSERT INTO meta_kv VALUES('acme','fold_floor_healed.88888',?)").run(claimVal);
+  restoreResidueGuards(h);
   const seal2 = h.f.sealAuditChain(h.p('security'));
   assert.ok(!(seal2.head_watermark_tampered ?? []).some(e => e.healed_marker === 'victim-claim'),
     `a re-planted copy of a consumed claim must not re-fire: ${JSON.stringify(seal2.head_watermark_tampered)}`);
@@ -152,6 +167,7 @@ test('w59-seal F-3: residue wiped before its first report still retires the clai
   healOnce(h, 'wiped-claim');
   dropResidueGuards(h);
   h.f.store.db.prepare("DELETE FROM meta_kv WHERE tenant='acme' AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.')").run();
+  restoreResidueGuards(h);
   const seal = h.f.sealAuditChain(h.p('security'));
   assert.ok((seal.head_watermark_tampered ?? []).some(e => e.kind === 'floor_marker_healed' && e.healed_marker === 'wiped-claim'),
     'the wiped heal is still named chain-side');
@@ -177,11 +193,13 @@ test('w59-seal F-2: a cut over the retire mint keeps its claims consumed', t => 
   dropAuditGuards(h);
   const rseq = h.f.store.db.prepare("SELECT seq FROM audit WHERE tenant='acme' AND envelope LIKE '%FOLD_RESIDUE_RETIRED%'").get().seq;
   h.f.store.db.prepare("UPDATE audit SET hash='00' WHERE tenant='acme' AND seq=?").run(rseq);
+  restoreAuditGuards(h);
   h.f.invalidateAuditIndex('acme');
   h.f.sealAuditChain(h.p('security'));
   // The carried retire re-applies: a re-planted consumed claim is dead.
   dropResidueGuards(h);
   h.f.store.db.prepare("INSERT INTO meta_kv VALUES('acme','fold_floor_healed.99999',?)").run(claimVal);
+  restoreResidueGuards(h);
   const seal3 = h.f.sealAuditChain(h.p('security'));
   assert.ok(!(seal3.head_watermark_tampered ?? []).some(e => e.healed_marker === 'cut-over'),
     `the carried retire keeps the claim consumed: ${JSON.stringify(seal3.head_watermark_tampered)}`);
@@ -241,6 +259,7 @@ test('w59-seal F-6: malformed residue rows retire by claim value', t => {
   h.ready(); h.ready();
   dropResidueGuards(h);
   h.f.store.db.prepare("INSERT INTO meta_kv VALUES('acme','fold_floor_healed.zzz','junk-value')").run();
+  restoreResidueGuards(h);
   const seal = h.f.sealAuditChain(h.p('security'));
   assert.ok((seal.head_watermark_tampered ?? []).some(e => e.kind === 'floor_marker_healed_unanchored' && e.healed_marker === 'junk-value'));
   assert.equal(residueRows(h).length, 0, 'the malformed row retires with its report');
