@@ -24,6 +24,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fixture } from './helpers.mjs';
+import { RESIDUE_KEEP_TRIGGERS } from '../src/store.mjs';
 
 const probeFile = src => {
   const dir = mkdtempSync(join(tmpdir(), 'gate-probe-'));
@@ -52,6 +53,9 @@ const dropResidueGuards = h => {
   h.f.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
   h.f.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
 };
+// w76-fv F-1: the schema-version pin convicts a dropped guard set at the next
+// guarded call — plants restore the canonical set before the seal runs.
+const restoreResidueGuards = h => { for (const [name, sql] of RESIDUE_KEEP_TRIGGERS) { try { h.f.store.db.exec(sql); } catch (e) { if (!/already exists/.test(String(e?.message ?? e))) throw e; } } };
 const healOnce = (h, garbage) => {
   h.f.store.db.prepare("UPDATE meta_kv SET value=? WHERE tenant='acme' AND key='fold_floor'").run(garbage);
   h.f.store.audit('acme', 'PROBE', 'actor', null, {}, h.f.clock());
@@ -395,15 +399,17 @@ test('w73-ledger F-4: bound-verdict continuations never cross `;` and `&&=`/`||=
 // dispatch surfaces outside the audited file.
 // ============================================================================
 const OUTSIDE_SLICE = (() => {
-  const s0 = CHECK_SRC.indexOf('      const dispatchRebind');
+  // The slice runs the whole shipped block — normalization prelude
+  // included — so the staged text must arrive through readFileSync.
+  const s0 = CHECK_SRC.search(/\n {6}(?:const|let) dispatchText/) + 1;
   const s1 = CHECK_SRC.indexOf('route-spec parity: HTTP dispatch surface');
   const e = CHECK_SRC.indexOf('failed = true; }', s1);
-  assert.ok(s0 !== -1 && s1 !== -1 && e !== -1, 'the outside-scan block slice resolves');
+  assert.ok(s0 > 0 && s1 !== -1 && e !== -1, 'the outside-scan block slice resolves');
   return CHECK_SRC.slice(s0, e + 'failed = true; }'.length);
 })();
 const outsideRun = dispatchText => JSON.parse(probeFile([
   `const p = 'probe.mjs'; let failed = false;`,
-  `const dispatchText = ${JSON.stringify(dispatchText)};`,
+  `const readFileSync = () => ${JSON.stringify(dispatchText)};`,
   OUTSIDE_SLICE,
   'process.stdout.write(JSON.stringify({ failed }));'
 ].join('\n'))).failed;

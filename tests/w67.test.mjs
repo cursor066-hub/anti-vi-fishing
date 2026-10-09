@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fixture } from './helpers.mjs';
 import { digest } from '../src/canonical.mjs';
+import { RESIDUE_KEEP_TRIGGERS } from '../src/store.mjs';
 
 const probeFile = src => {
   const dir = mkdtempSync(join(tmpdir(), 'gate-probe-'));
@@ -44,6 +45,9 @@ const dropResidueGuards = h => {
   h.f.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
   h.f.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
 };
+// w76-fv F-1: the schema-version pin convicts a dropped guard set at the next
+// guarded call — plants restore the canonical set before the seal runs.
+const restoreResidueGuards = h => { for (const [name, sql] of RESIDUE_KEEP_TRIGGERS) { try { h.f.store.db.exec(sql); } catch (e) { if (!/already exists/.test(String(e?.message ?? e))) throw e; } } };
 const dropAuditGuards = h => {
   for (const tr of h.f.store.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all())
     h.f.store.db.exec(`DROP TRIGGER "${String(tr.name).replace(/"/g, '""')}"`);
@@ -56,6 +60,7 @@ const putMarker = (h, env, claims = null) => {
   dropResidueGuards(h);
   h.f.store.db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme','fold_floor_retired',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value")
     .run(JSON.stringify({ claims: claims ?? (env ? JSON.parse(env.payload ?? '{}')?.fold_floor_retired ?? [] : []), env }));
+  restoreResidueGuards(h);
 };
 const committedTip = h => h.f.store.db.prepare("SELECT MAX(seq) m FROM audit WHERE tenant='acme'").get().m;
 const tipHashAt = (h, seq) => {
@@ -238,6 +243,7 @@ test('w67-runtime F-1: a dead standing marker is murdered and the deferred mint 
   dropResidueGuards(h);
   h.f.store.db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme','fold_floor_retired',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value")
     .run(JSON.stringify({ claims: ['junk'], env: { garbage: true } }));
+  restoreResidueGuards(h);
   // The apply runs only behind a committed cut — corrupt a row so the
   // seal really cuts, then the drain meets the dead marker and murders it.
   dropAuditGuards(h);

@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fixture } from './helpers.mjs';
 import { digest } from '../src/canonical.mjs';
+import { RESIDUE_KEEP_TRIGGERS } from '../src/store.mjs';
 
 const probeFile = src => {
   const dir = mkdtempSync(join(tmpdir(), 'gate-probe-'));
@@ -45,6 +46,11 @@ const dropResidueGuards = h => {
   h.f.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
   h.f.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
 };
+// The version pin (w76-fv F-1) convicts a diverged trigger set at the
+// next guarded call, so a plant that dropped the keep guards must put
+// them back from the same shared text the drain recreates them with —
+// the planted row itself is untouched by the guards once landed.
+const restoreResidueGuards = h => { for (const [, sql] of RESIDUE_KEEP_TRIGGERS) h.f.store.db.exec(sql); };
 const healOnce = (h, garbage) => {
   h.f.store.db.prepare("UPDATE meta_kv SET value=? WHERE tenant='acme' AND key='fold_floor'").run(garbage);
   h.f.store.audit('acme', 'PROBE', 'actor', null, {}, h.f.clock());
@@ -73,6 +79,7 @@ const putMarker = (h, env, claims = null) => {
   dropResidueGuards(h);
   h.f.store.db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme','fold_floor_retired',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value")
     .run(JSON.stringify({ claims: claims ?? (env ? (typeof env.payload === 'string' ? JSON.parse(env.payload) : env.payload)?.fold_floor_retired ?? [] : []), env }));
+  restoreResidueGuards(h);
 };
 const markerRow = h => h.f.store.db.prepare("SELECT value FROM meta_kv WHERE tenant='acme' AND key='fold_floor_retired'").get()?.value;
 const tipHashAt = (h, seq) => {
@@ -139,10 +146,16 @@ test('w71-ledger F-3 + w72-fv F-3: the outside-scan binds capability shapes, not
   const reE = CHECK_SRC.indexOf('/.test(dispatchText)', reB);
   assert.ok(reB > 0 && reE > reB, 'the shipped outside-scan regex is extractable');
   const RE = new RegExp(CHECK_SRC.slice(reB, reE + 1).slice(1, -1));
-  const deB = CHECK_SRC.indexOf('const dispatchRebind = /');
-  const deE = CHECK_SRC.indexOf('/.test(dispatchText)', deB);
+  // The destructure arm is a `new RegExp` template interpolating REQ_RX
+  // (w76-ledger F-3 alias set) — rebuild it from the shipped file's
+  // literal bytes by the template's own rules (`\\` → `\`, then the
+  // ${REQ_RX} interpolation with the no-alias REQ_RX these probes
+  // assume). Tested code cannot drift from shipped code — no eval.
+  const deB = CHECK_SRC.indexOf('const dispatchRebind = new RegExp(`');
+  const deE = CHECK_SRC.indexOf('`).test(dispatchText)', deB);
   assert.ok(deB > 0 && deE > deB, 'the shipped destructure arm is extractable');
-  const DESTR = new RegExp(CHECK_SRC.slice(deB + 'const dispatchRebind = '.length, deE + 1).slice(1, -1));
+  const REQ_RX = '(?:req|request)';
+  const DESTR = new RegExp(CHECK_SRC.slice(deB + 'const dispatchRebind = new RegExp(`'.length, deE).replaceAll('\\\\', '\\').replaceAll('${REQ_RX}', REQ_RX));
   const usB = CHECK_SRC.indexOf('&& /', deE) + 3;
   const usE = CHECK_SRC.indexOf('/.test(dispatchText)', usB);
   assert.ok(usB > 3 && usE > usB, 'the shipped rebind-use arm is extractable');
@@ -410,6 +423,7 @@ test('w71-seal F-3: the deferred apply murders the corrupt marker inside its sav
   // savepoint and the queued claims still land under a fresh envelope.
   dropResidueGuards(h);
   h.f.store.db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme','fold_floor_retired',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run('{"corrupt');
+  restoreResidueGuards(h);
   h.f.sealAuditChain(h.p('security'));
   const res4 = h.f.sealAuditChain(h.p('security'));
   const murdered = findKind(res4, /floor_marker_retired_murdered/);
@@ -433,24 +447,39 @@ test('w71-seal F-4: a defeated drain murder names the row before the swallow', t
   healOnce(h, 'defeat-drain');
   h.f.sealAuditChain(h.p('security'));
   healOnce(h, 'defeat-drain-b');
-  // Corrupt the standing marker and eat the murder's DELETE with a
-  // foreign RAISE(IGNORE) — the landed probe must name the row it could
-  // not remove before the error crosses the drain boundary. The
-  // InvariantError then aborts the seal — the conviction must already
-  // ride the flag AND the thrown details, not wait for a clean pass.
+  // Corrupt the standing marker and eat the murder's DELETE — staged at
+  // the statement layer: a real eating trigger is convictable live-DDL
+  // before the write even runs (w76-fv F-1), so the swallow is faked by
+  // a delete that reports zero changes while the row reads back standing.
+  // The landed probe must name the row it could not remove before the
+  // error crosses the drain boundary. The InvariantError then aborts the
+  // seal — the conviction must already ride the flag AND the thrown
+  // details, not wait for a clean pass.
   dropResidueGuards(h);
   h.f.store.db.prepare("UPDATE meta_kv SET value='{\"corrupt' WHERE tenant='acme' AND key='fold_floor_retired'").run();
-  h.f.store.db.exec("CREATE TRIGGER eat_murder BEFORE DELETE ON meta_kv WHEN OLD.key='fold_floor_retired' BEGIN SELECT RAISE(IGNORE); END");
+  restoreResidueGuards(h);
+  const origStmt = h.f.store._stmt.bind(h.f.store);
+  const origPrep = h.f.store.db.prepare.bind(h.f.store.db);
+  const fake = { run: () => ({ changes: 0 }), get: () => undefined, all: () => [] };
+  h.f.store._stmt = (sql) => {
+    if (typeof sql === 'string' && sql.includes('DELETE FROM meta_kv') && sql.includes('fold_floor_retired')) return fake;
+    return origStmt(sql);
+  };
+  h.f.store.db.prepare = (sql) => {
+    if (typeof sql === 'string' && sql.includes('DELETE FROM meta_kv') && sql.includes('fold_floor_retired')) return fake;
+    return origPrep(sql);
+  };
   let e1 = null, e2 = null;
   try { h.f.sealAuditChain(h.p('security')); } catch (e) { e1 = e; }
   try { h.f.sealAuditChain(h.p('security')); } catch (e) { e2 = e; }
+  h.f.store._stmt = origStmt;
+  h.f.store.db.prepare = origPrep;
   for (const e of [e1, e2]) {
     assert.ok(e !== null, 'the armed trigger aborts every seal — no silent wedge');
     assert.equal(e.details?.marker_defeated, 'fold_floor_retired', `the thrown details name the defeated delete: ${JSON.stringify(e.details)}`);
     assert.ok(String(e.details?.claims?.[0]).includes('corrupt'), `the standing row is named on the throw: ${JSON.stringify(e.details)}`);
   }
   assert.ok(String(markerRow(h)).includes('corrupt'), 'the eaten delete leaves the row standing');
-  h.f.store.db.exec('DROP TRIGGER eat_murder');
   const res3 = h.f.sealAuditChain(h.p('security'));
   const defeated = findKind(res3, /floor_marker_retired_marker_defeated/);
   assert.ok(defeated.length === 1, `the latched conviction delivers on the next clean seal: ${JSON.stringify(tamperKinds(res3))}`);

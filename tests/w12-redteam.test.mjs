@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { fixture, hasCode, runtimeInput, runtimeRequest } from './helpers.mjs';
+import { fixture, hasCode, runtimeInput, runtimeRequest, suspendTrigger } from './helpers.mjs';
 import { Store } from '../src/store.mjs';
 import { digest } from '../src/canonical.mjs';
 import { signed, verifySigned, generateKey } from '../src/crypto.mjs';
@@ -146,8 +146,9 @@ test('w12 R9: data-access disclosure is anchored on the chain', t => {
   assert.ok(idx.dataAccess.some(e => e.dataset === input.resource && e.row_ids.includes('row-1')), 'DATA_ACCESSED event is on the chain');
   // A file-writer must first defeat the append-only trigger — even with
   // DDL in hand the chain attestation survives (w21-store F-6).
-  h.f.store.db.exec('DROP TRIGGER no_access_delete');
+  const __r = suspendTrigger(h.f.store.db, 'no_access_delete');
   h.f.store.db.prepare('DELETE FROM data_access').run();
+  __r();
   // The chain-derived index still reports the disclosure after the wipe.
   const idx2 = h.f._auditIndex('acme');
   assert.ok(idx2.dataAccess.some(e => e.dataset === input.resource && e.row_ids.includes('row-1')), 'wiping the table cannot erase chain attestation');

@@ -153,8 +153,10 @@ test('w21-store: corrupt head envelope surfaces INV-409-AUDIT-TAMPER', t => {
   // bare JSON parser error.
   const path = h.f.store.db.location();
   const db2 = new DatabaseSync(path);
+  const __trg = db2.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='no_audit_update'").get().sql;
   db2.exec('DROP TRIGGER no_audit_update');
   db2.prepare("UPDATE audit SET envelope='{corrupt' WHERE tenant=? AND seq=(SELECT MAX(seq) FROM audit WHERE tenant=?)").run(T, T);
+  db2.exec(__trg);
   db2.close();
   assert.throws(() => h.f.store.audit(T, 'NEXT', 'system', 'x', {}, h.now()), hasCode('INV-409-AUDIT-TAMPER'));
 });

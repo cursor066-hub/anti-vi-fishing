@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fixture, hasCode } from './helpers.mjs';
 import { verifySigned } from '../src/crypto.mjs';
+import { RESIDUE_KEEP_TRIGGERS } from '../src/store.mjs';
 const probeFile = src => {
   const dir = mkdtempSync(join(tmpdir(), 'gate-probe-'));
   const file = join(dir, 'probe.mjs');
@@ -113,6 +114,7 @@ test('w62-runtime F-3: a divergent unsigned claims twin names forged', t => {
   h.f.store.db.exec("DROP TRIGGER IF EXISTS fold_residue_keep_upd");
   const twin = { claims: [...signedSet, '77777:unsigned-claim'], env: marker.env };
   h.f.store.db.prepare("UPDATE meta_kv SET value=? WHERE tenant='acme' AND key='fold_floor_retired'").run(JSON.stringify(twin));
+  restoreResidueGuards(h);
   const seal2 = h.f.sealAuditChain(h.p('security'));
   const kinds = (seal2.head_watermark_tampered ?? []).map(e => e.kind);
   assert.ok(kinds.includes('floor_marker_retired_forged'), `a divergent claims twin is forged: ${kinds}`);
@@ -201,6 +203,7 @@ test('w62-seal F-2: premature claims drain without minting', t => {
   assert.ok(key, 'a residue row stands');
   dropResidueGuards(h);
   h.f.store.db.prepare('UPDATE meta_kv SET value=? WHERE tenant=? AND key=?').run('99999:forged-claim', 'acme', key);
+  restoreResidueGuards(h);
   const seal = h.f.sealAuditChain(h.p('security'));
   const kinds = (seal.head_watermark_tampered ?? []).map(e => e.kind);
   assert.ok(kinds.includes('floor_marker_residue_premature'), `premature claim flagged: ${kinds}`);
@@ -220,11 +223,14 @@ test('w62-seal F-4: the durable retiring note suppresses the echo flag', t => {
   const claim = residueRows(h)[0]?.value;
   assert.ok(claim, 'a residue claim stands');
   // Simulate the crash window: marker already minted the claim retired and
-  // the signed retiring set still names it — the drain never ran.
-  dropResidueGuards(h);
+  // the signed retiring set still names it — the drain never ran. (The
+  // signer accessor is itself a guarded call — sign before the guards drop,
+  // w76-fv F-1.)
   const tip = h.f.store.db.prepare("SELECT MAX(seq) m FROM audit WHERE tenant='acme'").get().m;
   const env = h.f.store.auditSigners['acme'].sign({ tenant_id: 'acme', fold_floor_retired: [claim], fold_floor_retiring: [claim], marker_seq: tip, marker_tip_hash: tipHashAt(h, tip) }, 'audit');
+  dropResidueGuards(h);
   h.f.store.db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme','fold_floor_retired',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(JSON.stringify({ claims: [claim], env }));
+  restoreResidueGuards(h);
   const seal = h.f.sealAuditChain(h.p('security'));
   const kinds = (seal.head_watermark_tampered ?? []).map(e => e.kind);
   assert.ok(!kinds.includes('floor_marker_residue_retired_echo'), `in-flight claims do not echo-convict: ${kinds}`);
@@ -244,6 +250,7 @@ test('w62-seal F-6: a null-valued marker row convicts unauthenticated', t => {
   assert.ok(h.f.store.db.prepare("SELECT 1 FROM meta_kv WHERE tenant='acme' AND key='fold_floor_retired'").get(), 'marker exists');
   dropResidueGuards(h);
   h.f.store.db.prepare("UPDATE meta_kv SET value='null' WHERE tenant='acme' AND key='fold_floor_retired'").run();
+  restoreResidueGuards(h);
   const seal = h.f.sealAuditChain(h.p('security'));
   const kinds = (seal.head_watermark_tampered ?? []).map(e => e.kind);
   assert.ok(kinds.includes('floor_marker_retired_unauthenticated'), `null marker row convicts: ${kinds}`);
@@ -265,6 +272,9 @@ const collectRun = (lines, verb) => {
     `globalThis.process.stdout.write(JSON.stringify(collectAuthorize(${JSON.stringify(lines)}, 0, ${lines.length + 2}, true, ${JSON.stringify(verb)})));`
   ].join('\n')));
 };
+// w76-fv F-1: the schema-version pin convicts a dropped guard set at the next
+// guarded call — plants restore the canonical set before the seal runs.
+const restoreResidueGuards = h => { for (const [name, sql] of RESIDUE_KEEP_TRIGGERS) { try { h.f.store.db.exec(sql); } catch (e) { if (!/already exists/.test(String(e?.message ?? e))) throw e; } } };
 const HEAD = "if (req.method === 'GET' && (m = /^\\/x\\/(.*)/.exec(path))) {";
 const pyEval = (expr) => execFileSync('python3', ['-c',
   `import json\nsrc=open('scripts/traceability.py').read()\ng={'__file__':'scripts/traceability.py'}\nexec(src[:src.index('def evidence_blocks')], g)\nprint(${expr})`], { encoding: 'utf8', cwd: ROOT }).trim();

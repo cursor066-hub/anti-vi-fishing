@@ -8,8 +8,12 @@ import assert from 'node:assert/strict';
 import { fixture, runtimeInput, runtimeRequest } from './helpers.mjs';
 
 const dropAuditGuards = h => {
-  for (const tr of h.f.store.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all())
-    h.f.store.db.exec(`DROP TRIGGER "${tr.name}"`);
+  const rows = h.f.store.db.prepare("SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all();
+  for (const tr of rows) h.f.store.db.exec(`DROP TRIGGER "${tr.name}"`);
+  // Verbatim re-arm — the tamper writes below must not leave the guard
+  // set dead: the schema pin's live-DDL arm (w76-fv F-1) convicts it on
+  // the next guarded call and drowns the deeper verdict under test.
+  return () => { for (const tr of rows) if (tr.sql) h.f.store.db.exec(tr.sql); };
 };
 const corruptAt = (h, seq) =>
   h.f.store.db.prepare("UPDATE audit SET envelope=? WHERE tenant='acme' AND seq=?").run('{"payload":{"time":1},"signatures":[{"signature":"AA"}]}', seq);
@@ -28,8 +32,9 @@ test('w35 F-1: tail deletion under a surviving head attests the abandoned tip', 
   h.f.execute(h.p('operator'), certificate);
   const tipSeq = maxSeq(h);
   const tipHash = h.f.store.db.prepare("SELECT hash FROM audit WHERE tenant='acme' AND seq=?").get(tipSeq).hash;
-  dropAuditGuards(h);
+  const __r = dropAuditGuards(h);
   h.f.store.db.prepare("DELETE FROM audit WHERE tenant='acme' AND seq>=?").run(tipSeq - 1); // survivors verify — no cut needed
+  __r();
   const r = h.f.sealAuditChain(h.p('security'));
   assert.equal(r.sealed, false);
   assert.equal(r.head_regressed, true, 'the seal must name the regression, never claim clean');
@@ -51,8 +56,9 @@ test('w35 F-1b: tail deletion that regresses the revocation floor refuses', t =>
   h.f.revoke(h.p('security'), { kind: 'capability', id: cap.payload.capability_id, reason: 'spent' });
   h.f.auditProof(h.p('auditor'), 1); // a signed write mints a head that claims the floor
   const revSeq = seqOf(h, '%AUTHORITY_REVOKED%');
-  dropAuditGuards(h);
+  const __r = dropAuditGuards(h);
   h.f.store.db.prepare("DELETE FROM audit WHERE tenant='acme' AND seq>=?").run(revSeq);
+  __r();
   h.f.store.db.prepare("DELETE FROM deks WHERE tenant='acme' AND kind='revocation'").run();
   h.f.store.db.prepare("DELETE FROM records WHERE tenant='acme' AND kind='revocation'").run();
   assert.throws(() => h.f.sealAuditChain(h.p('security')), e => e?.code === 'INV-409-INTEGRITY' && /floor|revocation/i.test(e.message));

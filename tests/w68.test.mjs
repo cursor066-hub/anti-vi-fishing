@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fixture } from './helpers.mjs';
 import { digest } from '../src/canonical.mjs';
+import { RESIDUE_KEEP_TRIGGERS } from '../src/store.mjs';
 
 const probeFile = src => {
   const dir = mkdtempSync(join(tmpdir(), 'gate-probe-'));
@@ -37,9 +38,17 @@ const HEAD2 = "if ((m = /^\\/x\\/(.*)\\/(.*)/.exec(path))) {";
 
 const residueRows = h => h.f.store.db.prepare("SELECT value FROM meta_kv WHERE tenant='acme' AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.')").all();
 const committedTip = h => h.f.store.db.prepare("SELECT MAX(seq) m FROM audit WHERE tenant='acme'").get().m;
+let _auditSnap = [];
 const dropAuditGuards = h => {
-  for (const tr of h.f.store.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all())
+  // w76-fv F-1: the schema-version pin convicts a dropped guard set at the
+  // next guarded call — snapshot the canonical texts first so the graft
+  // restores them (the pin then re-verifies and re-pins silently).
+  _auditSnap = h.f.store.db.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all();
+  for (const tr of _auditSnap)
     h.f.store.db.exec(`DROP TRIGGER "${String(tr.name).replace(/"/g, '""')}"`);
+};
+const restoreAuditGuards = h => {
+  for (const tr of _auditSnap) { try { h.f.store.db.exec(tr.sql); } catch (e) { if (!/already exists/.test(String(e?.message ?? e))) throw e; } }
 };
 const payloadDigestAt = (h, seq) => digest(JSON.parse(h.f.store.db.prepare("SELECT envelope FROM audit WHERE tenant='acme' AND seq=?").get(seq).envelope).payload);
 
@@ -190,6 +199,7 @@ test('w68-fv F-4: a hash-column rewrite cannot launder a planted floor marker', 
   h.f.store.db.prepare("UPDATE meta_kv SET value=? WHERE tenant='acme' AND key='fold_floor'").run(`${seq}:${fake}`);
   dropAuditGuards(h);
   h.f.store.db.prepare("UPDATE audit SET hash=? WHERE tenant='acme' AND seq=?").run(fake, seq);
+  restoreAuditGuards(h);
   h.f.store.audit('acme', 'PROBE', 'actor', null, {}, h.f.clock());
   const res = residueRows(h).map(r => r.value);
   assert.ok(res.some(v => v.includes(fake)), `the plant is named divergent — column clay cannot launder it: ${JSON.stringify(res)}`);
@@ -209,6 +219,7 @@ test('w68-fv F-4b: a hash-column rewrite cannot frame an honest marker as foreig
   h.f.store.db.prepare("UPDATE meta_kv SET value=? WHERE tenant='acme' AND key='fold_floor'").run(`${seq}:${payloadDigestAt(h, seq)}`);
   dropAuditGuards(h);
   h.f.store.db.prepare("UPDATE audit SET hash=? WHERE tenant='acme' AND seq=?").run('bb'.repeat(32), seq);
+  restoreAuditGuards(h);
   h.f.store.audit('acme', 'PROBE', 'actor', null, {}, h.f.clock());
   const res = residueRows(h).map(r => r.value);
   assert.ok(!res.some(v => v.includes('bb'.repeat(32))), 'no false divergent claim from column clay');

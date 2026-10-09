@@ -50,6 +50,23 @@ export const RESIDUE_KEEP_TRIGGERS = [
 // element's own `metadata` object (w66-runtime F-1). Coverage still stops
 // at lc[*].metadata.*: deeper free-form nesting has no schema-defined
 // sub-object, and no scan selects on those paths.
+// Expected physical shape of every ledger table: ordinal columns,
+// ordinal PRIMARY KEY columns, and whether the DDL carries a CHECK
+// guard. Shared by #ledgerSchemaProbe (convicts shape drift) and
+// #schemaSurfaceAssert (temp-shadow scan over the same names) — one
+// list, so a table added to one can never silently skip the other
+// (w76-fv F-2).
+const LEDGER_SHAPE = [
+  ['records', ['tenant', 'kind', 'id', 'value', 'created'], ['tenant', 'kind', 'id'], false],
+  ['audit', ['tenant', 'seq', 'previous', 'hash', 'envelope'], ['tenant', 'seq'], false],
+  ['nonces', ['tenant', 'nonce', 'capsule'], ['tenant', 'nonce'], false],
+  ['idempotency', ['tenant', 'scope', 'key', 'hash', 'result'], ['tenant', 'scope', 'key'], false],
+  ['deks', ['tenant', 'kind', 'id', 'wrapped'], ['tenant', 'kind', 'id'], false],
+  ['usage', ['tenant', 'subject', 'resource', 'at', 'cost', 'capability', 'request'], ['tenant', 'capability', 'request'], false],
+  ['clock', ['id', 'last'], ['id'], true],
+  ['meta_kv', ['tenant', 'key', 'value'], ['tenant', 'key'], false],
+  ['data_access', ['tenant', 'subject', 'dataset', 'row_id', 'column_name', 'at'], [], false],
+];
 export const DUP_KEY_PROBE = ` OR EXISTS (SELECT 1 FROM json_each(envelope,'$') GROUP BY "key" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload') GROUP BY "key" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload.metadata') GROUP BY "key" HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload.metadata.lifecycle_carryover') je, json_each(CASE WHEN je.type='object' THEN je.value ELSE '{}' END) jk GROUP BY je.key, jk.key HAVING COUNT(*)>1) OR EXISTS (SELECT 1 FROM json_each(envelope,'$.payload.metadata.lifecycle_carryover') je2, json_each(CASE WHEN je2.type='object' AND json_type(je2.value,'$.metadata')='object' THEN json_extract(je2.value,'$.metadata') ELSE '{}' END) jm GROUP BY je2.key, jm.key HAVING COUNT(*)>1)`;
 
 
@@ -119,16 +136,19 @@ export class Store {
       if (e?.errcode !== undefined || e?.code === 'ERR_SQLITE_ERROR' || /not a database|malformed|no such column|no such table/i.test(e?.message ?? '')) throw new InvariantError('INV-503-STORAGE', 'Ledger schema is unrecognised — refusing to interpret a foreign or corrupt database', 503, { cause: e });
       throw e;
     }
+    // Physical layout is verified at rest BEFORE the migration touches
+    // rows and BEFORE the guards install: a substituted VIEW or a
+    // reordered same-arity table reads fine — every SELECT names its
+    // columns — while positional writes land swapped-column garbage or a
+    // guard finds nothing to attach to (w75-seal F-3, w75-runtime F-3).
+    // Convict here, not at first write — and convict BEFORE the
+    // migration's own faults, or the view rides out as a 503
+    // 'unrecognised' instead of the tamper verdict (w76-fv F-3).
+    requireThat(this.#ledgerSchemaProbe() === 'ok', 'INV-409-INTEGRITY', 'Ledger schema diverged — object kind or column order differs — tamper evidence', 409);
     // Migration runs BEFORE the append-only guards exist: its donor-revert
     // closures legitimately UPDATE/DELETE idempotency and dek rows
     // (w21-store F-6 ordering).
     try { this._migrateAad(); } catch (e) { if (e instanceof InvariantError) throw e; throw new InvariantError('INV-503-STORAGE', 'Ledger schema is unrecognised — refusing to interpret a foreign or corrupt database', 503, { cause: e }); }
-    // Physical layout is verified at rest BEFORE the guards install: a
-    // substituted VIEW or a reordered same-arity table reads fine — every
-    // SELECT names its columns — while positional writes land swapped-
-    // column garbage or a guard finds nothing to attach to (w75-seal
-    // F-3, w75-runtime F-3). Convict it here, not at first write.
-    requireThat(this.#ledgerSchemaProbe() === 'ok', 'INV-409-INTEGRITY', 'Ledger schema diverged — object kind or column order differs — tamper evidence', 409);
     try {
       this._installIntegrityGuards();
     } catch (e) {
@@ -457,6 +477,13 @@ export class Store {
       if (e instanceof InvariantError) throw e;
       throw new InvariantError('INV-503-STORAGE', 'Ledger schema is unrecognised — refusing to interpret a foreign or corrupt database', 503, { cause: e });
     }
+    // Pin the guarded surface last — every table, column and guard the
+    // ctor verified, reduced to the schema_version and the trigger set.
+    // A live-connection RENAME+CREATE later bumps the version and
+    // strands the triggers on the orphaned original: #schemaSurfaceAssert
+    // re-verifies both before any guarded statement trusts the layout
+    // (w76-fv F-1).
+    this._schemaPin = this.#schemaPinCapture();
   }
   // One-shot migration: re-seal every ciphertext still bound under the
   // legacy slash-form AAD space, then never consult that space again. The
@@ -567,10 +594,13 @@ export class Store {
           this._schemaGuard(() => {
             // The INSERT arm of the marker guard must drop for the
             // sanctioned write — same drop+recreate-in-tx discipline the
-            // delete path uses (w48-store W48-4).
-            this.db.exec('DROP TRIGGER IF EXISTS aad_marker_keep_ins');
-            try { this._landed(() => this._stmt("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', ?)").run(mtenant, JSON.stringify(ms)), 'aad-migration marker'); }
-            finally { this.db.exec("CREATE TRIGGER IF NOT EXISTS aad_marker_keep_ins BEFORE INSERT ON meta_kv WHEN NEW.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END"); }
+            // delete path uses (w48-store W48-4). The ddl window keeps
+            // the version pin from convicting the sanctioned re-arm.
+            this._ddlWindow(() => {
+              this.db.exec('DROP TRIGGER IF EXISTS aad_marker_keep_ins');
+              try { this._landed(() => this._stmt("INSERT OR REPLACE INTO meta_kv VALUES(?, 'aad_migration', ?)").run(mtenant, JSON.stringify(ms)), 'aad-migration marker'); }
+              finally { this.db.exec("CREATE TRIGGER IF NOT EXISTS aad_marker_keep_ins BEFORE INSERT ON meta_kv WHEN NEW.key='aad_migration' BEGIN SELECT RAISE(ABORT, 'aad migration marker is evidence'); END"); }
+            });
           });
       this.db.exec('COMMIT');
       // Legacy ciphertext physically lingers in the WAL until a checkpoint
@@ -934,7 +964,7 @@ export class Store {
       const delta = this._totalChanges() - before;
       requireThat(delta === expect, 'INV-409-INTEGRITY', `${what} produced ${delta} row write(s) in one statement — foreign trigger side-effects`, 409);
       return result;
-    }));
+    }), true);
   }
   // Expected-schema probe shared by every convict-on-text site in this
   // store (w73): reads every ledger table column-bearing, so a dropped
@@ -951,21 +981,23 @@ export class Store {
     // surface, refuse-on-write engine text (w75-seal F-3). Fresh prepare
     // per probe: a cached statement's column metadata can outlive the
     // schema change it must see.
-    for (const [table, cols] of [
-      ['records', ['tenant', 'kind', 'id', 'value', 'created']],
-      ['audit', ['tenant', 'seq', 'previous', 'hash', 'envelope']],
-      ['nonces', ['tenant', 'nonce', 'capsule']],
-      ['idempotency', ['tenant', 'scope', 'key', 'hash', 'result']],
-      ['deks', ['tenant', 'kind', 'id', 'wrapped']],
-      ['usage', ['tenant', 'subject', 'resource', 'at', 'cost', 'capability', 'request']],
-      ['clock', ['id', 'last']],
-      ['meta_kv', ['tenant', 'key', 'value']],
-      ['data_access', ['tenant', 'subject', 'dataset', 'row_id', 'column_name', 'at']],
-    ]) {
+    // pk — the expected PRIMARY KEY columns in ordinal order: a table
+    // rebuilt same-shape-minus-PK passes the column checks while every
+    // ON CONFLICT write dies 'does not match any PRIMARY KEY' — a
+    // permanent, deniable DoS mislabeled engine fault (w76-runtime
+    // F-1). table_xinfo reports each column's PK ordinal; an expected
+    // [] also convicts a PK an attacker added to gate writes.
+    // needsCheck — tables whose DDL carries a CHECK guard a probe must
+    // not let a same-columns rebuild drop (clock's id=1).
+    for (const [table, cols, pk, needsCheck] of LEDGER_SHAPE) {
       try {
-        if (this.db.prepare('SELECT type FROM sqlite_master WHERE name=?').get(table)?.type !== 'table') return 'diverged';
+        const row = this.db.prepare('SELECT type, sql FROM sqlite_master WHERE name=?').get(table);
+        if (row?.type !== 'table') return 'diverged';
         const names = this.db.prepare(`SELECT * FROM ${table} LIMIT 0`).columns().map(c => c.name);
         if (names.length !== cols.length || names.some((n, i) => n !== cols[i])) return 'diverged';
+        const pks = this.db.prepare('SELECT name FROM pragma_table_xinfo(?) WHERE pk > 0 ORDER BY pk').all(table).map(r => r.name);
+        if (pks.length !== pk.length || pks.some((n, i) => n !== pk[i])) return 'diverged';
+        if (needsCheck && !/check/i.test(row.sql ?? '')) return 'diverged';
       }
       catch (pe) {
         if (/no such table|no such column|not a database|malformed|has \d+ columns? but \d+ values|has no column named|cannot modify .* because it is a view/i.test(pe?.message ?? '')) return 'diverged';
@@ -974,9 +1006,56 @@ export class Store {
     }
     return 'ok';
   }
+  #schemaPinCapture() {
+    return {
+      v: this.db.prepare('PRAGMA schema_version').get()?.schema_version,
+      triggers: this.db.prepare("SELECT name, tbl_name FROM sqlite_master WHERE type='trigger' ORDER BY name").all().map(r => r.name + '@' + r.tbl_name),
+    };
+  }
+  // A sanctioned drop+recreate region (the drain's keep-trigger drops,
+  // the aad-marker guarded write, the heal-path recreates) bumps
+  // schema_version and transiently differs the trigger set ON PURPOSE.
+  // The surface assert stands down while a window is open so guarded
+  // calls inside it cannot convict the sanctioned re-arm (w76-fv F-1).
+  // Nesting-safe by count; the flag clears in finally even on a fault.
+  _ddlWindow(fn) {
+    this._ddlSanction = (this._ddlSanction ?? 0) + 1;
+    try { return fn(); } finally { this._ddlSanction -= 1; }
+  }
+  // Physical-surface assert run at every guarded statement. Two arms:
+  // (a) TEMP SHADOW — a temp object resolving ahead of a ledger table
+  // launders the catalog probe (it reads main.sqlite_master) while
+  // unqualified reads and keep-trigger-guarded writes hit the shadow
+  // instead; a temp trigger bound to a ledger table is the same surgery
+  // with no table at all. This deployment creates no temp objects, so a
+  // shadowing temp table OR a temp trigger on a ledger table is tamper
+  // evidence outright (w76-fv F-2).
+  // (b) VERSION PIN — PRAGMA schema_version counts main-schema DDL. A
+  // live-connection RENAME+CREATE reorders columns past the open probe
+  // and strands the table's guards on the orphaned original; on a
+  // version change re-verify catalog shape AND the trigger set, convict
+  // on either, or re-pin when a sanctioned drop+recreate restored the
+  // identical surface (w76-fv F-1).
+  #schemaSurfaceAssert() {
+    if (this._schemaPin === undefined) return; // ctor still assembling the pin
+    if ((this._ddlSanction ?? 0) > 0) return; // sanctioned drop+recreate window open
+    const names = LEDGER_SHAPE.map(([t]) => t);
+    const shadow = this.db.prepare(`SELECT name FROM sqlite_temp_master WHERE name IN (${names.map(() => '?').join(',')}) OR tbl_name IN (${names.map(() => '?').join(',')}) LIMIT 1`)
+      .get(...names, ...names);
+    requireThat(shadow === undefined, 'INV-409-INTEGRITY', `Ledger object shadowed by a temp object '${shadow?.name}' — temp schema resolves ahead of main — tamper evidence`, 409);
+    const v = this.db.prepare('PRAGMA schema_version').get()?.schema_version;
+    if (v === this._schemaPin.v) return;
+    const triggers = this.db.prepare("SELECT name, tbl_name FROM sqlite_master WHERE type='trigger' ORDER BY name").all().map(r => r.name + '@' + r.tbl_name);
+    requireThat(this.#ledgerSchemaProbe() === 'ok'
+      && triggers.length === this._schemaPin.triggers.length
+      && triggers.every((n, i) => n === this._schemaPin.triggers[i]),
+      'INV-409-INTEGRITY', 'Ledger schema diverged — live DDL changed the guarded surface — tamper evidence', 409);
+    this._schemaPin = { v, triggers };
+  }
   // A dropped or rewritten table is integrity evidence inside the INV
   // taxonomy, never bare sqlite noise escaping to callers (w44-store M-2).
-  _schemaGuard(run) {
+  _schemaGuard(run, write = false) {
+    this.#schemaSurfaceAssert();
     try { return run(); }
     catch (e) {
       if (/no such table|no such column|not a database|malformed|has \d+ columns? but \d+ values|has no column named|cannot modify .* because it is a view/i.test(e?.message ?? '')) {
@@ -1004,12 +1083,36 @@ export class Store {
           throw new InvariantError('INV-409-INTEGRITY', 'Ledger write refused by a trigger — tamper evidence', 409, { cause: e });
         if (base0 === 19)
           throw new InvariantError('INV-409-INTEGRITY', `Ledger access refused by a constraint guard — tamper evidence: ${e?.message ?? 'sqlite error'}`, 409, { cause: e });
-        if (this.#ledgerSchemaProbe() === 'diverged')
+        let probe;
+        try { probe = this.#ledgerSchemaProbe(); }
+        catch (pe) {
+          // A probe that cannot answer classifies like the fabric's
+          // `#schemaClaim` — contention propagates for the outer layers'
+          // INV-503-LEDGER translation, a corruption-family fault is
+          // engine-minted evidence, storage rides its own class, and a
+          // classless eval fault propagates raw (w76-seal F-1).
+          const pb = typeof pe?.errcode === 'number' ? pe.errcode & 0xFF : null;
+          if (pb === 5 || pb === 6) throw pe;
+          if (pb === 11 || pb === 26)
+            throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: pe });
+          if (pb !== null && [8, 10, 13, 14, 15].includes(pb))
+            throw new InvariantError('INV-503-STORAGE', `Ledger schema probe hit a storage fault: ${pe?.message ?? 'sqlite error'}`, 503, { cause: pe });
+          throw pe;
+        }
+        if (probe === 'diverged')
           throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e });
-        // Every expected table stands — the claim was fabricated text;
-        // the raw fault propagates for the outer layers' classification.
-        // A probe that cannot answer threw above — infrastructure,
-        // never a tamper verdict (w73-seal F-2).
+        // Every expected table stands yet the guarded write was refused
+        // — a foreign trigger or a substituted object intercepted it:
+        // refused-write evidence, never a raw escape (w76-seal F-1 — a
+        // planted trigger spelling 'no such column' on a standing schema
+        // escaped unclassified where audit() convicts the same shape).
+        // Reads keep the membership doctrine instead: fabricated text
+        // over a standing schema is noise riding a real fault, and the
+        // raw fault propagates for the outer layers' classification
+        // (w73-seal F-3 — a fabricated 'no such table' on a SELECT must
+        // not convict).
+        if (write)
+          throw new InvariantError('INV-409-INTEGRITY', `Ledger write refused by a foreign trigger — tamper evidence: ${e?.message ?? 'sqlite error'}`, 409, { cause: e });
         throw e;
       }
       // Trigger-raised aborts arrive as SQLITE_CONSTRAINT_TRIGGER
@@ -1050,9 +1153,18 @@ export class Store {
       // Unmapped sqlite codes (TOOBIG, MISMATCH, MISUSE, NOLFS, RANGE,
       // …) are honest engine faults — mislabeling them INTEGRITY would
       // mint false tamper evidence from infrastructure noise
-      // (w51-fv F-5).
-      if (e?.code === 'ERR_SQLITE_ERROR' || typeof e?.errcode === 'number')
+      // (w51-fv F-5). But the convict-text regex is not the only way
+      // surgery announces itself: an engine-minted 'cannot UPSERT a
+      // view' (errcode 1) on a live INSTEAD-OF swap matched no arm and
+      // used to ride out as an engine fault — the catalog answers that
+      // question directly, so consult it once here: a diverged probe is
+      // evidence, an answering probe or a probe that cannot answer
+      // stays in the engine class (w76-runtime F-2).
+      if (e?.code === 'ERR_SQLITE_ERROR' || typeof e?.errcode === 'number') {
+        try { if (this.#ledgerSchemaProbe() === 'diverged') throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e }); }
+        catch (ie) { if (ie instanceof InvariantError) throw ie; }
         throw new InvariantError('INV-503-LEDGER', `Ledger engine fault: ${e?.message ?? 'sqlite error'}`, 503, { cause: e });
+      }
       throw e;
     }
   }
@@ -1369,19 +1481,21 @@ export class Store {
             v = this._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key=?").get(tenant, residueKey)?.value;
           }
         }
-        this.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
-        this.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
-        this.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
-        try { this._stmt("INSERT INTO meta_kv VALUES(?,?,?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, residueKey, residueClaim); }
-        finally {
-          // Plain CREATE, not IF NOT EXISTS — a planted impostor under
-          // our name must not keep the recreate a no-op (w58-fv F-1);
-          // the drops above already cleared any same-named row. Emitted
-          // from the shared RESIDUE_KEEP_TRIGGERS text — a local stale
-          // copy once downgraded the `fold_floor_retired` arms invisibly
-          // for the rest of the process lifetime (w61-runtime F-1).
-          for (const [, sql] of RESIDUE_KEEP_TRIGGERS) this.db.exec(sql);
-        }
+        this._ddlWindow(() => {
+          this.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
+          this.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
+          this.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
+          try { this._stmt("INSERT INTO meta_kv VALUES(?,?,?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, residueKey, residueClaim); }
+          finally {
+            // Plain CREATE, not IF NOT EXISTS — a planted impostor under
+            // our name must not keep the recreate a no-op (w58-fv F-1);
+            // the drops above already cleared any same-named row. Emitted
+            // from the shared RESIDUE_KEEP_TRIGGERS text — a local stale
+            // copy once downgraded the `fold_floor_retired` arms invisibly
+            // for the rest of the process lifetime (w61-runtime F-1).
+            for (const [, sql] of RESIDUE_KEEP_TRIGGERS) this.db.exec(sql);
+          }
+        });
         const landedResidue = this._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key=?").get(tenant, residueKey)?.value;
         requireThat(landedResidue === residueClaim, 'INV-409-INTEGRITY', 'fold-floor healed residue refused after write — foreign trigger side-effects', 409);
       }

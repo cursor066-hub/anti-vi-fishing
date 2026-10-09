@@ -23,7 +23,18 @@ test('w53-runtime F-1: uncommitted attestations pin their owning anchor — a mu
   const containmentRows = () => h.f.store.db.prepare("SELECT id FROM records WHERE tenant='acme' AND kind='containment'").all();
   // The gate-deny puts (id 'deny:<uuid>') are refused; the runtime deny
   // row (id 'deny:<uuid>:<code>') carries a second colon and commits.
-  h.f.store.db.exec("CREATE TRIGGER deny_put BEFORE INSERT ON records WHEN NEW.kind='containment' AND NEW.id LIKE 'deny:%' AND NEW.id NOT LIKE 'deny:%:%' BEGIN SELECT RAISE(ROLLBACK,'planted'); END");
+  // A live-DDL plant convicts at the guarded entry before it can fire, so
+  // the refusal is simulated at the write boundary: the cached records
+  // insert statement throws the exact RAISE-class fault (errcode 1811)
+  // an armed trigger would mint, under the same WHEN predicate
+  // (w76-fv F-1).
+  const __ins = h.f.store._stmt('INSERT INTO records VALUES(?,?,?,?,?) ON CONFLICT(tenant,kind,id) DO UPDATE SET value=excluded.value');
+  const origRun = __ins.run.bind(__ins);
+  __ins.run = (...a) => {
+    if (a[1] === 'containment' && typeof a[2] === 'string' && a[2].startsWith('deny:') && !a[2].slice(5).includes(':'))
+      throw Object.assign(new Error('planted'), { errcode: 1811, errstr: 'constraint failed', code: 'ERR_SQLITE_ERROR' });
+    return origRun(...a);
+  };
   assert.throws(() => h.f.runtime.consume(h.p('operator'), runtimeRequest(cap)), hasCode('INV-403-QUARANTINE'));
   const rows = containmentRows();
   assert.equal(rows.length, 1, 'the runtime-deny row committed while both gate-deny puts were refused');
@@ -31,6 +42,7 @@ test('w53-runtime F-1: uncommitted attestations pin their owning anchor — a mu
   const rep = h.f.containmentReport(h.p('security'));
   assert.equal(rep.anchored_denials_missing_total, 1, 'the murdered committed row is named — it cannot absorb a neighbouring uncommitted attestation');
   assert.equal(rep.anchored_denials_rows_uncommitted.length, 2, 'both refused gate-deny puts still read as named uncommitted, not murder');
+  __ins.run = origRun;
   h.close();
 });
 
@@ -56,11 +68,17 @@ test('w53-runtime F-3: a refused containment put attests the non-commit — the 
   const h = fixture(t);
   const cap = h.f.runtime.issue(h.p('operator'), runtimeInput());
   h.f.revoke(h.p('security'), { kind: 'device', id: 'operator-device', reason: 'w53 probe' });
-  h.f.store.db.exec("CREATE TRIGGER deny_put BEFORE INSERT ON records WHEN NEW.kind='containment' BEGIN SELECT RAISE(ROLLBACK,'planted'); END");
+  const __ins = h.f.store._stmt('INSERT INTO records VALUES(?,?,?,?,?) ON CONFLICT(tenant,kind,id) DO UPDATE SET value=excluded.value');
+  const origRun = __ins.run.bind(__ins);
+  __ins.run = (...a) => {
+    if (a[1] === 'containment') throw Object.assign(new Error('planted'), { errcode: 1811, errstr: 'constraint failed', code: 'ERR_SQLITE_ERROR' });
+    return origRun(...a);
+  };
   assert.throws(() => h.f.runtime.consume(h.p('operator'), runtimeRequest(cap)), hasCode('INV-403-QUARANTINE'));
   const types = h.f.store.db.prepare("SELECT envelope FROM audit WHERE tenant='acme' ORDER BY seq").all().map(r => JSON.parse(r.envelope).payload.type);
   assert.ok(types.includes('RUNTIME_DENIED'), 'the denial anchored even though its row put was refused');
   assert.ok(types.includes('CONTAINMENT_ROW_UNCOMMITTED'), 'the refused put is named on the chain');
+  __ins.run = origRun;
   h.close();
 });
 
@@ -70,8 +88,9 @@ test('w53-runtime F-3: a refused containment put attests the non-commit — the 
 // positives, and the survivingTip off-by-one.
 
 const dropAuditGuards = h => {
-  for (const tr of h.f.store.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all())
-    h.f.store.db.exec(`DROP TRIGGER "${tr.name}"`);
+  const rows = h.f.store.db.prepare("SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all();
+  for (const tr of rows) h.f.store.db.exec(`DROP TRIGGER "${tr.name}"`);
+  return () => { for (const tr of rows) if (tr.sql) h.f.store.db.exec(tr.sql); };
 };
 const maxSeq = h => h.f.store.db.prepare("SELECT COALESCE(MAX(seq),0) m FROM audit WHERE tenant='acme'").get().m;
 const auditRows = (h, like) => h.f.store.db.prepare("SELECT seq, envelope FROM audit WHERE tenant='acme' AND envelope LIKE ? ORDER BY seq").all(like).map(r => ({ seq: r.seq, meta: JSON.parse(r.envelope).payload.metadata ?? {} }));

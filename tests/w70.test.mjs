@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fixture, hasCode } from './helpers.mjs';
 import { digest } from '../src/canonical.mjs';
+import { RESIDUE_KEEP_TRIGGERS } from '../src/store.mjs';
 
 const probeFile = src => {
   const dir = mkdtempSync(join(tmpdir(), 'gate-probe-'));
@@ -42,6 +43,9 @@ const dropResidueGuards = h => {
   h.f.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
   h.f.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
 };
+// w76-fv F-1: the schema-version pin convicts a dropped guard set at the next
+// guarded call — plants restore the canonical set before the seal runs.
+const restoreResidueGuards = h => { for (const [name, sql] of RESIDUE_KEEP_TRIGGERS) { try { h.f.store.db.exec(sql); } catch (e) { if (!/already exists/.test(String(e?.message ?? e))) throw e; } } };
 const healOnce = (h, garbage) => {
   h.f.store.db.prepare("UPDATE meta_kv SET value=? WHERE tenant='acme' AND key='fold_floor'").run(garbage);
   h.f.store.audit('acme', 'PROBE', 'actor', null, {}, h.f.clock());
@@ -69,6 +73,7 @@ const putMarker = (h, env, claims = null) => {
   dropResidueGuards(h);
   h.f.store.db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme','fold_floor_retired',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value")
     .run(JSON.stringify({ claims: claims ?? (env ? (typeof env.payload === 'string' ? JSON.parse(env.payload) : env.payload)?.fold_floor_retired ?? [] : []), env }));
+  restoreResidueGuards(h);
 };
 const tipHashAt = (h, seq) => {
   const r = h.f.store.db.prepare("SELECT envelope FROM audit WHERE tenant='acme' AND seq=?").get(seq);
@@ -248,9 +253,18 @@ test('w70-seal F-1/F-2/F-3: an attacker-text abort is a named defeat riding the 
   // write left — a foreign trigger aborts it with attacker-chosen
   // 'database is locked' text (errcode 1/1811 — a trigger cannot mint a
   // real BUSY; the message-regex used to steer this into a silent retry).
-  h.f.store.db.exec("CREATE TRIGGER steer_retired BEFORE INSERT ON meta_kv WHEN NEW.key='fold_floor_retired' BEGIN SELECT RAISE(ABORT, 'database is locked'); END");
+  // w76-fv F-1: a real planted trigger convicts 'live DDL' at the next
+  // guarded call, so the armed abort is staged at the statement layer —
+  // the UPSERT throws the trigger's 1811 with attacker text.
+  const origPrep2 = h.f.store.db.prepare.bind(h.f.store.db);
+  h.f.store.db.prepare = (sql) => {
+    if (String(sql).includes('fold_floor_retired') && /INSERT|UPDATE/.test(String(sql))) {
+      return { run: () => { throw Object.assign(new Error('database is locked'), { errcode: 1811 }); }, get: () => undefined, all: () => [] };
+    }
+    return origPrep2(sql);
+  };
   const res2 = h.f.sealAuditChain(h.p('security'));
-  h.f.store.db.exec('DROP TRIGGER steer_retired');
+  h.f.store.db.prepare = origPrep2;
   assert.ok(typeof res2.deferred_apply_error === 'string' && /defeated|diverged/i.test(res2.deferred_apply_error),
     `the abort classifies as a refused write, never a retry wedge: ${res2.deferred_apply_error}`);
   const md = (res2.head_watermark_tampered ?? []).find(x => x.kind === 'floor_marker_retired_marker_defeated')
@@ -290,8 +304,16 @@ test('w70-fv F-4: an armed ABORT trigger convicts per seal — no permanent wedg
   h.f.store.db.exec = origExec;
   // Arm the foreign trigger on the apply's UPDATE path (the queue now
   // carries claims while a marker may already stand → UPDATE arm).
-  h.f.store.db.exec("CREATE TRIGGER armed_retired BEFORE UPDATE ON meta_kv WHEN OLD.key='fold_floor_retired' BEGIN SELECT RAISE(ABORT, 'database is locked'); END");
-  h.f.store.db.exec("CREATE TRIGGER armed_retired_i BEFORE INSERT ON meta_kv WHEN NEW.key='fold_floor_retired' BEGIN SELECT RAISE(ABORT, 'database is locked'); END");
+  // w76-fv F-1: a real planted trigger convicts 'live DDL' at the next
+  // guarded call, so the armed abort is staged at the statement layer —
+  // every fold_floor_retired write throws the trigger's 1811.
+  const origPrep3 = h.f.store.db.prepare.bind(h.f.store.db);
+  h.f.store.db.prepare = (sql) => {
+    if (String(sql).includes('fold_floor_retired') && /INSERT|UPDATE/.test(String(sql))) {
+      return { run: () => { throw Object.assign(new Error('database is locked'), { errcode: 1811 }); }, get: () => undefined, all: () => [] };
+    }
+    return origPrep3(sql);
+  };
   const results = [];
   for (let i = 0; i < 3; i++) results.push(h.f.sealAuditChain(h.p('security')));
   // Every seal still delivers — the armed trigger convicts each attempt
@@ -304,8 +326,7 @@ test('w70-fv F-4: an armed ABORT trigger convicts per seal — no permanent wedg
   const md = (results[2].head_watermark_tampered ?? []).find(x => x.kind === 'floor_marker_retired_marker_defeated')
     ?? (h.f.sealAuditChain(h.p('security')).head_watermark_tampered ?? []).find(x => x.kind === 'floor_marker_retired_marker_defeated');
   assert.ok(md, `the refused writes convict by name: ${JSON.stringify(tamperKinds(results[2]))}`);
-  h.f.store.db.exec('DROP TRIGGER armed_retired');
-  h.f.store.db.exec('DROP TRIGGER armed_retired_i');
+  h.f.store.db.prepare = origPrep3;
   const row = h.f.store.db.prepare("SELECT value FROM meta_kv WHERE tenant='acme' AND key='fold_floor_retired'").get()?.value;
   assert.ok(row !== undefined, 'the retained queue replays once the trigger lifts');
   h.close();
@@ -328,6 +349,7 @@ test('w70-seal F-4: a forged standing marker is murdered and named', t => {
   dropResidueGuards(h);
   h.f.store.db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme','fold_floor_retired',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value")
     .run(JSON.stringify({ claims: ['1:planted'], env: { envelope: '{"forged":true}', signature: 'deadbeef' } }));
+  restoreResidueGuards(h);
   const seal1 = h.f.sealAuditChain(h.p('security'));
   const seal2 = h.f.sealAuditChain(h.p('security'));
   const kindsAll = [...tamperKinds(seal1), ...tamperKinds(seal2)];

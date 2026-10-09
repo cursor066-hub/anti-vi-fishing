@@ -150,10 +150,10 @@ test('w75-fv F2.1/F2.2/F2.3: ASI separators, anti-gates and paren commas classif
 // scope injection, `for…in` enumeration and computed destructure keys.
 // ============================================================================
 const OUTSIDE_SLICE = (() => {
-  const s0 = CHECK_SRC.indexOf('      const dispatchText');
+  const s0 = CHECK_SRC.search(/\n {6}(?:const|let) dispatchText/) + 1;
   const s1 = CHECK_SRC.indexOf('route-spec parity: HTTP dispatch surface');
   const e = CHECK_SRC.indexOf('failed = true; }', s1);
-  assert.ok(s0 !== -1 && s1 !== -1 && e !== -1, 'the outside-scan block slice resolves');
+  assert.ok(s0 > 0 && s1 !== -1 && e !== -1, 'the outside-scan block slice resolves');
   return CHECK_SRC.slice(s0, e + 'failed = true; }'.length);
 })();
 const outsideRun = dispatchText => JSON.parse(probeFile([
@@ -332,16 +332,31 @@ test('w75-runtime F-3: a column-reordered same-arity table convicts — position
 test('w75-fv F6.2: schema-shaped text on a real 1811 abort convicts refused-trigger', t => {
   const h = fixture(t);
   h.ready();
-  h.f.store.db.exec("CREATE TRIGGER plant_schema_text BEFORE INSERT ON records BEGIN SELECT RAISE(ABORT,'no such table: records'); END");
+  // The version pin (w76-fv F-1) convicts a real planted trigger at the
+  // guard's entry — 'live DDL' — before the write ever reaches the
+  // refused-trigger arm (w76-seal F-1 asserts that ordering). To still
+  // exercise THIS arm — a 1811 abort wearing schema-shaped text — the
+  // fault is injected at the stmt layer with no DDL at all.
+  const origS = h.f.store._stmt.bind(h.f.store);
+  h.f.store._stmt = (sql) => {
+    if (String(sql).includes('INSERT INTO records'))
+      throw Object.assign(new Error('no such table: records'), { errcode: 1811 });
+    return origS(sql);
+  };
   let e = null;
   try { h.f.store.put('acme', 'capsule', 'fake-text', { a: 1 }, h.f.clock()); } catch (err) { e = err; }
+  h.f.store._stmt = origS;
   assert.ok(e && e.code === 'INV-409-INTEGRITY' && /refused by a trigger/.test(e.message ?? ''),
     `a trigger-minted abort stays evidence even under schema-shaped text: ${e?.code} ${e?.message}`);
-  // Parity: the same write with plain RAISE text convicts identically.
-  h.f.store.db.exec('DROP TRIGGER plant_schema_text');
-  h.f.store.db.exec("CREATE TRIGGER plant_plain BEFORE INSERT ON records BEGIN SELECT RAISE(ABORT,'wedged'); END");
+  // Parity: the same write with plain abort text convicts identically.
+  h.f.store._stmt = (sql) => {
+    if (String(sql).includes('INSERT INTO records'))
+      throw Object.assign(new Error('wedged'), { errcode: 1811 });
+    return origS(sql);
+  };
   e = null;
   try { h.f.store.put('acme', 'capsule', 'plain-text', { a: 1 }, h.f.clock()); } catch (err) { e = err; }
+  h.f.store._stmt = origS;
   assert.ok(e && e.code === 'INV-409-INTEGRITY',
     `plain-text abort convicts identically: ${e?.code} ${e?.message}`);
   h.close();
@@ -558,27 +573,59 @@ test('w75-ledger F-3: for-await and parenthesized heads still suppress the dead 
 });
 
 // ============================================================================
-// w75-ledger F-5: the SINK/MARKER scan runs the same control-char
-// collapse the secret scan got — a `\0`-interleaved eval-call/
-// `innerHTML` plant in a tracked file convicts.
+// w75-ledger F-5 + w76-ledger F-8/F-9: the shipped SINK/MARKER scan slice
+// is exercised against staged files — the control-char collapse convicts
+// NUL-interleaved sinks, and every rule (sink rules included) answers the
+// zero-width/NBSP normalizer the marker scan already stripped.
 // ============================================================================
-test('w75-ledger F-5: control-char-interleaved sinks answer the marker scan', () => {
-  // The marker/sink block runs `collapsed`/`cnorm` against the same
-  // rules — probe it through the whole gate on a staged file.
+const SINK_SLICE = (() => {
+  const s0 = CHECK_SRC.indexOf('const SINK_EXT');
+  const s1 = CHECK_SRC.indexOf('// Route-role parity');
+  assert.ok(s0 !== -1 && s1 > s0, 'the sink/marker scan slice resolves');
+  return CHECK_SRC.slice(s0, s1);
+})();
+test('w75-ledger F-5 + w76-ledger F-8: control-char and zero-width splits answer the shipped sink scan', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sink-probe-'));
   try {
-    const f = join(dir, 'sink.mjs');
-    writeFileSync(f, Buffer.from('e\0v\0a\0l\0(\0x\0)', 'latin1'));
-    const out = probeFile([
-      `import { readFileSync } from 'node:fs';`,
-      `const s = readFileSync(${JSON.stringify(f)}, 'utf8');`,
-      `const snorm = s.replace(/[\\u00AD\\u034F\\u061C\\u180E\\u200B-\\u200F\\u202A-\\u202F\\u2060\\u2063-\\u2064\\u3000\\uFE0F\\uFEFF]/g, '');`,
-      `const collapsed = /[\\x00-\\x09\\x0b-\\x1f\\x7f]/.test(s) ? s.replace(/[\\x00-\\x09\\x0b-\\x1f\\x7f]/g, '') : s;`,
-      `const cnorm = collapsed === s ? snorm : snorm.replace(/[\\x00-\\x09\\x0b-\\x1f\\x7f]/g, '');`,
-      `const hit = /\\bev\\x61l\\s*\\(/.test(collapsed);`,
-      `process.stdout.write(JSON.stringify({ hit, cnormHit: /\\bev\\x61l\\s*\\(/.test(cnorm) }));`
-    ].join('\n'));
-    const r = JSON.parse(out.split('\n').filter(Boolean).at(-1));
-    assert.equal(r.hit, true, 'a NUL-interleaved eval-call convicts under the collapse');
+    const run = files => {
+      const out = probeFile([
+        `import { readFileSync, existsSync } from 'node:fs';`,
+        `const files = [], textFiles = ${JSON.stringify(files)};`,
+        `let failed = false;`,
+        SINK_SLICE,
+        `process.stdout.write(JSON.stringify({ failed }));`
+      ].join('\n'));
+      return JSON.parse(out.split('\n').filter(Boolean).at(-1)).failed;
+    };
+    writeFileSync(join(dir, 'nul.mjs'), Buffer.from('e\0v\0a\0l\0(\0x\0)', 'latin1'));
+    // Staged payloads are assembled from escapes — a literal zero-width/NBSP in this file would trip the scan itself.
+    writeFileSync(join(dir, 'zwsp.mjs'), 'ev' + '\u200B' + 'al (x)');
+    writeFileSync(join(dir, 'nbsp.mjs'), 'AKIA' + '\u00A0' + 'IOSFODNN7EXAMPLE');
+    writeFileSync(join(dir, 'honest.mjs'), 'const x = 1;');
+    assert.equal(run([join(dir, 'nul.mjs')]), true, 'a NUL-interleaved eval-call convicts under the collapse');
+    assert.equal(run([join(dir, 'zwsp.mjs')]), true, 'a zero-width-split sink convicts under snorm');
+    assert.equal(run([join(dir, 'nbsp.mjs')]), true, 'an NBSP-joined credential convicts under snorm');
+    assert.equal(run([join(dir, 'honest.mjs')]), false, 'a clean file does not convict');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+test('w76-ledger F-8: zero-width and NBSP splits answer the shipped SECRET scan', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'secret-zw-'));
+  try {
+    writeFileSync(join(dir, 'zwsp.txt'), 'AKIA' + '\u200B' + 'IOSFODNN7EXAMPLE');
+    writeFileSync(join(dir, 'nbsp.txt'), 'AKIA' + '\u00A0' + 'IOSFODNN7EXAMPLE');
+    writeFileSync(join(dir, 'honest.txt'), 'no secrets here');
+    const run = files => {
+      const out = probeFile([
+        `import { readFileSync, existsSync } from 'node:fs';`,
+        `const textFiles = ${JSON.stringify(files)};`,
+        `let failed = false;`,
+        SECRET_SLICE,
+        `process.stdout.write(JSON.stringify({ failed }));`
+      ].join('\n'));
+      return JSON.parse(out.split('\n').filter(Boolean).at(-1)).failed;
+    };
+    assert.equal(run([join(dir, 'zwsp.txt')]), true, 'a ZWSP-interleaved credential convicts');
+    assert.equal(run([join(dir, 'nbsp.txt')]), true, 'an NBSP-joined credential convicts');
+    assert.equal(run([join(dir, 'honest.txt')]), false, 'a clean tracked file does not convict');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

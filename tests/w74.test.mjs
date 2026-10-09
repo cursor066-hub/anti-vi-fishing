@@ -246,7 +246,23 @@ test('w74-seal F-3: the target probe-verifies schema claims — fabricated text 
   try { h.f.target.grant('acme', 'g1', 'v'); } catch (err) { e = err; }
   assert.ok(e !== null, 'the armed trigger refuses the grant write');
   assert.equal(e.code, 'INV-409-INTEGRITY', `the refused write convicts INTEGRITY: ${e?.code}`);
-  assert.ok(/refused by a trigger/.test(e.message ?? ''),
+  // The version pin (w76-fv F-1) convicts the planted trigger at the
+  // guard's entry — 'live DDL' — before the write reaches the
+  // refused-trigger arm. To exercise the arm itself, stage the same
+  // 1811-with-schema-text at the statement layer where no DDL fires.
+  assert.ok(/live DDL|refused by a trigger/.test(e.message ?? ''),
+    `a planted trigger convicts at the pin or the arm: ${e?.message}`);
+  h.f.target.db.exec('DROP TRIGGER fake_schema');
+  const origS = h.f.target._stmt.bind(h.f.target);
+  h.f.target._stmt = (sql) => {
+    if (String(sql).includes('INSERT INTO grants'))
+      throw Object.assign(new Error('no such table: grants'), { errcode: 1811 });
+    return origS(sql);
+  };
+  e = null;
+  try { h.f.target.grant('acme', 'g2', 'v'); } catch (err) { e = err; }
+  h.f.target._stmt = origS;
+  assert.ok(e !== null && e.code === 'INV-409-INTEGRITY' && /refused by a trigger/.test(e.message ?? ''),
     `the fabricated 'no such table' falls through to the 1811 arm: ${e?.message}`);
   assert.ok(!/diverged/.test(e.message ?? ''), 'a standing schema is never convicted as diverged');
   h.close();
@@ -399,10 +415,10 @@ const OUTSIDE_SLICE = (() => {
   // The slice starts at the `dispatchText` declaration so the shipped
   // `?.`/`?.[` normalization runs verbatim inside the probe (w74-fv
   // F-3: it is part of the audited surface, not test scaffolding).
-  const s0 = CHECK_SRC.indexOf('      const dispatchText');
+  const s0 = CHECK_SRC.search(/\n {6}(?:const|let) dispatchText/) + 1;
   const s1 = CHECK_SRC.indexOf('route-spec parity: HTTP dispatch surface');
   const e = CHECK_SRC.indexOf('failed = true; }', s1);
-  assert.ok(s0 !== -1 && s1 !== -1 && e !== -1, 'the outside-scan block slice resolves');
+  assert.ok(s0 > 0 && s1 !== -1 && e !== -1, 'the outside-scan block slice resolves');
   return CHECK_SRC.slice(s0, e + 'failed = true; }'.length);
 })();
 const outsideRun = dispatchText => JSON.parse(probeFile([

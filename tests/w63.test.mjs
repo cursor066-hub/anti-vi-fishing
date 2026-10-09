@@ -17,6 +17,7 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fixture, designateSuccessor } from './helpers.mjs';
 import { signed } from '../src/crypto.mjs';
+import { RESIDUE_KEEP_TRIGGERS } from '../src/store.mjs';
 const probeFile = src => {
   const dir = mkdtempSync(join(tmpdir(), 'gate-probe-'));
   const file = join(dir, 'probe.mjs');
@@ -46,6 +47,9 @@ const dropResidueGuards = h => {
   h.f.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
   h.f.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
 };
+// w76-fv F-1: the schema-version pin convicts a dropped guard set at the next
+// guarded call — plants restore the canonical set before the seal runs.
+const restoreResidueGuards = h => { for (const [name, sql] of RESIDUE_KEEP_TRIGGERS) { try { h.f.store.db.exec(sql); } catch (e) { if (!/already exists/.test(String(e?.message ?? e))) throw e; } } };
 const healOnce = (h, garbage) => {
   h.f.store.db.prepare("UPDATE meta_kv SET value=? WHERE tenant='acme' AND key='fold_floor'").run(garbage);
   h.f.store.audit('acme', 'PROBE', 'actor', null, {}, h.f.clock());
@@ -54,6 +58,7 @@ const putMarker = (h, env, claims = null) => {
   dropResidueGuards(h);
   h.f.store.db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme','fold_floor_retired',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value")
     .run(JSON.stringify({ claims: claims ?? (env ? JSON.parse(env.payload ?? '{}')?.fold_floor_retired ?? [] : []), env }));
+  restoreResidueGuards(h);
 };
 const sealKinds = h => (h.f.sealAuditChain(h.p('security')).head_watermark_tampered ?? []).map(e => e.kind);
 const tipHashAt = (h, seq) => h.f.store.db.prepare("SELECT hash FROM audit WHERE tenant='acme' AND seq=?").get(seq)?.hash ?? null;
@@ -274,14 +279,17 @@ test('w63-seal F-1b: a rotated-out signer cannot mint past its death row', t => 
   const boundary = signed({ tenant_id: 'acme', fold_floor_retired: [claim], marker_seq: deadAt, marker_tip_hash: tipHashAt(h, deadAt) }, deadKey, 'audit');
   h.f.store.db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme','fold_floor_retired',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value")
     .run(JSON.stringify({ claims: [claim], env: boundary }));
+  restoreResidueGuards(h);
   const kinds = sealKinds(h);
   assert.ok(kinds.includes('floor_marker_retired_forged') || kinds.includes('floor_marker_retired_unauthenticated'),
     `a dead-signer envelope at its own death row is refused: ${kinds}`);
   // And below the boundary the same key is honored — the gate is exactly
   // `died <= marker_seq`, not a blanket dead-key refusal.
   const below = signed({ tenant_id: 'acme', fold_floor_retired: [claim], marker_seq: deadAt - 1, marker_tip_hash: tipHashAt(h, deadAt - 1) }, deadKey, 'audit');
+  dropResidueGuards(h);
   h.f.store.db.prepare("UPDATE meta_kv SET value=? WHERE tenant='acme' AND key='fold_floor_retired'")
     .run(JSON.stringify({ claims: [claim], env: below }));
+  restoreResidueGuards(h);
   const kinds2 = sealKinds(h);
   assert.ok(!kinds2.includes('floor_marker_retired_forged') && !kinds2.includes('floor_marker_retired_unauthenticated'),
     `a pre-death marker_seq verifies: ${kinds2}`);
@@ -335,6 +343,7 @@ test('w63-runtime F-6: a corrupt marker is not silently overwritten', t => {
   h.f.sealAuditChain(h.p('security'));
   dropResidueGuards(h);
   h.f.store.db.prepare("UPDATE meta_kv SET value='not json' WHERE tenant='acme' AND key='fold_floor_retired'").run();
+  restoreResidueGuards(h);
   const kinds1 = sealKinds(h);
   assert.ok(kinds1.includes('floor_marker_retired_malformed'), `corrupt marker convicts: ${kinds1}`);
   // A second heal + seal round must still see the corrupt row — the note

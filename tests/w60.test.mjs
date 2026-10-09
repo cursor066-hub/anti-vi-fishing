@@ -7,6 +7,7 @@ import { rmSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fixture, hasCode } from './helpers.mjs';
+import { RESIDUE_KEEP_TRIGGERS } from '../src/store.mjs';
 import { createIssuerServer, loadIssuers, writeIssuer } from '../src/issuerd.mjs';
 import { ISSUER_RULES, issuerRecords } from '../src/bootstrap.mjs';
 
@@ -73,6 +74,10 @@ const dropResidueGuards = h => {
   h.f.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
   h.f.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
 };
+// w76-fv F-1: the schema-version pin convicts a dropped guard set at the next
+// guarded call, so every plant that needed guards off restores the canonical
+// text before the seal runs — the pin re-verifies and re-pins silently.
+const restoreResidueGuards = h => { for (const [name, sql] of RESIDUE_KEEP_TRIGGERS) { try { h.f.store.db.exec(sql); } catch (e) { if (!/already exists/.test(String(e?.message ?? e))) throw e; } } };
 const dropAuditGuards = h => {
   for (const tr of h.f.store.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all())
     h.f.store.db.exec(`DROP TRIGGER "${tr.name}"`);
@@ -113,11 +118,16 @@ test('w60-seal F-1/F-2: retire-mint murder cannot un-consume a claim', t => {
   h.f.sealAuditChain(h.p('security'));
   assert.equal(residueRows(h).length, 0, 'precondition: the heal retired');
   // Murder the consumption record; keep the seal that carries the fold.
+  // w76-fv F-1: the schema-version pin convicts a dropped audit-trigger
+  // set at the next guarded call — snapshot first, graft, restore.
+  const auditSnap = h.f.store.db.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all();
   dropAuditGuards(h);
   h.f.store.db.prepare("DELETE FROM audit WHERE tenant='acme' AND envelope LIKE '%FOLD_RESIDUE_RETIRED%'").run();
+  for (const tr of auditSnap) { try { h.f.store.db.exec(tr.sql); } catch (e) { if (!/already exists/.test(String(e?.message ?? e))) throw e; } }
   // Re-plant the consumed claim at a fresh key.
   dropResidueGuards(h);
   h.f.store.db.prepare("INSERT INTO meta_kv VALUES('acme','fold_floor_healed.echo',?)").run(claimVal);
+  restoreResidueGuards(h);
   const seal2 = h.f.sealAuditChain(h.p('security'));
   const kinds2 = (seal2.head_watermark_tampered ?? []).map(e => e.kind);
   // w65-seal F-1 epoch binding: the murdered row was the retired
@@ -163,15 +173,30 @@ test('w60-fv F-10: a defeated residue delete is named', t => {
   healOnce(h, 'resurrect-me');
   // A hostile AFTER-DELETE trigger resurrects every drained residue row —
   // the sanctioned delete runs under it and the post-delete probe must
-  // see the echo still standing.
-  dropResidueGuards(h);
-  h.f.store.db.exec(`CREATE TRIGGER residue_zombie AFTER DELETE ON meta_kv
-    WHEN OLD.key='fold_floor_healed' OR substr(OLD.key,1,18)='fold_floor_healed.'
-    BEGIN INSERT INTO meta_kv VALUES(OLD.tenant, OLD.key, OLD.value); END`);
+  // see the echo still standing. w76-fv F-1: a real planted trigger convicts
+  // 'live DDL' at the next guarded call before any write reaches it, so the
+  // resurrection is staged at the statement layer instead — the drain's
+  // delete reports the rows gone while the zombie re-lands them, exactly
+  // what the AFTER-DELETE trigger did.
+  const origPrep = h.f.store.db.prepare.bind(h.f.store.db);
+  h.f.store.db.prepare = (sql) => {
+    const s = String(sql);
+    if (s.includes('fold_floor_healed') && s.startsWith('DELETE FROM meta_kv')) {
+      return { run: (tenant, ...vals) => {
+        // The zombie's after-image: the delete really runs, then every
+        // drained row lands back — what AFTER DELETE + INSERT produced.
+        const rows = origPrep("SELECT key,value FROM meta_kv WHERE tenant=? AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.') AND value IN (" + vals.map(() => '?').join(',') + ")").all(tenant, ...vals);
+        const del = origPrep("DELETE FROM meta_kv WHERE tenant=? AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.') AND value IN (" + vals.map(() => '?').join(',') + ")").run(tenant, ...vals);
+        for (const r of rows) origPrep("INSERT INTO meta_kv VALUES('acme',?,?)").run(r.key, r.value);
+        return { changes: del.changes };
+      }, get: () => undefined, all: () => [] };
+    }
+    return origPrep(sql);
+  };
   const seal = h.f.sealAuditChain(h.p('security'));
+  h.f.store.db.prepare = origPrep;
   assert.ok((seal.head_watermark_tampered ?? []).some(e => e.kind === 'floor_marker_residue_retired_echo'),
     `the resurrected rows are named: ${JSON.stringify(seal.head_watermark_tampered)}`);
-  h.f.store.db.exec('DROP TRIGGER IF EXISTS residue_zombie');
   h.close();
 });
 

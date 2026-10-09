@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fixture, designateSuccessor } from './helpers.mjs';
 import { Fabric } from '../src/fabric.mjs';
+import { RESIDUE_KEEP_TRIGGERS } from '../src/store.mjs';
 const probeFile = src => {
   const dir = mkdtempSync(join(tmpdir(), 'gate-probe-'));
   const file = join(dir, 'probe.mjs');
@@ -44,6 +45,9 @@ const dropResidueGuards = h => {
   h.f.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
   h.f.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
 };
+// w76-fv F-1: the schema-version pin convicts a dropped guard set at the next
+// guarded call — plants restore the canonical set before the seal runs.
+const restoreResidueGuards = h => { for (const [name, sql] of RESIDUE_KEEP_TRIGGERS) { try { h.f.store.db.exec(sql); } catch (e) { if (!/already exists/.test(String(e?.message ?? e))) throw e; } } };
 const healOnce = (h, garbage) => {
   h.f.store.db.prepare("UPDATE meta_kv SET value=? WHERE tenant='acme' AND key='fold_floor'").run(garbage);
   h.f.store.audit('acme', 'PROBE', 'actor', null, {}, h.f.clock());
@@ -52,6 +56,7 @@ const putMarker = (h, env, claims = null) => {
   dropResidueGuards(h);
   h.f.store.db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme','fold_floor_retired',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value")
     .run(JSON.stringify({ claims: claims ?? (env ? JSON.parse(env.payload ?? '{}')?.fold_floor_retired ?? [] : []), env }));
+  restoreResidueGuards(h);
 };
 const sealKinds = h => (h.f.sealAuditChain(h.p('security')).head_watermark_tampered ?? []).map(e => e.kind);
 const committedTip = h => h.f.store.db.prepare("SELECT MAX(seq) m FROM audit WHERE tenant='acme'").get().m;
@@ -261,6 +266,7 @@ test('w64-seal F-3: unsafe-integer claim seqs flag premature, never mint', t => 
   // `\d+:` filter passes it; the seq itself is dishonest.
   dropResidueGuards(h);
   h.f.store.db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme','fold_floor_healed.9',?)").run('99999999999999999999:x');
+  restoreResidueGuards(h);
   const kinds = sealKinds(h);
   assert.ok(kinds.includes('floor_marker_residue_premature') || kinds.includes('floor_marker_retired_unshaped') || kinds.includes('floor_marker_healed_unanchored'),
     `the unsafe seq is flagged: ${kinds}`);
@@ -347,6 +353,7 @@ test('w64-runtime F-2: a dup-key respelled mint stays on the residue plane', t =
   const mintedClaims = env.payload.metadata?.retired_claims ?? env.payload.retired_claims ?? [];
   assert.ok(mintedClaims.length > 0, 'the mint carries claims');
   for (const c of mintedClaims) h.f.store.db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme',?,?)").run(`fold_floor_healed.r${Math.random()}`.slice(0, 60), c);
+  restoreResidueGuards(h);
   const f2 = new Fabric(h.setup.config, h.directory, () => h.now());
   try {
     const kinds = (f2.sealAuditChain(h.p('security')).head_watermark_tampered ?? []).map(e => e.kind);
@@ -369,6 +376,7 @@ test('w64-seal F-6: an occupied residue key lands the heal on a sibling', t => {
   const nextSeq = committedTip(h) + 1;
   dropResidueGuards(h);
   h.f.store.db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme',?,?)").run(`fold_floor_healed.${nextSeq}`, `${nextSeq}:planted`);
+  restoreResidueGuards(h);
   healOnce(h, 'occupied');
   const rows = residueRows(h).map(r => r.key);
   assert.ok(rows.includes(`fold_floor_healed.${nextSeq}`), 'the planted row still stands');

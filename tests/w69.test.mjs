@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fixture, hasCode } from './helpers.mjs';
 import { digest } from '../src/canonical.mjs';
+import { RESIDUE_KEEP_TRIGGERS } from '../src/store.mjs';
 
 const probeFile = src => {
   const dir = mkdtempSync(join(tmpdir(), 'gate-probe-'));
@@ -43,6 +44,9 @@ const dropResidueGuards = h => {
   h.f.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
   h.f.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
 };
+// w76-fv F-1: the schema-version pin convicts a dropped guard set at the next
+// guarded call — plants restore the canonical set before the seal runs.
+const restoreResidueGuards = h => { for (const [name, sql] of RESIDUE_KEEP_TRIGGERS) { try { h.f.store.db.exec(sql); } catch (e) { if (!/already exists/.test(String(e?.message ?? e))) throw e; } } };
 const healOnce = (h, garbage) => {
   h.f.store.db.prepare("UPDATE meta_kv SET value=? WHERE tenant='acme' AND key='fold_floor'").run(garbage);
   h.f.store.audit('acme', 'PROBE', 'actor', null, {}, h.f.clock());
@@ -51,6 +55,7 @@ const putMarker = (h, env, claims = null) => {
   dropResidueGuards(h);
   h.f.store.db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme','fold_floor_retired',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value")
     .run(JSON.stringify({ claims: claims ?? (env ? (typeof env.payload === 'string' ? JSON.parse(env.payload) : env.payload)?.fold_floor_retired ?? [] : []), env }));
+  restoreResidueGuards(h);
 };
 const tipHashAt = (h, seq) => {
   const r = h.f.store.db.prepare("SELECT envelope FROM audit WHERE tenant='acme' AND seq=?").get(seq);
@@ -212,8 +217,16 @@ test('w69-seal F-2/F-5: a defeated murder-delete names the murdered claims durab
   const env = h.f.store.auditSigners['acme'].sign(
     { tenant_id: 'acme', fold_floor_retired: claims, marker_seq: tip, marker_tip_hash: 'ff'.repeat(32) }, 'audit');
   putMarker(h, env);
-  // A foreign trigger eats the delete.
-  h.f.store.db.exec("CREATE TRIGGER defeat_retired BEFORE DELETE ON meta_kv WHEN OLD.key='fold_floor_retired' BEGIN SELECT RAISE(IGNORE); END");
+  // A foreign trigger eats the delete. w76-fv F-1: a real planted trigger
+  // convicts 'live DDL' at the next guarded call before any delete reaches
+  // it, so the eat is staged at the statement layer — the murder's delete
+  // reports 0 changes, exactly the RAISE(IGNORE) effect.
+  const origStmt = h.f.store._stmt.bind(h.f.store);
+  h.f.store._stmt = (sql) => {
+    if (String(sql).includes("key='fold_floor_retired'") && String(sql).startsWith('DELETE'))
+      return { run: () => ({ changes: 0 }), get: () => undefined, all: () => [] };
+    return origStmt(sql);
+  };
   let e1 = null;
   try { h.f.sealAuditChain(h.p('security')); } catch (e) { e1 = e; }
   assert.ok(e1 !== null && e1.code === 'INV-409-INTEGRITY', `the defeated murder refuses INV-409: ${e1?.code}`);
@@ -226,9 +239,9 @@ test('w69-seal F-2/F-5: a defeated murder-delete names the murdered claims durab
   const md = (e2.details?.head_watermark_tampered ?? []).find(x => x.kind === 'floor_marker_retired_marker_defeated');
   assert.ok(md, `the re-latched conviction attests on the next refusal: ${JSON.stringify(e2.details?.head_watermark_tampered)}`);
   for (const c of claims) assert.ok(md.claims?.includes(c), `the flag names ${c}: ${JSON.stringify(md)}`);
-  // Lift the foreign trigger — the murder lands and the flag delivers
+  // Lift the foreign eat — the murder lands and the flag delivers
   // once through the normal report surface.
-  h.f.store.db.exec('DROP TRIGGER defeat_retired');
+  h.f.store._stmt = origStmt;
   const seal3 = h.f.sealAuditChain(h.p('security'));
   const md3 = (seal3.head_watermark_tampered ?? []).find(x => x.kind === 'floor_marker_retired_marker_defeated');
   assert.ok(md3, `the delivered report carries the conviction: ${JSON.stringify(tamperKinds(seal3))}`);
@@ -287,7 +300,9 @@ test('w69-runtime F-1: a post-commit re-latch survives the retire pass', t => {
   const db = h.f.store.db;
   const dropMeta = () => { for (const tr of db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='meta_kv'").all()) db.exec(`DROP TRIGGER "${String(tr.name).replace(/"/g, '""')}"`); };
   const dropAudit = () => { for (const tr of db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all()) db.exec(`DROP TRIGGER "${String(tr.name).replace(/"/g, '""')}"`); };
-  const plant = (k, v) => { dropMeta(); db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme',?,?)").run(k, v); };
+  const plant = (k, v) => { dropMeta(); db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme',?,?)").run(k, v); restoreMeta(); };
+  const metaSnap = db.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND tbl_name='meta_kv'").all();
+  const restoreMeta = () => { for (const tr of metaSnap) { try { db.exec(tr.sql); } catch (e) { if (!/already exists/.test(String(e?.message ?? e))) throw e; } } };
   plant('fold_floor_healed.90001', '777001:deadbeef01');
   h.f._auditIndex('acme');                       // latches healed_unanchored {heals:[R1]}
   dropAudit();
@@ -371,6 +386,7 @@ test('w69-fv F-4: the fold_floor survivor is healed to the recomputed truth', t 
   // guards the column and the survivor geometry always names our own
   // just-written row — the fix is parity with floorPriorForeign.)
   h.f.store.db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme','fold_floor',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(`${next}:${fakeHash}`);
+  restoreResidueGuards(h);
   h.f.store.audit('acme', 'PROBE', 'actor', null, {}, h.f.clock());
   const marker = h.f.store.db.prepare("SELECT value FROM meta_kv WHERE tenant='acme' AND key='fold_floor'").get()?.value;
   const landed = h.f.store.db.prepare("SELECT envelope FROM audit WHERE tenant='acme' AND seq=?").get(next);
@@ -399,6 +415,7 @@ test('w69-runtime F-4: the over-cover names every extra it consumed', t => {
   // A standing residue row no flag ever names — guaranteed extra.
   dropResidueGuards(h);
   h.f.store.db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme','fold_floor_healed.999999','8:extra-a')").run();
+  restoreResidueGuards(h);
   const res = h.f.sealAuditChain(h.p('security'));
   const e = (res.head_watermark_tampered ?? []).find(x => x?.kind === 'floor_marker_retired_overcovered');
   assert.ok(e, `the over-cover is flagged: ${JSON.stringify(tamperKinds(res))}`);
@@ -422,6 +439,7 @@ test('w69-runtime F-7: pre-cap fresh drops are counted in prior_evicted', t => {
   dropResidueGuards(h);
   const ins = h.f.store.db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme',?,?)");
   for (let i = 0; i < 1794; i++) ins.run(`fold_floor_healed.${100000 + i}`, `9:cap-extra-${i}`);
+  restoreResidueGuards(h);
   // fresh counts only claims the STANDING marker does not already carry
   // — the retiring note claims all of them, so pre-cap drops arise only
   // when the marker is rewritten between the drain's commit and the
@@ -430,10 +448,11 @@ test('w69-runtime F-7: pre-cap fresh drops are counted in prior_evicted', t => {
   const origHook = h.f.store.onTxCommit;
   h.f.store.onTxCommit = () => {
     origHook?.();
-    h.f.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
-    h.f.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
-    h.f.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
+    // w76-fv F-1: graft inside the hook — drop, delete, restore so the
+    // next guarded call still meets the canonical trigger set.
+    dropResidueGuards(h);
     h.f.store.db.prepare("DELETE FROM meta_kv WHERE tenant='acme' AND key='fold_floor_retired'").run();
+    restoreResidueGuards(h);
   };
   try { h.f.sealAuditChain(h.p('security')); }
   finally { h.f.store.onTxCommit = origHook; }
@@ -454,7 +473,7 @@ test('w69-runtime F-6: a same-kind re-fire cannot regress seq', t => {
   const h = fixture(t);
   h.ready(); h.ready();
   const db = h.f.store.db;
-  const plant = (k, v) => { dropResidueGuards(h); db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme',?,?)").run(k, v); };
+  const plant = (k, v) => { dropResidueGuards(h); db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme',?,?)").run(k, v); restoreResidueGuards(h); };
   plant('fold_floor_healed.91001', '777001:healed-a');
   h.f._auditIndex('acme');            // flag latches at seq 777001
   plant('fold_floor_healed.91002', '666000:healed-b');  // LOWER seq — must not regress the flag

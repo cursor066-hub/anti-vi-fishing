@@ -1671,35 +1671,102 @@ def _live_code(text, raw=None):
     # Iterating an empty literal never invokes the body or callback —
     # `for (x of [])`, `[].forEach(cb)`, `[].map(cb)` (w56-ledger F2). A
     # const bound to `[]` iterates identically empty — `const a = []`;
-    # `for (x of a)` runs zero times (w57-ledger F9).
-    empties = {n for n in re.findall(r'\b(?:const|let|var)\s+(\w+)\s*=\s*(?:\[\s*\]|\{\s*\}|new\s+(?:Set|Map|WeakSet|WeakMap|Array|Object)\s*\(\s*(?:\[\s*\])?\s*\))', text)}
-    empty_lit = (r'\[\s*\]|\{\s*\}|\'\'|""|``|new\s+(?:Set|Map|WeakSet|WeakMap|Array|Object)\s*\(\s*(?:\[\s*\])?\s*\)'
-                 + (r'|' + '|'.join(re.escape(n) for n in sorted(empties)) if empties else ''))
-    # `for..of` over ANY object literal throws — objects are not
-    # iterable — so the body is dead whatever the literal holds
-    # (w62-ledger F-9). Non-empty strings DO iterate and stay live.
-    # The head is walked with balanced parens, not `[^)]*` — `for await`
-    # sits between `for` and `(`, and a parenthesized binding
-    # (`for ((v) of [])`, `for await (const v of [])`) puts `)` before
-    # `of` and used to defeat the flat scan entirely (w75-ledger F-3).
+    # `for (x of a)` runs zero times (w57-ledger F9). The bound sets are
+    # split by arm (w76-ledger F-7): `of` over ANY object literal throws
+    # (objects are not iterable) while `in` over a populated literal still
+    # enumerates keys — a name bound to `{x:1}` is dead for `of`, live
+    # for `in`. Empty-string bindings and `let a; a = []` statement-start
+    # re-assignments bind the same way.
+    _EMPTY_NEW = r'new\s+(?:Set|Map|WeakSet|WeakMap|Array|Object)\s*\(\s*(?:\[\s*\])?\s*\)'
+    _OF_NONOBJ = r'(?:\[\s*\]|\'\'|""|``|' + _EMPTY_NEW + r'|\d+(?:\.\d+)?[nN]?|true|false|null|undefined)'
+    _IN_DEAD_LIT = r'(?:\[\s*\]|\{\s*\}|\'\'|""|``|' + _EMPTY_NEW + r'|\d+(?:\.\d+)?[nN]?|true|false|null|undefined)'
+    bound_of_dead = {n for n in re.findall(r'\b(?:const|let|var)\s+(\w+)\s*=\s*\{', text)}
+    bound_of_dead |= {n for n in re.findall(r'\b(?:const|let|var)\s+(\w+)\s*=\s*' + _OF_NONOBJ + r'(?=\s*[;\n,])', text)}
+    bound_of_dead |= {n for n in re.findall(r'(?:^|[;{}])\s*(\w+)\s*=\s*(?:\{|' + _OF_NONOBJ + r'(?=\s*[;\n]))', text)}
+    bound_in_dead = {n for n in re.findall(r'\b(?:const|let|var)\s+(\w+)\s*=\s*' + _IN_DEAD_LIT + r'(?=\s*[;\n,])', text)}
+    bound_in_dead |= {n for n in re.findall(r'(?:^|[;{}])\s*(\w+)\s*=\s*' + _IN_DEAD_LIT + r'(?=\s*[;\n])', text)}
+    def _strip_parens(s):
+        s = s.strip()
+        while s.startswith('(') and s.endswith(')'):
+            d = 0; whole = True
+            for i, c in enumerate(s):
+                if c in '([{': d += 1
+                elif c in ')]}':
+                    d -= 1
+                    if d == 0 and i != len(s) - 1: whole = False; break
+            if not whole or d != 0: break
+            s = s[1:-1].strip()
+        return s
+    def _split_top(s, ch):
+        d = 0; out = []; cur = 0
+        for i, c in enumerate(s):
+            if c in '([{': d += 1
+            elif c in ')]}': d -= 1
+            elif c == ch and d == 0: out.append(s[cur:i]); cur = i + 1
+        out.append(s[cur:])
+        return out
+    def _is_brace_span(s):
+        s = _strip_parens(s)
+        if not (s.startswith('{') and s.endswith('}')): return False
+        d = 0
+        for i, c in enumerate(s):
+            if c == '{': d += 1
+            elif c == '}':
+                d -= 1
+                if d == 0: return i == len(s) - 1
+        return False
+    # Recursive operand evaluation (w76-ledger F-6/F-7, w76-fv F-5): a
+    # comma expression's value is its last element; `{lit}.prop` resolves
+    # the named property (absent → undefined → dead both arms); a nested
+    # `{a:{b:1}}` is dead for `of` regardless of depth — the old flat
+    # `\{[^{}]*\}` could not see past the first inner brace.
+    def _dead_operand(s, kw):
+        s = _strip_parens(s)
+        parts = _split_top(s, ',')
+        if len(parts) > 1: return _dead_operand(parts[-1], kw)
+        if re.fullmatch(r'\[\s*\]', s): return 'dead'
+        if re.fullmatch(r"''|\"\"|``", s): return 'dead'
+        if re.fullmatch(_EMPTY_NEW, s): return 'dead'
+        if re.fullmatch(r'\d+(?:\.\d+)?[nN]?|true|false|null|undefined', s): return 'dead'
+        if _is_brace_span(s):
+            inner = s[1:-1].strip()
+            return 'dead' if (kw == 'of' or inner == '') else 'live'
+        # member read off a literal object/array — resolve the property
+        mm = re.match(r'(\{.*\}|\[[^\]]*\])\s*(?:\.\s*(\w+)|\[)', s)
+        if mm:
+            lit, prop = mm.group(1), mm.group(2)
+            if _is_brace_span(lit) or lit.startswith('['):
+                if lit.strip() in ('{}', '[]'): return 'dead'
+                if prop is not None and lit.startswith('{'):
+                    for pr in _split_top(lit[1:-1], ','):
+                        kv = pr.split(':', 1)
+                        if len(kv) == 2 and kv[0].strip().strip('\'"') == prop:
+                            return _dead_operand(kv[1], kw)
+                    return 'dead'
+        if kw == 'of' and s in bound_of_dead: return 'dead'
+        if kw == 'in' and s in bound_in_dead: return 'dead'
+        return 'unknown'
+    # The head is walked with balanced brackets — `for await` sits
+    # between `for` and `(` (unspaced `await(` is legal JS and used to
+    # slip the head scan entirely, w76-ledger F-5), a parenthesized
+    # binding (`for ((v) of [])`) puts `)` before `of` (w75-ledger F-3),
+    # and an `of` KEY inside a braced operand (`for (v of {of:1})`) used
+    # to win the last-depth-0 keyword slot (w76-ledger F-6).
     def _head_operand(head, kw):
         d = 0; last = None
-        for km in re.finditer(r'[()]|\b' + kw + r'\b', head):
+        for km in re.finditer(r'[()\[\]{}]|\b' + kw + r'\b', head):
             c = km.group(0)
-            if c == '(': d += 1
-            elif c == ')': d -= 1
+            if c in '([{': d += 1
+            elif c in ')]}': d -= 1
             elif d == 0: last = km
         return None if last is None else head[last.end():].strip()
-    # ANY object literal is a dead `of` operand (objects are not
-    # iterable) but only the EMPTY ones are a dead `in` operand — a
-    # populated literal still enumerates its keys (w75-ledger F-3).
-    dead_op_of = r'(?:' + empty_lit + r'|\{[^{}]*\}|\d+(?:\.\d+)?[nN]?|false|true|null|undefined)'
-    dead_op_in = r'(?:' + empty_lit + r'|\d+(?:\.\d+)?[nN]?|false|true|null|undefined)'
-    for m in re.finditer(r'\bfor\s*(?:await\s+)?\(', text):
+    empty_lit = (r'\[\s*\]|\{\s*\}|\'\'|""|``|' + _EMPTY_NEW
+                 + (r'|' + '|'.join(re.escape(n) for n in sorted(bound_of_dead | bound_in_dead)) if (bound_of_dead or bound_in_dead) else ''))
+    for m in re.finditer(r'\bfor\s*(?:await\s*)?\(', text):
         he = _paren_end(text, m.end() - 1)
         # _paren_end is exclusive — the head slice stops before the `)`
         opnd = _head_operand(text[m.end():he - 1], 'of')
-        if opnd is None or not re.fullmatch(dead_op_of, opnd): continue
+        if opnd is None or _dead_operand(opnd, 'of') != 'dead': continue
         j = he
         while j < len(text) and text[j] in ' \t\n': j += 1
         if j < len(text) and text[j] == '{': spans.append((j, _paren_end(text, j)))
@@ -1707,10 +1774,10 @@ def _live_code(text, raw=None):
     # `for..in` over an empty/non-object operand iterates zero times —
     # `{}`, `0`, `null`, `''` (w61-ledger F-4). Non-empty strings DO
     # enumerate indices and stay live.
-    for m in re.finditer(r'\bfor\s*(?:await\s+)?\(', text):
+    for m in re.finditer(r'\bfor\s*(?:await\s*)?\(', text):
         he = _paren_end(text, m.end() - 1)
         opnd = _head_operand(text[m.end():he - 1], 'in')
-        if opnd is None or not re.fullmatch(dead_op_in, opnd): continue
+        if opnd is None or _dead_operand(opnd, 'in') != 'dead': continue
         j = he
         while j < len(text) and text[j] in ' \t\n': j += 1
         if j < len(text) and text[j] == '{': spans.append((j, _paren_end(text, j)))

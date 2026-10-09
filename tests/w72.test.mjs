@@ -226,14 +226,22 @@ test('w72-seal F-3/runtime F-4: claims_dropped counts distinct claims, not firin
   h.ready(); h.ready();
   for (let i = 0; i < 20; i++) healOnce(h, `c${i}`);
   divergeChain(h);
-  // A foreign trigger swallows every write of the marker row: the landed
-  // probes (note's or apply's, whichever reaches the write first) read it
-  // back absent and fault INV-409 with marker_defeated details naming
-  // the whole claim set.
-  h.f.store.db.exec(`CREATE TRIGGER defeat_retired_ins BEFORE INSERT ON meta_kv
-    WHEN NEW.key='fold_floor_retired' BEGIN SELECT RAISE(IGNORE); END`);
-  h.f.store.db.exec(`CREATE TRIGGER defeat_retired_upd BEFORE UPDATE ON meta_kv
-    WHEN NEW.key='fold_floor_retired' BEGIN SELECT RAISE(IGNORE); END`);
+  // Swallow every write/read-back of the marker row — staged at the
+  // statement layer: real swallow triggers are convictable live-DDL
+  // before the write ever runs (w76-fv F-1), so the landed probes
+  // (note's or apply's, whichever reaches the write first) must read the
+  // marker back absent and fault INV-409 with marker_defeated details
+  // naming the whole claim set.
+  const origPrep = h.f.store.db.prepare.bind(h.f.store.db);
+  let armed = true;
+  h.f.store.db.prepare = (sql) => {
+    const s = String(sql);
+    if (armed && s.includes("'fold_floor_retired'")) {
+      if (/INSERT INTO meta_kv|UPDATE meta_kv/.test(s)) return { run: () => ({ changes: 1 }), get: () => undefined, all: () => [] };
+      if (/SELECT value FROM meta_kv/.test(s)) return { run: () => ({ changes: 0 }), get: () => undefined, all: () => [] };
+    }
+    return origPrep(s);
+  };
   let e1 = null, e2 = null;
   try { h.f.sealAuditChain(h.p('security')); } catch (err) { e1 = err; }
   assert.ok(e1?.code === 'INV-409-INTEGRITY' && e1.details?.marker_defeated !== undefined,
@@ -243,8 +251,8 @@ test('w72-seal F-3/runtime F-4: claims_dropped counts distinct claims, not firin
   // identical set must not double-count.
   try { h.f.sealAuditChain(h.p('security')); } catch (err) { e2 = err; }
   assert.ok(e2?.code === 'INV-409-INTEGRITY', `the second defeat refuses identically: ${e2?.code}`);
-  h.f.store.db.exec('DROP TRIGGER IF EXISTS defeat_retired_ins');
-  h.f.store.db.exec('DROP TRIGGER IF EXISTS defeat_retired_upd');
+  armed = false;
+  h.f.store.db.prepare = origPrep;
   const res = h.f.sealAuditChain(h.p('security'));
   const dropped = findKind(res, /floor_marker_retired_marker_defeated/)[0]?.claims_dropped;
   assert.equal(dropped, 4, `20 distinct claims latched twice keep dropped at 20-16=4 — firings never inflate: ${dropped}`);

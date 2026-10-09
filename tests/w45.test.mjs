@@ -136,9 +136,11 @@ test('w45-fv HIGH: a dup-key decoy payload cannot hide a verified death from the
   // parsed-type scan, diverging the offline and live death surfaces
   // (w45-fv HIGH PoC).
   const dupd = row.envelope.replace('"payload":', '"payload":{"type":"DECOY"},"payload":');
-  for (const tr of h.f.store.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all())
+  const __rows = h.f.store.db.prepare("SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all();
+  for (const tr of __rows)
     h.f.store.db.exec(`DROP TRIGGER "${tr.name}"`);
   h.f.store.db.prepare('UPDATE audit SET envelope=? WHERE tenant=? AND seq=?').run(dupd, tenant, row.seq);
+  for (const tr of __rows) if (tr.sql) h.f.store.db.exec(tr.sql);
   assert.equal(JSON.parse(dupd).payload.type, 'AUTHORITY_REVOKED', 'JS parse sees the real last-member type');
   const deadOffline = h.f.store._auditKeyDeaths(tenant);
   h.f.invalidateAuditIndex(tenant);

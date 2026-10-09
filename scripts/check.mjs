@@ -85,8 +85,14 @@ for (const file of textFiles) {
   // interleave — `A\x01K\x01I\x01A…`, `A\rK\rI\rA…` — so the collapse
   // covers the whole set, not just NUL (w75-fv F4.1).
   const collapsed = /[\x00-\x09\x0b-\x1f\x7f]/.test(s) ? s.replace(/[\x00-\x09\x0b-\x1f\x7f]/g, '') : s;
+  // Zero-width/format/space-separator obfuscation splits a credential
+  // without control chars — `AKIA\u200B…`, `AKIA\u00A0…` — normalize
+  // the same invisible set the marker scan strips before SECRET_RULES
+  // test (w76-ledger F-8).
+  const snorm = s.replace(/[\u00A0\u00AD\u034F\u061C\u1680\u180E\u2000-\u200F\u202A-\u202F\u2060\u2063-\u2064\u3000\uFE0F\uFEFF]/g, '');
+  const cnorm = collapsed === s ? snorm : snorm.replace(/[\x00-\x09\x0b-\x1f\x7f]/g, '');
   for (const [name, regex] of SECRET_RULES)
-    if (regex.test(s) || (collapsed !== s && regex.test(collapsed))) { console.error(`${file}: ${name}`); failed = true; }
+    if (regex.test(s) || regex.test(snorm) || (collapsed !== s && (regex.test(collapsed) || regex.test(cnorm)))) { console.error(`${file}: ${name}`); failed = true; }
 }
 
 for (const file of files.filter(f => CODE_EXT.test(f) && existsSync(f))) {
@@ -157,19 +163,23 @@ for (const file of textFiles) {
   // Zero-width/format chars embedded in a marker hide it from the
   // pattern while a human still reads the unfinished-work word —
   // normalize them away before the marker rules test (w56-ledger F11).
-  const snorm = s.replace(/[\u00AD\u034F\u061C\u180E\u200B-\u200F\u202A-\u202F\u2060\u2063-\u2064\u3000\uFE0F\uFEFF]/g, '');
+  const snorm = s.replace(/[\u00A0\u00AD\u034F\u061C\u1680\u180E\u2000-\u200F\u202A-\u202F\u2060\u2063-\u2064\u3000\uFE0F\uFEFF]/g, '');
   // Control-char collapse parity with the secret scan (w75-ledger F-5,
   // w75-fv F4.1): a UTF-16 or \x00-\x1f-interleaved file spells its
   // sink/marker contiguous once the controls go — the collapse runs
-  // before the zero-width normalize too.
+  // before the zero-width normalize too. NBSP/other space separators
+  // join the invisible set (w76-ledger F-8).
   const collapsed = /[\x00-\x09\x0b-\x1f\x7f]/.test(s) ? s.replace(/[\x00-\x09\x0b-\x1f\x7f]/g, '') : s;
   const cnorm = collapsed === s ? snorm : snorm.replace(/[\x00-\x09\x0b-\x1f\x7f]/g, '');
   // check.mjs exempts itself only from the DOM rules — its rule table
   // legitimately hosts the sink literals; sinks and markers still apply.
   const renderable = file !== 'scripts/check.mjs' && (file.startsWith('src/') || file.startsWith('web/') || /\.(?:html?|jsx|tsx)$/.test(file)) && !file.startsWith('tests/');
   const rules = [...(SINK_EXT.test(file) ? SINK_RULES : []), ...(renderable ? RENDER_ONLY : []), ...MARKER_RULES, ...(file.startsWith('reports/') ? [] : MARKER_LOOSE)];
+  // Every rule answers all normalized variants — a zero-width/NBSP split
+  // launders `eval\u200B(` through the sink rules exactly like a marker
+  // word (w76-ledger F-8).
   for (const [name, regex] of rules)
-    if (regex.test(name.includes('marker') ? snorm : s) || (collapsed !== s && regex.test(name.includes('marker') ? cnorm : collapsed))) { console.error(`${file}: ${name}`); failed = true; }
+    if (regex.test(s) || regex.test(snorm) || (collapsed !== s && (regex.test(collapsed) || regex.test(cnorm)))) { console.error(`${file}: ${name}`); failed = true; }
 }
 
 // Route-role parity: every role list the OpenAPI generator declares must
@@ -1368,13 +1378,48 @@ const pairServes = (p, verb, caseMap) =>
     || p.fall?.has(verb)
     || (p.verb === DEFAULT_CASE && !caseMap?.get(p.sw?.key)?.allCases?.has(verb))
     || (p.fall?.has(DEFAULT_CASE) && !caseMap?.get(p.sw?.key)?.allCases?.has(verb)));
+// The complete literal-case set of a switch, collected by scanning the
+// lines after the one carrying `frame`'s head: a `default:` arm serves
+// a verb only when NO case anywhere in the switch binds it — including
+// cases textually after the default — so the serve verdict cannot wait
+// for the normal per-line pass (w76-fv F-4: `default:` before `case 'x'`
+// used to mint 'x' too). Labels sit at head-depth+1 inside the switch's
+// braces; a `case` at any other level belongs to a nested switch (or an
+// invalid block) and is excluded.
+const switchCaseScan = (lines, from, i, frame, hi) => {
+  const labelRe = /\b(?:case\s*(?:'([^']+)'|"([^"]+)"|`([^`]+)`|\(\s*'([^']+)'\s*\)|\(\s*"([^"]+)"\s*\)|\(\s*`([^`]+)`\s*\))|default\s*:)/g;
+  const cases = new Set();
+  // Replay `from..i` on a private dead-state so the masking/brace depth
+  // at the head line matches the caller's pipeline without advancing it.
+  const dm = deadState();
+  // Match on the dead-stripped raw line — the literal text is what the
+  // pair binds — while `lmJ` gates masked positions and drives depth,
+  // exactly like `pairsForLine`'s own label loop.
+  const masked = j => { const lJ = stripComment(stripDead(lines[j], dm)); return [lJ, maskStrings(lJ, dm)]; };
+  let d = 0;
+  for (let j = from; j <= i; j++) for (const ch of masked(j)[1]) { if (ch === '{') d++; else if (ch === '}') d--; }
+  for (let j = i + 1; j < hi; j++) {
+    if (d <= frame.depth + 1) break;
+    const [lJ, lmJ] = masked(j);
+    for (const cm of lJ.matchAll(labelRe)) {
+      if (lmJ[cm.index] === ' ') continue;
+      let pd = d;
+      for (let k = 0; k < cm.index; k++) { const ch = lmJ[k]; if (ch === '{') pd++; else if (ch === '}') pd--; }
+      if (pd !== frame.depth + 2) continue;
+      const lit = cm[1] ?? cm[2] ?? cm[3] ?? cm[4] ?? cm[5] ?? cm[6];
+      if (lit !== undefined) cases.add(lit);
+    }
+    for (const ch of lmJ) { if (ch === '{') d++; else if (ch === '}') d--; }
+  }
+  return cases;
+};
 // The positive member-compare pairs a masked line carries: `m[N]==='v'`
 // in `if`/`else if`/`while`/`case`/ternary arms, alias-resolved compares,
 // and `switch(m[N])` case labels — with fall-through and `default`
 // semantics (w64-fv F-6). `sw` is the caller's live switch stack;
 // `verb`/`verbMembers` let `&&`-conjunct folds keep a pair whose extra
 // conjuncts are statically true for this row (w64-fv F-5).
-const pairsForLine = (l, lm, i, stmtDepth, sw, aliases, verb, verbMembers, allCases) => {
+const pairsForLine = (l, lm, i, stmtDepth, sw, aliases, verb, verbMembers, allCases, complete) => {
   const out = [];
   // A `switch (<member>)` opens a dispatch frame whose `case 'v'`
   // literals compare exactly like `m[N]==='v'` arms — unjudged switches
@@ -1396,8 +1441,18 @@ const pairsForLine = (l, lm, i, stmtDepth, sw, aliases, verb, verbMembers, allCa
     const top = sw.at(-1);
     if (top) {
       const labels = [];
-      for (const cm of l.matchAll(/\b(?:case\s*(?:'([^']+)'|"([^"]+)"|`([^`]+)`)|default\s*:)/g))
-        if (lm[cm.index] !== ' ' && (stmtDepth > top.depth || cm.index > top.at)) labels.push(cm);
+      // `case ('x'):`/`case ("x"):` — a parenthesized literal labels the
+      // same arm the bare literal does (w76-fv F-4).
+      for (const cm of l.matchAll(/\b(?:case\s*(?:'([^']+)'|"([^"]+)"|`([^`]+)`|\(\s*'([^']+)'\s*\)|\(\s*"([^"]+)"\s*\)|\(\s*`([^`]+)`\s*\))|default\s*:)/g)) {
+        if (lm[cm.index] === ' ') continue;
+        // The label belongs to the innermost frame whose body contains
+        // it: a switch head pushed THIS line owns only labels textually
+        // after its `(` — `case 'x': switch (m) {` labels the OUTER
+        // switch, never the inner one it precedes (w76-fv F-4 bleed).
+        // An earlier-line frame owns by depth instead.
+        const owner = sw.findLast(f => f.key >= i * 1e7 ? cm.index > f.at : stmtDepth > f.depth);
+        if (owner !== undefined) labels.push([cm, owner]);
+      }
       // An exit anywhere before this line's first label — or anywhere on
       // a label-less line — closes the open arm; `openExit` carries it
       // past the next label. The tail of the previous label's OWN line
@@ -1405,21 +1460,31 @@ const pairsForLine = (l, lm, i, stmtDepth, sw, aliases, verb, verbMembers, allCa
       // one line exits 'x' before the next line's label — the stale
       // segFrom used to slice it away and record a phantom fallthrough
       // (w75-ledger F-1).
-      if (top.open !== null && /\b(?:break|return|throw|continue)\b/.test(l.slice(0, labels.length ? labels[0].index : l.length))) top.openExit = true;
-      for (const cm of labels) {
-        if (top.open !== null) {
+      if (top.open !== null && /\b(?:break|return|throw|continue)\b/.test(l.slice(0, labels.length ? labels[0][0].index : l.length))) top.openExit = true;
+      for (const [cm, owner] of labels) {
+        if (owner.open !== null) {
           // The inter-label segment is meaningful only when the previous
           // label sits on THIS line — a segFrom carried from a previous
           // line's string indexes garbage (w75-ledger F-1).
-          if (!top.openExit && !(top.segFrom >= 0 && top.segFrom < cm.index && /\b(?:break|return|throw|continue)\b/.test(l.slice(top.segFrom, cm.index)))) top.flow.add(top.open);
-          top.open = null; top.openExit = false;
+          if (!owner.openExit && !(owner.segFrom >= 0 && owner.segFrom < cm.index && /\b(?:break|return|throw|continue)\b/.test(l.slice(owner.segFrom, cm.index)))) owner.flow.add(owner.open);
+          owner.open = null; owner.openExit = false;
         }
-        const isD = cm[1] === undefined && cm[2] === undefined && cm[3] === undefined;
-        const v2 = isD ? DEFAULT_CASE : (cm[1] ?? cm[2] ?? cm[3]);
-        out.push({ member: top.member, verb: v2, pos: cm.index, sw: top, fall: new Set(top.flow) });
-        if (isD) { top.hasDefault = true; top.open = DEFAULT_CASE; }
-        else { top.allCases.add(v2); top.flow.delete(v2); top.open = v2; }
-        top.segFrom = cm.index + cm[0].length;
+        const isD = cm[1] === undefined && cm[2] === undefined && cm[3] === undefined && cm[4] === undefined && cm[5] === undefined && cm[6] === undefined;
+        const v2 = isD ? DEFAULT_CASE : (cm[1] ?? cm[2] ?? cm[3] ?? cm[4] ?? cm[5] ?? cm[6]);
+        out.push({ member: owner.member, verb: v2, pos: cm.index, sw: owner, fall: new Set(owner.flow) });
+        if (isD) {
+          // Serve verdicts consult `allCases` right after this line —
+          // cases on LATER lines are not yet recorded, so eagerly finish
+          // the set: `default:` before `case 'x':` must not serve 'x'
+          // (w76-fv F-4).
+          if (!owner.casesComplete && complete !== undefined) {
+            for (const c of complete(owner)) owner.allCases.add(c);
+            owner.casesComplete = true;
+          }
+          owner.hasDefault = true; owner.open = DEFAULT_CASE;
+        }
+        else { owner.allCases.add(v2); owner.flow.delete(v2); owner.open = v2; }
+        owner.segFrom = cm.index + cm[0].length;
       }
       // `case 'x':` alone on its line puts the arm's body on the NEXT
       // line: the still-open arm covers this line's calls the same way
@@ -1774,8 +1839,11 @@ const condTracker = () => {
   let pendingIfs = [], deadElseArm = null, lastIfWasBraced = false;
   // `ownCaseDepth` = the body depth of this row's own `case`/`default`
   // label — its arm mints unconditionally like a braced own-dispatch
-  // arm (w64-fv F-6: `case 'a': authorize` IS 'a''s arm).
-  let ownCaseDepth = -1, ownCaseColon = -1;
+  // arm (w64-fv F-6: `case 'a': authorize` IS 'a''s arm). `ownCaseDead`
+  // = the same depth after the arm's own exit — statements from the
+  // exit to the next label/`}` are unreachable for this verb
+  // (w76-ledger F-2).
+  let ownCaseDepth = -1, ownCaseColon = -1, ownCaseDead = -1;
   // `oursIfArm` = the `{`-body depth of THIS row's braced dispatch arm;
   // when its `}` pops, `oursElseExpected` latches so a following `else`
   // (and every `else` of the same chain) is dead scope for this verb —
@@ -1930,15 +1998,25 @@ const condTracker = () => {
       // A `case`/`default` label ends the previous case body — the
       // word sits BEFORE the `:`; `cond ? x :` is excluded by the `?`
       // between the word and the colon (w64-fv F-6).
-      if (ownCaseDepth >= 0 && ((c === '}' && ld <= ownCaseDepth) || (pd === 0 && c === ':' && /\b(?:case|default)\b[^?:{};]*$/.test(lm.slice(0, ci))))) { ownCaseDepth = -1; ownCaseColon = -1; }
+      if (ownCaseDepth >= 0 && ((c === '}' && ld <= ownCaseDepth) || (pd === 0 && c === ':' && /\b(?:case|default)\b[^?:{};]*$/.test(lm.slice(0, ci))))) { ownCaseDepth = -1; ownCaseColon = -1; ownCaseDead = -1; }
       // An exit at the arm's own level ends it — `case 'x': a; break;`
-      // leaves the NEXT line outside the arm (w75-ledger F-6).
-      else if (ownCaseDepth >= 0 && pd === 0 && /^(?:break|return|throw|continue)\b/.test(lm.slice(ci)) && !/[\w$]/.test(lm[ci - 1] ?? ' ')) { ownCaseDepth = -1; ownCaseColon = -1; }
+      // leaves the NEXT line outside the arm (w75-ledger F-6). The span
+      // AFTER the exit up to the next label/`}` is unreachable for this
+      // verb — `case 'x': break; authorize` mints nothing (w76-ledger
+      // F-2); `ownCaseDead` carries the dead span at the arm's depth.
+      else if (ownCaseDepth >= 0 && pd === 0 && /^(?:break|return|throw|continue)\b/.test(lm.slice(ci)) && !/[\w$]/.test(lm[ci - 1] ?? ' ')) { ownCaseDead = ownCaseDepth; ownCaseDepth = -1; ownCaseColon = -1; }
       // `:` closing a `case 'v':`/`default:` label — when the label
       // serves THIS row's verb its arm is this row's own dispatch arm:
       // `case 'a': authorize` mints unconditionally for 'a' (w64-fv
       // F-6); `default:` serves every verb no case binds.
       if (c === ':' && pd === 0 && /(?:\bcase\b[^;]*|\bdefault)\s*$/.test(lm.slice(0, ci))) {
+        // A label boundary ends the previous arm outright: its pending
+        // gate belonged to the arm it labeled, and a post-exit dead
+        // span ends here too — but only for a label at the arm's own
+        // level; a `case` inside a nested switch sits deeper and stays
+        // unreachable (w76-fv F-4 stacked-labels fix, w76-ledger F-2).
+        pendingUsed = false;
+        if (ld <= ownCaseDead) ownCaseDead = -1;
         // The label ending AT this colon — its `case`/`default` keyword
         // position is what a served pair binds; a slice from a pair pos
         // would always start at that pair's own keyword (w64-fv F-6).
@@ -2140,7 +2218,7 @@ const condTracker = () => {
           else if (/(?:\b(?:else|catch)\b|=>\s*$|\bcase\b[^;]*:\s*$|\bdefault\s*:\s*$)/.test(prevR)) {
             // This row's own `case`/`default` label opens its own arm —
             // unconditional like the dispatch `if` arm (w64-fv F-6).
-            const ownLabel = (() => { const lm6 = /\b(?:case|default)\b[^?:{};]*$/.exec(prevR); return lm6 !== null && (verbPos ?? []).includes(lm6.index); })();
+            const ownLabel = (() => { const p6 = prevR.replace(/:\s*$/, ''); const lm6 = /\b(?:case|default)\b[^?:{};]*$/.exec(p6); return lm6 !== null && (verbPos ?? []).includes(lm6.index); })();
             // The chain ledger (chainFailed/deadElseExpected) already
             // mints the else unconditional exactly when every head in
             // the chain is provably dead for this verb — a bare `else`
@@ -2393,12 +2471,12 @@ const condTracker = () => {
       const ownDepth = (oursIfArm >= 0 && oursIfNested) ? oursIfArm : Math.max(pendingIfs.findLast(p => p.cls === 'ours')?.depth ?? -1, ownCaseDepth);
       const inOwn = ownDepth >= 0 && ld >= ownDepth;
       const gates = e => !(inOwn && e.req && e.d <= ownDepth);
-      condPos[ci] = deadDepths.size > 0 || bracelessDead || deadElseArm ? 2 : (condDepths.some(e => gates(e) && e.d <= ld) || condTail.some(e => gates(e) && e.d <= ld) || (bracelessCond !== null && !(inOwn && bracelessCond.req && bracelessCond.depth <= ownDepth)) || (pendingUsed && !(pendingUsed === 'arm' && bracelessLive && ld <= bracelessLive.depth)) ? 1 : 0);
+      condPos[ci] = deadDepths.size > 0 || bracelessDead || deadElseArm || (ownCaseDead >= 0 && ld >= ownCaseDead) ? 2 : (condDepths.some(e => gates(e) && e.d <= ld) || condTail.some(e => gates(e) && e.d <= ld) || (bracelessCond !== null && !(inOwn && bracelessCond.req && bracelessCond.depth <= ownDepth)) || (pendingUsed && !(pendingUsed === 'arm' && bracelessLive && ld <= bracelessLive.depth)) ? 1 : 0);
       // Scope-only view for credential-resolution scans: containing
       // conditions and pending gates count, propagated exit-tails do
       // not — a call after `if (a) {…return…}` still resolves for every
       // request that reaches it.
-      condPosDeep[ci] = deadDepths.size > 0 || bracelessDead || deadElseArm ? 2 : (condDepths.some(e => gates(e) && e.d <= ld) || (pendingUsed && !(pendingUsed === 'arm' && bracelessLive && ld <= bracelessLive.depth)) ? 1 : 0);
+      condPosDeep[ci] = deadDepths.size > 0 || bracelessDead || deadElseArm || (ownCaseDead >= 0 && ld >= ownCaseDead) ? 2 : (condDepths.some(e => gates(e) && e.d <= ld) || (pendingUsed && !(pendingUsed === 'arm' && bracelessLive && ld <= bracelessLive.depth)) ? 1 : 0);
       // Positions a provably-live arm cover — the syntactic prefix
       // guard cannot see the dead-state, so `else authorize` / a
       // do-`while` tail would read conditional without this (w61-fv
@@ -2967,17 +3045,28 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
       String.raw`\b([A-Za-z_$][\w$]*)\s*:\s*(?:async\s+)?function\s*\*?\s*[A-Za-z_$]*\s*\(`,
       String.raw`\b([A-Za-z_$][\w$]*)\s*:\s*(?:async\s+)?${PARAMS}\s*=>`,
       String.raw`(?:(?:^|[{,\s])|(?:\b(?:static|async|get|set)\s+)+|\*\s*)([#]?[A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{`,
+      // `[expr](args){` — computed-name method shorthand in class or
+      // object-literal position (w76-ledger F-1): the runtime key is not
+      // a boundable identifier, so no provable call site exists and the
+      // body counts dead by the same never-invoked rule as plain-name
+      // methods. A `[x](` mid-expression (`arr[x](y) {`) is excluded by
+      // the same prefix check the plain arm applies.
+      String.raw`(?:(?:^|[{,\s])|(?:\b(?:static|async|get|set)\s+)+|\*\s*)(\[[^\]]*\])\s*\([^)]*\)\s*\{`,
     ].join('|'), 'g');
     const decls = [];
     const declPos = new Set();
     for (let i = 0; i < ml.length; i++)
       for (const dm of ml[i].matchAll(declRe)) {
-        const g = dm[1] !== undefined ? 1 : dm[2] !== undefined ? 2 : dm[3] !== undefined ? 3 : dm[4] !== undefined ? 4 : dm[5] !== undefined ? 5 : 6;
-        const name = dm[g];
+        const g = dm[1] !== undefined ? 1 : dm[2] !== undefined ? 2 : dm[3] !== undefined ? 3 : dm[4] !== undefined ? 4 : dm[5] !== undefined ? 5 : dm[6] !== undefined ? 6 : 7;
+        // A computed-name method gets a sentinel that can never appear
+        // in a call position — the escape scan finds no invocation and
+        // the body stays provably dead (a real `obj[k]()` call is
+        // invisible to name analysis — fail-closed, never launders).
+        const name = g === 7 ? `__cm_${i}_${dm.index}` : dm[g];
         if (!name || name === 'if' || name === 'for' || name === 'while' || name === 'switch' || name === 'catch' || name === 'return' || name === 'function') continue;
         // The method-shorthand arm only counts a label position — `g()`
         // following `return`/`(`/`,` is a call, not a decl.
-        if (g === 6) {
+        if (g === 6 || g === 7) {
           const pre = ml[i].slice(0, dm.index).trimEnd();
           if (/[\w$.)\]]\s*$/.test(pre) && !/\b(?:static|async|get|set)\s*$|\*\s*$/.test(pre) && !/[{;,=:(]\s*$/.test(pre) && pre !== '') continue;
         }
@@ -3385,7 +3474,7 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
         // compares execute on no request, so they cannot vote, bind a
         // member, or seed a ride — `deadFn` already blanks them from
         // the mint loop; votes need the same cut (w69-ledger F-2).
-        for (const p of deadFn.has(i2) ? [] : pairsForLine(stripComment(l2), lm2, i2, swBefore, seedStack, aliases, verb, verbMemberSet, seedCases)) {
+        for (const p of deadFn.has(i2) ? [] : pairsForLine(stripComment(l2), lm2, i2, swBefore, seedStack, aliases, verb, verbMemberSet, seedCases, frame => switchCaseScan(lines, from, i2, frame, Math.min(from + depth, lines.length)))) {
           if (typeof p.verb === 'string' && p.verb !== '' && p.member !== null && p.member !== undefined && !rowVerbRide.has(p.verb)) rowVerbRide.set(p.verb, p.member);
           if (gatedAt(i2 * 1e7 + p.pos)) continue;
           rowMemberVotes.set(p.member, (rowMemberVotes.get(p.member) ?? 0) + 1);
@@ -3472,7 +3561,7 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
       // Pairs bind on the arm-head line too — `if (m[1]==='a') {…}`
       // scanned for verb 'b' must see the a-pair so the arm classifies
       // as sibling/dead for 'b', not 'ours' by default (w63-seal F-3).
-      const pairs0 = verb ? pairsForLine(l, lm, i, depthCur - closes, switchStack, aliases, verb, verbMemberSet, switchCaseMap) : [];
+      const pairs0 = verb ? pairsForLine(l, lm, i, depthCur - closes, switchStack, aliases, verb, verbMemberSet, switchCaseMap, frame => switchCaseScan(lines, from, i, frame, Math.min(from + depth, lines.length))) : [];
       // `ownCaseDepth` in the tracker already carries an own `case`
       // label's arm across the following lines; the EOL `pending`
       // classification below decides whether the label's tail gates
@@ -4035,6 +4124,56 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
       // inside a never-invoked function minted the gate for the whole
       // arm (w72-ledger F-1).
       for (let i = hi; i < wEnd; i++) winMasked[i - hi] = windowDeadFn.has(i) ? ' ' : maskStrings(stripDead(lines[i], d), d);
+      // A local alias whose own body calls an auth resolver IS an auth
+      // resolver — `const gate = s => requireThat(configOk &&
+      // (anyBearer(s) || openLoopback), 'INV-401-AUTH', …)` makes
+      // `gate('read')` the enforcing call it names (w76 parity: the
+      // issuerd routes gate through exactly this helper). Throwing
+      // aliases (`requireThat`/`throw` in the body) enforce in bare
+      // statement position like AUTH_THROW; predicate-shaped aliases
+      // still need the gate-position verdict doctrine.
+      const aliasNames = [], aliasThrow = [];
+      {
+        // The resolver's own helpers live in the enclosing-function
+        // prelude above the route arm (`const gate = (scope) =>
+        // requireThat(configOk && (anyBearer(scope) || openLoopback), …)`
+        // sits above every issuerd route arm), so the alias scan covers
+        // the file up to the window end — a dead prelude def mints a
+        // name only, never evidence, since a live call is still
+        // required inside the window.
+        const dp = deadState();
+        const joined = lines.slice(0, hi).map(x => maskStrings(stripDead(x, dp), dp)).concat(winMasked).join('\n');
+        const bodySpan = at => {
+          if (joined[at] === '{') {
+            let bd = 0;
+            for (let k = at; k < joined.length; k++) {
+              const c = joined[k];
+              if (c === '{') bd++;
+              else if (c === '}') { bd--; if (bd === 0) return joined.slice(at, k + 1); }
+            }
+            return joined.slice(at);
+          }
+          let pd = 0;
+          for (let k = at; k < joined.length; k++) {
+            const c = joined[k];
+            if (c === '(' || c === '[' || c === '{') pd++;
+            else if (c === ')' || c === ']' || c === '}') { if (pd === 0) return joined.slice(at, k); pd--; }
+            else if (pd === 0 && (c === ';' || c === ',' || c === '\n')) return joined.slice(at, k);
+          }
+          return joined.slice(at);
+        };
+        const AUTH_BODY = new RegExp(AUTH_CALL.source);
+        const consider = (nm, body) => {
+          const esc = (nm ?? '').replace(/\$/g, '\\$');
+          if (!esc || !body || aliasNames.includes(esc) || !AUTH_BODY.test(body)) return;
+          aliasNames.push(esc);
+          if (/\brequireThat\s*\(|\bthrow\b/.test(body)) aliasThrow.push(esc);
+        };
+        for (const dm of joined.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:\([^)]*\)|[A-Za-z_$][\w$]*)?\s*=>\s*/g)) consider(dm[1], bodySpan(dm.index + dm[0].length));
+        for (const dm of joined.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*function\s*(?:[A-Za-z_$][\w$]*)?\s*\([^)]*\)\s*|\bfunction\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*/g)) consider(dm[1] ?? dm[2], bodySpan(dm.index + dm[0].length));
+      }
+      const callRe = new RegExp(`\\b(?:auth|authenticateToken|authBreakglass|authorize|anyBearer|bearerMatches|issuerAuthOk|bearerDigest|verifyJwt|bearer|verifyBearer|checkAuth${aliasNames.length ? '|' + aliasNames.join('|') : ''})\\s*\\(\\s*(?:req\\b|p\\b|request\\b)?`, 'g');
+      const thrRe = new RegExp(`^\\s*(?:auth|authenticateToken|authBreakglass|authorize${aliasThrow.length ? '|' + aliasThrow.join('|') : ''})\\s*\\(`);
       for (let i = hi; i < wEnd; i++) {
         const ml = winMasked[i - hi];
         // Iteration over a collection is a credential resolver's
@@ -4042,9 +4181,9 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
         // here (while/if/switch arms stay conditional).
         const scan = tr.line(ml, sd, i === hi ? 'ours' : null, maskStrings(blankBlock(stripComment(lines[i]), dM), dM), true);
         sd = scan.endDepth;
-        for (const m of ml.matchAll(AUTH_CALL)) {
+        for (const m of ml.matchAll(callRe)) {
           if (windowDeadFn.has(i) || scan.condPosDeep[m.index] || guardedPrefix(ml, m.index, scan.livePos[m.index] ? scan.liveArm[m.index] : undefined)) continue;
-          if (AUTH_THROW.test(m[0])) return true;
+          if (thrRe.test(m[0])) return true;
           const before = ml.slice(0, m.index).trimEnd();
           const after = ml.slice(m.index + m[0].length);
           // A predicate's verdict must demonstrably decide control flow —
@@ -4079,10 +4218,55 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
             const nm = asg[1].replace(/\$/g, '\\$');
             let tail = after;
             for (let j = i - hi + 1; j < winMasked.length; j++) tail += '\n' + winMasked[j];
-            if (new RegExp(
-              `\\b(?:if|else\\s+if|while|for|switch)\\s*\\([^)]*\\b${nm}\\b` +
-              `|\\b(?:return|throw|case)\\b[^;\\n]*\\b${nm}\\b` +
-              `|\\b${nm}\\b\\s*\\?(?![.?])`).test(tail)) return true;
+            // The verdict must decide a flow that CARRIES the request —
+            // `const ok = checkAuth(req); if (ok) debug(); serve(req)`
+            // gates `debug` while `serve` runs unguarded, so a head
+            // containing the bound name counts only when its gated body
+            // reaches `return`/`throw` or a call taking req/request/p
+            // (w76-ledger F-10). A `return`/`throw`/`case` spelling the
+            // name stays evidence — the verdict leaves the handler for
+            // the caller to decide.
+            if (new RegExp(`\\b(?:return|throw|case)\\b[^;\\n]*\\b${nm}\\b`).test(tail)) return true;
+            // A ternary condition on the verdict gates when a chosen
+            // arm ACTS — `ok ? audit() : deny()` picks the enforcement
+            // path inside one statement, so the verdict decides the
+            // out-flow; `ok ? x : y` only decides a value (w72-fv F-4
+            // meets w76-ledger F-10).
+            if (new RegExp(`\\b${nm}\\b\\s*\\?(?![.?])[^;\\n]*\\b[A-Za-z_$][\\w$]*\\s*\\(`).test(tail)) return true;
+            const headRe = new RegExp(`\\b(?:if|else\\s+if|while|for|switch)\\s*\\(`, 'g');
+            let hm;
+            while ((hm = headRe.exec(tail)) !== null) {
+              const open = hm.index + hm[0].length - 1;
+              let pd = 0, close = -1;
+              for (let k = open; k < tail.length; k++) { const c = tail[k]; if (c === '(') pd++; else if (c === ')') { pd--; if (pd === 0) { close = k; break; } } }
+              if (close === -1) break;
+              if (!new RegExp(`\\b${nm}\\b`).test(tail.slice(open, close + 1))) continue;
+              // The gated body: a braced block, or a single statement
+              // bounded by `;`/newline — an ASI split ends it so a
+              // next-line serve stays ungated.
+              const takeBody = p => {
+                if (tail[p] === '{') { let bd = 0; for (let k = p; k < tail.length; k++) { const c = tail[k]; if (c === '{') bd++; else if (c === '}') { bd--; if (bd === 0) return k + 1; } } return tail.length; }
+                const sc = tail.indexOf(';', p), nl = tail.indexOf('\n', p);
+                const e = sc === -1 ? nl : (nl === -1 ? sc : Math.min(sc, nl));
+                return e === -1 ? tail.length : e + 1;
+              };
+              let pos = close + 1;
+              while (pos < tail.length && /\s/.test(tail[pos])) pos++;
+              const spans = [[pos, takeBody(pos)]];
+              // A trailing bare `else` arms one more gated statement
+              // (`else if` heads are found by the headRe walk itself).
+              pos = spans[0][1];
+              while (pos < tail.length && /\s/.test(tail[pos])) pos++;
+              if (tail.startsWith('else', pos) && !/[\w$]/.test(tail[pos + 4] ?? '')) {
+                pos += 4;
+                while (pos < tail.length && /\s/.test(tail[pos])) pos++;
+                if (!tail.startsWith('if', pos)) spans.push([pos, takeBody(pos)]);
+              }
+              for (const [a2, b2] of spans) {
+                const body = tail.slice(a2, b2);
+                if (/\b(?:return|throw)\b/.test(body) || /\b[A-Za-z_$][\w$]*\s*\([^)]*\b(?:req|request|p)\b/.test(body)) return true;
+              }
+            }
             // The continuation stays inside the SAME statement — `;`
             // bounds it explicitly (w73-ledger F-4) and ASI bounds it
             // implicitly: `ok && flag\nserve(req)` discards the verdict
@@ -4411,7 +4595,7 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
       // Optional chaining spells the same member access `?.`/`?.[` — the
       // common modern spelling — so normalize it before matching or the
       // whole `req?.url`/`req?.headers` surface escapes (w74-fv F-3).
-      const dispatchText = readFileSync(p, 'utf8')
+      let dispatchText = readFileSync(p, 'utf8')
         // Comments hide inside member spellings — `req /*x*/ . url`
         // dispatches exactly like `req.url` (w75-fv F3.2); masking them
         // to a space lets the spaced-dot collapse see through.
@@ -4422,7 +4606,21 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
         // Spaced and line-wrapped dots are the same member — `req . url`,
         // `req\n . url` (w75-fv F3.2). The lookahead keeps `a . -1`/
         // `x . "s"` plain.
-        .replace(/([A-Za-z_$][\w$]*)\s*\.\s*(?=[A-Za-z_$])/g, '$1.');
+        .replace(/([A-Za-z_$][\w$]*)\s*\.\s*(?=[A-Za-z_$])/g, '$1.')
+        // A parenthesized receiver is the same receiver — `(req).url`
+        // dispatches like `req.url`. The `\.` lookahead keeps `with (q)`
+        // /`if (x)` parens intact — only a member-taking group unwraps;
+        // the `\w`/`.` lookbehind keeps `f(req)` arglists (w76-ledger F-3).
+        .replace(/(?<![\w$.])\(\s*([A-Za-z_$][\w$]*)\s*\)\s*(?=\.)/g, '$1');
+      // A call-result receiver hides its member too — `f(req).url`,
+      // `f(g(req)).url`, `req.f(x).url` reach the dispatch arms only
+      // after the call collapses to an opaque receiver. `Object.`/
+      // `Reflect.`/`URL.` dotted callees stay spelled out — their own
+      // arms need the member name intact. The arglist admits two nested
+      // paren levels and the collapse runs to fixpoint for deeper nests
+      // (w76-ledger F-3).
+      const CALL_RECV = /(?<![.\w$])(?!Object\s*\.\s*(?:entries|keys|values|fromEntries|getOwnPropertyNames|getOwnPropertyDescriptor|getOwnPropertyDescriptors|assign|freeze|seal|preventExtensions)\s*\()(?!Reflect\s*\.\s*\w+\s*\()(?!URL\s*\.\s*(?:parse|resolve|canParse)\s*\()(?:[A-Za-z_$][\w$]*\s*\.\s*)*[A-Za-z_$][\w$]*\s*\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)\s*\./g;
+      for (let prev; (prev = dispatchText) !== (dispatchText = dispatchText.replace(CALL_RECV, 'expr.')););
       // Bracket-member spellings carry the same capability the dot arms
       // name — `srv['listen'](8080)`, `srv['on']('request', h)`,
       // `r['method']`, `r['headers']` — and a destructure rebind (`const
@@ -4430,7 +4628,13 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
       // alone is not a surface, but paired with a dispatch-shaped use of
       // the rebound name it is (w72-fv F-3). `URL.parse(` and
       // `new http.Server(` are the same shapes under different receivers.
-      const dispatchRebind = /(?:const|let|var)\s*\{[^}]*\b(?:url|method|pathname|searchParams|headers|query)\b[^}]*\}\s*=\s*(?:req|request)\b/.test(dispatchText)
+      // A whole-request alias `const r = req` rebinds the receiver —
+      // every arm below (destructure source, Object/Reflect surface,
+      // `with`, `for…in`, bracket member) answers the alias exactly like
+      // `req` (w76-ledger F-3).
+      const reqAlias = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:req|request)\b/.exec(dispatchText);
+      const REQ_RX = `(?:req|request${reqAlias ? '|' + reqAlias[1].replace(/\$/g, '\\$') : ''})`;
+      const dispatchRebind = new RegExp(`(?:const|let|var)\\s*\\{[^}]*\\b(?:url|method|pathname|searchParams|headers|query)\\b[^}]*\\}\\s*=\\s*${REQ_RX}\\b`).test(dispatchText)
         && /\b(?:url|method|pathname|searchParams|headers)\s*(?:===|!==|==|!=|\.(?:startsWith|endsWith|includes|match|at|slice|indexOf|get|has|set|forEach)\s*\(|\.authorization\b)/.test(dispatchText);
       // Renamed destructure — `{ url: u } = req` binds `u`, not `url`:
       // the rebound names come FROM the destructure, then every
@@ -4448,8 +4652,29 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
       // bare destructures, the `for` arm loop heads (incl. `for await`),
       // and the final `\(\s*\{…\}\s*\)` arm function-param destructures
       // `handler({url, method})` (w74-ledger F-2).
-      for (const m of dispatchText.matchAll(/(?:const|let|var)\s*\{([^)]*)\}\s*=\s*(?:await\s+)?(?:req|request)\b|\((\{[^)]*)\}\s*=\s*(?:await\s+)?(?:req|request)\b|for\s*(?:await\s+)?\(\s*(?:const|let|var)\s*\{([^)]*)\}\s*(?:of|in)\s+|\(\s*\{([^)]*)\}\s*\)/g)) {
-        const body = m[1] ?? m[2] ?? m[3] ?? m[4] ?? '';
+      // Arm 3's `of|in` source is captured (m[4]) so a computed key on a
+      // for-head needs request-shaped evidence — `for (const {[k]: v}
+      // of items)` is not a request surface (w76-ledger F-4).
+      for (const m of dispatchText.matchAll(new RegExp(`(?:const|let|var)\\s*\\{([^)]*)\\}\\s*=\\s*(?:await\\s+)?${REQ_RX}\\b|\\((\\{[^)]*)\\}\\s*=\\s*(?:await\\s+)?${REQ_RX}\\b|for\\s*(?:await\\s+)?\\(\\s*(?:const|let|var)\\s*\\{([^)]*)\\}\\s*(?:of|in)\\s+([^);]*)|\\(\\s*\\{([^)]*)\\}\\s*[,)]`, 'g'))) {
+        const body = m[1] ?? m[2] ?? m[3] ?? m[5] ?? '';
+        // A computed key claims surface only with request evidence: the
+        // `= req`/`= alias` arms carry it inherently, the for-head arm
+        // needs a request-shaped `of|in` source (`of req`, `of f(req)`),
+        // and the param arm needs `req`/`request`/alias inside the same
+        // call's parens — `handler({[k]: u}, req)`. Without it the
+        // `__computed_key__` claim over-flags ordinary destructure
+        // syntax (w76-ledger F-4).
+        const reqSrc = m[1] !== undefined || m[2] !== undefined
+          || (m[3] !== undefined && new RegExp(`\\b${REQ_RX}\\b`).test(m[4] ?? ''))
+          || (m[5] !== undefined && (() => {
+            let pd = 0;
+            for (let k = m.index; k < dispatchText.length; k++) {
+              const c = dispatchText[k];
+              if (c === '(') pd++;
+              else if (c === ')') { pd--; if (pd === 0) return new RegExp(`\\b${REQ_RX}\\b`).test(dispatchText.slice(m.index, k + 1)); }
+            }
+            return false;
+          })());
         // Quoted and computed keys bind too — `{'url': u}` and
         // `{['url']: u}` rename the same surface to `u` (w74-ledger
         // F-2's computed-key case); the bare-word arm keeps shorthand
@@ -4458,7 +4683,7 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
         // single literal — flag the pattern body directly (w75-fv F3.5).
         // Only a `[` in KEY position (pattern start, or after `{`/`,`)
         // is a computed key — `{x = m[0]}`'s subscript is not one.
-        if (/(?:^|[,{]\s*)\[\s*(?!\s*['"][^'"]*['"]\s*\])/.test(body)) destrNames.push('__computed_key__');
+        if (reqSrc && /(?:^|[,{]\s*)\[\s*(?!\s*['"][^'"]*['"]\s*\])/.test(body)) destrNames.push('__computed_key__');
         for (const n of body.matchAll(/\[?\s*['"](url|method|pathname|searchParams|headers|query)['"]\s*\]?\s*:\s*([A-Za-z_$][\w$]*)|\b(url|method|pathname|searchParams|headers|query)\b\s*(?::\s*([A-Za-z_$][\w$]*))?/g))
           destrNames.push((n[2] ?? n[4] ?? n[1] ?? n[3]).replace(/\$/g, '\\$'));
       }
@@ -4470,18 +4695,23 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
         new RegExp(`\\b${n}\\s*(?:===|!==|==|!=|\\.(?:startsWith|endsWith|includes|match|at|slice|indexOf|get|has|set|forEach)\\s*\\(|\\.authorization\\b)`).test(dispatchText)
         || new RegExp(`\\bnew\\s+URL\\s*\\(\\s*${n}\\b`).test(dispatchText)
         || new RegExp(`\\bswitch\\s*\\([\\s\\S]{0,200}?\\b${n}\\b`).test(dispatchText));
-      // A whole-request alias `const r = req` rebinds the receiver — its
-      // `r.url`/`r.method`/`r.headers` members are the same surface
-      // (w74-fv F-4).
-      const reqAlias = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:req|request)\b/.exec(dispatchText);
       const reqAliasRebind = reqAlias !== null
         && new RegExp(`\\b${reqAlias[1].replace(/\$/g, '\\$')}\\s*\\.\\s*(?:method|url|pathname|searchParams|headers|query)\\b`).test(dispatchText);
+      // The alias carries every Object/Reflect/with/for-in/bracket
+      // surface `req` does — `Object.entries(q)`, `with (q)`,
+      // `for (const k in q)`, `q['u'+'rl']` hide behind the rebind
+      // exactly like the request itself (w76-ledger F-3).
+      const aliasSurface = reqAlias !== null && new RegExp(
+        `\\b(?:Object\\s*\\.\\s*(?:entries|keys|values|fromEntries|getOwnPropertyNames|getOwnPropertyDescriptor|getOwnPropertyDescriptors|assign|freeze|seal|preventExtensions)|Reflect\\s*\\.\\s*(?:get|ownKeys|getOwnPropertyDescriptor|has|getPrototypeOf))\\s*\\(\\s*${reqAlias[1].replace(/\$/g, '\\$')}\\b` +
+        `|\\bwith\\s*\\(\\s*${reqAlias[1].replace(/\$/g, '\\$')}\\b` +
+        `|\\bfor\\s*\\(\\s*(?:const|let|var)?\\s*\\w+\\s+in\\s+${reqAlias[1].replace(/\$/g, '\\$')}\\b` +
+        `|\\b${reqAlias[1].replace(/\$/g, '\\$')}\\s*\\[`).test(dispatchText);
       // `const u = URL` rebinds the class itself — `u.parse(req.url)`
       // parses the dispatch surface behind the alias (w73-ledger F-5).
       const urlAlias = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*URL\b/.exec(dispatchText);
       const urlAliasRebind = urlAlias !== null && new RegExp(`\\b${urlAlias[1].replace(/\$/g, '\\$')}\\s*(?:\\.\\s*|\\[\s*['"])(?:parse|resolve|canParse)`).test(dispatchText);
-      if (/req\.method|req\.url|url\.pathname|req\.headers|\b(?:req|request)\s*\[\s*['"](?:method|url)['"]\s*\]|\b\w+\.pathname\s*===\s*['"`]|createServer\s*\(|\b[A-Za-z_$][\w$]*\s*\[\s*['"]createServer['"]\s*\]\s*\(|\bnew\s+(?:[A-Za-z_$][\w$]*\s*\.\s*)*[\w$]*Server\s*\(|\.\s*listen\s*\(|\[\s*['"](?:listen|on|once|addListener|addEventListener|emit)['"]\s*\]\s*\(|\b[A-Za-z_$][\w$]*\s*\[\s*['"](?:method|url|pathname|headers|searchParams)['"]\s*\]|(?:on|once|addEventListener|addListener)\s*\(\s*['"](?:request|upgrade|connect|connection|secureConnection|checkContinue|checkExpectation|clientError)['"]|\bswitch\s*\([\s\S]{0,200}?\.(?:method|url)\s*\)\s*\{|\b[A-Za-z_$][\w$]*\.(?:method|url)\s*(?:===|!==|==|!=)\s*['"`]|\bnew\s+URL\s*\(\s*[A-Za-z_$][\w$]*\s*\.\s*(?:url|href)|\bnew\s*\(\s*URL\s*\)\s*\(|\bURL\s*\.\s*parse\s*\(|\bURL\s*\[\s*['"](?:parse|resolve|canParse)['"]\s*\]\s*\(|\.\s*(?:url|pathname)\s*\.\s*(?:startsWith|endsWith|includes|match|at|slice|indexOf)\s*\(|\.test\s*\(\s*[A-Za-z_$][\w$]*\s*\.\s*(?:url|pathname)|\.\s*searchParams\s*\.|\b(?:req|request)\s*\.\s*headers|\b[A-Za-z_$][\w$]*\.headers\s*(?:\[\s*['"](?:authorization|proxy-|x-|cookie|sec-|cf-|true-)|\.authorization\b)|\bReflect\s*\.\s*(?:get|ownKeys|getOwnPropertyDescriptor|has|getPrototypeOf)\s*\(\s*(?:req|request)\b|\bReflect\s*\.\s*\w+\s*\.\s*(?:call|apply|bind)\s*\(|\bObject\s*\.\s*(?:entries|keys|values|fromEntries|getOwnPropertyNames|getOwnPropertyDescriptor|getOwnPropertyDescriptors|assign|freeze|seal|preventExtensions)\s*\(\s*(?:req|request)\b|\bwith\s*\(\s*(?:req|request)\b|\bfor\s*\(\s*(?:const|let|var)?\s*\w+\s+in\s+(?:req|request)\b/.test(dispatchText)
-        || dispatchRebind || destrRebind || urlAliasRebind || reqAliasRebind || computedDestr) { console.error(`route-spec parity: HTTP dispatch surface in ${p} — outside the audited file`); failed = true; }
+      if (/req\.method|req\.url|url\.pathname|req\.headers|\b(?:req|request)\s*\[|\b\w+\.pathname\s*===\s*['"`]|createServer\s*\(|\b[A-Za-z_$][\w$]*\s*\[\s*['"]createServer['"]\s*\]\s*\(|\bnew\s+(?:[A-Za-z_$][\w$]*\s*\.\s*)*[\w$]*Server\s*\(|\.\s*listen\s*\(|\[\s*['"](?:listen|on|once|addListener|addEventListener|emit)['"]\s*\]\s*\(|\b[A-Za-z_$][\w$]*\s*\[\s*['"](?:method|url|pathname|headers|searchParams)['"]\s*\]|(?:on|once|addEventListener|addListener)\s*\(\s*['"](?:request|upgrade|connect|connection|secureConnection|checkContinue|checkExpectation|clientError)['"]|\bswitch\s*\([\s\S]{0,200}?\.(?:method|url)\s*\)\s*\{|\b[A-Za-z_$][\w$]*\.(?:method|url)\s*(?:===|!==|==|!=)\s*['"`]|\bnew\s+URL\s*\(\s*[A-Za-z_$][\w$]*\s*\.\s*(?:url|href)|\bnew\s*\(\s*URL\s*\)\s*\(|\bURL\s*\.\s*parse\s*\(|\bURL\s*\[\s*['"](?:parse|resolve|canParse)['"]\s*\]\s*\(|\.\s*(?:url|pathname)\s*\.\s*(?:startsWith|endsWith|includes|match|at|slice|indexOf)\s*\(|\.test\s*\(\s*[A-Za-z_$][\w$]*\s*\.\s*(?:url|pathname)|\.\s*searchParams\s*\.|\b(?:req|request)\s*\.\s*headers|\b[A-Za-z_$][\w$]*\.headers\s*(?:\[\s*['"](?:authorization|proxy-|x-|cookie|sec-|cf-|true-)|\.authorization\b)|\bReflect\s*\.\s*(?:get|ownKeys|getOwnPropertyDescriptor|has|getPrototypeOf)\s*\(\s*(?:req|request)\b|\bReflect\s*\.\s*\w+\s*\.\s*(?:call|apply|bind)\s*\(|\bObject\s*\.\s*(?:entries|keys|values|fromEntries|getOwnPropertyNames|getOwnPropertyDescriptor|getOwnPropertyDescriptors|assign|freeze|seal|preventExtensions)\s*\(\s*(?:req|request)\b|\bwith\s*\(\s*(?:req|request)\b|\bfor\s*\(\s*(?:const|let|var)?\s*\w+\s+in\s+(?:req|request)\b/.test(dispatchText)
+        || dispatchRebind || destrRebind || urlAliasRebind || reqAliasRebind || aliasSurface || computedDestr) { console.error(`route-spec parity: HTTP dispatch surface in ${p} — outside the audited file`); failed = true; }
     }
 }
 
