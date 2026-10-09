@@ -92,6 +92,11 @@ export class SimulatedTarget {
     // Migration faults get the same classification — a foreign schema's
     // missing column must not leak a raw sqlite error (w31-fixverify F2).
     try { this._migrateAad(); } catch (e) { if (e instanceof InvariantError) throw e; throw new InvariantError('INV-503-STORAGE', 'Target schema is unrecognised — refusing to interpret a foreign or corrupt database', 503, { cause: e }); }
+    // Physical layout is verified at rest BEFORE the guards install —
+    // a substituted VIEW or a reordered table reads fine until a
+    // positional write lands swapped-column garbage or a guard finds no
+    // table to attach to (w75-seal F-3, w75-runtime F-3).
+    requireThat(this._schemaProbe() === 'ok', 'INV-409-INTEGRITY', 'Ledger schema diverged — object kind or column order differs — tamper evidence', 409);
     // The AAD migration marker is the only durable signal between the
     // migration commit and the fabric's attestation — a live delete in the
     // gap silently suppresses the evidence row (w46-store M-2, parity with
@@ -141,13 +146,19 @@ export class SimulatedTarget {
             // F-4): a dropped or column-drained table verifies against
             // the catalog and convicts INV-409 — fabricated text over a
             // standing schema keeps the infrastructure class.
-            if (/no such table|no such column|not a database|malformed|has \d+ columns? but \d+ values/i.test(e?.message ?? '')
+            if (/no such table|no such column|not a database|malformed|has \d+ columns? but \d+ values|has no column named|cannot modify .* because it is a view/i.test(e?.message ?? '')
               && this._schemaProbe() === 'diverged')
               throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — integrity probe met a column-drained table', 409, { cause: e });
             throw new InvariantError('INV-503-STORAGE', `Integrity probe fault: ${e?.message ?? e}`, 503);
           }
         } finally {
-          this.db.exec('ROLLBACK TO integrity_probe'); this.db.exec('RELEASE integrity_probe');
+          // Same dead-span doctrine as the residue spans (w75-seal F-6):
+          // a dead savepoint's 'no such savepoint' must not replace the
+          // classified verdict, and a faulted RELEASE reaps the leaked
+          // implicit tx.
+          try { this.db.exec('ROLLBACK TO integrity_probe'); } catch { /* a dead span resolves with the tx */ }
+          try { this.db.exec('RELEASE integrity_probe'); } catch { /* name resolves with the enclosing tx */ }
+          if (this.db.isTransaction) { try { this.db.exec('ROLLBACK'); } catch { /* the zombie refused */ } }
         }
         return ok;
       };
@@ -177,7 +188,11 @@ export class SimulatedTarget {
       const probeLanded = (run, what) => {
         this.db.exec('SAVEPOINT integrity_probe');
         try { requireThat(run().changes === 1, 'INV-503-STORAGE', `${what} abandoned — foreign trigger interference`, 503); }
-        finally { this.db.exec('ROLLBACK TO integrity_probe'); this.db.exec('RELEASE integrity_probe'); }
+        finally {
+          try { this.db.exec('ROLLBACK TO integrity_probe'); } catch { /* a dead span resolves with the tx */ }
+          try { this.db.exec('RELEASE integrity_probe'); } catch { /* name resolves with the enclosing tx */ }
+          if (this.db.isTransaction) { try { this.db.exec('ROLLBACK'); } catch { /* the zombie refused */ } }
+        }
       };
       probeLanded(() => this._stmt("INSERT INTO meta_kv VALUES(?, 'integrity_probe', '{}')").run(pt), 'meta_kv insert');
       probeLanded(() => this._stmt('INSERT INTO grants VALUES(?,?,?)').run(pt, 'probe-grant', 'x'), 'grants insert');
@@ -439,17 +454,28 @@ export class SimulatedTarget {
   // (w74-seal F-3). A probe that cannot answer propagates its own
   // fault — infrastructure, never a verdict.
   _schemaProbe() {
-    for (const sql of [
-      "SELECT tenant,id,version,value FROM resources LIMIT 0",
-      "SELECT tenant,id,value FROM transactions LIMIT 0",
-      "SELECT tenant,dataset,row_id,data FROM dataset_rows LIMIT 0",
-      "SELECT tenant,secret_id,version,value FROM secrets_registry LIMIT 0",
-      "SELECT tenant,grant_id,value FROM grants LIMIT 0",
-      "SELECT tenant,key,value FROM meta_kv LIMIT 0",
+    // `SELECT *` + columns() verifies column ORDER like Store's probe —
+    // positional `VALUES(?,?,…)` inserts write into wrong columns
+    // silently when only the column set is verified (w75-runtime F-3).
+    // The catalog type check convicts a substituted VIEW — identical
+    // columns, no trigger surface (w75-seal F-3). Fresh prepare per
+    // probe: a cached statement's column metadata can outlive the schema
+    // change it must see.
+    for (const [table, cols] of [
+      ['resources', ['tenant', 'id', 'version', 'value']],
+      ['transactions', ['tenant', 'id', 'value']],
+      ['dataset_rows', ['tenant', 'dataset', 'row_id', 'data']],
+      ['secrets_registry', ['tenant', 'secret_id', 'version', 'value']],
+      ['grants', ['tenant', 'grant_id', 'value']],
+      ['meta_kv', ['tenant', 'key', 'value']],
     ]) {
-      try { this._stmt(sql).get(); }
+      try {
+        if (this.db.prepare('SELECT type FROM sqlite_master WHERE name=?').get(table)?.type !== 'table') return 'diverged';
+        const names = this.db.prepare(`SELECT * FROM ${table} LIMIT 0`).columns().map(c => c.name);
+        if (names.length !== cols.length || names.some((n, i) => n !== cols[i])) return 'diverged';
+      }
       catch (pe) {
-        if (/no such table|no such column|not a database|malformed/i.test(pe?.message ?? '')) return 'diverged';
+        if (/no such table|no such column|not a database|malformed|has \d+ columns? but \d+ values|has no column named|cannot modify .* because it is a view/i.test(pe?.message ?? '')) return 'diverged';
         throw pe;
       }
     }
@@ -458,7 +484,7 @@ export class SimulatedTarget {
   _schemaGuard(run) {
     try { return run(); }
     catch (e) {
-      if (/no such table|no such column|not a database|malformed/i.test(e?.message ?? '')) {
+      if (/no such table|no such column|not a database|malformed|has \d+ columns? but \d+ values|has no column named|cannot modify .* because it is a view/i.test(e?.message ?? '')) {
         // Prove the claim against the catalog before convicting — a
         // foreign RAISE spelling 'no such table: grants' over a healthy
         // schema is a refused write (the 1811 arm below), not divergence

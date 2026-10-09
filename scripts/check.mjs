@@ -81,9 +81,10 @@ for (const file of textFiles) {
   // A UTF-16 (or NUL-interleaved) file decodes to `A\0K\0I\0A…` under a
   // tolerant utf8 read — the ASCII-contiguous secret rules cannot match
   // across the NULs, so a planted credential answers the scan and
-  // passes (w74-fv F-5). Collapsing the NULs recovers the contiguous
-  // spelling for both endians without needing a BOM table.
-  const collapsed = s.includes('\0') ? s.replace(/\0/g, '') : s;
+  // passes (w74-fv F-5). Every C0 control char except \n does the same
+  // interleave — `A\x01K\x01I\x01A…`, `A\rK\rI\rA…` — so the collapse
+  // covers the whole set, not just NUL (w75-fv F4.1).
+  const collapsed = /[\x00-\x09\x0b-\x1f\x7f]/.test(s) ? s.replace(/[\x00-\x09\x0b-\x1f\x7f]/g, '') : s;
   for (const [name, regex] of SECRET_RULES)
     if (regex.test(s) || (collapsed !== s && regex.test(collapsed))) { console.error(`${file}: ${name}`); failed = true; }
 }
@@ -157,11 +158,18 @@ for (const file of textFiles) {
   // pattern while a human still reads the unfinished-work word —
   // normalize them away before the marker rules test (w56-ledger F11).
   const snorm = s.replace(/[\u00AD\u034F\u061C\u180E\u200B-\u200F\u202A-\u202F\u2060\u2063-\u2064\u3000\uFE0F\uFEFF]/g, '');
+  // Control-char collapse parity with the secret scan (w75-ledger F-5,
+  // w75-fv F4.1): a UTF-16 or \x00-\x1f-interleaved file spells its
+  // sink/marker contiguous once the controls go — the collapse runs
+  // before the zero-width normalize too.
+  const collapsed = /[\x00-\x09\x0b-\x1f\x7f]/.test(s) ? s.replace(/[\x00-\x09\x0b-\x1f\x7f]/g, '') : s;
+  const cnorm = collapsed === s ? snorm : snorm.replace(/[\x00-\x09\x0b-\x1f\x7f]/g, '');
   // check.mjs exempts itself only from the DOM rules — its rule table
   // legitimately hosts the sink literals; sinks and markers still apply.
   const renderable = file !== 'scripts/check.mjs' && (file.startsWith('src/') || file.startsWith('web/') || /\.(?:html?|jsx|tsx)$/.test(file)) && !file.startsWith('tests/');
   const rules = [...(SINK_EXT.test(file) ? SINK_RULES : []), ...(renderable ? RENDER_ONLY : []), ...MARKER_RULES, ...(file.startsWith('reports/') ? [] : MARKER_LOOSE)];
-  for (const [name, regex] of rules) if (regex.test(name.includes('marker') ? snorm : s)) { console.error(`${file}: ${name}`); failed = true; }
+  for (const [name, regex] of rules)
+    if (regex.test(name.includes('marker') ? snorm : s) || (collapsed !== s && regex.test(name.includes('marker') ? cnorm : collapsed))) { console.error(`${file}: ${name}`); failed = true; }
 }
 
 // Route-role parity: every role list the OpenAPI generator declares must
@@ -505,6 +513,21 @@ const guardedPrefix = (masked, callStart, from) => {
 const LV_NUL = Symbol('litNullish'), LV_UNK = Symbol('litUnknown'), LV_OBJ = Symbol('litObject'), LV_ARR = Symbol('litArray'), LV_TYPEOF = Symbol('litTypeof');
 const isLitMarker = v => v === LV_OBJ || v === LV_ARR || v === LV_TYPEOF || (typeof v === 'object' && v !== null && v.newCtor !== undefined);
 const truthyPrim = v => isLitMarker(v) ? true : Boolean(v);
+// `[e]`/`{k:v}` markers fold only when the WHOLE operand is the
+// literal — a greedy `^\[.*\]$`/`^\{.*\}$` match let `[x][0]`/`{x},y`
+// (a projection / comma sibling, statically unknown) read as a
+// literal and minted `if ([cmp][0]) authorize` unconditional
+// (w75-fv F1.1). The opener must close exactly at the end.
+const wholeLitBracket = (t, open, close) => {
+  if (t[0] !== open || t[t.length - 1] !== close) return false;
+  let d = 0;
+  for (let k = 0; k < t.length; k++) {
+    const c = t[k];
+    if (c === open || c === '(' || c === '{' || c === '[') d++;
+    else if (c === close || c === ')' || c === '}' || c === ']') { d--; if (d === 0) return k === t.length - 1; }
+  }
+  return false;
+};
 const topSplit = (t, ops) => {
   // Split `t` at depth-0 occurrences of any op (skipping strings). A
   // match at the expression start is a unary/sign, not a split point.
@@ -979,8 +1002,8 @@ const litPrim = (e0, known) => {
   if (t.startsWith('!')) { const v = litVal(t.slice(1), known); return v === null ? LV_UNK : v !== true; }
   if (t.startsWith('~')) { const n = litPrim(t.slice(1), known); if (n === LV_UNK || isLitMarker(n)) return LV_UNK; const num = Number(n); return Number.isNaN(num) ? LV_UNK : ~num; }
   if (/^[+-]/.test(t)) { const n = litPrim(t.slice(1), known); if (n === LV_UNK || isLitMarker(n)) return LV_UNK; const num = Number(n); return Number.isNaN(num) ? LV_UNK : (t[0] === '-' ? -num : num); }
-  if (/^\{[\s\S]*\}$/.test(t)) return LV_OBJ;
-  if (/^\[[\s\S]*\]$/.test(t)) return LV_ARR;
+  if (wholeLitBracket(t, '{', '}')) return LV_OBJ;
+  if (wholeLitBracket(t, '[', ']')) return LV_ARR;
   const nm = /^new\s+([A-Za-z_$][\w$]*)/.exec(t); if (nm) return { newCtor: nm[1] };
   if (/\)\s*=>|^[\s\S]*=>|^\s*(?:async\s+)?function\b|^\s*class\b/.test(t)) return LV_OBJ;
   const fm = /^(Boolean|Number|String)\s*\(([\s\S]*)\)$/.exec(t);
@@ -1375,10 +1398,20 @@ const pairsForLine = (l, lm, i, stmtDepth, sw, aliases, verb, verbMembers, allCa
       const labels = [];
       for (const cm of l.matchAll(/\b(?:case\s*(?:'([^']+)'|"([^"]+)"|`([^`]+)`)|default\s*:)/g))
         if (lm[cm.index] !== ' ' && (stmtDepth > top.depth || cm.index > top.at)) labels.push(cm);
+      // An exit anywhere before this line's first label — or anywhere on
+      // a label-less line — closes the open arm; `openExit` carries it
+      // past the next label. The tail of the previous label's OWN line
+      // is checked at end-of-line below: `case 'x': auth(); break;` on
+      // one line exits 'x' before the next line's label — the stale
+      // segFrom used to slice it away and record a phantom fallthrough
+      // (w75-ledger F-1).
       if (top.open !== null && /\b(?:break|return|throw|continue)\b/.test(l.slice(0, labels.length ? labels[0].index : l.length))) top.openExit = true;
       for (const cm of labels) {
         if (top.open !== null) {
-          if (!top.openExit && !/\b(?:break|return|throw|continue)\b/.test(l.slice(top.segFrom, cm.index))) top.flow.add(top.open);
+          // The inter-label segment is meaningful only when the previous
+          // label sits on THIS line — a segFrom carried from a previous
+          // line's string indexes garbage (w75-ledger F-1).
+          if (!top.openExit && !(top.segFrom >= 0 && top.segFrom < cm.index && /\b(?:break|return|throw|continue)\b/.test(l.slice(top.segFrom, cm.index)))) top.flow.add(top.open);
           top.open = null; top.openExit = false;
         }
         const isD = cm[1] === undefined && cm[2] === undefined && cm[3] === undefined;
@@ -1387,6 +1420,14 @@ const pairsForLine = (l, lm, i, stmtDepth, sw, aliases, verb, verbMembers, allCa
         if (isD) { top.hasDefault = true; top.open = DEFAULT_CASE; }
         else { top.allCases.add(v2); top.flow.delete(v2); top.open = v2; }
         top.segFrom = cm.index + cm[0].length;
+      }
+      // `case 'x':` alone on its line puts the arm's body on the NEXT
+      // line: the still-open arm covers this line's calls the same way
+      // its label does (w75-ledger F-6). An exit after the last label
+      // closes the arm before then (w75-ledger F-1).
+      if (top.open !== null) {
+        if (labels.length > 0 && /\b(?:break|return|throw|continue)\b/.test(l.slice(top.segFrom))) top.openExit = true;
+        else if (labels.length === 0 && !top.openExit) out.push({ member: top.member, verb: top.open, pos: 0, sw: top, fall: new Set(top.flow) });
       }
       allCases?.set(top.key, top);
     }
@@ -1861,6 +1902,12 @@ const condTracker = () => {
     if (lraw) for (let i = 0; i < lraw.length; i++) if (lraw[i] === '{') rawBraces.push(i);
     let ld = sd, pendingUsed = pending, armBraceTaken = false, braceN = 0, pd = 0;
     let bracelessIfArm = -1, bracelessIfCond = null;
+    // `ownCaseDepth` carries across lines — an own `case` label alone on
+    // its line leaves the arm open for the following ones — but
+    // `ownCaseColon` is a position on the LABEL's own line: resetting
+    // it per line makes the live floor `0`, so a continuation line's
+    // `if (c)` gate still reads in the prefix (w75-ledger F-6).
+    ownCaseColon = -1;
     // Stale chain entries below this line's entry depth are dropped —
     // a `}`-pop chain consult needs only entries for still-open scopes.
     for (const d of [...chainFailed.keys()]) if (d > sd) chainFailed.delete(d);
@@ -1884,6 +1931,9 @@ const condTracker = () => {
       // word sits BEFORE the `:`; `cond ? x :` is excluded by the `?`
       // between the word and the colon (w64-fv F-6).
       if (ownCaseDepth >= 0 && ((c === '}' && ld <= ownCaseDepth) || (pd === 0 && c === ':' && /\b(?:case|default)\b[^?:{};]*$/.test(lm.slice(0, ci))))) { ownCaseDepth = -1; ownCaseColon = -1; }
+      // An exit at the arm's own level ends it — `case 'x': a; break;`
+      // leaves the NEXT line outside the arm (w75-ledger F-6).
+      else if (ownCaseDepth >= 0 && pd === 0 && /^(?:break|return|throw|continue)\b/.test(lm.slice(ci)) && !/[\w$]/.test(lm[ci - 1] ?? ' ')) { ownCaseDepth = -1; ownCaseColon = -1; }
       // `:` closing a `case 'v':`/`default:` label — when the label
       // serves THIS row's verb its arm is this row's own dispatch arm:
       // `case 'a': authorize` mints unconditionally for 'a' (w64-fv
@@ -2403,16 +2453,26 @@ const condTracker = () => {
       return d > 0;
     })();
     if (!/[;{}]\s*$/.test(tail)
-        && (eolCtrl || eolCtrlOpen || /(?:\b(?:if|for|while|switch|catch)\s*(?:\([^()]*\)\s*)?|\belse\b|\bcatch\b|=>|&&|\|\||\?|:)\s*$/.test(tail))) pending = /(?:\belse\b|=>)\s*$/.test(tail) ? 'arm'
+        && (eolCtrl || eolCtrlOpen || /(?:\b(?:if|for|while|switch|catch)\s*(?:\([^()]*\)\s*)?|\belse\b|\bcatch\b|=>|&&|\|\||\?|:)\s*$/.test(tail))) {
+      // A `case`/`default` label ending the line is an arm OPENER, not
+      // a gate: its body is the following lines. When the label serves
+      // this row's verb the carry is `false` — same as the
+      // `{`-consumed own-`if` head — and the own-case carry
+      // (ownCaseArm) mints the body unconditional; 'gate' would mark
+      // every call inside it conditional (w75-ledger F-6). A foreign
+      // label stays 'gate'.
+      const ownCaseTail = (() => { const ctm = /\b(?:case|default)\b[^?:{};]*:\s*$/.exec(tail); return ctm !== null && (verbPos ?? []).includes(ctm.index); })();
+      pending = /(?:\belse\b|=>)\s*$/.test(tail) ? 'arm'
         // A braceless `if` this row provably enters gates nothing — its
         // body runs unconditionally, so `if (true)`/`if (m[1]==='a')`
         // (this row's own member) never carries 'gate' into the next
         // statement. An unproven enclosing pending `if` still gates
         // through it (w66-fv F-6).
-        : ((eolKw === 'if' || /\bif\s*\([^()]*\)\s*$/.test(tail))
+        : (ownCaseTail || ((eolKw === 'if' || /\bif\s*\([^()]*\)\s*$/.test(tail))
             && ['ours', 'true'].includes(pendCls(eolHead ?? headCond(tail)))
-            && !pendingIfs.some(p => p.cls === 'cond' || p.cls === 'sibling' || p.cls === 'siblingPlural')
+            && !pendingIfs.some(p => p.cls === 'cond' || p.cls === 'sibling' || p.cls === 'siblingPlural'))
           ? false : 'gate');
+    }
     return { condPos, condPosDeep, livePos, liveArm, endDepth: ld };
   };
   // The dispatch `if`'s paren condition — between the `(` matching the
@@ -3413,6 +3473,10 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
       // scanned for verb 'b' must see the a-pair so the arm classifies
       // as sibling/dead for 'b', not 'ours' by default (w63-seal F-3).
       const pairs0 = verb ? pairsForLine(l, lm, i, depthCur - closes, switchStack, aliases, verb, verbMemberSet, switchCaseMap) : [];
+      // `ownCaseDepth` in the tracker already carries an own `case`
+      // label's arm across the following lines; the EOL `pending`
+      // classification below decides whether the label's tail gates
+      // them (w75-ledger F-6).
       // Whether each switch opened on this line is COMPLETE here —
       // a `switch(m[1]){case'x':x}` whole-line form dead-marks for
       // every verb it doesn't serve, instead of leaking conditional
@@ -3598,7 +3662,15 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
       // statically dead (`if(m[2]==='abort'){ if(m[2]==='acknowledge')`),
       // so its authorize mints nothing (w59-fv F-2). Different members
       // (m[1] vs m[2]) or the else of a sibling chain stay reachable.
-      const contradict = p => skipStack.some(s => s.ours === false && Array.isArray(s.pairs) && s.pairs.some(sp => sp.member === p.member && sp.verb !== p.verb));
+      // A `case`/`default` label of the SAME switch the enclosing
+      // sibling arm belongs to is that arm's sibling, not a nested
+      // re-arm: `switch(m[1]){ case 'a':… case 'w': auth }` mints for
+      // 'w' even though the a-arm frame reads as same-member/other-
+      // verb. Only pairs carrying `sw` (real labels) qualify — an
+      // `if(m[1]==='w')` inside a dead arm still contradicts, and so
+      // does a case of a DIFFERENT switch nested in it (w75-ledger).
+      const sameDispatch = (p, sp) => p.sw !== undefined && sp.sw === p.sw;
+      const contradict = p => skipStack.some(s => s.ours === false && Array.isArray(s.pairs) && s.pairs.some(sp => !sameDispatch(p, sp) && sp.member === p.member && sp.verb !== p.verb));
       const ours = pairs.some(p => pairServes(p, verb, switchCaseMap) && !contradict(p));
       // An `else`/`else if` after OUR arm already closed is dead for
       // this row even when it repeats our verb — the earlier arm
@@ -3623,7 +3695,13 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
         if (ih) {
           let dd = 0, k = ih.index + ih[0].length;
           for (; k < lm.length; k++) { const c = lm[k]; if (c === '(') dd++; else if (c === ')') { dd--; if (dd <= 0) break; } }
-          if (dd <= 0) oursBraceEnd = k;
+          // The `)` only marks the row's own body when the head IS this
+          // row's dispatch — `[cmp][0]`/`flag`-shaped heads are real
+          // gates: flooring the guarded-prefix scan at their `)` minted
+          // a conditional `authorize` unconditional for every verb
+          // (w75-fv F1.1).
+          const condStart = ih.index + ih[0].length;
+          if (dd <= 0 && dispatchPure([lm.slice(condStart, k), condStart], i === from && pairs0.length === 0 ? null : verbPosLine, verb, verbMemberSet, posMemberMap, posVerbMap, rowVerbSets)) oursBraceEnd = k;
         }
       }
       // Walk the masked line for conditional-body state on EVERY line
@@ -4004,19 +4082,39 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
             if (new RegExp(
               `\\b(?:if|else\\s+if|while|for|switch)\\s*\\([^)]*\\b${nm}\\b` +
               `|\\b(?:return|throw|case)\\b[^;\\n]*\\b${nm}\\b` +
-              `|\\b${nm}\\b\\s*\\?(?![.?])` +
-              // The continuation stays inside the SAME statement — `;`
-              // bounds it explicitly (w73-ledger F-4) and ASI bounds it
-              // implicitly: `ok && flag\nserve(req)` discards the verdict
-              // then calls ungated (w74-fv F-2). `(?![=])` excludes
-              // `&&=`/`||=`: logical assignment writes the verdict,
-              // never gates on it. The optional `[ \t]*\n` right after
-              // the operator is the one legal line-wrap — `ok &&\nserve`
-              // is still a single statement; a newline after an operand
-              // (`ok && flag\n`) is ASI. `,` is excluded for the same
-              // reason: `ok && flag, serve()` runs serve unconditionally.
-              `|\\b${nm}\\b\\s*(?:&&|\\|\\|)(?![=])(?:[ \\t]*\\n\\s*)?[^;,\\n]*?\\b[A-Za-z_$][\\w$]*\\s*\\(`)
-              .test(tail)) return true;
+              `|\\b${nm}\\b\\s*\\?(?![.?])`).test(tail)) return true;
+            // The continuation stays inside the SAME statement — `;`
+            // bounds it explicitly (w73-ledger F-4) and ASI bounds it
+            // implicitly: `ok && flag\nserve(req)` discards the verdict
+            // then calls ungated (w74-fv F-2), and `\u2028`/`\u2029` are
+            // ASI boundaries too (w75-fv F2.1). `(?![=])` excludes
+            // `&&=`/`||=`: logical assignment writes the verdict, never
+            // gates on it. The optional `[ \t]*\n` right after the
+            // operator is the one legal line-wrap — `ok &&\nserve` is
+            // still a single statement. Only `&&` continues a verdict
+            // honestly: `ok || serve()` runs serve iff the verdict is
+            // FALSY (w75-ledger F-2), and a `!`/`~` before the name
+            // inverts it the same way. The operand span is checked
+            // char-by-char after the match: a top-level `,`, `|`, or
+            // single `&` calls the right side unconditionally
+            // (`ok && flag, serve()` runs serve ungated), while inside
+            // parens the same chars stay sub-expressions of the gated
+            // operand (`ok && (flag, serve())` IS gated — w75-fv F2.3).
+            const contRe = new RegExp(`(?<![!~])\\b${nm}\\b\\s*&&(?![=&])(?:[ \\t]*\\n\\s*)?[^;\\n]*?\\b[A-Za-z_$][\\w$]*\\s*\\(`, 'g');
+            let cm;
+            while ((cm = contRe.exec(tail)) !== null) {
+              const seg = cm[0].slice(cm[0].indexOf('&&') + 2);
+              let d = 0, bad = false;
+              for (let k = 0; k < seg.length && !bad; k++) {
+                const c = seg[k];
+                if (c === '(' || c === '[' || c === '{') d++;
+                else if (c === ')' || c === ']' || c === '}') d--;
+                else if (c === '\u2028' || c === '\u2029') bad = true;
+                else if (d === 0 && (c === ',' || c === '|' || (c === '&' && seg[k + 1] !== '&'))) bad = true;
+                else if (c === '&' && seg[k + 1] === '&') k++;
+              }
+              if (!bad) return true;
+            }
           }
         }
       }
@@ -4314,8 +4412,17 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
       // common modern spelling — so normalize it before matching or the
       // whole `req?.url`/`req?.headers` surface escapes (w74-fv F-3).
       const dispatchText = readFileSync(p, 'utf8')
+        // Comments hide inside member spellings — `req /*x*/ . url`
+        // dispatches exactly like `req.url` (w75-fv F3.2); masking them
+        // to a space lets the spaced-dot collapse see through.
+        .replace(/\/\*[\s\S]*?\*\//g, ' ')
+        .replace(/\/\/[^\n]*/g, ' ')
         .replace(/\s*\?\s*\.\s*(?=\[)/g, '')
-        .replace(/\s*\?\s*\.\s*/g, '.');
+        .replace(/\s*\?\s*\.\s*/g, '.')
+        // Spaced and line-wrapped dots are the same member — `req . url`,
+        // `req\n . url` (w75-fv F3.2). The lookahead keeps `a . -1`/
+        // `x . "s"` plain.
+        .replace(/([A-Za-z_$][\w$]*)\s*\.\s*(?=[A-Za-z_$])/g, '$1.');
       // Bracket-member spellings carry the same capability the dot arms
       // name — `srv['listen'](8080)`, `srv['on']('request', h)`,
       // `r['method']`, `r['headers']` — and a destructure rebind (`const
@@ -4346,10 +4453,19 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
         // Quoted and computed keys bind too — `{'url': u}` and
         // `{['url']: u}` rename the same surface to `u` (w74-ledger
         // F-2's computed-key case); the bare-word arm keeps shorthand
-        // and plain renames.
+        // and plain renames. A concatenated or expression computed key
+        // (`{['u'+'rl']: u}`, `{[k]: u}`) can name the surface without a
+        // single literal — flag the pattern body directly (w75-fv F3.5).
+        // Only a `[` in KEY position (pattern start, or after `{`/`,`)
+        // is a computed key — `{x = m[0]}`'s subscript is not one.
+        if (/(?:^|[,{]\s*)\[\s*(?!\s*['"][^'"]*['"]\s*\])/.test(body)) destrNames.push('__computed_key__');
         for (const n of body.matchAll(/\[?\s*['"](url|method|pathname|searchParams|headers|query)['"]\s*\]?\s*:\s*([A-Za-z_$][\w$]*)|\b(url|method|pathname|searchParams|headers|query)\b\s*(?::\s*([A-Za-z_$][\w$]*))?/g))
           destrNames.push((n[2] ?? n[4] ?? n[1] ?? n[3]).replace(/\$/g, '\\$'));
       }
+      // A computed/expression destructure key on the request is surface
+      // by itself — the rebound name can equal 'url' at runtime
+      // (w75-fv F3.5) even when the gate cannot prove the literal.
+      const computedDestr = destrNames.includes('__computed_key__');
       const destrRebind = destrNames.some(n =>
         new RegExp(`\\b${n}\\s*(?:===|!==|==|!=|\\.(?:startsWith|endsWith|includes|match|at|slice|indexOf|get|has|set|forEach)\\s*\\(|\\.authorization\\b)`).test(dispatchText)
         || new RegExp(`\\bnew\\s+URL\\s*\\(\\s*${n}\\b`).test(dispatchText)
@@ -4364,8 +4480,8 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
       // parses the dispatch surface behind the alias (w73-ledger F-5).
       const urlAlias = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*URL\b/.exec(dispatchText);
       const urlAliasRebind = urlAlias !== null && new RegExp(`\\b${urlAlias[1].replace(/\$/g, '\\$')}\\s*(?:\\.\\s*|\\[\s*['"])(?:parse|resolve|canParse)`).test(dispatchText);
-      if (/req\.method|req\.url|url\.pathname|req\.headers|\b(?:req|request)\s*\[\s*['"](?:method|url)['"]\s*\]|\b\w+\.pathname\s*===\s*['"`]|createServer\s*\(|\b[A-Za-z_$][\w$]*\s*\[\s*['"]createServer['"]\s*\]\s*\(|\bnew\s+(?:[A-Za-z_$][\w$]*\s*\.\s*)*[\w$]*Server\s*\(|\.\s*listen\s*\(|\[\s*['"](?:listen|on|once|addListener|addEventListener|emit)['"]\s*\]\s*\(|\b[A-Za-z_$][\w$]*\s*\[\s*['"](?:method|url|pathname|headers|searchParams)['"]\s*\]|(?:on|once|addEventListener|addListener)\s*\(\s*['"](?:request|upgrade|connect|connection|secureConnection|checkContinue|checkExpectation|clientError)['"]|\bswitch\s*\([\s\S]{0,200}?\.(?:method|url)\s*\)\s*\{|\b[A-Za-z_$][\w$]*\.(?:method|url)\s*(?:===|!==|==|!=)\s*['"`]|\bnew\s+URL\s*\(\s*[A-Za-z_$][\w$]*\s*\.\s*(?:url|href)|\bnew\s*\(\s*URL\s*\)\s*\(|\bURL\s*\.\s*parse\s*\(|\bURL\s*\[\s*['"](?:parse|resolve|canParse)['"]\s*\]\s*\(|\.\s*(?:url|pathname)\s*\.\s*(?:startsWith|endsWith|includes|match|at|slice|indexOf)\s*\(|\.test\s*\(\s*[A-Za-z_$][\w$]*\s*\.\s*(?:url|pathname)|\.\s*searchParams\s*\.|\b(?:req|request)\s*\.\s*headers|\b[A-Za-z_$][\w$]*\.headers\s*(?:\[\s*['"](?:authorization|proxy-|x-|cookie|sec-|cf-|true-)|\.authorization\b)|\bReflect\s*\.\s*(?:get|ownKeys|getOwnPropertyDescriptor)\s*\(\s*(?:req|request)\b/.test(dispatchText)
-        || dispatchRebind || destrRebind || urlAliasRebind || reqAliasRebind) { console.error(`route-spec parity: HTTP dispatch surface in ${p} — outside the audited file`); failed = true; }
+      if (/req\.method|req\.url|url\.pathname|req\.headers|\b(?:req|request)\s*\[\s*['"](?:method|url)['"]\s*\]|\b\w+\.pathname\s*===\s*['"`]|createServer\s*\(|\b[A-Za-z_$][\w$]*\s*\[\s*['"]createServer['"]\s*\]\s*\(|\bnew\s+(?:[A-Za-z_$][\w$]*\s*\.\s*)*[\w$]*Server\s*\(|\.\s*listen\s*\(|\[\s*['"](?:listen|on|once|addListener|addEventListener|emit)['"]\s*\]\s*\(|\b[A-Za-z_$][\w$]*\s*\[\s*['"](?:method|url|pathname|headers|searchParams)['"]\s*\]|(?:on|once|addEventListener|addListener)\s*\(\s*['"](?:request|upgrade|connect|connection|secureConnection|checkContinue|checkExpectation|clientError)['"]|\bswitch\s*\([\s\S]{0,200}?\.(?:method|url)\s*\)\s*\{|\b[A-Za-z_$][\w$]*\.(?:method|url)\s*(?:===|!==|==|!=)\s*['"`]|\bnew\s+URL\s*\(\s*[A-Za-z_$][\w$]*\s*\.\s*(?:url|href)|\bnew\s*\(\s*URL\s*\)\s*\(|\bURL\s*\.\s*parse\s*\(|\bURL\s*\[\s*['"](?:parse|resolve|canParse)['"]\s*\]\s*\(|\.\s*(?:url|pathname)\s*\.\s*(?:startsWith|endsWith|includes|match|at|slice|indexOf)\s*\(|\.test\s*\(\s*[A-Za-z_$][\w$]*\s*\.\s*(?:url|pathname)|\.\s*searchParams\s*\.|\b(?:req|request)\s*\.\s*headers|\b[A-Za-z_$][\w$]*\.headers\s*(?:\[\s*['"](?:authorization|proxy-|x-|cookie|sec-|cf-|true-)|\.authorization\b)|\bReflect\s*\.\s*(?:get|ownKeys|getOwnPropertyDescriptor|has|getPrototypeOf)\s*\(\s*(?:req|request)\b|\bReflect\s*\.\s*\w+\s*\.\s*(?:call|apply|bind)\s*\(|\bObject\s*\.\s*(?:entries|keys|values|fromEntries|getOwnPropertyNames|getOwnPropertyDescriptor|getOwnPropertyDescriptors|assign|freeze|seal|preventExtensions)\s*\(\s*(?:req|request)\b|\bwith\s*\(\s*(?:req|request)\b|\bfor\s*\(\s*(?:const|let|var)?\s*\w+\s+in\s+(?:req|request)\b/.test(dispatchText)
+        || dispatchRebind || destrRebind || urlAliasRebind || reqAliasRebind || computedDestr) { console.error(`route-spec parity: HTTP dispatch surface in ${p} — outside the audited file`); failed = true; }
     }
 }
 

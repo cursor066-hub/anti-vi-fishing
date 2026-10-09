@@ -62,10 +62,18 @@ test('w62-runtime F-2: the marker consult splits transient faults from tamper', 
   const h = fixture(t);
   h.ready();
   const origStmt = h.f.store._stmt.bind(h.f.store);
+  const origPrep = h.f.store.db.prepare.bind(h.f.store.db);
   const inject = (err) => {
+    // The consult read rides _stmt while the schema probe prepares fresh
+    // (w75-runtime F-3) — inject on both so the probe agrees with the
+    // consult's claim (w62-runtime F-2 keeps its honest verdict).
     h.f.store._stmt = sql => {
       if (/meta_kv/.test(sql)) throw err;
       return origStmt(sql);
+    };
+    h.f.store.db.prepare = sql => {
+      if (/meta_kv/.test(String(sql))) throw err;
+      return origPrep(sql);
     };
   };
   const busy = new Error('database is busy'); busy.errcode = 5;
@@ -81,6 +89,7 @@ test('w62-runtime F-2: the marker consult splits transient faults from tamper', 
   assert.throws(() => h.f._foldFloorMarker('acme', 0), hasCode('INV-409-INTEGRITY'),
     'schema divergence remains tamper evidence');
   h.f.store._stmt = origStmt;
+  h.f.store.db.prepare = origPrep;
   h.close();
 });
 

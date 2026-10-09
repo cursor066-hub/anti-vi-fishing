@@ -123,6 +123,12 @@ export class Store {
     // closures legitimately UPDATE/DELETE idempotency and dek rows
     // (w21-store F-6 ordering).
     try { this._migrateAad(); } catch (e) { if (e instanceof InvariantError) throw e; throw new InvariantError('INV-503-STORAGE', 'Ledger schema is unrecognised — refusing to interpret a foreign or corrupt database', 503, { cause: e }); }
+    // Physical layout is verified at rest BEFORE the guards install: a
+    // substituted VIEW or a reordered same-arity table reads fine — every
+    // SELECT names its columns — while positional writes land swapped-
+    // column garbage or a guard finds nothing to attach to (w75-seal
+    // F-3, w75-runtime F-3). Convict it here, not at first write.
+    requireThat(this.#ledgerSchemaProbe() === 'ok', 'INV-409-INTEGRITY', 'Ledger schema diverged — object kind or column order differs — tamper evidence', 409);
     try {
       this._installIntegrityGuards();
     } catch (e) {
@@ -326,13 +332,19 @@ export class Store {
           // under `#schemaClaim`). Fabricated text over a standing
           // schema keeps the infrastructure class — never a tamper
           // verdict.
-          if (/no such table|no such column|not a database|malformed|has \d+ columns? but \d+ values/i.test(e?.message ?? '')
+          if (/no such table|no such column|not a database|malformed|has \d+ columns? but \d+ values|has no column named|cannot modify .* because it is a view/i.test(e?.message ?? '')
             && this.#ledgerSchemaProbe() === 'diverged')
             throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — integrity probe met a column-drained table', 409, { cause: e });
           throw new InvariantError('INV-503-STORAGE', `Integrity probe fault: ${e?.message ?? e}`, 503);
         }
       } finally {
-        this.db.exec('ROLLBACK TO integrity_probe'); this.db.exec('RELEASE integrity_probe');
+        // Same dead-span doctrine as the residue spans (w75-seal F-6):
+        // a fault that already destroyed the savepoint must not let
+        // 'no such savepoint' replace the classified verdict above, and
+        // a faulted RELEASE reaps the leaked implicit tx.
+        try { this.db.exec('ROLLBACK TO integrity_probe'); } catch { /* a dead span resolves with the tx */ }
+        try { this.db.exec('RELEASE integrity_probe'); } catch { /* name resolves with the enclosing tx */ }
+        if (this.db.isTransaction) { try { this.db.exec('ROLLBACK'); } catch { /* the zombie refused */ } }
       }
       return ok;
     };
@@ -382,7 +394,11 @@ export class Store {
     const probeLanded = (run, what) => {
       this.db.exec('SAVEPOINT integrity_probe');
       try { requireThat(run().changes === 1, 'INV-503-STORAGE', `${what} abandoned — foreign trigger interference`, 503); }
-      finally { this.db.exec('ROLLBACK TO integrity_probe'); this.db.exec('RELEASE integrity_probe'); }
+      finally {
+        try { this.db.exec('ROLLBACK TO integrity_probe'); } catch { /* a dead span resolves with the tx */ }
+        try { this.db.exec('RELEASE integrity_probe'); } catch { /* name resolves with the enclosing tx */ }
+        if (this.db.isTransaction) { try { this.db.exec('ROLLBACK'); } catch { /* the zombie refused */ } }
+      }
     };
     probeLanded(() => insAudit(1), 'audit insert');
     probeLanded(() => this._stmt("INSERT INTO meta_kv VALUES(?, 'integrity_probe', '{}')").run(pt), 'meta_kv insert');
@@ -927,20 +943,32 @@ export class Store {
   // stands, and throws the probe's own fault — contention/storage is
   // infrastructure, never a tamper verdict (w73-seal F-2).
   #ledgerSchemaProbe() {
-    for (const sql of [
-      "SELECT tenant,kind,id,value,created FROM records LIMIT 0",
-      "SELECT tenant,seq,previous,hash,envelope FROM audit LIMIT 0",
-      "SELECT tenant,nonce,capsule FROM nonces LIMIT 0",
-      "SELECT tenant,scope,key,hash,result FROM idempotency LIMIT 0",
-      "SELECT tenant,kind,id,wrapped FROM deks LIMIT 0",
-      "SELECT tenant,subject,resource,at,cost,capability,request FROM usage LIMIT 0",
-      "SELECT id,last FROM clock LIMIT 0",
-      "SELECT tenant,key,value FROM meta_kv LIMIT 0",
-      "SELECT tenant,subject,dataset,row_id,column_name,at FROM data_access LIMIT 0",
+    // `SELECT *` + columns() verifies column ORDER too — every runtime
+    // insert is positional `VALUES(?,?,…)`, so a reordered or widened
+    // same-arity table must diverge like a dropped one, or writes land
+    // in the wrong columns silently (w75-runtime F-3). The catalog type
+    // check convicts a substituted VIEW — identical columns, no trigger
+    // surface, refuse-on-write engine text (w75-seal F-3). Fresh prepare
+    // per probe: a cached statement's column metadata can outlive the
+    // schema change it must see.
+    for (const [table, cols] of [
+      ['records', ['tenant', 'kind', 'id', 'value', 'created']],
+      ['audit', ['tenant', 'seq', 'previous', 'hash', 'envelope']],
+      ['nonces', ['tenant', 'nonce', 'capsule']],
+      ['idempotency', ['tenant', 'scope', 'key', 'hash', 'result']],
+      ['deks', ['tenant', 'kind', 'id', 'wrapped']],
+      ['usage', ['tenant', 'subject', 'resource', 'at', 'cost', 'capability', 'request']],
+      ['clock', ['id', 'last']],
+      ['meta_kv', ['tenant', 'key', 'value']],
+      ['data_access', ['tenant', 'subject', 'dataset', 'row_id', 'column_name', 'at']],
     ]) {
-      try { this._stmt(sql).get(); }
+      try {
+        if (this.db.prepare('SELECT type FROM sqlite_master WHERE name=?').get(table)?.type !== 'table') return 'diverged';
+        const names = this.db.prepare(`SELECT * FROM ${table} LIMIT 0`).columns().map(c => c.name);
+        if (names.length !== cols.length || names.some((n, i) => n !== cols[i])) return 'diverged';
+      }
       catch (pe) {
-        if (/no such table|no such column|not a database|malformed/i.test(pe?.message ?? '')) return 'diverged';
+        if (/no such table|no such column|not a database|malformed|has \d+ columns? but \d+ values|has no column named|cannot modify .* because it is a view/i.test(pe?.message ?? '')) return 'diverged';
         throw pe;
       }
     }
@@ -951,7 +979,7 @@ export class Store {
   _schemaGuard(run) {
     try { return run(); }
     catch (e) {
-      if (/no such table|no such column|not a database|malformed/i.test(e?.message ?? '')) {
+      if (/no such table|no such column|not a database|malformed|has \d+ columns? but \d+ values|has no column named|cannot modify .* because it is a view/i.test(e?.message ?? '')) {
         // Verify the claim against the catalog before convicting — and
         // verify the SCHEMA, not the named string: the attacker authors
         // the message, so parsing a table name out of it lets case,
@@ -967,6 +995,15 @@ export class Store {
         const base0 = typeof e?.errcode === 'number' ? e.errcode & 0xFF : null;
         if (/not a database|malformed/i.test(e?.message ?? '') && (base0 === 11 || base0 === 26))
           throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e });
+        // A trigger-minted abort (1811) or a base-19 guard conviction is
+        // engine-proof of interference — the schema-shaped RAISE text
+        // cannot launder it out through the probe-ok exculpation arm
+        // (w75-fv F6.2): the probe answering 'ok' used to let a
+        // fabricated 'no such table' on 1811 escape raw.
+        if (e?.errcode === 1811)
+          throw new InvariantError('INV-409-INTEGRITY', 'Ledger write refused by a trigger — tamper evidence', 409, { cause: e });
+        if (base0 === 19)
+          throw new InvariantError('INV-409-INTEGRITY', `Ledger access refused by a constraint guard — tamper evidence: ${e?.message ?? 'sqlite error'}`, 409, { cause: e });
         if (this.#ledgerSchemaProbe() === 'diverged')
           throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e });
         // Every expected table stands — the claim was fabricated text;
@@ -1183,7 +1220,7 @@ export class Store {
           // retries, storage faults name storage; anything else rides
           // raw so the caller sees the real fault.
           const pb = typeof probe?.errcode === 'number' ? probe.errcode & 0xFF : null;
-          if (/no such table|no such column|not a database|malformed/i.test(probe?.message ?? '') || pb === 11 || pb === 26)
+          if (/no such table|no such column|not a database|malformed|has \d+ columns? but \d+ values|has no column named|cannot modify .* because it is a view/i.test(probe?.message ?? '') || pb === 11 || pb === 26)
             throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: probe });
           if (pb === 5 || pb === 6) throw new InvariantError('INV-503-LEDGER', 'Audit slot probe hit ledger contention — retry', 503, { cause: probe });
           if (pb !== null && [8, 10, 13, 14, 15].includes(pb)) throw new InvariantError('INV-503-STORAGE', `Audit slot probe hit a storage fault: ${probe?.message ?? ''}`, 503, { cause: probe });
@@ -1197,7 +1234,7 @@ export class Store {
       // sqlite noise on the write path (w44-store M-2) — but the claim
       // is verified against the catalog first: fabricated schema text
       // under SQLITE_ERROR convicts nothing (w73-seal F-1).
-      if (/no such table|no such column|not a database|malformed/i.test(raw?.message ?? '')) {
+      if (/no such table|no such column|not a database|malformed|has \d+ columns? but \d+ values|has no column named|cannot modify .* because it is a view/i.test(raw?.message ?? '')) {
         const rb = typeof raw?.errcode === 'number' ? raw.errcode & 0xFF : null;
         if ((/not a database|malformed/i.test(raw?.message ?? '') && (rb === 11 || rb === 26)) || this.#ledgerSchemaProbe() === 'diverged')
           throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e });

@@ -176,10 +176,20 @@ test('w73-seal F-2: a contended schema probe propagates its own classified fault
       throw Object.assign(new Error('database is locked'), { errcode: 5 });
     return orig(sql);
   };
+  // The w75 membership probe prepares fresh per table — the contended
+  // probe fault reaches it on db.prepare (w75-seal F-3's column-order
+  // check is why fresh prepare is required).
+  const origPrep = h.f.store.db.prepare.bind(h.f.store.db);
+  h.f.store.db.prepare = (sql) => {
+    if (String(sql).includes('LIMIT 0') && new Error().stack.includes('sealAuditChain'))
+      throw Object.assign(new Error('database is locked'), { errcode: 5 });
+    return origPrep(sql);
+  };
   healOnce(h, 'probe-busy-2');
   let e = null;
   try { h.f.sealAuditChain(h.p('security')); } catch (err) { e = err; }
   h.f.store._stmt = orig;
+  h.f.store.db.prepare = origPrep;
   assert.ok(e && e.code === 'INV-503-LEDGER' && /schema probe/i.test(e.message ?? ''),
     `a contended probe retries as INV-503-LEDGER, never tamper evidence: ${e?.code} ${e?.message}`);
   h.close();
@@ -219,8 +229,16 @@ test('w73-seal F-3/fv F-1: _schemaGuard verifies membership — fabricated names
       throw Object.assign(new Error('no such table: records'), { errcode: 1 });
     return orig(sql);
   };
+  // The w75 probe prepares fresh per table — same fault on db.prepare.
+  const origPrep2 = h.f.store.db.prepare.bind(h.f.store.db);
+  h.f.store.db.prepare = (sql) => {
+    if (String(sql).includes('LIMIT 0'))
+      throw Object.assign(new Error('no such table: records'), { errcode: 1 });
+    return origPrep2(sql);
+  };
   let e = null;
   try { h.f.store.get('acme', 'capsule', 'nope'); } catch (err) { e = err; }
+  h.f.store.db.prepare = origPrep2;
   assert.ok(e && e.code === 'INV-409-INTEGRITY', `a probe-diverged schema convicts: ${e?.code}`);
   // A corruption-family errcode is engine-only proof — no probe needed.
   h.f.store._stmt = (sql) => {
@@ -265,9 +283,16 @@ test('w73-seal F-1/fv F-2: the gate wrapper never re-convicts a fabricated schem
       throw Object.assign(new Error('no such table: audit'), { errcode: 1 });
     return orig(sql);
   };
+  const origPrep = h.f.store.db.prepare.bind(h.f.store.db);
+  h.f.store.db.prepare = (sql) => {
+    if (String(sql).includes('LIMIT 0'))
+      throw Object.assign(new Error('no such table: audit'), { errcode: 1 });
+    return origPrep(sql);
+  };
   e = null;
   try { h.f.simulate(h.p('policy-admin', 'acme'), cand); } catch (err) { e = err; }
   h.f.store._stmt = orig;
+  h.f.store.db.prepare = origPrep;
   assert.ok(e && e.code === 'INV-409-INTEGRITY', `a probe-diverged schema convicts at the gate: ${e?.code}`);
   h.close();
 });

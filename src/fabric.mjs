@@ -368,9 +368,16 @@ export class Fabric {
         // recreated missing tenant/value diverges identically to a
         // dropped table (w74-seal F-4). A probe that cannot answer
         // propagates its own fault — infrastructure, never a verdict.
-        try { src._stmt("SELECT tenant,key,value FROM meta_kv LIMIT 0").get(); }
+        try {
+          if (src.db.prepare('SELECT type FROM sqlite_master WHERE name=?').get('meta_kv')?.type !== 'table')
+            throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged (meta_kv substituted) — tamper evidence', 409, { cause: e });
+          const mkNames = src.db.prepare('SELECT * FROM meta_kv LIMIT 0').columns().map(c => c.name);
+          if (mkNames.length !== 3 || mkNames.some((n, i) => n !== ['tenant', 'key', 'value'][i]))
+            throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged (meta_kv dropped or column-drained) — tamper evidence', 409, { cause: e });
+        }
         catch (pe) {
-          if (/no such table|no such column|not a database|malformed/i.test(pe?.message ?? ''))
+          if (pe instanceof InvariantError) throw pe;
+          if (/no such table|no such column|not a database|malformed|has \d+ columns? but \d+ values|has no column named|cannot modify .* because it is a view/i.test(pe?.message ?? ''))
             throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged (meta_kv dropped or column-drained) — tamper evidence', 409, { cause: e });
           throw pe;
         }
@@ -1572,13 +1579,16 @@ export class Fabric {
     // faulted: the finally must then run the ordered recovery — a plain
     // RELEASE would COMMIT the span the catch meant to undo
     // (w74-runtime F-1).
-    let spanError; let rollbackFailed = false;
+    // `prev` scopes past the try so the dead-span arm's silent-commit
+    // audit can compare the durable marker to the pre-span snapshot
+    // (w75-fv F5.1/F5.2).
+    let spanError; let rollbackFailed = false; let prev;
     db.exec('SAVEPOINT residue_drain');
     try {
       let env, merged;
       // The standing marker is read once per drain — the retire arm uses
       // it for `prior`, and the murder gate below uses it for every drain.
-      const prev = db.prepare("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(tenant)?.value;
+      prev = db.prepare("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(tenant)?.value;
       // A standing marker that does not authenticate no longer stands
       // forever: leaving it in place wedged every future mint — the mint
       // gate refused to overwrite it and the keep triggers made it
@@ -1781,6 +1791,11 @@ export class Fabric {
         if (rolledBack) { try { db.exec('RELEASE residue_drain'); } catch { /* name resolves with the enclosing tx */ } }
         if (!callerInTx && db.isTransaction) {
           try { db.exec('ROLLBACK'); } catch { /* the zombie refused */ }
+          // The reap rides out UNDER the in-flight error — replacing
+          // spanError with a retry-class 503 would hide a defeat from the
+          // retire's classifier (w75-seal F-4). With nothing in flight
+          // the named refusal is the error.
+          if (spanError !== undefined) throw spanError;
           throw new InvariantError('INV-503-LEDGER', 'residue drain savepoint release faulted — leaked transaction rolled back', 503, { cause: releaseErr ?? rbErr });
         }
         if (!rolledBack) {
@@ -1792,6 +1807,25 @@ export class Fabric {
           // `rbErr` catches the caller-in-tx case where the name is
           // gone but the caller's transaction still lives.
           if (!db.isTransaction || /no such savepoint/i.test(rbErr?.message ?? '')) {
+            // Silent-commit audit (w75-fv F5.1/F5.2): a foreign COMMIT
+            // inside the span ends the transaction with the span's
+            // writes durable — 'destroyed' would then lie. With the
+            // transaction gone, autocommit reads see committed state:
+            // a changed marker, the drained heal rows gone, or the keep
+            // triggers still dropped all prove the span committed
+            // externally — convict it instead of reporting defeat.
+            if (!db.isTransaction) {
+              const landed = (() => {
+                try {
+                  const cur = db.prepare("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(tenant)?.value;
+                  if (cur !== prev) return true;
+                  if (values.length && db.prepare("SELECT COUNT(*) c FROM meta_kv WHERE tenant=? AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.')").get(tenant)?.c === 0) return true;
+                  return (db.prepare("SELECT COUNT(*) c FROM sqlite_master WHERE type='trigger' AND name IN ('fold_residue_keep','fold_residue_keep_upd','fold_residue_keep_ins')").get()?.c ?? 3) < 3;
+                } catch { return null; }
+              })();
+              if (landed === true)
+                throw new InvariantError('INV-409-INTEGRITY', 'residue drain committed outside its savepoint — a foreign commit landed the span writes under a defeat verdict', 409, { marker_defeated: 'fold_floor_retired' });
+            }
             if (spanError !== undefined) throw spanError;
             throw new InvariantError('INV-503-LEDGER', 'residue drain savepoint destroyed with its transaction', 503, { cause: releaseErr ?? rbErr });
           }
@@ -1931,6 +1965,9 @@ export class Fabric {
     // rollback that faulted skips the finally's plain RELEASE — it
     // would COMMIT the span the catch meant to undo.
     let spanError; let rollbackFailed = false;
+    // `prev` hoists like the drain's — the finally's silent-commit audit
+    // compares the durable marker against the pre-span row (w75-fv F5.1).
+    let prev;
     // Same savepoint doctrine as the drain's note: the trigger drops,
     // the write and the landed probe are one atomic span — a mid-span
     // fault rolls back to guards-intact, never leaves them absent on
@@ -1954,7 +1991,7 @@ export class Fabric {
       db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
       db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
       db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
-      const prev = db.prepare("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(tenant)?.value;
+      prev = db.prepare("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(tenant)?.value;
       let prior = [];
       let pa = null;
       let markerFresh = false;
@@ -2072,6 +2109,11 @@ export class Fabric {
         throw (spanError = new InvariantError('INV-503-LEDGER', 'Deferred retired-mint apply hit ledger contention — retry', 503, { cause: e }));
       if ([8, 10, 11, 13, 14, 15].includes(base))
         throw (spanError = new InvariantError('INV-503-STORAGE', `Deferred retired-mint apply hit a storage fault: ${msg}`, 503, { cause: e }));
+      // NOMEM/INTERRUPT/SCHEMA are engine faults — the store guard
+      // calls the same bases honest infrastructure, and a durable
+      // marker_defeated must never disagree (w75-seal F-5).
+      if (base !== null && [7, 9, 17].includes(base))
+        throw (spanError = new InvariantError('INV-503-LEDGER', `Deferred retired-mint apply hit a ledger engine fault: ${msg}`, 503, { cause: e }));
       // Everything else — a foreign trigger abort, a constraint the
       // honest UPSERT cannot hit, a schema break — is a refused write:
       // evidence, not contention. The flag names the claims it dropped
@@ -2107,14 +2149,42 @@ export class Fabric {
         if (rolledBack) { try { db.exec('RELEASE deferred_mint'); } catch { /* name resolves with the enclosing tx */ } }
         if (!callerInTx && db.isTransaction) {
           try { db.exec('ROLLBACK'); } catch { /* the zombie refused */ }
+          // Same doctrine as the drain reap: the in-flight error keeps
+          // its evidence class (w75-seal F-4) — a raw 1811 must reach
+          // the classifier, not be masked by the retryable 503.
+          if (spanError !== undefined) throw spanError;
           throw new InvariantError('INV-503-LEDGER', 'deferred mint savepoint release faulted — leaked transaction rolled back', 503, { cause: releaseErr ?? rbErr });
         }
+        // The try succeeded but the commit edge faulted and the proved
+        // rollback discarded the apply's writes — nothing was in flight
+        // to report it (w75-runtime F-4). Name the discard so the seal
+        // carrier rides deferred_apply_error; the queue survives because
+        // its delete below is gated on `released`.
+        if (rolledBack && !released && spanError === undefined)
+          throw new InvariantError('INV-503-LEDGER', 'deferred mint apply rolled back — the release fault discarded the span; queued claims retained for replay', 503, { cause: releaseErr ?? rbErr });
         if (!rolledBack) {
           // Dead-vs-unresolved parity with the drain (w74-seal F-1): a
           // tx-destroying fault already ended the span — restore the
           // in-flight error instead of minting 'unresolved savepoint'
           // over it.
           if (!db.isTransaction || /no such savepoint/i.test(rbErr?.message ?? '')) {
+            // Silent-commit audit (w75-fv F5.1): a foreign COMMIT inside
+            // the span ends the transaction with the apply's writes
+            // durable — 'destroyed' would lie while the marker and the
+            // dropped guards stand committed. A marker differing from
+            // the pre-span row (the mint's UPSERT or the murder's delete
+            // landed) or still-absent keep triggers prove it.
+            if (!db.isTransaction) {
+              const landed = (() => {
+                try {
+                  const cur = db.prepare("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(tenant)?.value;
+                  if (cur !== prev) return true;
+                  return (db.prepare("SELECT COUNT(*) c FROM sqlite_master WHERE type='trigger' AND name IN ('fold_residue_keep','fold_residue_keep_upd','fold_residue_keep_ins')").get()?.c ?? 3) < 3;
+                } catch { return null; }
+              })();
+              if (landed === true)
+                throw new InvariantError('INV-409-INTEGRITY', 'deferred mint apply committed outside its savepoint — a foreign commit landed the marker under a defeat verdict', 409, { marker_defeated: 'fold_floor_retired' });
+            }
             if (spanError !== undefined) throw spanError;
             throw new InvariantError('INV-503-LEDGER', 'deferred mint savepoint destroyed with its transaction', 503, { cause: releaseErr ?? rbErr });
           }
@@ -3001,6 +3071,10 @@ export class Fabric {
               // transaction; `rollbackFailed` skips a plain RELEASE
               // that would commit the span the catch meant to undo.
               let spanError; let rollbackFailed = false;
+              // `noteWrite` holds the exact bytes the span wrote — the
+              // dead-span arm's silent-commit audit compares the
+              // durable marker against them (w75-fv F5.2).
+              let noteWrite = null;
               db.exec('SAVEPOINT residue_note');
               try {
                 // The sign re-enters the fold, whose residue-mint window
@@ -3015,7 +3089,8 @@ export class Fabric {
                 db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
                 db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
                 db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
-                db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES (?, 'fold_floor_retired', ?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, JSON.stringify({ claims: prior, env: noteEnv }));
+                noteWrite = JSON.stringify({ claims: prior, env: noteEnv });
+                db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES (?, 'fold_floor_retired', ?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, noteWrite);
                 // The note is a security write like every other on this
                 // plane: read it back and require the landed content to
                 // carry the retiring set — a foreign trigger that ate or
@@ -3056,7 +3131,7 @@ export class Fabric {
                     // the mints proceed unsigned — name the transient
                     // window instead of sealing silently (w73-fv F-3).
                     try { this.#wmTamperClaimList(tenant, 'floor_marker_retired_note_rolled_back', mintable); } catch { /* flagging never wedges the rollback */ }
-                    try { db.exec('RELEASE residue_note'); } catch (re2) { throw new InvariantError('INV-503-LEDGER', 'residue note savepoint failed to resolve — open transaction holds pending writes', 503, { cause: re2 }); }
+                    try { db.exec('RELEASE residue_note'); } catch { /* name resolves with the enclosing tx — the reap arm below must still run (w75-runtime F-1: a throw here preempted the reap and leaked the implicit transaction) */ }
                   }
                   // Drain parity (w74-seal F-2): an autocommit note
                   // whose release faulted leaks its implicit
@@ -3064,6 +3139,10 @@ export class Fabric {
                   // writes join a doomed span.
                   if (!callerInTx && db.isTransaction) {
                     try { db.exec('ROLLBACK'); } catch { /* the zombie refused */ }
+                    // Reap under the in-flight error like the sibling
+                    // spans — a retryable 503 must never mask the
+                    // original fault's evidence class (w75-seal F-4).
+                    if (spanError !== undefined) throw spanError;
                     throw new InvariantError('INV-503-LEDGER', 'residue note savepoint release faulted — leaked transaction rolled back', 503, { cause: releaseErr ?? rbErr });
                   }
                   if (!rolledBack) {
@@ -3073,6 +3152,23 @@ export class Fabric {
                     // error rather than minting 'unresolved savepoint'
                     // over it.
                     if (!db.isTransaction || /no such savepoint/i.test(rbErr?.message ?? '')) {
+                      // Silent-commit audit (w75-fv F5.2): a foreign
+                      // COMMIT inside the span lands the marker and the
+                      // guard drops durably while 'destroyed' reports a
+                      // defeat. The durable marker carrying our written
+                      // bytes, or still-absent keep triggers, prove it —
+                      // convict the external commit instead.
+                      if (!db.isTransaction) {
+                        const landed = (() => {
+                          try {
+                            const cur = db.prepare("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(tenant)?.value;
+                            if (noteWrite !== null && cur === noteWrite) return true;
+                            return (db.prepare("SELECT COUNT(*) c FROM sqlite_master WHERE type='trigger' AND name IN ('fold_residue_keep','fold_residue_keep_upd','fold_residue_keep_ins')").get()?.c ?? 3) < 3;
+                          } catch { return null; }
+                        })();
+                        if (landed === true)
+                          throw new InvariantError('INV-409-INTEGRITY', 'residue note committed outside its savepoint — a foreign commit landed the marker under a destroy verdict', 409, { marker_defeated: 'fold_floor_retired' });
+                      }
                       if (spanError !== undefined) throw spanError;
                       throw new InvariantError('INV-503-LEDGER', 'residue note savepoint destroyed with its transaction', 503, { cause: releaseErr ?? rbErr });
                     }
@@ -3130,6 +3226,11 @@ export class Fabric {
           throw new InvariantError('INV-503-LEDGER', 'Residue retire hit ledger contention — retry', 503, { cause: e });
         if ([8, 10, 11, 13, 14, 15].includes(base))
           throw new InvariantError('INV-503-STORAGE', `Residue retire hit a storage fault: ${msg}`, 503, { cause: e });
+        // Engine bases ride the same class the store guard gives them
+        // — a durable defeat flag must never convict infrastructure
+        // (w75-seal F-5).
+        if (base !== null && [7, 9, 17].includes(base))
+          throw new InvariantError('INV-503-LEDGER', `Residue retire hit a ledger engine fault: ${msg}`, 503, { cause: e });
         try { if (this.store._stmt("SELECT 1 FROM meta_kv LIMIT 1").get() !== undefined) this.#wmTamperClaimList(tenant, 'floor_marker_retired_marker_defeated', claims); } catch { /* table really is gone */ }
       }
     const cur = cur0;
@@ -3627,14 +3728,27 @@ export class Fabric {
   // real); a probe that cannot run at all throws its own fault —
   // infrastructure, never a tamper verdict.
   #schemaProbe() {
-    try {
-      this.store._stmt("SELECT tenant,seq,previous,hash,envelope FROM audit LIMIT 0").get();
-      this.store._stmt("SELECT tenant,key,value FROM meta_kv LIMIT 0").get();
-      return 'ok';
-    } catch (pe) {
-      if (/no such table|no such column|not a database|malformed/i.test(pe?.message ?? '')) return 'diverged';
-      throw pe;
+    // `SELECT *` + columns() so a REORDERED or widened same-arity table
+    // diverges like a dropped one — positional inserts write into wrong
+    // columns silently when only the column SET is verified (w75-runtime
+    // F-3). The catalog type check convicts a substituted VIEW — identical
+    // columns, no trigger surface (w75-seal F-3). Fresh prepare per
+    // probe: a cached statement's column metadata can outlive the schema
+    // change it must see.
+    for (const [table, cols] of [
+      ['audit', ['tenant', 'seq', 'previous', 'hash', 'envelope']],
+      ['meta_kv', ['tenant', 'key', 'value']],
+    ]) {
+      try {
+        if (this.store.db.prepare('SELECT type FROM sqlite_master WHERE name=?').get(table)?.type !== 'table') return 'diverged';
+        const names = this.store.db.prepare(`SELECT * FROM ${table} LIMIT 0`).columns().map(c => c.name);
+        if (names.length !== cols.length || names.some((n, i) => n !== cols[i])) return 'diverged';
+      } catch (pe) {
+        if (/no such table|no such column|not a database|malformed|has \d+ columns? but \d+ values|has no column named|cannot modify .* because it is a view/i.test(pe?.message ?? '')) return 'diverged';
+        throw pe;
+      }
     }
+    return 'ok';
   }
   // Classify a schema-claim error `e`: throws INV-409 when the claim is
   // PROVEN (a corruption-family errcode, which only the engine mints, or
@@ -3645,7 +3759,7 @@ export class Fabric {
   // `e` by its own errcode arms.
   #schemaClaim(e, what) {
     const msg = e?.message ?? '';
-    if (!/no such table|no such column|not a database|malformed/i.test(msg)) return 'none';
+    if (!/no such table|no such column|not a database|malformed|has \d+ columns? but \d+ values|has no column named|cannot modify .* because it is a view/i.test(msg)) return 'none';
     const base = typeof e?.errcode === 'number' ? e.errcode & 0xFF : null;
     // SQLITE_CORRUPT(11)/SQLITE_NOTADB(26) come only from the engine —
     // a RAISE cannot mint them, so the errcode alone proves corruption

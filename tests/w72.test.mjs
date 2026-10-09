@@ -106,9 +106,19 @@ test('w72-seal F-2/F-6: consult schema claims are probe-verified — attacker te
       throw Object.assign(new Error('no such table: meta_kv'), { errcode: 1 });
     return orig(sql);
   };
+  // The w75 probe prepares fresh per table (cached column metadata can
+  // outlive the schema change it must see — F6.1) — the fault reaches
+  // it on db.prepare, not store._stmt.
+  const origPrep = h.f.store.db.prepare.bind(h.f.store.db);
+  h.f.store.db.prepare = (sql) => {
+    if (String(sql).includes('LIMIT 0') && new Error().stack.includes('sealAuditChain'))
+      throw Object.assign(new Error('no such table: meta_kv'), { errcode: 1 });
+    return origPrep(sql);
+  };
   e = null;
   try { h.f.sealAuditChain(h.p('security')); } catch (err) { e = err; }
   h.f.store._stmt = orig;
+  h.f.store.db.prepare = origPrep;
   assert.ok(e && e.code === 'INV-409-INTEGRITY', `a probe-failing schema fault convicts divergence: ${e?.code}`);
   // The consult INV-409 carries no `marker_defeated` details — the apply's
   // keyed re-latch must not mint a defeat flag off a bare verdict

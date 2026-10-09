@@ -1678,16 +1678,40 @@ def _live_code(text, raw=None):
     # `for..of` over ANY object literal throws — objects are not
     # iterable — so the body is dead whatever the literal holds
     # (w62-ledger F-9). Non-empty strings DO iterate and stay live.
-    for m in re.finditer(r'\bfor\s*\([^)]*\bof\s*(?:' + empty_lit + r'|\{[^{}]*\}|\d+(?:\.\d+)?[nN]?|false|true|null|undefined)\s*\)', text):
-        j = m.end()
+    # The head is walked with balanced parens, not `[^)]*` — `for await`
+    # sits between `for` and `(`, and a parenthesized binding
+    # (`for ((v) of [])`, `for await (const v of [])`) puts `)` before
+    # `of` and used to defeat the flat scan entirely (w75-ledger F-3).
+    def _head_operand(head, kw):
+        d = 0; last = None
+        for km in re.finditer(r'[()]|\b' + kw + r'\b', head):
+            c = km.group(0)
+            if c == '(': d += 1
+            elif c == ')': d -= 1
+            elif d == 0: last = km
+        return None if last is None else head[last.end():].strip()
+    # ANY object literal is a dead `of` operand (objects are not
+    # iterable) but only the EMPTY ones are a dead `in` operand — a
+    # populated literal still enumerates its keys (w75-ledger F-3).
+    dead_op_of = r'(?:' + empty_lit + r'|\{[^{}]*\}|\d+(?:\.\d+)?[nN]?|false|true|null|undefined)'
+    dead_op_in = r'(?:' + empty_lit + r'|\d+(?:\.\d+)?[nN]?|false|true|null|undefined)'
+    for m in re.finditer(r'\bfor\s*(?:await\s+)?\(', text):
+        he = _paren_end(text, m.end() - 1)
+        # _paren_end is exclusive — the head slice stops before the `)`
+        opnd = _head_operand(text[m.end():he - 1], 'of')
+        if opnd is None or not re.fullmatch(dead_op_of, opnd): continue
+        j = he
         while j < len(text) and text[j] in ' \t\n': j += 1
         if j < len(text) and text[j] == '{': spans.append((j, _paren_end(text, j)))
         else: spans.append((j, _one_stmt(text, j)))
     # `for..in` over an empty/non-object operand iterates zero times —
     # `{}`, `0`, `null`, `''` (w61-ledger F-4). Non-empty strings DO
     # enumerate indices and stay live.
-    for m in re.finditer(r'\bfor\s*\([^)]*\bin\s*(?:' + empty_lit + r'|\d+(?:\.\d+)?[nN]?|false|true|null|undefined)\s*\)', text):
-        j = m.end()
+    for m in re.finditer(r'\bfor\s*(?:await\s+)?\(', text):
+        he = _paren_end(text, m.end() - 1)
+        opnd = _head_operand(text[m.end():he - 1], 'in')
+        if opnd is None or not re.fullmatch(dead_op_in, opnd): continue
+        j = he
         while j < len(text) and text[j] in ' \t\n': j += 1
         if j < len(text) and text[j] == '{': spans.append((j, _paren_end(text, j)))
         else: spans.append((j, _one_stmt(text, j)))

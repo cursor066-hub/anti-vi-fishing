@@ -96,10 +96,16 @@ test('w74-runtime F-1: a faulted catch-arm rollback never commits the drain span
   // and propagates. The first catch-arm ROLLBACK TO faults once. Under
   // the buggy shape the first drain's RELEASE then committed its dropped
   // keep triggers; every later rollback only undoes its own span.
-  let rbOnce = true;
+  let rbOnce = true; let fired = 0;
   h.f.store.db.prepare = (sql) => {
     const s = String(sql), st = new Error().stack;
-    if (s.includes('INSERT INTO meta_kv') && s.includes("'fold_floor_retired'") && st.includes('residueValueDelete')) {
+    // The marker UPSERT actually executes inside #wmTamperRetire's
+    // residue_note span (or a non-deferred drain's residueValueDelete)
+    // — gating on residueValueDelete alone never fired (w75-fv F5.3:
+    // the test was green-but-vacuous, fired=0).
+    if (s.includes('INSERT INTO meta_kv') && s.includes("'fold_floor_retired'")
+        && (st.includes('wmTamperRetire') || st.includes('residueValueDelete'))) {
+      fired++;
       const stmt = origPrep(s);
       stmt.run = () => { throw Object.assign(new Error('refused by trigger: fold-floor'), { errcode: 1811 }); };
       return stmt;
@@ -107,13 +113,14 @@ test('w74-runtime F-1: a faulted catch-arm rollback never commits the drain span
     return origPrep(s);
   };
   h.f.store.db.exec = (sql) => {
-    if (rbOnce && sql === 'ROLLBACK TO residue_drain') { rbOnce = false; throw Object.assign(new Error('disk I/O error'), { errcode: 10 }); }
+    if (rbOnce && /^ROLLBACK TO residue_(?:drain|note)$/.test(sql)) { rbOnce = false; throw Object.assign(new Error('disk I/O error'), { errcode: 10 }); }
     return origExec(sql);
   };
   let res = null;
   try { res = h.f.sealAuditChain(h.p('security')); } catch (err) { res = { threw: err }; }
   h.f.store.db.exec = origExec;
   h.f.store.db.prepare = origPrep;
+  assert.ok(fired > 0, `the marker-write fault actually injected — the test is not vacuous (fired=${fired})`);
   assert.equal(h.f.store.db.isTransaction, false, 'no zombie transaction survives the refused unwind');
   assert.ok(keepExists(h), 'the keep-trigger drops rolled back with every span — never committed dirty');
   assert.ok(!res?.threw || res.threw.code !== 'INV-503-LEDGER',
@@ -273,18 +280,26 @@ test('w74-seal F-5: a corruption-family probe fault convicts INV-409, never stor
   healOnce(h, 'pb-corrupt');
   h.f.sealAuditChain(h.p('security'));
   const orig = h.f.store._stmt.bind(h.f.store);
+  const origP = h.f.store.db.prepare.bind(h.f.store.db);
   h.f.store._stmt = (sql) => {
     const s = String(sql), st = new Error().stack;
     if (s.includes("key='fold_floor_retired'") && st.includes('sealAuditChain'))
       throw Object.assign(new Error('no such table: meta_kv'), { errcode: 1 });
+    return orig(sql);
+  };
+  // The schema probes prepare fresh statements (w75-runtime F-3) — the
+  // faulted LIMIT-0 lands through db.prepare, never the _stmt cache.
+  h.f.store.db.prepare = (sql) => {
+    const s = String(sql), st = new Error().stack;
     if (s.includes('LIMIT 0') && st.includes('sealAuditChain'))
       throw Object.assign(new Error('database disk image is malformed at page 7'), { errcode: 11 });
-    return orig(sql);
+    return origP(s);
   };
   healOnce(h, 'pb-corrupt-2');
   let e = null;
   try { h.f.sealAuditChain(h.p('security')); } catch (err) { e = err; }
   h.f.store._stmt = orig;
+  h.f.store.db.prepare = origP;
   assert.ok(e && e.code === 'INV-409-INTEGRITY',
     `a corruption-family probe fault convicts INV-409: ${e?.code} ${e?.message}`);
   h.close();
