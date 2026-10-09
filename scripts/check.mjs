@@ -67,7 +67,21 @@ if (tracked.status === 0) {
   };
   walkText('.');
 }
-const isBinary = file => { try { const buf = readFileSync(file); return buf.subarray(0, Math.min(buf.length, 8192)).includes(0); } catch { return true; } };
+// A single NUL byte used to exempt the whole file from every
+// secret/sink/marker rule — `\x00` + a private key passed every scan
+// (w71-ledger F-5). Binary detection needs EVIDENCE: NUL density
+// (≥1% of the head — real binaries are dense, one planted byte is not)
+// or an undecodable UTF-8 head.
+const isBinary = file => {
+  try {
+    const buf = readFileSync(file);
+    const head = buf.subarray(0, Math.min(buf.length, 8192));
+    let nul = 0;
+    for (const b of head) if (b === 0) nul++;
+    if (head.length > 0 && nul / head.length >= 0.01) return true;
+    try { new TextDecoder('utf-8', { fatal: true }).decode(head); return false; } catch { return true; }
+  } catch { return true; }
+};
 for (const file of textFiles) {
   if (!existsSync(file) || isBinary(file)) continue;
   const s = readFileSync(file, 'utf8');
@@ -565,6 +579,9 @@ const dispOperandCls = op => {
   // leading member compare in `(m[1]==='a', flag)` never gates it, so
   // the whole operand is impure (w64-fv F-4).
   let tt = t;
+  // `!!` is a truthiness wrap, not a negation — `!!(m[2]==='x')` classifies
+  // like the bare compare; a lone `!` stays impure (w71-fv F-3).
+  while (tt.startsWith('!!')) tt = tt.slice(2).trim();
   if (tt.startsWith('(') && tt.endsWith(')')) tt = tt.slice(1, -1).trim();
   if (tt !== '') {
     let d = 0, q = null, lastComma = -1;
@@ -583,11 +600,20 @@ const dispOperandCls = op => {
   }
   // `?.` is optional-chaining on the member itself (`m?.[1]==='a'`),
   // not a `?:` gate — strip it before the ternary test (w64-ledger F-4).
-  if (t === '' || t.startsWith('!') || /[?:]/.test(t.replace(/\?\./g, ''))) return 'impure';
+  if (tt === '' || tt.startsWith('!') || /[?:]/.test(tt.replace(/\?\./g, ''))) return 'impure';
+  // A `typeof`-headed operand is a type predicate, not a member-vs-verb
+  // compare — `typeof m[2]==='string'` deciding as membercmp let its
+  // literal poison the arm's verb scoping while the fold could not see
+  // it (w71-fv F-3). litPrim still folds the predicate itself.
+  if (/^\s*\(?\s*typeof\b/.test(tt)) return 'impure';
   DISP_MEMBER.lastIndex = 0;
-  const member = DISP_MEMBER.test(t); DISP_MEMBER.lastIndex = 0;
-  const cmp = /[!=]==?/.test(t);
-  if (member && cmp) return /!={1,2}/.test(t) ? 'memberneg' : 'membercmp';
+  const member = DISP_MEMBER.test(tt); DISP_MEMBER.lastIndex = 0;
+  const cmp = /[!=]==?/.test(tt);
+  if (member && cmp) return /!={1,2}/.test(tt) ? 'memberneg' : 'membercmp';
+  // The bind shape needs the operand's OWN `(…)` wrapper — `(m =
+  // /re/.exec(path))` — so it tests the unstripped view: the `tt` view
+  // already dropped exactly the paren context the regex anchors on
+  // (w71 self-regression — every dispatch head read 'impure').
   if (/\(\s*[A-Za-z_$][\w$]*\s*=[^=]/.test(t) && /\.(?:exec|test|match)\s*\(/.test(t)) return 'bind';
   // A compare is serving-material only when it tests a dispatch field —
   // `path === '/x'`, `req.method === 'GET'`. `flag === 'on'` /
@@ -647,6 +673,11 @@ const siblingArm = (condPair, verbPos, verb, verbMembers, posMember, posVerb = n
       // An unfolded `!==` is never a kill — its runtime gamble makes
       // the arm conditional, not foreign-dead (w67-fv F-1).
       if (dispOperandCls(op.t) !== 'memberneg') {
+        // `typeof m[N]==='literal'` is a type predicate — the `m[N]===`
+        // fragment inside it is not a member-vs-verb compare and must
+        // not decide the side; litPrim still folds the predicate
+        // (w71-fv F-3).
+        if (/^\s*\(?\s*typeof\b/.test(op.t)) continue;
         let pm, pmPos;
         for (const [p, mem] of posMember ?? []) if (p >= op.a && p < op.b) { pm = mem; pmPos = p; break; }
         // An operator-negated pair (`q[2]!=='z'`, an alias surface the
@@ -866,8 +897,15 @@ const litPrim = (e0, known) => {
   // F-3: folding to 'x' dead-armed `typeof v === 'string'` live code).
   // An unknowable operand yields the LV_TYPEOF marker — provably a
   // nonempty type string whose comparisons cannot fold.
-  if (/^typeof\s/.test(t)) {
-    const tv = litPrim(t.slice(6), known);
+  if (/^typeof[\s(]/.test(t)) {
+    // A route capture is always a string — `typeof m[2]` folds 'string'
+    // even though the member's VALUE is unknowable; a `typeof
+    // m[2]==='string'` conjunct used to stay live-conditional and hide an
+    // unconditional mint behind it (w71-fv F-3). Aliased receivers
+    // (`q[2]`) stay LV_TYPEOF — under-approximate by design.
+    const td = t.slice(6).replace(/^\s*\(([\s\S]*)\)\s*$/, '$1').trim();
+    if (/^m\s*(?:\?\s*\.\s*)?(?:\[\s*[^\]]+\s*\]|(?:\?\s*\.\s*|\.\s*)at\s*(?:\?\s*\.\s*)?\(\s*[^)]*\))\s*$/.test(td)) return 'string';
+    const tv = litPrim(td, known);
     if (tv === LV_UNK) return LV_TYPEOF;
     if (tv === LV_TYPEOF) return 'string';
     if (typeof tv === 'string') return 'string';
@@ -877,7 +915,7 @@ const litPrim = (e0, known) => {
     if (tv === undefined) return 'undefined';
     if (tv === LV_ARR) return 'object';
     if (typeof tv === 'object' && tv.newCtor !== undefined) return tv.newCtor === 'Function' ? 'function' : 'object';
-    if (tv === LV_OBJ) return /^\s*(?:async\s+)?(?:function|class)\b|=>/.test(t.slice(6)) ? 'function' : 'object';
+    if (tv === LV_OBJ) return /^\s*(?:async\s+)?(?:function|class)\b|=>/.test(td) ? 'function' : 'object';
     return LV_TYPEOF;
   }
   const sm = /^(['"`])((?:\\.|(?!\1)[^\\])*)\1$/s.exec(t);
@@ -998,7 +1036,16 @@ const conditionalTerm = (lm, term) => {
 // before the member negates the compare.
 const negatedCompare = (lm, term, memberStart) => {
   if (!term) return true;
-  return logicalScan(lm, term[0], memberStart, (c, k) => c === '!' && lm[k + 1] !== '=');
+  // `!!` re-negates to the same compare — only an ODD count of `!`
+  // operators before the member makes the compare negated, so
+  // `!!(m[2]==='x')` binds the identical pair `m[2]==='x'` binds
+  // (w71-fv F-3).
+  let bangs = 0;
+  logicalScan(lm, term[0], memberStart, (c, k) => {
+    if (c === '!' && lm[k + 1] !== '=') bangs++;
+    return false;
+  });
+  return bangs % 2 === 1;
 };
 // `default:` mints its arm under every verb no case label binds —
 // emitted as a sentinel pair verb so `p.verb === v` still reads the
@@ -1032,6 +1079,9 @@ const memberCmpFold = (t, verb, verbMembers, posMember = null, posVerb = null, b
     }
     const cs = topSplit(s, [',']);
     if (cs !== null) { s = cs.parts[cs.parts.length - 1]; changed = true; }
+    // `!!` is a truthiness wrap, not a negation — `!!(m[2]==='x')` decides
+    // the identical compare; a lone `!` is never stripped (w71-fv F-3).
+    if (s.startsWith('!!')) { s = s.slice(2).trim(); changed = true; }
     tt = s;
     if (!changed) break;
   }
@@ -2805,7 +2855,7 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
     // `.g` member reads, `g:`-key positions, `function g`/`g: function`
     // headers, decl name tokens, and occurrences inside the decl's own
     // body.
-    const CALLBACK_CONSUMER = /(?:\bsetTimeout|\bsetInterval|\bsetImmediate|\bqueueMicrotask|\brequestAnimationFrame|\bnextTick|\baddEventListener|\bReflect\s*\.\s*(?:apply|construct)|\.(?:then|catch|finally|on|once|addEventListener|forEach|map|filter|reduce|find|sort|flatMap|every|some))\s*\([^)]*$/;
+    const CALLBACK_CONSUMER = /(?:\bsetTimeout|\bsetInterval|\bsetImmediate|\bqueueMicrotask|\brequestAnimationFrame|\bnextTick|\baddEventListener|\bPromise\s*\.\s*try|\bReflect\s*\.\s*(?:apply|construct)|\.(?:then|catch|finally|on|once|addEventListener|forEach|map|filter|reduce|find|sort|flatMap|every|some))\s*\([^)]*$/;
     const escapes = new Set();
     for (const d of decls) {
       if (escapes.has(d.name)) continue;
@@ -2832,10 +2882,25 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
           // the masked view, so the raw line supplies the tell (positions
           // align — maskStrings preserves them).
           const rawAfter = lines[lo + i].slice(wi + d.name.length);
+          const rawBefore = lines[lo + i].slice(0, wi).trimEnd();
           if (/^\s*\(/.test(after) || /^\s*\?\s*\.\s*\(/.test(after) || /^\s*`/.test(rawAfter)
             || /^\s*\.\s*(?:call|apply|bind)\b/.test(after) || /^\s*\?\s*\.\s*(?:call|apply|bind)\b/.test(after)
-            || (/\(\s*$/.test(before) && /^\s*\)\s*\(/.test(after))
+            // `g['call'](x)`/`g?.['apply'](x)` — bracket-member invocation
+            // spellings the dot list cannot see; strings are blanked on
+            // the masked view so the raw line supplies the member name
+            // (w71-fv F-2).
+            || /^\s*(?:\?\s*\.\s*)?\[\s*['"`](?:call|apply|bind)['"`]\s*\]\s*(?:\?\s*\.\s*)?\(/.test(rawAfter)
+            // `(0,g)()` — the comma-call idiom invokes the operand list's
+            // LAST element; the name followed by `)(` closes the group
+            // and calls it. `foo(x,g)(y)` over-flags (g is an argument,
+            // not the callee) — the safe direction for an audit surface
+            // (w71-fv F-2).
+            || (/[(,]\s*$/.test(before) && /^\s*\)\s*\(/.test(after))
             || /\bnew\s*$/.test(before)
+            // `el.onclick = g`/`el['onclick'] = g` — an `on*` receiver
+            // assigns a host-invoked handler; over-flags a plain property
+            // store named on* — again the safe direction (w71-fv F-2).
+            || /\.on[A-Za-z_$][\w$]*\s*=\s*$/.test(before) || /\[\s*['"`]on[^'"`]*['"`]\s*\]\s*=\s*$/.test(rawBefore)
             || CALLBACK_CONSUMER.test(before)) {
             escapes.add(d.name); found = true; break;
           }
@@ -3718,20 +3783,50 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
     // (w58-ledger F6); custom credential helpers count too
     // (w58-ledger F13).
     const AUTH_CALL = /\b(?:auth|authenticateToken|authBreakglass|authorize|anyBearer|bearerMatches|issuerAuthOk|bearerDigest|verifyJwt|bearer|verifyBearer|checkAuth)\s*\(\s*(?:req\b|p\b|request\b)?/g;
+    // Throwing calls enforce in bare statement position — `authorize(p)`
+    // dies on denial. PREDICATES (`bearerMatches`, `checkAuth`, `anyBearer`
+    // …) return a verdict: a discarded `bearerMatches('x','y');` call
+    // resolved nothing yet minted 'issuer bearer token' rows
+    // (w71-ledger F-4). A predicate counts only behind a gate-shaped
+    // use — condition position, a comparator/logic continuation,
+    // `return`, a `?`/`:`/`??` operand, an argument position, or an
+    // assignment whose binding is read later in the arm.
+    const AUTH_THROW = /^\s*(?:auth|authenticateToken|authBreakglass|authorize)\s*\(/;
     const unguardedAuth = hi === -1 ? false : (() => {
       const d = deadState();
       const dM = deadState();
       const tr = condTracker();
       let sd = 0;
+      const winMasked = [];
+      for (let i = hi; i < wEnd; i++) winMasked[i - hi] = maskStrings(stripDead(lines[i], d), d);
       for (let i = hi; i < wEnd; i++) {
-        const ml = maskStrings(stripDead(lines[i], d), d);
+        const ml = winMasked[i - hi];
         // Iteration over a collection is a credential resolver's
         // traversal, not a gate — `for` bodies count as unguarded scope
         // here (while/if/switch arms stay conditional).
         const scan = tr.line(ml, sd, i === hi ? 'ours' : null, maskStrings(blankBlock(stripComment(lines[i]), dM), dM), true);
         sd = scan.endDepth;
-        for (const m of ml.matchAll(AUTH_CALL))
-          if (!windowDeadFn.has(i) && !scan.condPosDeep[m.index] && !guardedPrefix(ml, m.index, scan.livePos[m.index] ? scan.liveArm[m.index] : undefined)) return true;
+        for (const m of ml.matchAll(AUTH_CALL)) {
+          if (windowDeadFn.has(i) || scan.condPosDeep[m.index] || guardedPrefix(ml, m.index, scan.livePos[m.index] ? scan.liveArm[m.index] : undefined)) continue;
+          if (AUTH_THROW.test(m[0])) return true;
+          const before = ml.slice(0, m.index).trimEnd();
+          const after = ml.slice(m.index + m[0].length);
+          // Gate-shaped contexts: `if (!call(`, `x && call(`, `ok ? call(`,
+          // `return call(`, `!call(`, `outer(call(`, `x ?? call(`. A call
+          // result feeding `&&`/`||`/`?:`/`??`/a comparison is used.
+          if (/(?:if\s*\(\s*!*\s*|&&\s*!*\s*|\|\|\s*!*\s*|\?\s*!*\s*|:\s*!*\s*|\?\?\s*!*\s*|!+\s*|\(\s*!*\s*|\breturn\b(?:\s+await\b)?|\bcase\b|else\s+if\s*\(\s*!*\s*)$/.test(before)
+            || /^[^)]*\)\s*(?:&&|\|\||\?|\?\?|===|!==|==|!=|>=|<=|>|<)/.test(after)) return true;
+          // Assignment counts only when the binding is READ afterwards —
+          // `const ok = checkAuth(x); send()` binds a verdict nobody
+          // consults (w71-ledger F-4).
+          const asg = /(?:^|[;,{}(]\s*|\b(?:const|let|var|return)\s+)([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?$/.exec(before);
+          if (asg !== null) {
+            const bound = new RegExp(`\\b${asg[1].replace(/\$/g, '\\$')}\\b`);
+            let tail = after;
+            for (let j = i - hi + 1; j < winMasked.length; j++) tail += '\n' + winMasked[j];
+            if (bound.test(tail)) return true;
+          }
+        }
       }
       return false;
     })();
@@ -4011,7 +4106,18 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
     // nothing: any `X.method === 'GET'`, `X.url ===`, `X.headers[…]` or
     // a 'request' listener is a dispatch surface under any identifier
     // (w56-ledger F9).
-    if (/req\.method|req\.url|url\.pathname|req\.headers|\b(?:req|request)\s*\[\s*['"](?:method|url)['"]\s*\]|\b\w+\.pathname\s*===\s*['"`]|createServer\s*\(|(?:on|once)\s*\(\s*['"]request['"]|\b[A-Za-z_$][\w$]*\.(?:method|url)\s*(?:===|!==)\s*['"`]|\b[A-Za-z_$][\w$]*\.headers\s*(?:\[\s*['"]authorization|\.authorization\b)/.test(readFileSync(p, 'utf8'))) { console.error(`route-spec parity: HTTP dispatch surface in ${p} — outside the audited file`); failed = true; }
+    // Capability match, not spelling match (w71-ledger F-3): a file that
+    // BUILDS or ACCEPTS HTTP connections is a dispatch surface whatever
+    // spelling the handler uses — `new Server(`, `.listen(`, request-ish
+    // listeners (request/upgrade/connect/connection/secureConnection/
+    // checkContinue/checkExpectation/clientError), `switch` dispatch on a
+    // request field, loose `==` method compares, `new URL(req.url)`,
+    // sub-path predicates (`.url.startsWith`, `/re/.test(q.url)`,
+    // `.searchParams.`), and non-'authorization' header reads. The
+    // transport import ALONE is deliberately not a surface —
+    // src/connectors.mjs is a pure outbound client with no dispatch; the
+    // accept/dispatch SHAPES are what the audit must hold.
+    if (/req\.method|req\.url|url\.pathname|req\.headers|\b(?:req|request)\s*\[\s*['"](?:method|url)['"]\s*\]|\b\w+\.pathname\s*===\s*['"`]|createServer\s*\(|\bnew\s+Server\s*\(|\.\s*listen\s*\(|(?:on|once)\s*\(\s*['"](?:request|upgrade|connect|connection|secureConnection|checkContinue|checkExpectation|clientError)['"]|\bswitch\s*\([^)]*\.\s*(?:method|url)\s*\)|\b[A-Za-z_$][\w$]*\.(?:method|url)\s*(?:===|!==|==|!=)\s*['"`]|\bnew\s+URL\s*\(\s*[A-Za-z_$][\w$]*\s*\.\s*(?:url|href)|\.\s*(?:url|pathname)\s*\.\s*(?:startsWith|endsWith|includes|match|at|slice|indexOf)\s*\(|\.test\s*\(\s*[A-Za-z_$][\w$]*\s*\.\s*(?:url|pathname)|\.\s*searchParams\s*\.|\b(?:req|request)\s*\.\s*headers|\b[A-Za-z_$][\w$]*\.headers\s*(?:\[\s*['"](?:authorization|proxy-|x-|cookie|sec-|cf-|true-)|\.authorization\b)/.test(readFileSync(p, 'utf8'))) { console.error(`route-spec parity: HTTP dispatch surface in ${p} — outside the audited file`); failed = true; }
 }
 
 // Query-parameter parity: the runtime allowlist (QUERY_ALLOW in

@@ -46,6 +46,25 @@ const healOnce = (h, garbage) => {
   h.f.store.db.prepare("UPDATE meta_kv SET value=? WHERE tenant='acme' AND key='fold_floor'").run(garbage);
   h.f.store.audit('acme', 'PROBE', 'actor', null, {}, h.f.clock());
 };
+// Deferred-apply arms only engage on sealed:true — the post-commit
+// retire drains outside any tx there (in-tx drains mint in-tx since
+// w71-runtime F-4). One rewritten audit row forces the cut.
+const dropAuditGuards = h => {
+  for (const tr of h.f.store.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all())
+    h.f.store.db.exec(`DROP TRIGGER "${tr.name}"`);
+};
+const corruptAt = (h, seq) =>
+  h.f.store.db.prepare("UPDATE audit SET envelope=? WHERE tenant='acme' AND seq=?")
+    .run('{"payload":{"time":1},"signatures":[{"signature":"AA"}]}', seq);
+const divergeChain = h => {
+  // Corrupt a sacrificial TIP row appended here — the cut rewinds only
+  // this row, so heal claims anchored to earlier seqs stay inside the
+  // committed window. A rewind past a claim's own seq makes it
+  // premature: drained unsigned, never staged for the deferred apply.
+  h.f.store.audit('acme', 'PROBE', 'actor', null, {}, h.f.clock());
+  dropAuditGuards(h);
+  corruptAt(h, h.f.store.db.prepare("SELECT seq FROM audit WHERE tenant='acme' ORDER BY seq DESC LIMIT 1").get().seq);
+};
 const putMarker = (h, env, claims = null) => {
   dropResidueGuards(h);
   h.f.store.db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme','fold_floor_retired',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value")
@@ -211,7 +230,9 @@ test('w70-seal F-1/F-2/F-3: an attacker-text abort is a named defeat riding the 
   // Retain a non-empty queue first: a committed seal whose post-commit
   // apply faults transiently keeps every queued claim — and rides the
   // fault on the delivered result as `deferred_apply_error` instead of
-  // reporting the sealed chain denied (w70-seal F-2).
+  // reporting the sealed chain denied (w70-seal F-2). The seal must CUT —
+  // the post-commit retire is the only drain that defers (w71-runtime F-4).
+  divergeChain(h);
   const origExec = h.f.store.db.exec.bind(h.f.store.db);
   let busyOnce = true;
   h.f.store.db.exec = (sql) => {
@@ -257,6 +278,8 @@ test('w70-fv F-4: an armed ABORT trigger convicts per seal — no permanent wedg
   const residue = residueRows(h).map(r => r.value);
   assert.ok(residue.length > 0, 'a residue claim stands for the deferred drain');
   // Hold a non-empty queue across seals: first apply faults transiently.
+  // The queue stages only on a cut seal's post-commit drain (w71-runtime F-4).
+  divergeChain(h);
   const origExec = h.f.store.db.exec.bind(h.f.store.db);
   let busyOnce = true;
   h.f.store.db.exec = (sql) => {
@@ -378,7 +401,9 @@ test('w70-runtime F-1: an aborted seal restores the deferred mint queue', t => {
   const residue = residueRows(h).map(r => r.value);
   assert.ok(residue.length > 0, 'a residue claim stands for the deferred drain');
   // First, retain a non-empty queue: a committed seal whose post-commit
-  // apply faults on its savepoint keeps every queued claim.
+  // apply faults on its savepoint keeps every queued claim. The seal
+  // must CUT — only the post-commit retire defers (w71-runtime F-4).
+  divergeChain(h);
   const origExec = h.f.store.db.exec.bind(h.f.store.db);
   let busyOnce = true;
   h.f.store.db.exec = (sql) => {
@@ -486,7 +511,11 @@ test('w70-seal F-5: the deferred apply reads prev inside its savepoint', () => {
 // ============================================================================
 test('w70-seal F-6: the deferred apply wraps _chainFacts like its siblings', () => {
   const src = readFileSync(new URL('../src/fabric.mjs', import.meta.url).pathname, 'utf8');
-  const apply = src.slice(src.indexOf('#applyDeferredRetiredMints(tenant)'), src.indexOf('#applyDeferredRetiredMints(tenant)') + 4000);
+  // Slice to the next private method — a char window goes stale the
+  // moment the apply legitimately grows (w71's murder/parse consult
+  // pushed the freshness probe past 4000).
+  const applyStart = src.indexOf('#applyDeferredRetiredMints(tenant)');
+  const apply = src.slice(applyStart, src.indexOf('\n  #', applyStart + 40));
   assert.ok(/try\s*\{[^}]*markerFresh\s*=\s*[^}]*\}\s*catch\s*\{[^}]*markerFresh\s*=\s*false/.test(apply),
     'the freshness probe degrades to not-fresh on a chain-facts fault instead of throwing raw');
 });

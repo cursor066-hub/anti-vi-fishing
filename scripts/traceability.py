@@ -232,6 +232,80 @@ _SHADOWED_ASSERT = re.compile(
     # already masked dead. Neuter the whole vocabulary (w59-ledger F-14).
     r'|\bev' + r'al\s*\('
 )
+def _bracket_end(s, i):
+    # Index just past the bracket matching s[i]; -1 when unbalanced.
+    # Input is literal-blanked, so string contents cannot disturb the
+    # balance scan.
+    want = {'{': '}', '[': ']', '(': ')'}.get(s[i])
+    if want is None: return -1
+    depth = 0
+    for j in range(i, len(s)):
+        if s[j] == s[i]: depth += 1
+        elif s[j] == want:
+            depth -= 1
+            if depth == 0: return j + 1
+    return -1
+def _pattern_bind_names(pat, out):
+    # Every name a JS binding pattern binds, walked recursively — a
+    # nested `const { x: { assert } }`/`const { x: [assert] }` binds the
+    # name exactly like the flat spellings the regex arms already cover
+    # (w71-ledger F-2). `k:` names are property keys (not bindings); the
+    # value side and bare names bind.
+    inner = pat[1:-1]
+    for el in _split_top(inner, ',') or [inner]:
+        el = el.strip()
+        if not el: continue
+        if el.startswith('...'): el = el[3:].strip()
+        if pat[0] == '{':
+            kv = _split_top(el, ':')
+            if kv is not None and len(kv) > 1: el = ':'.join(kv[1:]).strip()
+        dv = _split_top(el, '=')
+        if dv is not None: el = dv[0].strip()
+        if not el: continue
+        if re.fullmatch(r'[A-Za-z_$][\w$]*', el): out.append(el)
+        elif el[:1] in '{[': _pattern_bind_names(el, out)
+def _param_bind_names(text, out):
+    # Names bound by a param-list content — plain names plus any
+    # destructure patterns nested inside (w71-ledger F-2).
+    for el in _split_top(text, ',') or [text]:
+        el = el.strip()
+        if el.startswith('...'): el = el[3:].strip()
+        dv = _split_top(el, '=')
+        if dv is not None: el = dv[0].strip()
+        if not el: continue
+        if el[:1] in '{[': _pattern_bind_names(el, out)
+        elif re.fullmatch(r'[A-Za-z_$][\w$]*', el): out.append(el)
+_PARAM_HEAD_EXCLUDE = re.compile(r'(?:if|for|while|switch|with|return|typeof|new|else|case|in|of|instanceof|void|delete|await|yield|do|import|using|throw|assert|class|function)\s*$')
+def _shadow_events(blanked):
+    # Shadow events as (pos, kind, names, match_text, span_end): the
+    # regex arms plus real balance-walks the flat arms cannot express
+    # (w71-ledger F-2) — `const { x: { assert } }`/`{ x: [assert] }`
+    # destructures, `for (const {x:{assert}} of …)`, `catch ({…})`, and
+    # param positions under computed method names (`{ ['m'](assert) {} }`)
+    # or arrows (`({x:{assert}}) => …`). kind 'param' binds inside the
+    # FOLLOWING block; kind 'decl' binds inside its enclosing block.
+    for m in _SHADOWED_ASSERT.finditer(blanked):
+        yield m.start(), 'decl', [g for g in m.groups() if g] or list(_ASSERT_NAME_SET), m.group(0), m.end()
+    for m in re.finditer(r'\b(?:const|let|var)\s*[\[{]', blanked):
+        e = _bracket_end(blanked, m.end() - 1)
+        if e == -1 or not re.match(r'\s*(?:=|of\b|in\b)', blanked[e:]): continue
+        out = []
+        _pattern_bind_names(blanked[m.end() - 1:e], out)
+        hits = [nm for nm in out if nm in _ASSERT_NAME_SET]
+        if hits: yield m.start(), 'decl', hits, 'destructure', e
+    # Param-position binds: `(` whose closing paren is followed by `{`
+    # (function/method/catch bodies) or `=>` (arrow bodies). Control
+    # keywords are excluded — `if (x)` evaluates, it never binds.
+    for m in re.finditer(r'\(', blanked):
+        if _PARAM_HEAD_EXCLUDE.search(blanked[:m.start()].rstrip()): continue
+        e = _bracket_end(blanked, m.end() - 1)
+        # `e` sits just past `)`; the body brace / arrow may follow
+        # whitespace — `(assert) {`, `()  =>` both bind.
+        if e == -1 or not re.match(r'\s*(?:\{)|\s*=>', blanked[e:]): continue
+        out = []
+        _param_bind_names(blanked[m.end():e - 1], out)
+        hits = [nm for nm in out if nm in _ASSERT_NAME_SET]
+        if hits: yield m.start(), 'param', hits, 'param-head', e
 # The assert namespace itself is import-bound: `import { strict as asrt }`
 # or `import * as a` renames it — the probe runs on the resolved local
 # names, not a hardcoded 'assert' (w51-ledger M-7). Names are trusted
@@ -436,6 +510,10 @@ def _blank_code(text):
             i = j + 1; continue
         i += 1
     return ''.join(out)
+# body → names its enclosing scopes bind (populated per file by
+# _test_bodies; identical body strings union — the safe direction for a
+# mint oracle).
+_body_scope_shadows = {}
 def _test_bodies(text):
     # Exact per-test bodies: brace-match each test( call on the literal-blanked
     # text, then slice the body from the real text so a requirement ID inside a
@@ -473,6 +551,70 @@ def _test_bodies(text):
     for a, b, g1 in spans:
         body = text[a:b]
         raw.append((a, b, g1 or _options_skip(body)))
+    # Enclosing-scope shadows (w71-ledger F-1): a fake `assert` bound in
+    # a wrapper function, bare block or IIFE neuters every test lexically
+    # inside it — the body-local scan never saw those scopes. Resolve
+    # each shadow decl's scope and union the names binding each call.
+    brace_close = {}
+    _st = []
+    for _i, _c in enumerate(blanked):
+        if _c == '{': _st.append(_i)
+        elif _c == '}' and _st: brace_close[_st.pop()] = _i
+    # Which `{` opens a function body — `var` bindings hoist to the
+    # enclosing function, the rest are block-scoped. A `{` is a function
+    # body when it follows `=>` or a `(...)` head whose leading word is
+    # not a control keyword.
+    _FN_CTRL = {'if', 'else', 'for', 'while', 'switch', 'catch', 'with',
+                'try', 'finally', 'do', 'return', 'typeof', 'case', 'new',
+                'in', 'of', 'await', 'yield', 'delete', 'void', 'throw'}
+    _fn_braces = set()
+    for _o in brace_close:
+        _k = _o - 1
+        while _k >= 0 and blanked[_k] in ' \t\n': _k -= 1
+        if _k < 0: continue
+        if _k >= 1 and blanked[_k - 1:_k + 1] == '=>':
+            _fn_braces.add(_o); continue
+        if blanked[_k] == ')':
+            _h, _d = _k, 0
+            while _h >= 0:
+                if blanked[_h] == ')': _d += 1
+                elif blanked[_h] == '(':
+                    _d -= 1
+                    if _d == 0: break
+                _h -= 1
+            _m = re.search(r'([A-Za-z_$][\w$]*)\s*$', blanked[:_h]) if _h >= 0 else None
+            if _m is None or _m.group(1) not in _FN_CTRL or _m.group(1) == 'function':
+                _fn_braces.add(_o)
+    scope_events = []
+    for _pos, _kind, _names, _txt, _end in _shadow_events(blanked):
+        if _kind == 'param':
+            _nb = blanked.find('{', _end)
+            scope_events.append((_pos, brace_close.get(_nb, len(blanked)) if _nb != -1 else len(blanked), _names))
+            continue
+        # A file-level `import` is the trusted binding channel itself —
+        # `_assert_names` already decides which imported names prove
+        # real; neutering every non-node specifier would erase the
+        # file's own helper imports as if they were shadows. The arm
+        # stays live only inside bodies (where an `import` statement is
+        # not legal JS anyway).
+        if re.match(r'\s*import\b', _txt): continue
+        # The `(\s*[^)]*NAMES[^)]*)\s*=>` arm is a body-scanner
+        # approximation: at file scope `[^)]*` happily spans statements,
+        # so `test('…', t => { assert.throws(() =>` reads as a giant
+        # param list containing `throws`. The param-head walk already
+        # covers every real `(name) =>` binding precisely — skip the
+        # approximate arm here.
+        if _txt.startswith('(') and _txt.rstrip().endswith('=>'): continue
+        _encl = max((o for o, c in brace_close.items() if o <= _pos and c > _pos), default=-1)
+        if re.match(r'\s*var\b', _txt):
+            # `var` hoists to the innermost enclosing function body (or
+            # the whole file at top level) — not its lexical block.
+            _fb = max((o for o in _fn_braces if o <= _pos and brace_close[o] > _pos), default=0)
+            scope_events.append((_fb, brace_close.get(_fb, len(blanked)), _names))
+            continue
+        # `const`/`let`/`function` (strict .mjs) and every destructure or
+        # clause head bind from their position to the innermost block end.
+        scope_events.append((_pos, brace_close.get(_encl, len(blanked)), _names))
     bodies = []
     for a, b, skipped in raw:
         # A skipped enclosing test/describe skips every nested call too —
@@ -489,6 +631,8 @@ def _test_bodies(text):
             for x, y in inner:
                 for k in range(x - a, y - a): out[k] = ' '
             body = ''.join(out)
+        scope_names = frozenset(nm for s, e, nms in scope_events if s <= a <= e for nm in nms)
+        _body_scope_shadows[body] = _body_scope_shadows.get(body, frozenset()) | scope_names
         bodies.append(body)
     return bodies
 _OPT_TITLE = re.compile(r"\s*(?:test|it|describe|context)\(\s*(['\"`])((?:\\.|(?!\1)[\s\S])*)\1")
@@ -1721,13 +1865,25 @@ def _asserts(body, names=('assert', 'requireThat')):
     # Shadow detection runs on the UNLIVENED body — _live_code may blank
     # the declaration itself ('assert.equal' isn't a call of bare
     # 'assert'), hiding the shadow it created (w48-ledger F-1).
-    for m in _SHADOWED_ASSERT.finditer(_blank_code(body)):
+    blanked_body = _blank_code(body)
+    shadowed = set()
+    for _pos, _kind, arm_names, _txt, _end in _shadow_events(blanked_body):
         # Unconditional rebind arms (import/globalThis grafts) neuter the
         # whole assert vocabulary — a file may not alias its way to
-        # fabricated evidence (w51-ledger H-1).
-        arm_names = [g for g in m.groups() if g] or list(_ASSERT_NAME_SET)
+        # fabricated evidence (w51-ledger H-1). `_shadow_events` adds the
+        # balance-walked binds a flat regex cannot express — nested
+        # destructures, computed method-param names (w71-ledger F-2).
+        shadowed |= set(arm_names)
         for name in arm_names:
             live = re.sub(r'\b' + re.escape(name) + r'(?:\.\w+)?\s*\(', '(', live)
+    # Enclosing-scope shadows join the neuter (w71-ledger F-1): a fake
+    # `assert` bound in a wrapper function, bare block, or IIFE covers
+    # every test lexically inside it — `_test_bodies` resolves which
+    # names each body's enclosing scopes bind.
+    scope_shadowed = globals().get('_body_scope_shadows', {}).get(body, frozenset())
+    shadowed |= set(scope_shadowed)
+    for name in scope_shadowed:
+        live = re.sub(r'\b' + re.escape(name) + r'(?:\.\w+)?\s*\(', '(', live)
     # No trusted binding means no assert call can be evidence — an
     # unbound `assert.ok(` is a ReferenceError at runtime, and a
     # `import assert from './stub'` file calls a real no-op. The regex
@@ -1735,15 +1891,21 @@ def _asserts(body, names=('assert', 'requireThat')):
     if not names: return None
     # Body-level member/destructure aliases resolve to assert calls too:
     # `const ok = assert.ok`, `const { strictEqual } = assert` — an alias
-    # is still the real assertion, not a stub (w51-ledger M-7).
-    extra = set(names)
-    src = '|'.join(re.escape(n) for n in names)
+    # is still the real assertion, not a stub (w51-ledger M-7). A
+    # shadowed name cannot seed an alias — `const ok = assert.ok` under
+    # a fake `assert` binds the stub's method, not a real assertion.
+    extra = set(names) - shadowed
+    src = '|'.join(re.escape(n) for n in names if n not in shadowed) or r'x\b(?!x)'
     for am in re.finditer(r'\b(?:const|let|var)\s+(\w+)\s*=\s*(?:' + src + r')\.\w+', _blank_code(body)):
         extra.add(am.group(1))
     for dm in re.finditer(r'\b(?:const|let|var)\s*\{([^}]+)\}\s*=\s*(?:' + src + r')\b', _blank_code(body)):
         for spec in dm.group(1).split(','):
             nm = re.split(r'\s+as\s+|:', spec.strip())[-1].strip()
             if re.fullmatch(r'\w+', nm): extra.add(nm)
+    # Every trusted name shadowed → nothing here can mint. An empty
+    # `extra` would make the call pattern below an empty alternation
+    # matching any `(` — phantom hits (w71 self-audit).
+    if not extra: return 0
     # The call must be on the trusted binding itself — `stub.assert(` is
     # a member call on a host object, and `assert(args) {` is a method
     # definition, not a call (w59-ledger F-12). The member-chain arms

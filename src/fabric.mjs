@@ -1546,6 +1546,12 @@ export class Fabric {
     // AFTER the savepoint commits — a flag latched inside the try would
     // claim a delete the rollback just un-happened (w70-seal F-4).
     let murderedPrev = null;
+    // `db.isTransaction` is true for ANY open tx — including the drain's
+    // own savepoint — so the defer gate must snapshot the CALLER's
+    // context: a drain inside an abortable tx mints in-tx (sharing the
+    // tx's fate), a post-commit drain defers to the replay (w71-runtime
+    // F-4's guard was dead — the savepoint had already started).
+    const callerInTx = db.isTransaction;
     db.exec('SAVEPOINT residue_drain');
     try {
       let env, merged;
@@ -1559,8 +1565,14 @@ export class Fabric {
       // plane (w70-seal F-4). It is murdered below inside this same
       // guarded span; the consult's forged/unauthenticated flag already
       // carries the conviction, and the murder names itself as a claim.
-      let prevAuthed = null;
-      try { prevAuthed = prev === undefined ? null : this.#retiredClaimsOf(tenant, JSON.parse(prev)); } catch { prevAuthed = null; }
+      // Stored bytes that do not parse ARE proved-inauthentic content —
+      // the murder below proceeds on them. A fault EVALUATING them is
+      // infra, not a verdict: it propagates into this savepoint's errcode
+      // classification (retry/refuse) instead of wearing the corrupt
+      // marker's color (w71-seal F-1, w71-runtime F-3).
+      let parsedPrev = null;
+      try { parsedPrev = prev === undefined ? null : JSON.parse(prev); } catch { parsedPrev = null; }
+      const prevAuthed = parsedPrev === null ? null : this.#retiredClaimsOf(tenant, parsedPrev);
       if (Array.isArray(retired) && retired.length) {
         // The consumption record lands BEFORE the value delete: a wedged
         // marker write aborts the whole savepoint, leaving the residue
@@ -1635,7 +1647,14 @@ export class Fabric {
         // post-cut tip, so consumed claims still reach `fold_floor_retired`
         // exactly once instead of stranding as `retiring` forever
         // (w66-runtime F-3, w66-runtime F-2).
-        if (this.#sealing?.has(tenant)) {
+        // The deferred queue only makes sense OUTSIDE a transaction: a
+        // drain running inside an abortable tx that rolled back would
+        // leave phantom claims whose residue deletes and F_R_R rows
+        // rolled back with it — the abort-restore union would then
+        // re-anchor a retirement the ledger never recorded (w71-runtime
+        // F-4). In-tx the mint simply lands in-tx and shares the tx's
+        // fate instead.
+        if (this.#sealing?.has(tenant) && !callerInTx) {
           // Queue the UNCAPPED union — the replay recomputes the cap and
           // the `prior_evicted` count at apply time, so a capped queue
           // could never report an eviction honestly. mergedSet would
@@ -1669,9 +1688,15 @@ export class Fabric {
       if (prev !== undefined && prevAuthed === null) {
         db.prepare("DELETE FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").run(tenant);
         // Same landed-probe doctrine as the pin-murder above: a foreign
-        // RAISE(IGNORE) eating this delete leaves the wedge standing.
+        // RAISE(IGNORE) eating this delete leaves the wedge standing —
+        // and the conviction must ride the flag BEFORE the throw, since a
+        // consult-path drain swallows the error entirely (w71-seal F-4).
         const back = db.prepare("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(tenant)?.value;
-        requireThat(back === undefined, 'INV-409-INTEGRITY', 'fold-floor retired marker delete defeated — foreign trigger side-effects', 409);
+        if (back !== undefined) {
+          const defeatedClaims = [String(back).slice(0, 120)];
+          this.#wmTamperClaimList(tenant, 'floor_marker_retired_marker_defeated', defeatedClaims);
+          requireThat(back === undefined, 'INV-409-INTEGRITY', 'fold-floor retired marker delete defeated — foreign trigger side-effects', 409, { marker_defeated: 'fold_floor_retired', claims: defeatedClaims, claims_total: 1 });
+        }
         murderedPrev = String(prev).slice(0, 120);
       }
       if (env !== undefined) {
@@ -1683,7 +1708,12 @@ export class Fabric {
         // `retired` against a 4096-capped marker self-wedged every drain
         // past the cap (w63-runtime F-1).
         const back = db.prepare("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(tenant)?.value;
-        const backClaims = (() => { try { return this.#retiredClaimsOf(tenant, JSON.parse(back ?? 'null'))?.retired ?? null; } catch { return null; } })();
+        // Our own landed write must authenticate — unparseable bytes or a
+        // non-authenticating row mean a foreign splice; an EVALUATION fault
+        // is infra and propagates to the savepoint's classifier
+        // (w71-seal F-1).
+        const backParsed = (() => { try { return JSON.parse(back ?? 'null'); } catch { return null; } })();
+        const backClaims = backParsed === null ? null : this.#retiredClaimsOf(tenant, backParsed)?.retired ?? null;
         requireThat(Array.isArray(backClaims) && merged.every(c => backClaims.includes(c)), 'INV-409-INTEGRITY', 'fold-floor retired marker refused after write — foreign trigger side-effects', 409);
       }
       for (let ci = 0; ci < values.length; ci += 500) {
@@ -1741,7 +1771,14 @@ export class Fabric {
     // signature-invalid env is planted evidence left standing for the
     // consult to name forever (w68-runtime F-3).
     if (pl?.tenant_id !== t || !Number.isSafeInteger(pl?.marker_seq)) return false;
-    const live = (() => { try { const r = this.store._stmt('SELECT envelope FROM audit WHERE tenant=? AND seq=?').get(t, pl.marker_seq); return r === undefined ? null : digest(JSON.parse(r.envelope).payload); } catch { return null; } })();
+    // The row READ is infra — a fault proves nothing about the pin and
+    // must propagate rather than fold into "pin dead" (a live-pinned
+    // authentic marker was murdered on a transient fault — w71-seal F-2).
+    // Bytes that fail to parse/digest are a corrupt pinned row: the pin
+    // is provably dead and the murder is authorized.
+    const tipRow = this.store._stmt('SELECT envelope FROM audit WHERE tenant=? AND seq=?').get(t, pl.marker_seq);
+    let live = null;
+    if (tipRow !== undefined) { try { live = digest(JSON.parse(tipRow.envelope).payload); } catch { live = null; } }
     if (live !== null && live === pl.marker_tip_hash) return false;
     // The keep guards cover `fold_floor_retired` by name — drop them
     // for the delete and recreate from the shared text, the same
@@ -1749,12 +1786,13 @@ export class Fabric {
     this.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
     this.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
     this.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
-    this.store._stmt("DELETE FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").run(t);
-    for (const [, sql] of RESIDUE_KEEP_TRIGGERS) this.store.db.exec(sql);
+    try { this.store._stmt("DELETE FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").run(t); }
+    finally { for (const [, sql] of RESIDUE_KEEP_TRIGGERS) this.store.db.exec(sql); }
     // Landed probe — the note write's doctrine: a foreign trigger's
     // RAISE(IGNORE) eating this delete would leave a forged corpse
-    // wedging every marker write forever (w68-fv F-5).
-    const back = (() => { try { return this.store._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(t)?.value; } catch { return undefined; } })();
+    // wedging every marker write forever (w68-fv F-5). A read fault here
+    // is infra too — "couldn't verify" never mints "deleted" (w71-seal F-2).
+    const back = this.store._stmt("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(t)?.value;
     if (back !== undefined) {
       // The flag set here rolls back with the seal tx — it is re-latched
       // at sealAuditChain's catch, keyed on the defeat detail this
@@ -1765,6 +1803,13 @@ export class Fabric {
       this.#wmTamperClaimList(t, 'floor_marker_retired_marker_defeated', murderedClaims);
       requireThat(back === undefined, 'INV-409-INTEGRITY', 'fold-floor retired marker delete defeated — foreign trigger side-effects', 409, { marker_defeated: 'fold_floor_retired', claims: murderedClaims.slice(0, 64), claims_total: murderedClaims.length });
     }
+    // Destruction of evidence is never anonymous — the drain-murder's
+    // contract applied to the pin path: the claim names the pin that
+    // died and the marker's own signed claim set (w71-seal F-2). The
+    // flag rides the same tx the delete did, so a rolled-back murder
+    // never claims itself.
+    const murderedClaims = (Array.isArray(pl?.fold_floor_retired) ? pl.fold_floor_retired : []).map(c => String(c).slice(0, 120));
+    this.#wmTamperClaimList(t, 'floor_marker_retired_pin_murdered', [`pin@${pl.marker_seq}`, ...murderedClaims]);
     return true;
   }
   // Replay the marker mint the drain deferred while a seal held the
@@ -1784,6 +1829,10 @@ export class Fabric {
     // they replay on the next seal (w69-runtime F-2).
     const queued = [...q].map(c => String(c).slice(0, 120));
     const db = this.store.db;
+    // The murder is named AFTER the savepoint commits — the flag must
+    // outlive the try block's scope or every successful apply faults on
+    // a ReferenceError (w71-seal F-3 regression).
+    let murderedPrev = null;
     // Same savepoint doctrine as the drain's note: the trigger drops,
     // the write and the landed probe are one atomic span — a mid-span
     // fault rolls back to guards-intact, never leaves them absent on
@@ -1801,22 +1850,31 @@ export class Fabric {
       let pa = null;
       let markerFresh = false;
       if (prev !== undefined) {
-        try { pa = this.#retiredClaimsOf(tenant, JSON.parse(prev)); } catch { pa = null; }
+        // Same split as the drain: bytes that do not parse are
+        // proved-corrupt content (murdered below); a fault EVALUATING
+        // them is infra and propagates into this savepoint's errcode
+        // classification — "couldn't evaluate" never wears the corrupt
+        // marker's color and never destroys the queue (w71-seal F-1).
+        let parsedPrev = null;
+        try { parsedPrev = JSON.parse(prev); } catch { parsedPrev = null; }
+        pa = parsedPrev === null ? null : this.#retiredClaimsOf(tenant, parsedPrev);
         if (pa === null) {
-          // A non-authenticating standing marker is left for the consult
-          // to name — the deferred set cannot overwrite it. A silent drop
-          // would leave the queue's only suppression copy inside the
-          // already-minted F_R_R rows: the drop itself is evidence, so
-          // name it with the same bounded claims convention as the other
-          // rejected-claim flags (w67-runtime F-1).
-          this.#wmTamperClaimList(tenant, 'floor_marker_retired_deferred_dropped', queued);
-          this.#deferredRetiredMints.delete(tenant);
-          try { db.exec('ROLLBACK TO deferred_mint'); } catch { /* savepoint may already be gone */ }
-          // If the rollback itself was defeated the guards stay dropped —
-          // restore them best-effort rather than leave the residue plane
-          // unguarded (CREATE on a live trigger errors harmlessly).
-          try { for (const [, sql] of RESIDUE_KEEP_TRIGGERS) db.exec(sql); } catch { /* meta_kv gone — the consult names it */ }
-          return;
+          // The murder doctrine extends to the apply: a proved-corrupt
+          // marker is deleted inside THIS guarded span and the queued
+          // claims still land under a fresh env — the old drop-and-flag
+          // destroyed the queue while leaving the wedge row standing on
+          // every drain-less pass (w71-seal F-3, w71-fv F-1). Nothing
+          // from the unverifiable row is laundered: `prior` stays empty
+          // so the fresh env signs only the deferred set. The murder is
+          // named post-commit like the drain's.
+          db.prepare("DELETE FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").run(tenant);
+          const backM = db.prepare("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(tenant)?.value;
+          if (backM !== undefined) {
+            const defeatedClaims = [String(backM).slice(0, 120)];
+            this.#wmTamperClaimList(tenant, 'floor_marker_retired_marker_defeated', defeatedClaims);
+            requireThat(backM === undefined, 'INV-409-INTEGRITY', 'fold-floor retired marker delete defeated — foreign trigger side-effects', 409, { marker_defeated: 'fold_floor_retired', claims: defeatedClaims, claims_total: 1 });
+          }
+          murderedPrev = String(prev).slice(0, 120);
         }
         // `retiring` holds claims an interrupted replay left in flight —
         // the next marker write absorbs them into `retired` instead of
@@ -1859,7 +1917,8 @@ export class Fabric {
       const env = this.#mintRetiredEnvelope(tenant, merged, (markerFresh ? (pa?.priorEvicted ?? 0) : 0) + (unionSet.size - merged.length) + Math.max(0, fresh.length - 2048));
       db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES (?, 'fold_floor_retired', ?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value").run(tenant, JSON.stringify({ claims: merged, env }));
       const back = db.prepare("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(tenant)?.value;
-      const backClaims = (() => { try { return this.#retiredClaimsOf(tenant, JSON.parse(back ?? 'null'))?.retired ?? null; } catch { return null; } })();
+      const backParsedA = (() => { try { return JSON.parse(back ?? 'null'); } catch { return null; } })();
+      const backClaims = backParsedA === null ? null : this.#retiredClaimsOf(tenant, backParsedA)?.retired ?? null;
       requireThat(Array.isArray(backClaims) && merged.every(c => backClaims.includes(c)), 'INV-409-INTEGRITY', 'fold-floor retired marker refused after deferred write — foreign trigger side-effects', 409);
       for (const [, sql] of RESIDUE_KEEP_TRIGGERS) db.exec(sql);
     } catch (e) {
@@ -1874,14 +1933,24 @@ export class Fabric {
       // trigger cannot mint errcode 5/6 — genuine cross-connection
       // BUSY/LOCKED is the only honest retry.
       if (e instanceof InvariantError) {
-        if (e?.code === 'INV-409-INTEGRITY') this.#wmTamperClaimList(tenant, 'floor_marker_retired_marker_defeated', queued);
+        // The thrown detail names the defeated write when it carried one —
+        // the murder's probe names the standing row it could not delete,
+        // not the queue that replayed (w71-seal F-4).
+        if (e?.code === 'INV-409-INTEGRITY') this.#wmTamperClaimList(tenant, 'floor_marker_retired_marker_defeated', Array.isArray(e.details?.claims) && e.details.claims.length ? e.details.claims : queued);
         throw e;
       }
       const msg = e?.message ?? '';
       const base = typeof e?.errcode === 'number' ? e.errcode & 0xFF : null;
+      // A fault with NO sqlite code is an evaluation/infra fault from
+      // our own consult path (key catalog, chain facts) — never a
+      // refused write: "couldn't evaluate" does not wear the corrupt
+      // marker's color and minting marker_defeated here pins a verdict
+      // on a defeat that never happened (w71-seal F-1). It propagates
+      // raw and rides `deferred_apply_error`; the queue stays retained.
+      if (base === null) throw e;
       if (base === 5 || base === 6)
         throw new InvariantError('INV-503-LEDGER', 'Deferred retired-mint apply hit ledger contention — retry', 503, { cause: e });
-      if (base !== null && [8, 10, 11, 13, 14, 15].includes(base))
+      if ([8, 10, 11, 13, 14, 15].includes(base))
         throw new InvariantError('INV-503-STORAGE', `Deferred retired-mint apply hit a storage fault: ${msg}`, 503, { cause: e });
       // Everything else — a foreign trigger abort, a constraint the
       // honest UPSERT cannot hit, a schema break — is a refused write:
@@ -1892,6 +1961,10 @@ export class Fabric {
       throw new InvariantError('INV-409-INTEGRITY', 'Deferred retired-mint apply defeated by a foreign or diverged write path', 409, { cause: e });
     }
     finally { try { db.exec('RELEASE deferred_mint'); } catch { /* rolled back or never opened */ } }
+    // The murder is named only after its savepoint committed — a flag
+    // latched inside would claim a delete the rollback un-happened
+    // (w70-seal F-4 doctrine, applied to the apply's own murder arm).
+    if (murderedPrev !== null) this.#wmTamperClaim(tenant, 'floor_marker_retired_murdered', murderedPrev);
     this.#deferredRetiredMints.delete(tenant);
   }
   // The `fold_floor_retired` claim list, iff the marker row carries it
@@ -1905,69 +1978,78 @@ export class Fabric {
   #retiredClaimsOf(tenant, parsed) {
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
     if (parsed.env === undefined) return null;
-    try {
-      const pl = verifySigned(parsed.env, this.auditPublicKeys(tenant), 'audit');
-      if (pl?.tenant_id !== tenant || !Array.isArray(pl?.fold_floor_retired)) return null;
-      // The signed marker asserts the committed tip it consumed to: a
-      // signer dead at or before that tip could never have minted it —
-      // a tip including the signer's own death row was never visible to
-      // it (w63-seal F-1). A non-integer `marker_seq` is crafted — the
-      // gate must not skip on a type-pun.
-      const kid = parsed.env?.protected?.key_id;
-      if (typeof kid === 'string') {
-        if (!Number.isSafeInteger(pl.marker_seq)) return null;
-        const died = this._chainFacts(tenant).dead.get(kid);
-        if (died !== undefined && died <= pl.marker_seq) return null;
-        // A marker asserting consumption to marker_seq could not have
-        // seen claims anchored above it — a compromised-then-dead key
-        // minting a backdated env would otherwise suppress future heals
-        // it can predict (w64-seal F-2). Non-`seq:`-shaped claims are left
-        // for the consult's malformed naming.
-        // Unsafe-integer seq prefixes fail CLOSED: a `\d+` head beyond
-        // MAX_SAFE_INTEGER cannot be proven <= marker_seq — treating it as
-        // legal let such a claim authenticate (and suppress a standing
-        // residue row) where the mintable arm refuses the identical string
-        // as premature (w65-seal F-2). Bare non-`seq:` claims still pass —
-        // the consult names them malformed.
-        if ([...pl.fold_floor_retired, ...(Array.isArray(pl?.fold_floor_retiring) ? pl.fold_floor_retiring : [])]
-          .some(c => { const m = /^(\d+):/.exec(c); return m !== null && (!Number.isSafeInteger(Number(m[1])) || Number(m[1]) > pl.marker_seq); })) return null;
-        // `marker_seq` is a bare chain position the seq guard REUSES once
-        // a seal cut rewinds the table — MAX is not a clock. The env must
-        // pin the exact row it asserted (`marker_tip_hash`); a replayed or
-        // epoch-stranded marker binds a seq that now holds different bytes
-        // — or no row at all — and refuses (w65-seal F-1). The pin is
-        // REQUIRED: a pre-pin env (no field) replayed against an
-        // out-of-table seq satisfied both-undefined and could launder
-        // planted claims into every later marker via `prior` (w66-seal
-        // F-1). And the stored `hash` column is attacker clay (w44) —
-        // recompute it from the row's own envelope bytes; a mid-table
-        // column rewrite is invisible to the tip-only cfShape fingerprint
-        // but never satisfies this check.
-        const tipRow = this.store._stmt("SELECT envelope FROM audit WHERE tenant=? AND seq=?").get(tenant, pl.marker_seq);
-        let tipRecomputed = null;
-        try { tipRecomputed = tipRow === undefined ? null : digest(JSON.parse(tipRow.envelope).payload); } catch { tipRecomputed = null; }
-        if (typeof pl.marker_tip_hash !== 'string' || tipRecomputed === null || tipRecomputed !== pl.marker_tip_hash) return null;
-      }
-      // The unsigned `claims` twin is advisory — the env is the sole
-      // authority, so a missing twin authenticates (w62-seal F-7); when
-      // present it must still match the signed set byte-for-byte
-      // (w62-runtime F-3).
-      if (parsed.claims !== undefined && JSON.stringify(parsed.claims) !== JSON.stringify(pl.fold_floor_retired)) return null;
-      // `retiring` takes the same bound `retired` gets — an
-      // honest-signed env carrying an unbounded in-flight set would
-      // otherwise flood `prior` unbounded (w68-runtime F-5a).
-      const retiring = Array.isArray(pl?.fold_floor_retiring)
-        ? pl.fold_floor_retiring.filter(c => typeof c === 'string').slice(0, 8192)
-        : [];
-      // `prior_evicted` is signed accounting: the field must round-trip
-      // or the signed number was write-only (a flood could evict priors
-      // forever with no reader ever seeing the count — w67-runtime F-2).
-      // A garbage count on a verified env is crafted like a bad
-      // marker_seq; older envs simply carried no field.
-      const evicted = pl.prior_evicted === undefined ? 0 : (Number.isSafeInteger(pl.prior_evicted) && pl.prior_evicted >= 0 ? pl.prior_evicted : null);
-      if (evicted === null) return null;
-      return { retired: pl.fold_floor_retired.filter(c => typeof c === 'string').slice(0, 8192), retiring, markerSeq: Number.isSafeInteger(pl.marker_seq) ? pl.marker_seq : null, priorEvicted: evicted };
-    } catch { return null; }
+    // Infra faults PROPAGATE — key resolution, the chain scan and the
+    // tip-row read say nothing about the marker's content, and callers
+    // must never fold "couldn't evaluate" into the same null that means
+    // "proved inauthentic": murder/forged/drop verdicts require proof
+    // (w71-seal F-1, w71-runtime F-3). Only the content's own verdicts —
+    // the signature check on the given keys and the stored bytes' parse —
+    // map to null.
+    const keys = this.auditPublicKeys(tenant);
+    const pl = (() => { try { return verifySigned(parsed.env, keys, 'audit'); } catch { return null; } })();
+    if (pl?.tenant_id !== tenant || !Array.isArray(pl?.fold_floor_retired)) return null;
+    // The signed marker asserts the committed tip it consumed to: a
+    // signer dead at or before that tip could never have minted it —
+    // a tip including the signer's own death row was never visible to
+    // it (w63-seal F-1). A non-integer `marker_seq` is crafted — the
+    // gate must not skip on a type-pun.
+    const kid = parsed.env?.protected?.key_id;
+    if (typeof kid === 'string') {
+      if (!Number.isSafeInteger(pl.marker_seq)) return null;
+      const died = this._chainFacts(tenant).dead.get(kid);
+      if (died !== undefined && died <= pl.marker_seq) return null;
+      // A marker asserting consumption to marker_seq could not have
+      // seen claims anchored above it — a compromised-then-dead key
+      // minting a backdated env would otherwise suppress future heals
+      // it can predict (w64-seal F-2). Non-`seq:`-shaped claims are left
+      // for the consult's malformed naming.
+      // Unsafe-integer seq prefixes fail CLOSED: a `\d+` head beyond
+      // MAX_SAFE_INTEGER cannot be proven <= marker_seq — treating it as
+      // legal let such a claim authenticate (and suppress a standing
+      // residue row) where the mintable arm refuses the identical string
+      // as premature (w65-seal F-2). Bare non-`seq:` claims still pass —
+      // the consult names them malformed.
+      if ([...pl.fold_floor_retired, ...(Array.isArray(pl?.fold_floor_retiring) ? pl.fold_floor_retiring : [])]
+        .some(c => { const m = /^(\d+):/.exec(c); return m !== null && (!Number.isSafeInteger(Number(m[1])) || Number(m[1]) > pl.marker_seq); })) return null;
+      // `marker_seq` is a bare chain position the seq guard REUSES once
+      // a seal cut rewinds the table — MAX is not a clock. The env must
+      // pin the exact row it asserted (`marker_tip_hash`); a replayed or
+      // epoch-stranded marker binds a seq that now holds different bytes
+      // — or no row at all — and refuses (w65-seal F-1). The pin is
+      // REQUIRED: a pre-pin env (no field) replayed against an
+      // out-of-table seq satisfied both-undefined and could launder
+      // planted claims into every later marker via `prior` (w66-seal
+      // F-1). And the stored `hash` column is attacker clay (w44) —
+      // recompute it from the row's own envelope bytes; a mid-table
+      // column rewrite is invisible to the tip-only cfShape fingerprint
+      // but never satisfies this check.
+      const tipRow = this.store._stmt("SELECT envelope FROM audit WHERE tenant=? AND seq=?").get(tenant, pl.marker_seq);
+      // Stored bytes that do not parse/digest are corrupt content — the
+      // pin is provably dead and the verdict is null like every other
+      // content failure. The row READ itself propagates above.
+      let tipRecomputed = null;
+      try { tipRecomputed = tipRow === undefined ? null : digest(JSON.parse(tipRow.envelope).payload); } catch { tipRecomputed = null; }
+      if (typeof pl.marker_tip_hash !== 'string' || tipRecomputed === null || tipRecomputed !== pl.marker_tip_hash) return null;
+    }
+    // The unsigned `claims` twin is advisory — the env is the sole
+    // authority, so a missing twin authenticates (w62-seal F-7); when
+    // present it must still match the signed set byte-for-byte
+    // (w62-runtime F-3).
+    if (parsed.claims !== undefined && JSON.stringify(parsed.claims) !== JSON.stringify(pl.fold_floor_retired)) return null;
+    // `retiring` takes the same bound `retired` gets — an
+    // honest-signed env carrying an unbounded in-flight set would
+    // otherwise flood `prior` unbounded (w68-runtime F-5a).
+    const retiring = Array.isArray(pl?.fold_floor_retiring)
+      ? pl.fold_floor_retiring.filter(c => typeof c === 'string').slice(0, 8192)
+      : [];
+    // `prior_evicted` is signed accounting: the field must round-trip
+    // or the signed number was write-only (a flood could evict priors
+    // forever with no reader ever seeing the count — w67-runtime F-2).
+    // A garbage count on a verified env is crafted like a bad
+    // marker_seq; older envs simply carried no field.
+    const evicted = pl.prior_evicted === undefined ? 0 : (Number.isSafeInteger(pl.prior_evicted) && pl.prior_evicted >= 0 ? pl.prior_evicted : null);
+    if (evicted === null) return null;
+    return { retired: pl.fold_floor_retired.filter(c => typeof c === 'string').slice(0, 8192), retiring, markerSeq: Number.isSafeInteger(pl.marker_seq) ? pl.marker_seq : null, priorEvicted: evicted };
   }
   _foldFloorMarker(t, attestedFloor) {
     try {
@@ -2481,7 +2563,7 @@ export class Fabric {
     // Same-kind merges move seq/claims_dropped forward only — a re-fire
     // at an older position or a smaller count must not regress the
     // standing flag backwards (w69-runtime F-6).
-    if (cur.kind === flag.kind) { if (flag.seq !== undefined) cur.seq = Math.max(cur.seq ?? flag.seq, flag.seq); if (flag.healed_marker !== undefined) cur.healed_marker = flag.healed_marker; if (Array.isArray(flag.claims)) cur.claims = flag.claims; if (flag.claims_dropped !== undefined) cur.claims_dropped = Math.max(cur.claims_dropped ?? flag.claims_dropped, flag.claims_dropped); if (flag._claimsSeen !== undefined) cur._claimsSeen = flag._claimsSeen; if (heal) pushHeal(cur); return; }
+    if (cur.kind === flag.kind) { if (flag.seq !== undefined) cur.seq = Math.max(cur.seq ?? flag.seq, flag.seq); if (flag.healed_marker !== undefined) cur.healed_marker = flag.healed_marker; if (Array.isArray(flag.claims)) cur.claims = flag.claims; if (flag.claims_dropped !== undefined) cur.claims_dropped = Math.max(cur.claims_dropped ?? flag.claims_dropped, flag.claims_dropped); if (flag._claimsSeen !== undefined) cur._claimsSeen = flag._claimsSeen; if (flag._seenTotal !== undefined) cur._seenTotal = Math.max(cur._seenTotal ?? flag._seenTotal, flag._seenTotal); if (heal) pushHeal(cur); return; }
     const slot = (cur.masked ??= new Map());
     const prev = slot.get(flag.kind);
     if (prev !== undefined && typeof prev === 'object' && prev !== null) {
@@ -2492,8 +2574,13 @@ export class Fabric {
       if (Array.isArray(flag.claims)) prev.claims = flag.claims;
       if (flag.claims_dropped !== undefined) prev.claims_dropped = Math.max(prev.claims_dropped ?? flag.claims_dropped, flag.claims_dropped);
       if (flag._claimsSeen !== undefined) prev._claimsSeen = flag._claimsSeen;
+      // `_seenTotal` is the monotone distinct-claim ledger `_claimsSeen`
+      // approximates under window churn — drop it here and
+      // `claims_dropped` freezes at the window edge while the real
+      // eviction volume keeps growing (w71-runtime F-1).
+      if (flag._seenTotal !== undefined) prev._seenTotal = Math.max(prev._seenTotal ?? flag._seenTotal, flag._seenTotal);
       if (heal) pushHeal(prev);
-    } else slot.set(flag.kind, { seq: flag.seq, ...(flag.healed_marker !== undefined ? { healed_marker: flag.healed_marker } : {}), ...(Array.isArray(flag.claims) ? { claims: flag.claims } : {}), ...(flag.claims_dropped !== undefined ? { claims_dropped: flag.claims_dropped } : {}), ...(flag._claimsSeen !== undefined ? { _claimsSeen: flag._claimsSeen } : {}), ...(heal ? { heals: [heal] } : {}) });
+    } else slot.set(flag.kind, { seq: flag.seq, ...(flag.healed_marker !== undefined ? { healed_marker: flag.healed_marker } : {}), ...(Array.isArray(flag.claims) ? { claims: flag.claims } : {}), ...(flag.claims_dropped !== undefined ? { claims_dropped: flag.claims_dropped } : {}), ...(flag._claimsSeen !== undefined ? { _claimsSeen: flag._claimsSeen } : {}), ...(flag._seenTotal !== undefined ? { _seenTotal: flag._seenTotal } : {}), ...(heal ? { heals: [heal] } : {}) });
   }
   // Claim-valued flags minted at seq 0 collapse identity on the shared
   // kind — carry a bounded `claims[]` sample (like `heals[]`) so the
@@ -2618,9 +2705,12 @@ export class Fabric {
             // the signature/shape gates. `JSON.parse` must not share the
             // consult's try: a throw here skipped prevCorrupt entirely
             // and the note below overwrote the corrupt row (w63-runtime
-            // F-6 regression).
-            let pa = null;
-            try { pa = this.#retiredClaimsOf(tenant, JSON.parse(prev)); } catch { pa = null; }
+            // F-6 regression). An EVALUATION fault is infra, not corrupt
+            // content — it propagates rather than silently thinning the
+            // note plane (w71-seal F-1).
+            let parsedPrevNote = null;
+            try { parsedPrevNote = JSON.parse(prev); } catch { parsedPrevNote = null; }
+            const pa = parsedPrevNote === null ? null : this.#retiredClaimsOf(tenant, parsedPrevNote);
             prevCorrupt = pa === null;
             // Union the standing marker's `retiring` set exactly like
             // the drain does (:1605) — a batch interrupted between the
@@ -2703,7 +2793,12 @@ export class Fabric {
                 // rewrote it is evidence, not a silent no-op
                 // (w67-runtime F-5).
                 const backNote = db.prepare("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'").get(tenant)?.value;
-                const backAuthed = (() => { try { return this.#retiredClaimsOf(tenant, JSON.parse(backNote ?? 'null')); } catch { return null; } })();
+                // Our own write must authenticate — unparseable or
+                // non-authenticating read-back means a foreign splice;
+                // an evaluation fault is infra and propagates to this
+                // savepoint's rollback (w71-seal F-1).
+                const backParsed = (() => { try { return JSON.parse(backNote ?? 'null'); } catch { return null; } })();
+                const backAuthed = backParsed === null ? null : this.#retiredClaimsOf(tenant, backParsed);
                 requireThat(backAuthed !== null && mintable.every(c => backAuthed.retiring.includes(c)) && prior.every(c => backAuthed.retired.includes(c)), 'INV-409-INTEGRITY', 'fold-floor retiring note refused after write — foreign trigger side-effects', 409);
                 for (const [, sql] of RESIDUE_KEEP_TRIGGERS) db.exec(sql);
               } catch (e) { try { db.exec('ROLLBACK TO residue_note'); } catch { /* savepoint may already be gone */ } throw e; }
@@ -3859,6 +3954,11 @@ export class Fabric {
           const msg = applyErr instanceof Error ? applyErr.message : String(applyErr);
           if (committedResult !== null) committedResult.deferred_apply_error = msg;
           else if (sealFault instanceof InvariantError) sealFault.details = { ...(sealFault.details ?? {}), deferred_apply_error: msg };
+          // A raw (non-InvariantError) seal fault has no details shape —
+          // but the apply fault still deserves attestation: the queue was
+          // retained for retry and silence would leave it unnamed
+          // (w71-runtime F-2).
+          else if (sealFault instanceof Error) { try { sealFault.deferred_apply_error = msg; } catch { /* a frozen fault object keeps its own shape — the fault itself still propagates */ } }
         }
       }
       else {
