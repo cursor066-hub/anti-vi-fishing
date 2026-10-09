@@ -317,7 +317,20 @@ export class Store {
         // caller's INV-503-LEDGER translation (w20-fixverify F-12).
         if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw e;
         if (e?.message === msg) ok = true;
-        else throw new InvariantError('INV-503-STORAGE', `Integrity probe fault: ${e?.message ?? e}`, 503);
+        else {
+          // A schema-shaped probe fault verifies against the catalog
+          // like every convict-on-text site — a dropped or column-drained
+          // table is divergence evidence, not an infrastructure 'probe
+          // fault' (w74-seal F-4: `meta_kv` recreated missing `value`
+          // minted INV-503 at open while the same file convicts INV-409
+          // under `#schemaClaim`). Fabricated text over a standing
+          // schema keeps the infrastructure class — never a tamper
+          // verdict.
+          if (/no such table|no such column|not a database|malformed|has \d+ columns? but \d+ values/i.test(e?.message ?? '')
+            && this.#ledgerSchemaProbe() === 'diverged')
+            throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — integrity probe met a column-drained table', 409, { cause: e });
+          throw new InvariantError('INV-503-STORAGE', `Integrity probe fault: ${e?.message ?? e}`, 503);
+        }
       } finally {
         this.db.exec('ROLLBACK TO integrity_probe'); this.db.exec('RELEASE integrity_probe');
       }

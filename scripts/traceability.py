@@ -168,7 +168,7 @@ _ASSERT_NAME_SET = ('assert', 'requireThat', 'hasCode', 'expect', 'throws', 'rej
 # graft, or a parameter shadow `(assert) =>` (w51-ledger H-1).
 _SHADOWED_ASSERT = re.compile(
     r'\b(?:const|let|var|function)\s+(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b'
-    r'|\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\s*=(?!=)'
+    r'|\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\s*=(?![=>])'
     # `assert.ok &&= noop` / `assert.ok ||= fn` / `assert.equal = stub`
     # replace one METHOD on the real object — the name is still the
     # trusted binding, so only the member-assignment is the shadow
@@ -192,7 +192,14 @@ _SHADOWED_ASSERT = re.compile(
     # whole clause — `try {} catch (assert) { assert(...) }` and
     # `for (assert of x) assert(...)` never call node:assert (w53-fv H-1).
     r'|\bcatch\s*\(\s*(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\s*\)'
-    r'|\bfor\s*\(\s*(?:const|let|var\s+)?(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\s+(?:of|in)\b'
+    # `for await (` binds the same clause scope — the dedicated `await`
+    # gap makes the coverage deliberate, not an accident of the
+    # method-def arm parsing `await (` as a method head (w74-ledger F-5).
+    # The decl keywords require their whitespace — `const assert` is a
+    # binding, `constassert` is a bare name (w74-ledger F-3's `(?:const|let|var\s+)?`
+    # never matched `const `/`let `, so every declared for-head fell to
+    # the block-wide decl arm).
+    r'|\bfor\s*(?:await\s+)?\(\s*(?:(?:const|let|var)\s+)?(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\s+(?:of|in)\b'
     # Destructured shadows neuter the name the same way —
     # `const { assert } = fake` and `for (const [assert] of z)` bind a
     # local that is not node:assert; `class assert {}` does too. The
@@ -204,7 +211,7 @@ _SHADOWED_ASSERT = re.compile(
     # by `,`/`}`/`=` to shadow (w60-ledger F-11).
     r'|\b(?:const|let|var)\s*\{[^{}]*?\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\s*(?=[,}=]|$)[^{}]*\}\s*='
     r'|\b(?:const|let|var)\s*\[[^\]]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b[^\]]*\]\s*='
-    r'|\bfor\s*\(\s*(?:const|let|var)\s+[\[{][^\]}]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b'
+    r'|\bfor\s*(?:await\s+)?\(\s*(?:const|let|var)\s+[\[{][^\]}]*\b(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b'
     r'|\bclass\s+(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\b'
     # A member write neuters the called method while the `assert.ok(`
     # token survives — `assert.ok = () => {}`, `assert['ok'] = f` and
@@ -296,6 +303,11 @@ def _shadow_events(blanked):
         # `for (assert of x)` is no binding at all — an assignment to
         # the (import-bound) name that poisons the block from the `for`
         # onward.
+        # `(list) =>` arrows bind through the param-head walk below —
+        # emitting this approximate arm as 'decl' would neuter every
+        # assert in the enclosing block instead of just the arrow body
+        # (w74-fv LOW: `(assert) => {}` demoted a trailing honest assert).
+        if txt.startswith('(') and txt.rstrip().endswith('=>'): continue
         paren = txt.find('(')
         kind = 'decl'
         if paren > 0:
@@ -318,6 +330,11 @@ def _shadow_events(blanked):
                 continue
         yield m.start(), kind, names, txt, m.end()
     for m in re.finditer(r'\b(?:const|let|var)\s*[\[{]', blanked):
+        # A `const [`/`const {` inside a `for (`/`for await (` head is
+        # already bound clause-scoped by the for-arms — emitting a
+        # second 'decl' event would neuter block-wide and win over the
+        # ranged param event (w74-ledger F-3).
+        if re.search(r'\bfor\s*(?:await\s+)?\(\s*$', blanked[:m.start()]): continue
         e = _bracket_end(blanked, m.end() - 1)
         if e == -1 or not re.match(r'\s*(?:=|of\b|in\b)', blanked[e:]): continue
         out = []
@@ -343,6 +360,12 @@ def _shadow_events(blanked):
         _param_bind_names(blanked[m.end():e - 1], out)
         hits = [nm for nm in out if nm in _ASSERT_NAME_SET]
         if hits: yield m.start(), 'param', hits, 'param-head', e
+    # Bare-param arrows `assert => …` bind clause-scoped exactly like
+    # `(assert) =>` — the assign arm's `(?![=>])` refuses the `=` of
+    # `=>`, so the param event is emitted here with `_end` at the gap
+    # before `=>` (the consumers then scope the arrow body) (w74-fv LOW).
+    for m in re.finditer(r'(?<![\w$.])(assert|requireThat|hasCode|expect|throws|rejects|strictEqual|deepStrictEqual|doesNotThrow)\s*=>', blanked):
+        yield m.start(), 'param', [m.group(1)], m.group(0), m.start() + len(m.group(1))
 # The assert namespace itself is import-bound: `import { strict as asrt }`
 # or `import * as a` renames it — the probe runs on the resolved local
 # names, not a hardcoded 'assert' (w51-ledger M-7). Names are trusted

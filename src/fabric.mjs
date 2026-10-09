@@ -364,8 +364,16 @@ export class Fabric {
         // read on a table the schema swears exists is a dropped table, not
         // a pre-marker database: classify it as tamper evidence rather
         // than absorbing the pending markers silently (w46-seal F-2).
-        const exists = src._stmt("SELECT COUNT(*) n FROM sqlite_master WHERE type='table' AND name='meta_kv'").get()?.n > 0;
-        if (!exists) throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged (meta_kv dropped) — tamper evidence', 409, { cause: e });
+        // Column-bearing probe, not existence: a meta_kv dropped and
+        // recreated missing tenant/value diverges identically to a
+        // dropped table (w74-seal F-4). A probe that cannot answer
+        // propagates its own fault — infrastructure, never a verdict.
+        try { src._stmt("SELECT tenant,key,value FROM meta_kv LIMIT 0").get(); }
+        catch (pe) {
+          if (/no such table|no such column|not a database|malformed/i.test(pe?.message ?? ''))
+            throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged (meta_kv dropped or column-drained) — tamper evidence', 409, { cause: e });
+          throw pe;
+        }
         throw e;
       }
       for (const r of rows) {
@@ -1555,6 +1563,16 @@ export class Fabric {
     // `released` attests the savepoint's commit edge — read by the
     // latches after the finally (w72-seal F-5).
     let released = false;
+    // `spanError` carries whatever the catch arm is about to propagate,
+    // so the finally's dead-span arm can restore it when the savepoint
+    // (and possibly the whole transaction) was destroyed by the fault
+    // itself — e.g. a foreign RAISE(ROLLBACK) — instead of minting a
+    // phantom 'unresolved savepoint' over the real evidence
+    // (w74-seal F-1). `rollbackFailed` latches a catch-arm rollback that
+    // faulted: the finally must then run the ordered recovery — a plain
+    // RELEASE would COMMIT the span the catch meant to undo
+    // (w74-runtime F-1).
+    let spanError; let rollbackFailed = false;
     db.exec('SAVEPOINT residue_drain');
     try {
       let env, merged;
@@ -1727,7 +1745,12 @@ export class Fabric {
         db.prepare(`DELETE FROM meta_kv WHERE tenant=? AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.') AND value IN (${chunk.map(() => '?').join(',')})`).run(tenant, ...chunk);
       }
       for (const [, sql] of RESIDUE_KEEP_TRIGGERS) db.exec(sql);
-    } catch (e) { deferredAdd = null; murderedPrev = null; try { db.exec('ROLLBACK TO residue_drain'); } catch { /* savepoint may already be gone */ } throw e; }
+    } catch (e) {
+      spanError = e;
+      deferredAdd = null; murderedPrev = null;
+      try { db.exec('ROLLBACK TO residue_drain'); } catch { rollbackFailed = true; }
+      throw e;
+    }
     // RELEASE of the outermost savepoint IS the commit edge — a fault
     // there leaves the savepoint OPEN: the transaction becomes a zombie
     // (every later drain's callerInTx reads true, seals refuse to nest)
@@ -1736,28 +1759,47 @@ export class Fabric {
     // F-2). On a release fault undo the savepoint and drop the name;
     // the latches only run when the edge actually landed.
     finally {
-      try { db.exec('RELEASE residue_drain'); released = true; }
-      catch (re) {
+      // When the catch's own rollback never proved, a plain RELEASE
+      // would COMMIT the span it meant to undo — skip it and go straight
+      // to the ordered recovery (w74-runtime F-1).
+      let releaseErr = null;
+      if (!rollbackFailed) {
+        try { db.exec('RELEASE residue_drain'); released = true; }
+        catch (re) { releaseErr = re; }
+      }
+      if (rollbackFailed || releaseErr !== null) {
         // The retry ORDER is the contract: a RELEASE retried over a
         // faulted ROLLBACK TO resolves the name by COMMITTING the span
         // — the "rolled back" writes land while `released` stays false
         // and the latches attest nothing (w73-runtime F-1). Only a
         // rollback retry can prove the span undone; a release retry is
         // legal only after a rollback actually ran.
-        let rolledBack = false;
+        let rolledBack = false; let rbErr = null;
         for (let i = 0; i < 2 && !rolledBack; i++) {
-          try { db.exec('ROLLBACK TO residue_drain'); rolledBack = true; } catch { /* savepoint may already be gone */ }
+          try { db.exec('ROLLBACK TO residue_drain'); rolledBack = true; } catch (rbe) { rbErr = rbe; }
         }
         if (rolledBack) { try { db.exec('RELEASE residue_drain'); } catch { /* name resolves with the enclosing tx */ } }
         if (!callerInTx && db.isTransaction) {
           try { db.exec('ROLLBACK'); } catch { /* the zombie refused */ }
-          throw new InvariantError('INV-503-LEDGER', 'residue drain savepoint release faulted — leaked transaction rolled back', 503, { cause: re });
+          throw new InvariantError('INV-503-LEDGER', 'residue drain savepoint release faulted — leaked transaction rolled back', 503, { cause: releaseErr ?? rbErr });
         }
-        if (!rolledBack)
+        if (!rolledBack) {
+          // Dead-vs-unresolved (w74-seal F-1): a tx-destroying fault
+          // (a foreign RAISE(ROLLBACK), a full-transaction rollback)
+          // kills the savepoint WITH its implicit transaction — nothing
+          // is pending, and minting 'unresolved savepoint' launders the
+          // real error into a phantom retryable 503 with no conviction.
+          // `rbErr` catches the caller-in-tx case where the name is
+          // gone but the caller's transaction still lives.
+          if (!db.isTransaction || /no such savepoint/i.test(rbErr?.message ?? '')) {
+            if (spanError !== undefined) throw spanError;
+            throw new InvariantError('INV-503-LEDGER', 'residue drain savepoint destroyed with its transaction', 503, { cause: releaseErr ?? rbErr });
+          }
           // The caller's own transaction still holds the unresolved
           // savepoint — its commit would land unattested work. Surface
           // the fault instead of returning success (w73-runtime F-1).
-          throw new InvariantError('INV-503-LEDGER', 'residue drain savepoint release faulted — caller transaction holds an unresolved savepoint', 503, { cause: re });
+          throw new InvariantError('INV-503-LEDGER', 'residue drain savepoint release faulted — caller transaction holds an unresolved savepoint', 503, { cause: releaseErr ?? rbErr });
+        }
       }
     }
     // Sequential after the finally — these latches are skipped on the
@@ -1883,6 +1925,12 @@ export class Fabric {
     // `released` attests the savepoint's commit edge — read by the
     // latches after the finally (w72-seal F-5).
     let released = false;
+    // Drain parity (w74-seal F-1, w74-runtime F-1): `spanError` carries
+    // the in-flight error so a tx-destroying fault's dead-span arm can
+    // restore it instead of minting 'unresolved savepoint'; a catch-arm
+    // rollback that faulted skips the finally's plain RELEASE — it
+    // would COMMIT the span the catch meant to undo.
+    let spanError; let rollbackFailed = false;
     // Same savepoint doctrine as the drain's note: the trigger drops,
     // the write and the landed probe are one atomic span — a mid-span
     // fault rolls back to guards-intact, never leaves them absent on
@@ -1983,7 +2031,8 @@ export class Fabric {
       requireThat(Array.isArray(backClaims) && merged.every(c => backClaims.includes(c)), 'INV-409-INTEGRITY', 'fold-floor retired marker refused after deferred write — foreign trigger side-effects', 409, { marker_defeated: 'fold_floor_retired', claims: back === undefined ? merged.map(String) : [String(back).slice(0, 120)], claims_total: back === undefined ? merged.length : 1 });
       for (const [, sql] of RESIDUE_KEEP_TRIGGERS) db.exec(sql);
     } catch (e) {
-      try { db.exec('ROLLBACK TO deferred_mint'); } catch { /* savepoint may already be gone */ }
+      spanError = e;
+      try { db.exec('ROLLBACK TO deferred_mint'); } catch { rollbackFailed = true; }
       // The murder un-happened with the rollback — the flag must never
       // name a delete that did not land (w72-seal F-5).
       murderedPrev = null;
@@ -2008,7 +2057,7 @@ export class Fabric {
         // the defeat flag: keying on code alone blamed the queue for a
         // defeat that never happened (w72-seal F-4).
         if (e?.code === 'INV-409-INTEGRITY' && e.details?.marker_defeated !== undefined) this.#wmTamperClaimList(tenant, 'floor_marker_retired_marker_defeated', Array.isArray(e.details?.claims) && e.details.claims.length ? e.details.claims : queued);
-        throw e;
+        throw (spanError = e);
       }
       const msg = e?.message ?? '';
       const base = typeof e?.errcode === 'number' ? e.errcode & 0xFF : null;
@@ -2020,16 +2069,16 @@ export class Fabric {
       // raw and rides `deferred_apply_error`; the queue stays retained.
       if (base === null) throw e;
       if (base === 5 || base === 6)
-        throw new InvariantError('INV-503-LEDGER', 'Deferred retired-mint apply hit ledger contention — retry', 503, { cause: e });
+        throw (spanError = new InvariantError('INV-503-LEDGER', 'Deferred retired-mint apply hit ledger contention — retry', 503, { cause: e }));
       if ([8, 10, 11, 13, 14, 15].includes(base))
-        throw new InvariantError('INV-503-STORAGE', `Deferred retired-mint apply hit a storage fault: ${msg}`, 503, { cause: e });
+        throw (spanError = new InvariantError('INV-503-STORAGE', `Deferred retired-mint apply hit a storage fault: ${msg}`, 503, { cause: e }));
       // Everything else — a foreign trigger abort, a constraint the
       // honest UPSERT cannot hit, a schema break — is a refused write:
       // evidence, not contention. The flag names the claims it dropped
       // and the error crosses the boundary as an InvariantError, never
       // as a raw SqliteError whose code belongs to nobody (w70-seal F-1).
       this.#wmTamperClaimList(tenant, 'floor_marker_retired_marker_defeated', queued);
-      throw new InvariantError('INV-409-INTEGRITY', 'Deferred retired-mint apply defeated by a foreign or diverged write path', 409, { cause: e });
+      throw (spanError = new InvariantError('INV-409-INTEGRITY', 'Deferred retired-mint apply defeated by a foreign or diverged write path', 409, { cause: e }));
     }
     finally {
       // Same release doctrine as the drain's: RELEASE deferred_mint is
@@ -2037,32 +2086,51 @@ export class Fabric {
       // murder flag / queue delete below would attest an edge that never
       // landed (w72-seal F-5, w72-runtime F-2). The apply runs autocommit,
       // so a still-open transaction after cleanup is ours: roll it back
-      // and surface the fault instead of succeeding silently.
-      try { db.exec('RELEASE deferred_mint'); released = true; }
-      catch (re) {
+      // and surface the fault instead of succeeding silently. A catch-arm
+      // rollback that faulted skips the plain release — it would commit
+      // the span the catch meant to undo (w74-runtime F-1).
+      let releaseErr = null;
+      if (!rollbackFailed) {
+        try { db.exec('RELEASE deferred_mint'); released = true; }
+        catch (re) { releaseErr = re; }
+      }
+      if (rollbackFailed || releaseErr !== null) {
         // Same w73-runtime F-1 ordering as the drain: RELEASE retried
         // over a faulted ROLLBACK TO commits the span un-attested —
         // only a rollback retry proves the undo, and a release retry is
         // legal only after one ran. `callerInTx` keeps a hypothetical
         // in-tx caller's transaction out of the zombie arm.
-        let rolledBack = false;
+        let rolledBack = false; let rbErr = null;
         for (let i = 0; i < 2 && !rolledBack; i++) {
-          try { db.exec('ROLLBACK TO deferred_mint'); rolledBack = true; } catch { /* savepoint may already be gone */ }
+          try { db.exec('ROLLBACK TO deferred_mint'); rolledBack = true; } catch (rbe) { rbErr = rbe; }
         }
         if (rolledBack) { try { db.exec('RELEASE deferred_mint'); } catch { /* name resolves with the enclosing tx */ } }
         if (!callerInTx && db.isTransaction) {
           try { db.exec('ROLLBACK'); } catch { /* the zombie refused */ }
-          throw new InvariantError('INV-503-LEDGER', 'deferred mint savepoint release faulted — leaked transaction rolled back', 503, { cause: re });
+          throw new InvariantError('INV-503-LEDGER', 'deferred mint savepoint release faulted — leaked transaction rolled back', 503, { cause: releaseErr ?? rbErr });
         }
-        if (!rolledBack)
-          throw new InvariantError('INV-503-LEDGER', 'deferred mint savepoint release faulted — caller transaction holds an unresolved savepoint', 503, { cause: re });
+        if (!rolledBack) {
+          // Dead-vs-unresolved parity with the drain (w74-seal F-1): a
+          // tx-destroying fault already ended the span — restore the
+          // in-flight error instead of minting 'unresolved savepoint'
+          // over it.
+          if (!db.isTransaction || /no such savepoint/i.test(rbErr?.message ?? '')) {
+            if (spanError !== undefined) throw spanError;
+            throw new InvariantError('INV-503-LEDGER', 'deferred mint savepoint destroyed with its transaction', 503, { cause: releaseErr ?? rbErr });
+          }
+          throw new InvariantError('INV-503-LEDGER', 'deferred mint savepoint release faulted — caller transaction holds an unresolved savepoint', 503, { cause: releaseErr ?? rbErr });
+        }
       }
     }
     // Sequential after the finally — skipped on the throw path, gated
     // on `released` on the success path (w70-seal F-4 doctrine applied
-    // to the apply's own murder arm).
+    // to the apply's own murder arm). The queue leaves only when the
+    // apply's own writes committed: a span that rolled back — even one
+    // whose RELEASE then resolved the empty name — wrote nothing, so
+    // the queued claims stay for the next seal's replay instead of
+    // evaporating with a span the catch undid (w74-runtime F-1).
     if (murderedPrev !== null && released) this.#wmTamperClaim(tenant, 'floor_marker_retired_murdered', murderedPrev);
-    if (released) this.#deferredRetiredMints.delete(tenant);
+    if (released && spanError === undefined) this.#deferredRetiredMints.delete(tenant);
   }
   // The `fold_floor_retired` claim list, iff the marker row carries it
   // inside an audit-signed envelope bound to this tenant. A bare array or
@@ -2922,6 +2990,17 @@ export class Fabric {
             // (w63-runtime F-6).
             if (mintable.length && !prevCorrupt) {
               const db = this.store.db;
+              // Drain parity (w74-seal F-2): the caller's tx context is
+              // snapshotted before the savepoint — without it the
+              // release-fault path cannot reap a doomed implicit tx,
+              // and later writes would silently join the leaked span.
+              const callerInTx = db.isTransaction;
+              // Same dead-span doctrine as the drain's (w74-seal F-1,
+              // w74-runtime F-1): `spanError` restores the in-flight
+              // error when the fault destroyed the savepoint with its
+              // transaction; `rollbackFailed` skips a plain RELEASE
+              // that would commit the span the catch meant to undo.
+              let spanError; let rollbackFailed = false;
               db.exec('SAVEPOINT residue_note');
               try {
                 // The sign re-enters the fold, whose residue-mint window
@@ -2954,21 +3033,23 @@ export class Fabric {
                 // a spliced env too (w72-seal F-7).
                 requireThat(backAuthed !== null && mintable.every(c => backAuthed.retiring.includes(c)) && prior.every(c => backAuthed.retired.includes(c)) && backAuthed.priorEvicted === prevEvicted + (priorFull - prior.length), 'INV-409-INTEGRITY', 'fold-floor retiring note refused after write — foreign trigger side-effects', 409, { marker_defeated: 'fold_floor_retired', claims: backNote === undefined ? mintable.map(String) : [String(backNote).slice(0, 120)], claims_total: backNote === undefined ? mintable.length : 1 });
                 for (const [, sql] of RESIDUE_KEEP_TRIGGERS) db.exec(sql);
-              } catch (e) { try { db.exec('ROLLBACK TO residue_note'); } catch { /* savepoint may already be gone */ } throw e; }
+              } catch (e) {
+                spanError = e;
+                try { db.exec('ROLLBACK TO residue_note'); } catch { rollbackFailed = true; }
+                throw e;
+              }
               finally {
-                try { db.exec('RELEASE residue_note'); }
-                catch (re) {
-                  // A faulted RELEASE leaves the note's write pending
-                  // inside an open savepoint — undo it and drop the
-                  // name; a savepoint that refuses to resolve is a live
-                  // transaction holding unattested writes — surface it,
-                  // never return success with the tx live (w72-runtime
-                  // F-2). Same w73-runtime F-1 ordering: a RELEASE
-                  // retried over a faulted ROLLBACK TO commits the note
-                  // it was meant to undo.
-                  let rolledBack = false;
+                // Same ordering contract as the drain's (w73-runtime
+                // F-1) plus the catch-arm rollback latch: when the
+                // catch's own rollback never proved, a plain RELEASE
+                // would COMMIT the note it meant to undo — skip it and
+                // run the ordered recovery (w74-runtime F-1).
+                let releaseErr = null;
+                if (!rollbackFailed) { try { db.exec('RELEASE residue_note'); } catch (re) { releaseErr = re; } }
+                if (rollbackFailed || releaseErr !== null) {
+                  let rolledBack = false; let rbErr = null;
                   for (let i = 0; i < 2 && !rolledBack; i++) {
-                    try { db.exec('ROLLBACK TO residue_note'); rolledBack = true; } catch { /* savepoint may already be gone */ }
+                    try { db.exec('ROLLBACK TO residue_note'); rolledBack = true; } catch (rbe) { rbErr = rbe; }
                   }
                   if (rolledBack) {
                     // The retiring set's carry note was discarded while
@@ -2977,7 +3058,26 @@ export class Fabric {
                     try { this.#wmTamperClaimList(tenant, 'floor_marker_retired_note_rolled_back', mintable); } catch { /* flagging never wedges the rollback */ }
                     try { db.exec('RELEASE residue_note'); } catch (re2) { throw new InvariantError('INV-503-LEDGER', 'residue note savepoint failed to resolve — open transaction holds pending writes', 503, { cause: re2 }); }
                   }
-                  else throw new InvariantError('INV-503-LEDGER', 'residue note savepoint release faulted — unresolved savepoint holds pending writes', 503, { cause: re });
+                  // Drain parity (w74-seal F-2): an autocommit note
+                  // whose release faulted leaks its implicit
+                  // transaction — reap it instead of letting later
+                  // writes join a doomed span.
+                  if (!callerInTx && db.isTransaction) {
+                    try { db.exec('ROLLBACK'); } catch { /* the zombie refused */ }
+                    throw new InvariantError('INV-503-LEDGER', 'residue note savepoint release faulted — leaked transaction rolled back', 503, { cause: releaseErr ?? rbErr });
+                  }
+                  if (!rolledBack) {
+                    // Dead-vs-unresolved (w74-seal F-1): when the fault
+                    // destroyed the savepoint with its transaction
+                    // there is nothing pending — restore the in-flight
+                    // error rather than minting 'unresolved savepoint'
+                    // over it.
+                    if (!db.isTransaction || /no such savepoint/i.test(rbErr?.message ?? '')) {
+                      if (spanError !== undefined) throw spanError;
+                      throw new InvariantError('INV-503-LEDGER', 'residue note savepoint destroyed with its transaction', 503, { cause: releaseErr ?? rbErr });
+                    }
+                    throw new InvariantError('INV-503-LEDGER', 'residue note savepoint release faulted — caller transaction holds an unresolved savepoint', 503, { cause: releaseErr ?? rbErr });
+                  }
                 }
               }
             }
@@ -3557,7 +3657,12 @@ export class Fabric {
     catch (pe) {
       const pb = typeof pe?.errcode === 'number' ? pe.errcode & 0xFF : null;
       if (pb === 5 || pb === 6) throw new InvariantError('INV-503-LEDGER', `${what} — schema probe hit ledger contention — retry`, 503, { cause: pe });
-      if (pb !== null && [8, 10, 11, 13, 14, 15].includes(pb)) throw new InvariantError('INV-503-STORAGE', `${what} — schema probe hit a storage fault: ${pe?.message ?? ''}`, 503, { cause: pe });
+      // A corruption-family fault ON THE PROBE is engine-minted evidence
+      // the same as on the read — the store's slot probe convicts it;
+      // classifying it storage degraded the verdict (w74-seal F-5).
+      if (pb === 11 || pb === 26)
+        throw new InvariantError('INV-409-INTEGRITY', `${what} — tamper evidence`, 409, { cause: pe });
+      if (pb !== null && [8, 10, 13, 14, 15].includes(pb)) throw new InvariantError('INV-503-STORAGE', `${what} — schema probe hit a storage fault: ${pe?.message ?? ''}`, 503, { cause: pe });
       throw pe;
     }
     if (probe === 'diverged') throw new InvariantError('INV-409-INTEGRITY', `${what} — tamper evidence`, 409, { cause: e });

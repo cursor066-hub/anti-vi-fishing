@@ -1,6 +1,6 @@
 {
   "described_tree": {
-    "commit": "e53cf5e9a044cacc4c2e7f0f602030a8a9cb9c46",
+    "commit": "12fa6d037dd296fc7bd0dd318c8042c27b12a5be",
     "clean": false
   },
   "note": "volatile evidence: describes the tree at generation time — freshness is proven by the live CI step, not by this snapshot (w11-supply SC-08)",

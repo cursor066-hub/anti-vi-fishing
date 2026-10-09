@@ -78,7 +78,14 @@ if (tracked.status === 0) {
 for (const file of textFiles) {
   if (!existsSync(file)) continue;
   const s = readFileSync(file, 'utf8');
-  for (const [name, regex] of SECRET_RULES) if (regex.test(s)) { console.error(`${file}: ${name}`); failed = true; }
+  // A UTF-16 (or NUL-interleaved) file decodes to `A\0K\0I\0A…` under a
+  // tolerant utf8 read — the ASCII-contiguous secret rules cannot match
+  // across the NULs, so a planted credential answers the scan and
+  // passes (w74-fv F-5). Collapsing the NULs recovers the contiguous
+  // spelling for both endians without needing a BOM table.
+  const collapsed = s.includes('\0') ? s.replace(/\0/g, '') : s;
+  for (const [name, regex] of SECRET_RULES)
+    if (regex.test(s) || (collapsed !== s && regex.test(collapsed))) { console.error(`${file}: ${name}`); failed = true; }
 }
 
 for (const file of files.filter(f => CODE_EXT.test(f) && existsSync(f))) {
@@ -414,7 +421,12 @@ const maskStrings = (text, dead) => {
     }
     if (q) {
       if (c === '\\') { out[i] = ' '; if (i + 1 < out.length) out[++i] = ' '; continue; }
-      if (q === '`' && c === '$' && out[i + 1] === '{') { out[i] = ' '; out[i + 1] = ' '; i++; tStack.push(1); q = null; continue; }
+      // The interpolation's braces are real structure — masking them
+      // hid the container opener from the operand-head walk, letting
+      // `` `${cmp}` `` bind a pair an always-truthy template never
+      // decided (w74-fv F-1's residual template surface). Keep both
+      // braces visible; the literal segments and the `$` still mask.
+      if (q === '`' && c === '$' && out[i + 1] === '{') { out[i] = ' '; i++; tStack.push(1); q = null; continue; }
       out[i] = ' ';
       if (c === q) q = null;
       continue;
@@ -423,7 +435,7 @@ const maskStrings = (text, dead) => {
       if (c === '{') tStack[tStack.length - 1]++;
       else if (c === '}') {
         tStack[tStack.length - 1]--;
-        if (tStack[tStack.length - 1] === 0) { tStack.pop(); q = '`'; out[i] = ' '; continue; }
+        if (tStack[tStack.length - 1] === 0) { tStack.pop(); q = '`'; continue; }
       } else if (c === "'" || c === '"' || c === '`') { q = c; out[i] = ' '; continue; }
       else if (c === '/') {
         let j = i - 1;
@@ -1073,8 +1085,26 @@ const operandHeadSkip = (lm, pos) => {
   if (k < 0) return false;
   const c = lm[k];
   if (c === '.') return true;
-  if (c === '&' || c === '|') return lm[k - 1] !== c;
-  if (c === '>') return lm[k - 1] !== '=';
+  // `&&` keeps the pair — the compare genuinely shares the arm with the
+  // LHS. `||` discriminates by its left operand: `cmp || cmp` is a pure
+  // route disjunction — every member-compare decides the arm for its
+  // verb, so the RHS pair binds (w64-fv F-5's `||`-negated fold and the
+  // w68 `m[2]==='w' || m[2]==='x'` tail both need it). `flag || cmp`
+  // serves every non-pair verb when flag holds — the compare never
+  // decides the arm, so the pair stays skipped (w74-ledger F-1). A solo
+  // `|`/`&` swallows the member into a bitwise operand — always a skip.
+  if (c === '&') return lm[k - 1] !== '&';
+  if (c === '|') {
+    if (lm[k - 1] === '|' || lm[k + 1] === '|')
+      return !/[\w$]+\[\w+\]\s*[=!]={2,3}\s*(?:\|\s*)*$/.test(lm.slice(0, lm[k - 1] === '|' ? k - 1 : k));
+    return true;
+  }
+  if (c === '?' || c === ':') return true;
+  // `>`/`>>`/`>>>` and `=>` all swallow the member into a tighter
+  // operand — `=>` spells the same `=` `>` pair `>=` does backwards, so
+  // the k-1 discrimination the w72 arm used only ever saw `=` (w74-ledger
+  // F-1: `z => m[1]==='x'` minted unconditional).
+  if (c === '>') return true;
   if (c === '!') {
     // `!` hugging the member binds to it — `(!m[1])==='v'` is dead for
     // every verb (w72-ledger F-6). A `!` over a PAREN negates the whole
@@ -1085,8 +1115,20 @@ const operandHeadSkip = (lm, pos) => {
     return lm[j] !== '(';
   }
   if ('+-~*/%<^'.includes(c)) return true;
+  // `=` heads: `==`/`!=`/`<=`/`>=` preceders keep their skip, and every
+  // compound-assign preceder (`+= -= *= /= %= &= |= ^= <<= >>= >>>= **=
+  // &&= ||= ??=`) does too — `y op cmp` is an operand expression the
+  // compare never decides (w74-ledger F-1). A bare `=` stays honest:
+  // `x = m[1]==='a'` still evaluates the compare.
   if (c === '=')
-    return lm[k - 1] === '=' || lm[k - 1] === '!' || lm[k - 1] === '<' || lm[k - 1] === '>';
+    return lm[k - 1] === '=' || lm[k - 1] === '!' || '+-~*/%<>&^|?'.includes(lm[k - 1]);
+  // Container wrappers are structurally non-boolean heads: `[cmp]` and
+  // `{k: cmp}` are ALWAYS truthy whatever the compare answers — keeping
+  // the pair would bind an unconditional `authorize` to one verb while
+  // every other verb's arm reports dead (w74-fv F-1). Skipping the pair
+  // degrades the arm to conditional — `[cmp][0]`/`({b:cmp}).b` honest
+  // dereferences under-claim (safe direction), never over-claim.
+  if (c === '[' || c === '{') return true;
   return /(?:^|[^\w$])(?:typeof|void|delete|new|in|of|instanceof)$/.test(lm.slice(0, k + 1));
 };
 // `!(member===v)` / `!member===v` / `!member` — a `!` at logical depth 0
@@ -3963,13 +4005,17 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
               `\\b(?:if|else\\s+if|while|for|switch)\\s*\\([^)]*\\b${nm}\\b` +
               `|\\b(?:return|throw|case)\\b[^;\\n]*\\b${nm}\\b` +
               `|\\b${nm}\\b\\s*\\?(?![.?])` +
-              // `[^;]` bounds the continuation to the SAME statement —
-              // `ok && flag; serve(req);` minted 'token holder' off a
-              // later un-gated call (w73-ledger F-4). `(?![=])` excludes
+              // The continuation stays inside the SAME statement — `;`
+              // bounds it explicitly (w73-ledger F-4) and ASI bounds it
+              // implicitly: `ok && flag\nserve(req)` discards the verdict
+              // then calls ungated (w74-fv F-2). `(?![=])` excludes
               // `&&=`/`||=`: logical assignment writes the verdict,
-              // never gates on it (the w72 arm already excluded `??=`
-              // by omission).
-              `|\\b${nm}\\b\\s*(?:&&|\\|\\|)(?![=])[^;]*?\\b[A-Za-z_$][\\w$]*\\s*\\(`)
+              // never gates on it. The optional `[ \t]*\n` right after
+              // the operator is the one legal line-wrap — `ok &&\nserve`
+              // is still a single statement; a newline after an operand
+              // (`ok && flag\n`) is ASI. `,` is excluded for the same
+              // reason: `ok && flag, serve()` runs serve unconditionally.
+              `|\\b${nm}\\b\\s*(?:&&|\\|\\|)(?![=])(?:[ \\t]*\\n\\s*)?[^;,\\n]*?\\b[A-Za-z_$][\\w$]*\\s*\\(`)
               .test(tail)) return true;
           }
         }
@@ -4264,7 +4310,12 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
     // src/connectors.mjs is a pure outbound client with no dispatch; the
     // accept/dispatch SHAPES are what the audit must hold.
     {
-      const dispatchText = readFileSync(p, 'utf8');
+      // Optional chaining spells the same member access `?.`/`?.[` — the
+      // common modern spelling — so normalize it before matching or the
+      // whole `req?.url`/`req?.headers` surface escapes (w74-fv F-3).
+      const dispatchText = readFileSync(p, 'utf8')
+        .replace(/\s*\?\s*\.\s*(?=\[)/g, '')
+        .replace(/\s*\?\s*\.\s*/g, '.');
       // Bracket-member spellings carry the same capability the dot arms
       // name — `srv['listen'](8080)`, `srv['on']('request', h)`,
       // `r['method']`, `r['headers']` — and a destructure rebind (`const
@@ -4279,25 +4330,42 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
       // dispatch-shaped use of those spellings counts (`u === '…'`,
       // `u.startsWith(`, `u.get('authorization')`, `new URL(u)`,
       // `switch (u.method)`). The enumerated-name leg above keeps the
-      // plain `const {url} = req` shapes (w73-ledger F-5).
-      const destr = /(?:const|let|var)\s*\{([^}]*)\}\s*=\s*(?:req|request)\b/.exec(dispatchText);
-      const destrRebind = (() => {
-        if (destr === null) return false;
-        const names = [];
-        for (const m of destr[1].matchAll(/\b(url|method|pathname|searchParams|headers|query)\b\s*(?::\s*([A-Za-z_$][\w$]*))?/g))
-          names.push((m[2] ?? m[1]).replace(/\$/g, '\\$'));
-        for (const n of names)
-          if (new RegExp(`\\b${n}\\s*(?:===|!==|==|!=|\\.(?:startsWith|endsWith|includes|match|at|slice|indexOf|get|has|set|forEach)\\s*\\(|\\.authorization\\b)`).test(dispatchText)
-            || new RegExp(`\\bnew\\s+URL\\s*\\(\\s*${n}\\b`).test(dispatchText)
-            || new RegExp(`\\bswitch\\s*\\([\\s\\S]{0,200}?\\b${n}\\b`).test(dispatchText)) return true;
-        return false;
-      })();
+      // plain `const {url} = req` shapes (w73-ledger F-5). Bare
+      // destructures `({url: u} = req)` and for-of heads
+      // `for (const {url} of reqs)` bind the same names without a
+      // declaration keyword or `=` (w74-fv F-4).
+      const destrNames = [];
+      // `[^)]*` bodies see computed keys (`{['url']: u}`), nested
+      // destructures (`{a: {url}}`), and multi-pattern param lists; the
+      // `(?:await\s+)?` gap covers `= await req`, the `\({…} = req` arm
+      // bare destructures, the `for` arm loop heads (incl. `for await`),
+      // and the final `\(\s*\{…\}\s*\)` arm function-param destructures
+      // `handler({url, method})` (w74-ledger F-2).
+      for (const m of dispatchText.matchAll(/(?:const|let|var)\s*\{([^)]*)\}\s*=\s*(?:await\s+)?(?:req|request)\b|\((\{[^)]*)\}\s*=\s*(?:await\s+)?(?:req|request)\b|for\s*(?:await\s+)?\(\s*(?:const|let|var)\s*\{([^)]*)\}\s*(?:of|in)\s+|\(\s*\{([^)]*)\}\s*\)/g)) {
+        const body = m[1] ?? m[2] ?? m[3] ?? m[4] ?? '';
+        // Quoted and computed keys bind too — `{'url': u}` and
+        // `{['url']: u}` rename the same surface to `u` (w74-ledger
+        // F-2's computed-key case); the bare-word arm keeps shorthand
+        // and plain renames.
+        for (const n of body.matchAll(/\[?\s*['"](url|method|pathname|searchParams|headers|query)['"]\s*\]?\s*:\s*([A-Za-z_$][\w$]*)|\b(url|method|pathname|searchParams|headers|query)\b\s*(?::\s*([A-Za-z_$][\w$]*))?/g))
+          destrNames.push((n[2] ?? n[4] ?? n[1] ?? n[3]).replace(/\$/g, '\\$'));
+      }
+      const destrRebind = destrNames.some(n =>
+        new RegExp(`\\b${n}\\s*(?:===|!==|==|!=|\\.(?:startsWith|endsWith|includes|match|at|slice|indexOf|get|has|set|forEach)\\s*\\(|\\.authorization\\b)`).test(dispatchText)
+        || new RegExp(`\\bnew\\s+URL\\s*\\(\\s*${n}\\b`).test(dispatchText)
+        || new RegExp(`\\bswitch\\s*\\([\\s\\S]{0,200}?\\b${n}\\b`).test(dispatchText));
+      // A whole-request alias `const r = req` rebinds the receiver — its
+      // `r.url`/`r.method`/`r.headers` members are the same surface
+      // (w74-fv F-4).
+      const reqAlias = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:req|request)\b/.exec(dispatchText);
+      const reqAliasRebind = reqAlias !== null
+        && new RegExp(`\\b${reqAlias[1].replace(/\$/g, '\\$')}\\s*\\.\\s*(?:method|url|pathname|searchParams|headers|query)\\b`).test(dispatchText);
       // `const u = URL` rebinds the class itself — `u.parse(req.url)`
       // parses the dispatch surface behind the alias (w73-ledger F-5).
       const urlAlias = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*URL\b/.exec(dispatchText);
       const urlAliasRebind = urlAlias !== null && new RegExp(`\\b${urlAlias[1].replace(/\$/g, '\\$')}\\s*(?:\\.\\s*|\\[\s*['"])(?:parse|resolve|canParse)`).test(dispatchText);
-      if (/req\.method|req\.url|url\.pathname|req\.headers|\b(?:req|request)\s*\[\s*['"](?:method|url)['"]\s*\]|\b\w+\.pathname\s*===\s*['"`]|createServer\s*\(|\b[A-Za-z_$][\w$]*\s*\[\s*['"]createServer['"]\s*\]\s*\(|\bnew\s+(?:[A-Za-z_$][\w$]*\s*\.\s*)*[\w$]*Server\s*\(|\.\s*listen\s*\(|\[\s*['"](?:listen|on|once|addListener|addEventListener|emit)['"]\s*\]\s*\(|\b[A-Za-z_$][\w$]*\s*\[\s*['"](?:method|url|pathname|headers|searchParams)['"]\s*\]|(?:on|once|addEventListener|addListener)\s*\(\s*['"](?:request|upgrade|connect|connection|secureConnection|checkContinue|checkExpectation|clientError)['"]|\bswitch\s*\([\s\S]{0,200}?\.(?:method|url)\s*\)\s*\{|\b[A-Za-z_$][\w$]*\.(?:method|url)\s*(?:===|!==|==|!=)\s*['"`]|\bnew\s+URL\s*\(\s*[A-Za-z_$][\w$]*\s*\.\s*(?:url|href)|\bnew\s*\(\s*URL\s*\)\s*\(|\bURL\s*\.\s*parse\s*\(|\bURL\s*\[\s*['"](?:parse|resolve|canParse)['"]\s*\]\s*\(|\.\s*(?:url|pathname)\s*\.\s*(?:startsWith|endsWith|includes|match|at|slice|indexOf)\s*\(|\.test\s*\(\s*[A-Za-z_$][\w$]*\s*\.\s*(?:url|pathname)|\.\s*searchParams\s*\.|\b(?:req|request)\s*\.\s*headers|\b[A-Za-z_$][\w$]*\.headers\s*(?:\[\s*['"](?:authorization|proxy-|x-|cookie|sec-|cf-|true-)|\.authorization\b)/.test(dispatchText)
-        || dispatchRebind || destrRebind || urlAliasRebind) { console.error(`route-spec parity: HTTP dispatch surface in ${p} — outside the audited file`); failed = true; }
+      if (/req\.method|req\.url|url\.pathname|req\.headers|\b(?:req|request)\s*\[\s*['"](?:method|url)['"]\s*\]|\b\w+\.pathname\s*===\s*['"`]|createServer\s*\(|\b[A-Za-z_$][\w$]*\s*\[\s*['"]createServer['"]\s*\]\s*\(|\bnew\s+(?:[A-Za-z_$][\w$]*\s*\.\s*)*[\w$]*Server\s*\(|\.\s*listen\s*\(|\[\s*['"](?:listen|on|once|addListener|addEventListener|emit)['"]\s*\]\s*\(|\b[A-Za-z_$][\w$]*\s*\[\s*['"](?:method|url|pathname|headers|searchParams)['"]\s*\]|(?:on|once|addEventListener|addListener)\s*\(\s*['"](?:request|upgrade|connect|connection|secureConnection|checkContinue|checkExpectation|clientError)['"]|\bswitch\s*\([\s\S]{0,200}?\.(?:method|url)\s*\)\s*\{|\b[A-Za-z_$][\w$]*\.(?:method|url)\s*(?:===|!==|==|!=)\s*['"`]|\bnew\s+URL\s*\(\s*[A-Za-z_$][\w$]*\s*\.\s*(?:url|href)|\bnew\s*\(\s*URL\s*\)\s*\(|\bURL\s*\.\s*parse\s*\(|\bURL\s*\[\s*['"](?:parse|resolve|canParse)['"]\s*\]\s*\(|\.\s*(?:url|pathname)\s*\.\s*(?:startsWith|endsWith|includes|match|at|slice|indexOf)\s*\(|\.test\s*\(\s*[A-Za-z_$][\w$]*\s*\.\s*(?:url|pathname)|\.\s*searchParams\s*\.|\b(?:req|request)\s*\.\s*headers|\b[A-Za-z_$][\w$]*\.headers\s*(?:\[\s*['"](?:authorization|proxy-|x-|cookie|sec-|cf-|true-)|\.authorization\b)|\bReflect\s*\.\s*(?:get|ownKeys|getOwnPropertyDescriptor)\s*\(\s*(?:req|request)\b/.test(dispatchText)
+        || dispatchRebind || destrRebind || urlAliasRebind || reqAliasRebind) { console.error(`route-spec parity: HTTP dispatch surface in ${p} — outside the audited file`); failed = true; }
     }
 }
 

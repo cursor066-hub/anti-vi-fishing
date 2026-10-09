@@ -136,7 +136,16 @@ export class SimulatedTarget {
         try { run(); } catch (e) {
           if (e?.errcode === 5 || e?.errcode === 6 || /database .*locked/i.test(e?.message ?? '')) throw e;
           if (e?.message === 'aad migration marker is evidence') ok = true;
-          else throw new InvariantError('INV-503-STORAGE', `Integrity probe fault: ${e?.message ?? e}`, 503);
+          else {
+            // Same schema-claim doctrine as the store sibling (w74-seal
+            // F-4): a dropped or column-drained table verifies against
+            // the catalog and convicts INV-409 — fabricated text over a
+            // standing schema keeps the infrastructure class.
+            if (/no such table|no such column|not a database|malformed|has \d+ columns? but \d+ values/i.test(e?.message ?? '')
+              && this._schemaProbe() === 'diverged')
+              throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — integrity probe met a column-drained table', 409, { cause: e });
+            throw new InvariantError('INV-503-STORAGE', `Integrity probe fault: ${e?.message ?? e}`, 503);
+          }
         } finally {
           this.db.exec('ROLLBACK TO integrity_probe'); this.db.exec('RELEASE integrity_probe');
         }
@@ -423,11 +432,46 @@ export class SimulatedTarget {
       return result;
     }));
   }
+  // Column-bearing LIMIT-0 probes over every table the guarded writes
+  // touch — the same doctrine as Store's `#ledgerSchemaProbe`: convict
+  // only when the probe itself fails schema-shaped; a fabricated claim
+  // over a standing schema falls through to the errcode arms
+  // (w74-seal F-3). A probe that cannot answer propagates its own
+  // fault — infrastructure, never a verdict.
+  _schemaProbe() {
+    for (const sql of [
+      "SELECT tenant,id,version,value FROM resources LIMIT 0",
+      "SELECT tenant,id,value FROM transactions LIMIT 0",
+      "SELECT tenant,dataset,row_id,data FROM dataset_rows LIMIT 0",
+      "SELECT tenant,secret_id,version,value FROM secrets_registry LIMIT 0",
+      "SELECT tenant,grant_id,value FROM grants LIMIT 0",
+      "SELECT tenant,key,value FROM meta_kv LIMIT 0",
+    ]) {
+      try { this._stmt(sql).get(); }
+      catch (pe) {
+        if (/no such table|no such column|not a database|malformed/i.test(pe?.message ?? '')) return 'diverged';
+        throw pe;
+      }
+    }
+    return 'ok';
+  }
   _schemaGuard(run) {
     try { return run(); }
     catch (e) {
-      if (/no such table|no such column|not a database|malformed/i.test(e?.message ?? ''))
-        throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e });
+      if (/no such table|no such column|not a database|malformed/i.test(e?.message ?? '')) {
+        // Prove the claim against the catalog before convicting — a
+        // foreign RAISE spelling 'no such table: grants' over a healthy
+        // schema is a refused write (the 1811 arm below), not divergence
+        // evidence (w74-seal F-3). A corruption-family errcode is
+        // engine-minted proof a RAISE cannot forge (w73-fv F-1).
+        const base0 = typeof e?.errcode === 'number' ? e.errcode & 0xFF : null;
+        if (/not a database|malformed/i.test(e?.message ?? '') && (base0 === 11 || base0 === 26))
+          throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e });
+        if (this._schemaProbe() === 'diverged')
+          throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e });
+        // The schema stands — the claim was fabricated text; fall
+        // through to the errcode arms (1811 → 'refused by trigger').
+      }
       // EVERY trigger abort on a guarded path is tamper evidence — a
       // mimic replaying a known RAISE text is indistinguishable, so the
       // allowlist laundered planted payloads into raw errors (w48-store
