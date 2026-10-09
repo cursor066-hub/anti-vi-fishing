@@ -109,7 +109,10 @@ test('w53-fv M-2: a fold_floor marker with a foreign tip hash convicts floor_mar
 // dispatch surface.
 test('w53-fv M-4: the dispatch-parity scan flags req.url/req.headers-only surfaces', t => {
   const src = readFileSync(new URL('../scripts/check.mjs', import.meta.url), 'utf8');
-  const m = /if \((\/[^/]+\/)\.test\(readFileSync\(p, 'utf8'\)\)\)/.exec(src);
+  // The scan reads the file once into `dispatchText`, then gates on a
+  // single capability-shape regex (w72-fv F-6 widened it for bracket
+  // member and Server-constructor spellings).
+  const m = /if \((\/.+?\/)\.test\(dispatchText\)/.exec(src);
   assert.ok(m, 'the parity predicate is present');
   const re = new RegExp(m[1].slice(1, -1));
   assert.ok(re.test("require('http').createServer((req,res)=>{ if(req.url==='/v1/x') res.end('x'); })"), 'req.url dispatch flags');

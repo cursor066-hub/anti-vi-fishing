@@ -297,11 +297,17 @@ def _shadow_events(blanked):
     # (function/method/catch bodies) or `=>` (arrow bodies). Control
     # keywords are excluded — `if (x)` evaluates, it never binds.
     for m in re.finditer(r'\(', blanked):
-        if _PARAM_HEAD_EXCLUDE.search(blanked[:m.start()].rstrip()): continue
         e = _bracket_end(blanked, m.end() - 1)
+        if e == -1: continue
         # `e` sits just past `)`; the body brace / arrow may follow
-        # whitespace — `(assert) {`, `()  =>` both bind.
-        if e == -1 or not re.match(r'\s*(?:\{)|\s*=>', blanked[e:]): continue
+        # whitespace — `(assert) {`, `()  =>` both bind. An `=>`
+        # follower binds UNCONDITIONALLY — `return (x = g(), assert) =>
+        # {…}` still binds `assert` even though `return` precedes the
+        # head (w72-ledger F-4). Only a `{` follower consults the
+        # control-keyword exclusion — `if (x) {` evaluates, never binds.
+        nxt = re.match(r'\s*(?:\{)|\s*=>', blanked[e:])
+        if nxt is None: continue
+        if not nxt.group(0).rstrip().endswith('=>') and _PARAM_HEAD_EXCLUDE.search(blanked[:m.start()].rstrip()): continue
         out = []
         _param_bind_names(blanked[m.end():e - 1], out)
         hits = [nm for nm in out if nm in _ASSERT_NAME_SET]
@@ -588,8 +594,27 @@ def _test_bodies(text):
     scope_events = []
     for _pos, _kind, _names, _txt, _end in _shadow_events(blanked):
         if _kind == 'param':
-            _nb = blanked.find('{', _end)
-            scope_events.append((_pos, brace_close.get(_nb, len(blanked)) if _nb != -1 else len(blanked), _names))
+            # The param scope is the FOLLOWING body — a `{` directly
+            # after `)` or after `=>`. A bodyless arrow
+            # `(assert) => assert.ok(1)` binds through the end of its
+            # expression — the first top-level `,`/`;`/unmatched closer
+            # (w72-ledger F-4 follow-up: find('{') used to wander into
+            # an unrelated later block).
+            _m2 = re.match(r'\s*=>\s*\{|\s*\{', blanked[_end:])
+            if _m2 is not None:
+                _nb = _end + _m2.end() - 1
+                scope_events.append((_pos, brace_close.get(_nb, len(blanked)), _names))
+            else:
+                _j = _end; _d = 0
+                while _j < len(blanked):
+                    _c = blanked[_j]
+                    if _c in '([{': _d += 1
+                    elif _c in ')]}':
+                        if _d == 0: break
+                        _d -= 1
+                    elif _d == 0 and _c in ',;': break
+                    _j += 1
+                scope_events.append((_pos, _j, _names))
             continue
         # A file-level `import` is the trusted binding channel itself —
         # `_assert_names` already decides which imported names prove
@@ -612,9 +637,13 @@ def _test_bodies(text):
             _fb = max((o for o in _fn_braces if o <= _pos and brace_close[o] > _pos), default=0)
             scope_events.append((_fb, brace_close.get(_fb, len(blanked)), _names))
             continue
-        # `const`/`let`/`function` (strict .mjs) and every destructure or
-        # clause head bind from their position to the innermost block end.
-        scope_events.append((_pos, brace_close.get(_encl, len(blanked)), _names))
+        # `const`/`let`/`class`/`function` bind over the WHOLE enclosing
+        # block — TDZ keeps the name bound (uninitialized) above the
+        # decl, and a test registered before the decl still resolves the
+        # fake when node --test runs its callback later (w72-ledger F-3).
+        # `_encl` is the innermost `{` owning the decl; file scope is
+        # one block.
+        scope_events.append((_encl if _encl != -1 else 0, brace_close.get(_encl, len(blanked)) if _encl != -1 else len(blanked), _names))
     bodies = []
     for a, b, skipped in raw:
         # A skipped enclosing test/describe skips every nested call too —

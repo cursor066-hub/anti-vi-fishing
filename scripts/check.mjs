@@ -78,12 +78,31 @@ const isBinary = file => {
     const head = buf.subarray(0, Math.min(buf.length, 8192));
     let nul = 0;
     for (const b of head) if (b === 0) nul++;
-    if (head.length > 0 && nul / head.length >= 0.01) return true;
-    try { new TextDecoder('utf-8', { fatal: true }).decode(head); return false; } catch { return true; }
+    // One planted NUL in a tiny file reaches 1% of a 65-byte head — the
+    // density test needs a minimum window AND more than a lone byte, or
+    // a short planted file exempts itself from every scan (w72-fv F-5a).
+    if (head.length >= 512 && nul >= 2 && nul / head.length >= 0.01) return true;
+    // A multibyte UTF-8 char straddling the head boundary decodes as a
+    // broken tail — drop a trailing continuation run plus a lead byte
+    // whose sequence was cut before the strict decode, or a legitimate
+    // >8KB text file exempts itself (w72-fv F-5b).
+    let end = head.length, back = 0;
+    while (end > 0 && back < 3 && (head[end - 1] & 0xC0) === 0x80) { end--; back++; }
+    if (end > 0) {
+      const b = head[end - 1];
+      const need = (b & 0x80) === 0 ? 0 : (b & 0xE0) === 0xC0 ? 1 : (b & 0xF0) === 0xE0 ? 2 : (b & 0xF8) === 0xF0 ? 3 : 0;
+      if (need > back) end--;
+    }
+    try { new TextDecoder('utf-8', { fatal: true }).decode(head.subarray(0, end)); return false; } catch { return true; }
   } catch { return true; }
 };
+// Text-claimed extensions can never exempt themselves — a `.mjs`
+// carrying planted NULs still parses and must answer the secret scan;
+// `isBinary` only exempts files whose extension does not claim text
+// (w72-ledger F-8 — a NUL-dense comment used to skip the whole file).
+const TEXT_EXT = /\.(?:mjs|cjs|js|mts|cts|jsx|tsx|ts|json|py|sh|bash|zsh|ps1|yml|yaml|html|htm|md|txt|csv|xml|css|toml|ini|cfg|env|tap|sql|pem|key|crt)$/i;
 for (const file of textFiles) {
-  if (!existsSync(file) || isBinary(file)) continue;
+  if (!existsSync(file) || (!TEXT_EXT.test(file) && isBinary(file))) continue;
   const s = readFileSync(file, 'utf8');
   for (const [name, regex] of SECRET_RULES) if (regex.test(s)) { console.error(`${file}: ${name}`); failed = true; }
 }
@@ -149,7 +168,10 @@ const RENDER_ONLY = [
   ['DOM injection', /\.(?:innerHTML|outerHTML|srcdoc)\s*(?:=|\+=|\?\?=)|\[\s*['"](?:innerHTML|outerHTML|srcdoc)['"]\s*\]\s*(?:=|\+=|\?\?=)|\[\s*['"](?:inner|outer|srcdoc)['"]\s*\+\s*['"](?:HTML)?['"]\s*\]\s*(?:=|\+=|\?\?=)|Reflect\.set\s*\([^)]*['"](?:inner|outer|srcdoc)|Object\.assign\s*\([^)]*\binnerHTML\b|insertAdjacentHTML|(?:document|doc|d|el|target|element|node)\s*\.\s*write(?:ln)?\s*\(|document\s*\[[^\]]*writ[^\]]*\]|new\s*\(?\s*Function\s*\)?\s*\(/]
 ];
 for (const file of textFiles) {
-  if (file === 'vectors/keys.json' || !existsSync(file) || isBinary(file)) continue;
+  // Same exemption doctrine as the secret scan: a text-claimed
+  // extension can never binary-skip the marker/sink rules
+  // (w72-ledger F-8).
+  if (file === 'vectors/keys.json' || !existsSync(file) || (!TEXT_EXT.test(file) && isBinary(file))) continue;
   const s = readFileSync(file, 'utf8');
   // Zero-width/format chars embedded in a marker hide it from the
   // pattern while a human still reads the unfinished-work word —
@@ -579,10 +601,27 @@ const dispOperandCls = op => {
   // leading member compare in `(m[1]==='a', flag)` never gates it, so
   // the whole operand is impure (w64-fv F-4).
   let tt = t;
-  // `!!` is a truthiness wrap, not a negation — `!!(m[2]==='x')` classifies
-  // like the bare compare; a lone `!` stays impure (w71-fv F-3).
-  while (tt.startsWith('!!')) tt = tt.slice(2).trim();
-  if (tt.startsWith('(') && tt.endsWith(')')) tt = tt.slice(1, -1).trim();
+  // `!!` wraps the WHOLE compare only in paren form — `!!(m[2]==='x')`
+  // classifies like the bare compare, but `!!m[2]==='x'` binds `!!` to
+  // the member ((!!m[2])==='x' — always false at runtime), so stripping
+  // it classified a dead arm as a member compare (w72-ledger F-6).
+  while (tt.startsWith('!!(')) tt = tt.slice(2).trim();
+  // Whole-operand paren wraps strip to a fixpoint — `((typeof
+  // m[1]==='string'))` used to survive the single strip and misread
+  // (w72-ledger F-5). The first `(` must close AT the end — an early
+  // close means `f(x)(y)`-shaped text, not a wrap.
+  while (tt.startsWith('(') && tt.endsWith(')')) {
+    let d = 0, q = null, wraps = true;
+    for (let k = 0; k < tt.length - 1; k++) {
+      const c = tt[k];
+      if (q !== null) { if (c === '\\') { k++; continue; } if (c === q) q = null; continue; }
+      if (c === "'" || c === '"' || c === '`') { q = c; continue; }
+      if (c === '(' || c === '[' || c === '{') d++;
+      else if (c === ')' || c === ']' || c === '}') { d--; if (d === 0) { wraps = false; break; } }
+    }
+    if (!wraps) break;
+    tt = tt.slice(1, -1).trim();
+  }
   if (tt !== '') {
     let d = 0, q = null, lastComma = -1;
     for (let k = 0; k < tt.length; k++) {
@@ -904,7 +943,12 @@ const litPrim = (e0, known) => {
     // unconditional mint behind it (w71-fv F-3). Aliased receivers
     // (`q[2]`) stay LV_TYPEOF — under-approximate by design.
     const td = t.slice(6).replace(/^\s*\(([\s\S]*)\)\s*$/, '$1').trim();
-    if (/^m\s*(?:\?\s*\.\s*)?(?:\[\s*[^\]]+\s*\]|(?:\?\s*\.\s*|\.\s*)at\s*(?:\?\s*\.\s*)?\(\s*[^)]*\))\s*$/.test(td)) return 'string';
+    // `m[N]` reads as a route capture only while `m` still denotes the
+    // match binding — `m = {1: 7}` rebinds the name to a literal object
+    // whose member type is its own, not 'string' (w72-ledger F-7).
+    // `known` holds literal rebinds; undefined means exec-bound or
+    // unbound — the fold's premise stands.
+    if (/^m\s*(?:\?\s*\.\s*)?(?:\[\s*[^\]]+\s*\]|(?:\?\s*\.\s*|\.\s*)at\s*(?:\?\s*\.\s*)?\(\s*[^)]*\))\s*$/.test(td) && (known?.get('m') ?? LV_UNK) === LV_UNK) return 'string';
     const tv = litPrim(td, known);
     if (tv === LV_UNK) return LV_TYPEOF;
     if (tv === LV_TYPEOF) return 'string';
@@ -1079,9 +1123,12 @@ const memberCmpFold = (t, verb, verbMembers, posMember = null, posVerb = null, b
     }
     const cs = topSplit(s, [',']);
     if (cs !== null) { s = cs.parts[cs.parts.length - 1]; changed = true; }
-    // `!!` is a truthiness wrap, not a negation — `!!(m[2]==='x')` decides
-    // the identical compare; a lone `!` is never stripped (w71-fv F-3).
-    if (s.startsWith('!!')) { s = s.slice(2).trim(); changed = true; }
+    // `!!` is a truthiness wrap only over a parenthesized compare —
+    // `!!(m[2]==='x')` decides the identical compare, but `!!m[1]==='x'`
+    // binds `!!` to the member itself: `(!!m[1]) === 'x'` is always
+    // false, a dead arm — stripping it minted unconditional (w72-ledger
+    // F-6). A lone `!` is never stripped (w71-fv F-3).
+    if (s.startsWith('!!(')) { s = s.slice(2).trim(); changed = true; }
     tt = s;
     if (!changed) break;
   }
@@ -1295,6 +1342,19 @@ const pairsForLine = (l, lm, i, stmtDepth, sw, aliases, verb, verbMembers, allCa
     if (idx === null) continue;
     const cmp = /^\s*([!=]={2,3})\s*'([^']+)'/.exec(l.slice(x.index + x[0].length));
     if (!cmp) continue;
+    // `typeof m[N]==='t'` is a type predicate — the `m[N]===` fragment
+    // inside it is not a member-vs-verb compare: it binds no pair and
+    // casts no vote. The w71-fv F-3 guard covered the operand
+    // classifier; the extraction itself must skip too, or
+    // `((typeof m[2]==='string'))` binds `m[2]==='string'` and dead-arms
+    // every verb but 'string' (w72-ledger F-5).
+    if (/(?:^|[^\w$])typeof\s*\(*\s*$/.test(lm.slice(0, x.index))) continue;
+    // `!!m[N]==='v'` binds `!!` to the MEMBER — the operand is a boolean
+    // coercion, never a member compare: `(!!m[2])==='x'` is false for
+    // every string member — a dead arm that must neither serve nor vote
+    // (w72-ledger F-6). Odd `!` counts are the negated-compare arm
+    // below; even counts land here.
+    if (/!+\s*$/.test(lm.slice(0, x.index))) continue;
     // A chained `===`/`!==` right after the literal makes the whole
     // expression a different comparison — `m[1]==='a'===false` is true
     // iff `m[1]!=='a'` — so the extracted compare's polarity inverts
@@ -2889,7 +2949,7 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
             // spellings the dot list cannot see; strings are blanked on
             // the masked view so the raw line supplies the member name
             // (w71-fv F-2).
-            || /^\s*(?:\?\s*\.\s*)?\[\s*['"`](?:call|apply|bind)['"`]\s*\]\s*(?:\?\s*\.\s*)?\(/.test(rawAfter)
+            || /^\s*(?:\?\s*\.\s*)?\[\s*['"`](?:call|apply|bind)\b[\s\S]*?\]\s*(?:\?\s*\.\s*)?\(/.test(rawAfter)
             // `(0,g)()` — the comma-call idiom invokes the operand list's
             // LAST element; the name followed by `)(` closes the group
             // and calls it. `foo(x,g)(y)` over-flags (g is an argument,
@@ -2906,6 +2966,44 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
           }
         }
         if (found) break;
+      }
+    }
+    // `const h = g; h()` — an alias call runs the bound body, so `g`
+    // stays live: binding the name then invoking the alias is an escape
+    // the per-name scan cannot see (w72-fv F-6). Iterate — `const h = g;
+    // const j = h; j()` resolves transitively. A reference inside the
+    // source's own body is self-reference, not an escape.
+    const declByName = new Map(decls.map(d => [d.name, d]));
+    const aliasOf = new Map();
+    for (let i = 0; i < ml.length; i++)
+      for (const am of ml[i].matchAll(/(?:^|[;{}]\s*|\b(?:const|let|var)\s+)([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\s*(?=[;,\n]|$)/g))
+        aliasOf.set(am[1], am[2]);
+    let aliasPass = true;
+    while (aliasPass) {
+      aliasPass = false;
+      for (const [alias, src] of aliasOf) {
+        if (escapes.has(src) || !declByName.has(src)) continue;
+        const srcDecl = declByName.get(src);
+        const aw = new RegExp(`\\b${alias.replace(/\$/g, '\\$')}\\b`, 'g');
+        for (let i = 0; i < ml.length && !escapes.has(src); i++) {
+          for (const wm of ml[i].matchAll(aw)) {
+            const wi = wm.index;
+            if (srcDecl.inBody(i, wi)) continue;          // self-reference inside its own body
+            const before = ml[i].slice(0, wi).trimEnd();
+            const after = ml[i].slice(wi + alias.length);
+            if (/^\s*:/.test(after)) continue;            // `alias:` object key
+            if (/\b(?:const|let|var|function|class)\s*$/.test(before)) continue; // declaration position
+            if (/^\s*=(?!=)/.test(after)) continue;       // assignment target, not a use
+            if (/[.$]\s*$/.test(before)) continue;        // `.alias` member read
+            if (/^\s*(?:\(|\?\s*\.\s*\()/.test(after) || /\bnew\s*$/.test(before)
+              || (/[(,]\s*$/.test(before) && /^\s*\)\s*\(/.test(after))
+              || CALLBACK_CONSUMER.test(before)) { escapes.add(src); aliasPass = true; break; }
+            // Any other live reference (argument, return, member write)
+            // hands the function to a consumer that can invoke it — the
+            // safe direction for an audit surface.
+            escapes.add(src); aliasPass = true; break;
+          }
+        }
       }
     }
     const dead = new Set();
@@ -3798,7 +3896,10 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
       const tr = condTracker();
       let sd = 0;
       const winMasked = [];
-      for (let i = hi; i < wEnd; i++) winMasked[i - hi] = maskStrings(stripDead(lines[i], d), d);
+      // Dead-fn lines blank from the credential tail too — a bound read
+      // inside a never-invoked function minted the gate for the whole
+      // arm (w72-ledger F-1).
+      for (let i = hi; i < wEnd; i++) winMasked[i - hi] = windowDeadFn.has(i) ? ' ' : maskStrings(stripDead(lines[i], d), d);
       for (let i = hi; i < wEnd; i++) {
         const ml = winMasked[i - hi];
         // Iteration over a collection is a credential resolver's
@@ -3811,20 +3912,44 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
           if (AUTH_THROW.test(m[0])) return true;
           const before = ml.slice(0, m.index).trimEnd();
           const after = ml.slice(m.index + m[0].length);
-          // Gate-shaped contexts: `if (!call(`, `x && call(`, `ok ? call(`,
-          // `return call(`, `!call(`, `outer(call(`, `x ?? call(`. A call
-          // result feeding `&&`/`||`/`?:`/`??`/a comparison is used.
-          if (/(?:if\s*\(\s*!*\s*|&&\s*!*\s*|\|\|\s*!*\s*|\?\s*!*\s*|:\s*!*\s*|\?\?\s*!*\s*|!+\s*|\(\s*!*\s*|\breturn\b(?:\s+await\b)?|\bcase\b|else\s+if\s*\(\s*!*\s*)$/.test(before)
-            || /^[^)]*\)\s*(?:&&|\|\||\?|\?\?|===|!==|==|!=|>=|<=|>|<)/.test(after)) return true;
-          // Assignment counts only when the binding is READ afterwards —
-          // `const ok = checkAuth(x); send()` binds a verdict nobody
-          // consults (w71-ledger F-4).
-          const asg = /(?:^|[;,{}(]\s*|\b(?:const|let|var|return)\s+)([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?$/.exec(before);
+          // A predicate's verdict must demonstrably decide control flow —
+          // computing it proves nothing: a bare `checkAuth(req) && x;`,
+          // `(checkAuth(req));`, `!checkAuth(req);`,
+          // `checkAuth(req) === true;`, a `?.`/member read, or an
+          // argument position all discard the verdict yet minted
+          // 'token holder' rows (w72-ledger F-2).
+          // Unambiguous consumers: a control head still open (`if (…
+          // call(` — `[^)]*$` because the head hasn't closed), or an
+          // out-flow (`return`/`throw`/`case`) the call feeds.
+          if (/\b(?:if|else\s+if|while|for|switch)\s*\([^)]*$/.test(before)
+            || /\b(?:return|throw|case)\b[^;{}\n]*$/.test(before)) return true;
+          // A short-circuit continuation gates only when it reaches a
+          // CALL — `call && serve()` decides serve's execution while
+          // `call && flag;` computes a discarded boolean. As a ternary
+          // CONDITION (`call ? a : b`) the verdict picks the branch;
+          // `?.` is a member read — never a gate (w72-ledger F-2).
+          const cont = after.slice(after.indexOf(')') + 1);
+          const stmtTail = cont.slice(0, cont.indexOf(';') === -1 ? cont.length : cont.indexOf(';'));
+          if (/^\s*\?(?![.?])/.test(cont)
+            || /(?:&&|\|\||\?\?)[\s\S]*?\b[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*|\s*\[[^\]]*\])*\s*\(/.test(stmtTail)) return true;
+          // A binding capture — `x = … call(…)` anywhere in the
+          // statement (`x = flag && checkAuth(req)` binds the verdict;
+          // `await` sits mid-statement — w72-fv F-4) — counts only when
+          // the binding is READ in a gate position on live code: a dead
+          // closure's reference, an `if (0)` body, a comment, a string,
+          // or a WRITE (`ok = …`, `ok++`) minted the gate on
+          // name-occurrence alone (w72-ledger F-1).
+          const asg = /(?:\b(?:const|let|var)\s+|^|[;,{}(]\s*|\breturn\s+)([A-Za-z_$][\w$]*)\s*=(?![=>])[^;]*$/.exec(before);
           if (asg !== null) {
-            const bound = new RegExp(`\\b${asg[1].replace(/\$/g, '\\$')}\\b`);
+            const nm = asg[1].replace(/\$/g, '\\$');
             let tail = after;
             for (let j = i - hi + 1; j < winMasked.length; j++) tail += '\n' + winMasked[j];
-            if (bound.test(tail)) return true;
+            if (new RegExp(
+              `\\b(?:if|else\\s+if|while|for|switch)\\s*\\([^)]*\\b${nm}\\b` +
+              `|\\b(?:return|throw|case)\\b[^;\\n]*\\b${nm}\\b` +
+              `|\\b${nm}\\b\\s*\\?(?![.?])` +
+              `|\\b${nm}\\b\\s*(?:&&|\\|\\|)[\\s\\S]*?\\b[A-Za-z_$][\\w$]*\\s*\\(`)
+              .test(tail)) return true;
           }
         }
       }
@@ -4117,7 +4242,20 @@ const NONROLE = new Set(['bound subject', 'token holder', 'authenticated', 'unau
     // transport import ALONE is deliberately not a surface —
     // src/connectors.mjs is a pure outbound client with no dispatch; the
     // accept/dispatch SHAPES are what the audit must hold.
-    if (/req\.method|req\.url|url\.pathname|req\.headers|\b(?:req|request)\s*\[\s*['"](?:method|url)['"]\s*\]|\b\w+\.pathname\s*===\s*['"`]|createServer\s*\(|\bnew\s+Server\s*\(|\.\s*listen\s*\(|(?:on|once)\s*\(\s*['"](?:request|upgrade|connect|connection|secureConnection|checkContinue|checkExpectation|clientError)['"]|\bswitch\s*\([^)]*\.\s*(?:method|url)\s*\)|\b[A-Za-z_$][\w$]*\.(?:method|url)\s*(?:===|!==|==|!=)\s*['"`]|\bnew\s+URL\s*\(\s*[A-Za-z_$][\w$]*\s*\.\s*(?:url|href)|\.\s*(?:url|pathname)\s*\.\s*(?:startsWith|endsWith|includes|match|at|slice|indexOf)\s*\(|\.test\s*\(\s*[A-Za-z_$][\w$]*\s*\.\s*(?:url|pathname)|\.\s*searchParams\s*\.|\b(?:req|request)\s*\.\s*headers|\b[A-Za-z_$][\w$]*\.headers\s*(?:\[\s*['"](?:authorization|proxy-|x-|cookie|sec-|cf-|true-)|\.authorization\b)/.test(readFileSync(p, 'utf8'))) { console.error(`route-spec parity: HTTP dispatch surface in ${p} — outside the audited file`); failed = true; }
+    {
+      const dispatchText = readFileSync(p, 'utf8');
+      // Bracket-member spellings carry the same capability the dot arms
+      // name — `srv['listen'](8080)`, `srv['on']('request', h)`,
+      // `r['method']`, `r['headers']` — and a destructure rebind (`const
+      // { url } = req`) hides the receiver entirely: the destructure
+      // alone is not a surface, but paired with a dispatch-shaped use of
+      // the rebound name it is (w72-fv F-3). `URL.parse(` and
+      // `new http.Server(` are the same shapes under different receivers.
+      const dispatchRebind = /(?:const|let|var)\s*\{[^}]*\b(?:url|method|pathname|searchParams|headers|query)\b[^}]*\}\s*=\s*(?:req|request)\b/.test(dispatchText)
+        && /\b(?:url|method|pathname|searchParams)\s*(?:===|!==|==|!=|\.(?:startsWith|endsWith|includes|match|at|slice|indexOf|get)\s*\()/.test(dispatchText);
+      if (/req\.method|req\.url|url\.pathname|req\.headers|\b(?:req|request)\s*\[\s*['"](?:method|url)['"]\s*\]|\b\w+\.pathname\s*===\s*['"`]|createServer\s*\(|\bnew\s+(?:[A-Za-z_$][\w$]*\s*\.\s*)*[\w$]*Server\s*\(|\.\s*listen\s*\(|\[\s*['"](?:listen|on|once|addListener|emit)['"]\s*\]\s*\(|\b[A-Za-z_$][\w$]*\s*\[\s*['"](?:method|url|pathname|headers|searchParams)['"]\s*\]|(?:on|once)\s*\(\s*['"](?:request|upgrade|connect|connection|secureConnection|checkContinue|checkExpectation|clientError)['"]|\bswitch\s*\([^)]*\.\s*(?:method|url)\s*\)|\b[A-Za-z_$][\w$]*\.(?:method|url)\s*(?:===|!==|==|!=)\s*['"`]|\bnew\s+URL\s*\(\s*[A-Za-z_$][\w$]*\s*\.\s*(?:url|href)|\bURL\s*\.\s*parse\s*\(|\.\s*(?:url|pathname)\s*\.\s*(?:startsWith|endsWith|includes|match|at|slice|indexOf)\s*\(|\.test\s*\(\s*[A-Za-z_$][\w$]*\s*\.\s*(?:url|pathname)|\.\s*searchParams\s*\.|\b(?:req|request)\s*\.\s*headers|\b[A-Za-z_$][\w$]*\.headers\s*(?:\[\s*['"](?:authorization|proxy-|x-|cookie|sec-|cf-|true-)|\.authorization\b)/.test(dispatchText)
+        || dispatchRebind) { console.error(`route-spec parity: HTTP dispatch surface in ${p} — outside the audited file`); failed = true; }
+    }
 }
 
 // Query-parameter parity: the runtime allowlist (QUERY_ALLOW in

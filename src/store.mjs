@@ -912,8 +912,23 @@ export class Store {
   _schemaGuard(run) {
     try { return run(); }
     catch (e) {
-      if (/no such table|no such column|not a database|malformed/i.test(e?.message ?? ''))
+      if (/no such table|no such column|not a database|malformed/i.test(e?.message ?? '')) {
+        // Probe-verify a table-named claim before convicting divergence:
+        // a foreign RAISE can inject 'no such table: X' text over a
+        // healthy schema — the catalog itself must agree the table is
+        // gone, or the message is attacker-authored noise and the raw
+        // fault propagates for the outer layers' classification
+        // (w72-seal F-2 store-level arm — same doctrine as the fabric
+        // consult catches).
+        const named = /no such table:?\s*([\w$]+)/i.exec(e?.message ?? '')?.[1];
+        let exists = null;
+        if (named) {
+          try { exists = this._stmt("SELECT COUNT(*) n FROM sqlite_master WHERE type IN ('table','view') AND name=?").get(named)?.n > 0; }
+          catch { exists = null; }
+        }
+        if (exists === true) throw e;
         throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e });
+      }
       // Trigger-raised aborts arrive as SQLITE_CONSTRAINT_TRIGGER
       // (errcode 1811): EVERY abort on a guarded write path is tamper
       // evidence — a planted mimic trigger replaying a known guard's

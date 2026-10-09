@@ -131,37 +131,63 @@ test('w71-fv F-2: comma-call, member-call, Promise.try and handler-assignment es
 // non-authorization header access is an unaudited surface. Pure outbound
 // client shapes (connectors) stay exempt. The regex is the shipped one.
 // ============================================================================
-test('w71-ledger F-3: the outside-scan regex binds capability shapes, not spelling', () => {
-  // Anchor on the unique alternation head — `if (/req\.method` also
-  // appears earlier as a compound-condition fragment.
-  const i = CHECK_SRC.indexOf('/req\\.method|req\\.url|url\\.pathname');
-  const j = CHECK_SRC.indexOf('/.test(readFileSync', i);
-  assert.ok(i > 0 && j > i, 'the shipped outside-scan regex is extractable');
-  const lit = CHECK_SRC.slice(i, j + 1);
-  const RE = new RegExp(lit.slice(1, lit.lastIndexOf('/')));
+test('w71-ledger F-3 + w72-fv F-3: the outside-scan binds capability shapes, not spelling', () => {
+  // The shipped check is now a block: the big alternation plus a
+  // destructure-rebind conjunction. Extract all three literals by
+  // anchor and rebuild the shipped conjunction.
+  const reB = CHECK_SRC.indexOf('/req\\.method|req\\.url|url\\.pathname');
+  const reE = CHECK_SRC.indexOf('/.test(dispatchText)', reB);
+  assert.ok(reB > 0 && reE > reB, 'the shipped outside-scan regex is extractable');
+  const RE = new RegExp(CHECK_SRC.slice(reB, reE + 1).slice(1, -1));
+  const deB = CHECK_SRC.indexOf('const dispatchRebind = /');
+  const deE = CHECK_SRC.indexOf('/.test(dispatchText)', deB);
+  assert.ok(deB > 0 && deE > deB, 'the shipped destructure arm is extractable');
+  const DESTR = new RegExp(CHECK_SRC.slice(deB + 'const dispatchRebind = '.length, deE + 1).slice(1, -1));
+  const usB = CHECK_SRC.indexOf('&& /', deE) + 3;
+  const usE = CHECK_SRC.indexOf('/.test(dispatchText)', usB);
+  assert.ok(usB > 3 && usE > usB, 'the shipped rebind-use arm is extractable');
+  const USE = new RegExp(CHECK_SRC.slice(usB, usE + 1).slice(1, -1));
+  const flagged = s => RE.test(s) || (DESTR.test(s) && USE.test(s));
   for (const line of [
     "const srv = new Server();",
+    "const srv = new http.Server();",
     "srv.listen(8080);",
+    "srv['listen'](8080);",
+    "srv['on']('request', h);",
+    "srv['once']('connection', h);",
     "srv.on('upgrade', (r, s) => {});",
     "srv.once('clientError', h);",
     "switch (q.method) {",
+    "switch (r['method']) {",
     "if (m.method == 'GET') {",
+    "if (r['method'] == 'GET') {",
     "const u = new URL(q.url, base);",
+    "const u = new URL(r['url'], base);",
+    "const u = URL.parse(q.url);",
     "q.url.startsWith('/v1');",
+    "r['url'].startsWith('/v1');",
     "/^\\/x/.test(q.url);",
     "u.searchParams.get('a');",
+    "u['searchParams'].get('a');",
     "req.headers['x-tenant'];",
+    "r['headers']['x-tenant'];",
     "req.headers;",
     "q.url.at(0);",
     "path.pathname === '/x';",
+    "r['pathname'] === '/x';",
     "req.method",
-  ]) assert.ok(RE.test(line), `a dispatch surface must flag: ${line}`);
+    "const { url } = req; url === '/v1/x';",
+    "const { method, pathname } = req; pathname.startsWith('/v');",
+    "const { searchParams } = req; searchParams.get('k');",
+  ]) assert.ok(flagged(line), `a dispatch surface must flag: ${line}`);
   for (const line of [
     "import { request } from '../src/connectors.mjs';",
     "const r = http.request('https://api', cb);",
     "span.setAttribute('http.method', 'GET');",
     "const q = request.get(url);",
-  ]) assert.ok(!RE.test(line), `an outbound/non-dispatch shape stays exempt: ${line}`);
+    "const { url } = config; url === '/x';",
+    "const { method } = opts; method === 'PUT';",
+  ]) assert.ok(!flagged(line), `an outbound/non-dispatch shape stays exempt: ${line}`);
 });
 
 // ============================================================================
@@ -522,7 +548,9 @@ test('w71-runtime F-4: deferredAdd is gated outside-transaction; in-tx mints in-
   const drain = src.slice(src.indexOf('const prevFresh'), src.indexOf("db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');", src.indexOf('const prevFresh')));
   // `db.isTransaction` inside the drain is always true (its own savepoint
   // already started) — the gate must snapshot the caller's tx state.
-  assert.ok(/const callerInTx = db\.isTransaction;\s*db\.exec\('SAVEPOINT residue_drain'\)/.test(src),
+  const snapIdx = src.indexOf('const callerInTx = db.isTransaction;');
+  const drainSpIdx = src.indexOf("db.exec('SAVEPOINT residue_drain')", snapIdx);
+  assert.ok(snapIdx !== -1 && snapIdx < drainSpIdx,
     'the caller tx state is snapshotted BEFORE the drain savepoint');
   assert.ok(/this\.#sealing\?\.has\(tenant\) && !callerInTx/.test(drain),
     'the defer requires a live seal AND a non-transactional caller');
