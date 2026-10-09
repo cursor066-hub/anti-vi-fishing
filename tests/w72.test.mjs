@@ -97,9 +97,11 @@ test('w72-seal F-2/F-6: consult schema claims are probe-verified — attacker te
   assert.ok(e && e.code !== 'INV-409-INTEGRITY' && (e.code?.startsWith('INV-503') || /no such table/.test(e.message ?? '')),
     `attacker-text 'no such table' over a healthy schema is an engine fault, not divergence: ${e?.code} ${e?.message}`);
   // Arm 2: the catalog probes fail identically — real divergence convicts.
+  // The w73 probe is column-bearing `... LIMIT 0` membership over the
+  // expected tables (no sqlite_master name-parse — w73-seal F-3), so the
+  // patch shapes the probe statements themselves.
   h.f.store._stmt = (sql) => {
-    if ((String(sql).includes("key='fold_floor_retired'") || String(sql).includes('LIMIT 1')
-         || String(sql).includes('sqlite_master'))
+    if ((String(sql).includes("key='fold_floor_retired'") || String(sql).includes('LIMIT 0'))
         && new Error().stack.includes('sealAuditChain'))
       throw Object.assign(new Error('no such table: meta_kv'), { errcode: 1 });
     return orig(sql);
@@ -387,34 +389,32 @@ test('w72-fv F-6: computed-member and alias escapes keep bodies alive', () => {
 });
 
 // ============================================================================
-// w72-fv F-5 + ledger F-8: text-claimed extensions can never binary-skip
-// the scans — a `.mjs` carrying planted NULs still answers the secret
-// rules; `isBinary` exempts only non-text extensions, and the head
-// decode tolerates a UTF-8 boundary char at the 4KB read edge.
+// w72-fv F-5 + ledger F-8 → w73-ledger F-6: the binary exemption is gone
+// — every tracked file answers the secret/marker scans under a tolerant
+// utf8 read. The straddle probe now puts a real multibyte char at the
+// 8191-byte head edge, not mid-head at 4095.
 // ============================================================================
-test('w72-fv F-5/ledger F-8: isBinary exempts by extension claim, tolerates boundary UTF-8', () => {
-  const i = CHECK_SRC.indexOf('const isBinary');
-  const j = CHECK_SRC.indexOf('\n};', i);
-  const k = CHECK_SRC.indexOf('const TEXT_EXT');
-  assert.ok(i > 0 && j > i && k > 0, 'the shipped predicates are extractable');
-  const out = JSON.parse(probeFile(`import { readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-${CHECK_SRC.slice(i, j + 3)}
-${CHECK_SRC.slice(k, CHECK_SRC.indexOf('for (const file of textFiles)', k))}
-const here = new URL('.', import.meta.url).pathname;
-const put = (n, parts) => { const p = join(here, n); writeFileSync(p, Buffer.concat(parts)); return p; };
-// A multibyte char straddling the 4KB read boundary: 4095 bytes of 'x'
-// then a 2-byte char — the old strict decode faulted and called it
-// binary.
-const boundary = Buffer.concat([Buffer.alloc(4095, 120), Buffer.from('é', 'utf8'), Buffer.alloc(4096, 121)]);
-const dense = Buffer.alloc(8192, 65); for (let n = 0; n < 100; n++) dense[n * 40] = 0;
+test('w72-fv F-5/ledger F-8/w73-ledger F-6: binary content still answers the marker/secret scans', () => {
+  assert.ok(!/isBinary|TEXT_EXT/.test(CHECK_SRC), 'binary-exemption machinery must not return');
+  const i = CHECK_SRC.indexOf('const SECRET_RULES');
+  const j = CHECK_SRC.indexOf('];', i);
+  const mk = CHECK_SRC.indexOf('const MARKER_RULES');
+  const mj = CHECK_SRC.indexOf('];', mk);
+  assert.ok(i > 0 && j > i && mk > 0 && mj > mk, 'the shipped rule tables are extractable');
+  const out = JSON.parse(probeFile(`${CHECK_SRC.slice(i, j + 2)}
+${CHECK_SRC.slice(mk, mj + 2)}
+// A multibyte char straddling the REAL 8192-byte head edge: 8191 'x'
+// bytes then 'é' — its lead byte sits at 8191 and the continuation at
+// 8192 (the w72 test placed it at 4095 and never reached the boundary —
+// w73-ledger F-6). The content after the straddle still scans.
+const edge = Buffer.concat([Buffer.alloc(8191, 120), Buffer.from('é', 'utf8'), Buffer.from(' AKIA' + 'IOSFODNN7EXAMPLE'), Buffer.from([0])]);
+const word = Buffer.concat([Buffer.from([7, 8, 9]), Buffer.from(' FIX' + 'ME '), Buffer.from([0, 1])]);
 process.stdout.write(JSON.stringify([
-  isBinary(put('edge.bin', [boundary])),
-  isBinary(put('dense.bin', [dense])),
-  TEXT_EXT.test('a.mjs'), TEXT_EXT.test('a.py'), TEXT_EXT.test('a.bin'), TEXT_EXT.test('a.html'),
+  [...SECRET_RULES].filter(([n, r]) => r.test(edge.toString('utf8'))).map(([n]) => n),
+  [...MARKER_RULES].filter(([n, r]) => r.test(word.toString('utf8'))).map(([n]) => n),
 ]));`));
-  assert.deepEqual(out, [false, true, true, true, false, true],
-    `boundary UTF-8 stays text, dense NULs are binary, and only non-text extensions may exempt: ${JSON.stringify(out)}`);
+  assert.deepEqual(out, [['cloud credential pattern'], ['unfinished code marker']],
+    `a secret behind a real UTF-8 straddle and a marker inside binary bytes both convict: ${JSON.stringify(out)}`);
 });
 
 // ============================================================================

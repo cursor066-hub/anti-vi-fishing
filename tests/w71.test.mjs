@@ -231,33 +231,26 @@ test('w71-ledger F-4: only a USED credential call serves the claim', () => {
 });
 
 // ============================================================================
-// w71-ledger F-5: one planted NUL used to exempt the whole file from every
-// secret/sink scan. Binary detection needs evidence: NUL density >= 1% of
-// the head or an undecodable UTF-8 head.
+// w71-ledger F-5 + w73-ledger F-6: planted bytes used to exempt the whole
+// file from the secret/sink scans — first one NUL, then one undecodable
+// byte. w73 removed the exemption machinery outright: every tracked file
+// answers the rules under a tolerant utf8 read.
 // ============================================================================
-test('w71-ledger F-5: a single NUL no longer exempts a file from the scans', () => {
-  const i = CHECK_SRC.indexOf('const isBinary');
-  const j = CHECK_SRC.indexOf('\n};', i);
-  assert.ok(i > 0 && j > i, 'the shipped isBinary is extractable');
-  const out = JSON.parse(probeFile(`import { readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-${CHECK_SRC.slice(i, j + 3)}
-const here = new URL('.', import.meta.url).pathname;
-const put = (n, parts) => { const p = join(here, n); writeFileSync(p, Buffer.concat(parts)); return p; };
-const text = Buffer.from('plain text '.repeat(400));
-const oneNul = Buffer.concat([Buffer.from('x'.repeat(2000)), Buffer.from([0]), Buffer.from('y'.repeat(2000))]);
-const dense = Buffer.alloc(8192, 65); for (let k = 0; k < 100; k++) dense[k * 40] = 0;
-const bad8 = Buffer.from([0xff, 0xfe, 0x28, 0x29, 0x41]);
-const utf8 = Buffer.from('héllo wörld ✓ '.repeat(200), 'utf8');
-process.stdout.write(JSON.stringify([
-  isBinary(put('a.bin', [text])),
-  isBinary(put('b.bin', [oneNul])),
-  isBinary(put('c.bin', [dense])),
-  isBinary(put('d.bin', [bad8])),
-  isBinary(put('e.bin', [utf8])),
-]));`));
-  assert.deepEqual(out, [false, false, true, true, false],
-    `text false, one-NUL false (0.02% < 1%), dense NULs true, undecodable UTF-8 true, UTF-8 false: ${JSON.stringify(out)}`);
+test('w71-ledger F-5/w73-ledger F-6: no byte stream exempts the secret scan', () => {
+  // The exemption machinery is gone entirely (w73-ledger F-6): one
+  // undecodable byte used to excuse a planted secret from the whole
+  // file's audit — every tracked file now answers the rules under a
+  // tolerant utf8 read.
+  assert.ok(!/isBinary|TEXT_EXT/.test(CHECK_SRC), 'binary-exemption machinery must not return');
+  const i = CHECK_SRC.indexOf('const SECRET_RULES');
+  const j = CHECK_SRC.indexOf('];', i);
+  assert.ok(i > 0 && j > i, 'the shipped SECRET_RULES is extractable');
+  const out = JSON.parse(probeFile(`${CHECK_SRC.slice(i, j + 2)}
+const dense = Buffer.alloc(8192, 0); for (let k = 0; k < 100; k++) dense[k * 40] = 65;
+const planted = Buffer.concat([dense, Buffer.from('AKIA' + 'IOSFODNN7EXAMPLE'), Buffer.from([0, 1, 2])]);
+process.stdout.write(JSON.stringify([...SECRET_RULES].filter(([n, r]) => r.test(planted.toString('utf8'))).map(([n]) => n)));`));
+  assert.deepEqual(out, ['cloud credential pattern'],
+    `a credential behind 8192 NUL-dense bytes still convicts: ${JSON.stringify(out)}`);
 });
 
 // ============================================================================

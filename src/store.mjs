@@ -907,27 +907,60 @@ export class Store {
       return result;
     }));
   }
+  // Expected-schema probe shared by every convict-on-text site in this
+  // store (w73): reads every ledger table column-bearing, so a dropped
+  // column diverges as surely as a dropped table. Returns 'diverged' on
+  // a schema-shaped probe fault, 'ok' when the whole expected set
+  // stands, and throws the probe's own fault — contention/storage is
+  // infrastructure, never a tamper verdict (w73-seal F-2).
+  #ledgerSchemaProbe() {
+    for (const sql of [
+      "SELECT tenant,kind,id,value,created FROM records LIMIT 0",
+      "SELECT tenant,seq,previous,hash,envelope FROM audit LIMIT 0",
+      "SELECT tenant,nonce,capsule FROM nonces LIMIT 0",
+      "SELECT tenant,scope,key,hash,result FROM idempotency LIMIT 0",
+      "SELECT tenant,kind,id,wrapped FROM deks LIMIT 0",
+      "SELECT tenant,subject,resource,at,cost,capability,request FROM usage LIMIT 0",
+      "SELECT id,last FROM clock LIMIT 0",
+      "SELECT tenant,key,value FROM meta_kv LIMIT 0",
+      "SELECT tenant,subject,dataset,row_id,column_name,at FROM data_access LIMIT 0",
+    ]) {
+      try { this._stmt(sql).get(); }
+      catch (pe) {
+        if (/no such table|no such column|not a database|malformed/i.test(pe?.message ?? '')) return 'diverged';
+        throw pe;
+      }
+    }
+    return 'ok';
+  }
   // A dropped or rewritten table is integrity evidence inside the INV
   // taxonomy, never bare sqlite noise escaping to callers (w44-store M-2).
   _schemaGuard(run) {
     try { return run(); }
     catch (e) {
       if (/no such table|no such column|not a database|malformed/i.test(e?.message ?? '')) {
-        // Probe-verify a table-named claim before convicting divergence:
-        // a foreign RAISE can inject 'no such table: X' text over a
-        // healthy schema — the catalog itself must agree the table is
-        // gone, or the message is attacker-authored noise and the raw
-        // fault propagates for the outer layers' classification
-        // (w72-seal F-2 store-level arm — same doctrine as the fabric
-        // consult catches).
-        const named = /no such table:?\s*([\w$]+)/i.exec(e?.message ?? '')?.[1];
-        let exists = null;
-        if (named) {
-          try { exists = this._stmt("SELECT COUNT(*) n FROM sqlite_master WHERE type IN ('table','view') AND name=?").get(named)?.n > 0; }
-          catch { exists = null; }
-        }
-        if (exists === true) throw e;
-        throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e });
+        // Verify the claim against the catalog before convicting — and
+        // verify the SCHEMA, not the named string: the attacker authors
+        // the message, so parsing a table name out of it lets case,
+        // unicode, spacing and truncation dodge any regex, while a
+        // name a RAISE invented ('no such table: nonexistent_xyz')
+        // convicted a healthy ledger (w73-seal F-3, w73-runtime F-2,
+        // w73-fv F-1). Membership doctrine: probe every table the guarded
+        // writes touch — column-bearing, so a dropped column diverges
+        // too — and convict only when a probe fails schema-shaped.
+        // A corruption-family errcode (SQLITE_CORRUPT 11 / NOTADB 26)
+        // is engine-minted proof a RAISE cannot forge: convict on it
+        // alone even while the probe still answers (w73-fv F-1).
+        const base0 = typeof e?.errcode === 'number' ? e.errcode & 0xFF : null;
+        if (/not a database|malformed/i.test(e?.message ?? '') && (base0 === 11 || base0 === 26))
+          throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e });
+        if (this.#ledgerSchemaProbe() === 'diverged')
+          throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e });
+        // Every expected table stands — the claim was fabricated text;
+        // the raw fault propagates for the outer layers' classification.
+        // A probe that cannot answer threw above — infrastructure,
+        // never a tamper verdict (w73-seal F-2).
+        throw e;
       }
       // Trigger-raised aborts arrive as SQLITE_CONSTRAINT_TRIGGER
       // (errcode 1811): EVERY abort on a guarded write path is tamper
@@ -1130,14 +1163,35 @@ export class Store {
         // refusal is foreign-trigger evidence either way (w50-fv F-1).
         let headNow;
         try { headNow = this._stmt('SELECT COALESCE(MAX(seq),0) m FROM audit WHERE tenant=?').get(tenant)?.m; }
-        catch (probe) { throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: probe }); }
+        catch (probe) {
+          // A probe that cannot answer is infrastructure, never a tamper
+          // verdict — classify the probe's own errcode (w73-seal F-2):
+          // schema-shaped/corruption faults prove divergence, contention
+          // retries, storage faults name storage; anything else rides
+          // raw so the caller sees the real fault.
+          const pb = typeof probe?.errcode === 'number' ? probe.errcode & 0xFF : null;
+          if (/no such table|no such column|not a database|malformed/i.test(probe?.message ?? '') || pb === 11 || pb === 26)
+            throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: probe });
+          if (pb === 5 || pb === 6) throw new InvariantError('INV-503-LEDGER', 'Audit slot probe hit ledger contention — retry', 503, { cause: probe });
+          if (pb !== null && [8, 10, 13, 14, 15].includes(pb)) throw new InvariantError('INV-503-STORAGE', `Audit slot probe hit a storage fault: ${probe?.message ?? ''}`, 503, { cause: probe });
+          throw probe;
+        }
         if (Number.isInteger(headNow) && headNow < entry.sequence)
           throw new InvariantError('INV-409-INTEGRITY', 'Audit append refused by a foreign trigger — tamper evidence', 409, { cause: e });
         throw new InvariantError('INV-409-CONFLICT', 'Audit head moved during append; retry', 409);
       }
       // A dropped or rewritten table is integrity evidence, never raw
-      // sqlite noise on the write path (w44-store M-2).
-      if (/no such table|no such column|not a database|malformed/i.test(raw?.message ?? '')) throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e });
+      // sqlite noise on the write path (w44-store M-2) — but the claim
+      // is verified against the catalog first: fabricated schema text
+      // under SQLITE_ERROR convicts nothing (w73-seal F-1).
+      if (/no such table|no such column|not a database|malformed/i.test(raw?.message ?? '')) {
+        const rb = typeof raw?.errcode === 'number' ? raw.errcode & 0xFF : null;
+        if ((/not a database|malformed/i.test(raw?.message ?? '') && (rb === 11 || rb === 26)) || this.#ledgerSchemaProbe() === 'diverged')
+          throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e });
+        // Fabricated claim — the schema stands; the fault falls through
+        // to the storage/sqlite-class arms below for honest
+        // classification (w73-seal F-2 tri-state).
+      }
       // Storage-class faults are infrastructure, not surgery — same split
       // as _schemaGuard (w49-fixverify M-4).
       if (typeof raw?.errcode === 'number' && [8, 10, 11, 13, 14, 15].includes(raw.errcode & 0xFF)) throw new InvariantError('INV-503-STORAGE', `Audit storage fault: ${raw?.message ?? 'sqlite error'}`, 503, { cause: e });

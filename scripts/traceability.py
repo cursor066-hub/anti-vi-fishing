@@ -285,7 +285,38 @@ def _shadow_events(blanked):
     # or arrows (`({x:{assert}}) => …`). kind 'param' binds inside the
     # FOLLOWING block; kind 'decl' binds inside its enclosing block.
     for m in _SHADOWED_ASSERT.finditer(blanked):
-        yield m.start(), 'decl', [g for g in m.groups() if g] or list(_ASSERT_NAME_SET), m.group(0), m.end()
+        names = [g for g in m.groups() if g] or list(_ASSERT_NAME_SET)
+        txt = m.group(0)
+        # Param-headed bindings scope to their own BODY, not the
+        # enclosing block (w73-ledger F-7): `function g(assert)`,
+        # `check(assert) {`, `catch (assert)`, `for (const assert of x)`
+        # each neuter the name only inside the clause they head — an
+        # assert before or after the clause calls the real node:assert,
+        # and block-wide scoping silently demoted honest rows. A BARE
+        # `for (assert of x)` is no binding at all — an assignment to
+        # the (import-bound) name that poisons the block from the `for`
+        # onward.
+        paren = txt.find('(')
+        kind = 'decl'
+        if paren > 0:
+            head = txt[:paren].strip()
+            if re.match(r'for\b', head):
+                kind = 'param' if re.search(r'\b(?:const|let|var)\b', txt) else 'assign'
+            elif re.match(r'catch\b|function\b', head):
+                kind = 'param'
+            elif txt.rstrip().endswith('{') and re.fullmatch(r'(?:async\s+|static\s+|get\s+|set\s+)*[A-Za-z_$][\w$]*', head):
+                kind = 'param'
+            if kind == 'param':
+                apos = m.start() + paren
+                aend = _bracket_end(blanked, apos)
+                if aend != -1:
+                    yield apos, 'param', names, txt, aend
+                    continue
+                kind = 'decl'
+            if kind == 'assign':
+                yield m.start(), 'assign', names, txt, m.end()
+                continue
+        yield m.start(), kind, names, txt, m.end()
     for m in re.finditer(r'\b(?:const|let|var)\s*[\[{]', blanked):
         e = _bracket_end(blanked, m.end() - 1)
         if e == -1 or not re.match(r'\s*(?:=|of\b|in\b)', blanked[e:]): continue
@@ -615,6 +646,14 @@ def _test_bodies(text):
                     elif _d == 0 and _c in ',;': break
                     _j += 1
                 scope_events.append((_pos, _j, _names))
+            continue
+        if _kind == 'assign':
+            # `for (assert of x)` assigns to the module binding — on an
+            # import-bound name it throws at the first iteration and on
+            # a local it poisons it; either way every assert from the
+            # `for` onward inside this block is dead (w73-ledger F-7).
+            _enclA = max((o for o, c in brace_close.items() if o <= _pos and c > _pos), default=-1)
+            scope_events.append((_pos, brace_close.get(_enclA, len(blanked)) if _enclA != -1 else len(blanked), _names))
             continue
         # A file-level `import` is the trusted binding channel itself —
         # `_assert_names` already decides which imported names prove
@@ -1896,7 +1935,39 @@ def _asserts(body, names=('assert', 'requireThat')):
     # 'assert'), hiding the shadow it created (w48-ledger F-1).
     blanked_body = _blank_code(body)
     shadowed = set()
+    # Clause-scoped binds neuter only inside their own range (w73-ledger
+    # F-7): `function g(assert)`/`catch (assert)`/`for (const assert of
+    # x)` shadow the clause body, `for (assert of x)` poisons the block
+    # from the `for` onward — asserts outside the clause call the real
+    # binding and must still count. `(start, end, names)` per event.
+    _bc = {}
+    _st = []
+    for _i, _c in enumerate(blanked_body):
+        if _c == '{': _st.append(_i)
+        elif _c == '}' and _st: _bc[_st.pop()] = _i
+    ranged = []
     for _pos, _kind, arm_names, _txt, _end in _shadow_events(blanked_body):
+        if _kind == 'param':
+            _m = re.match(r'\s*=>\s*\{|\s*\{', blanked_body[_end:])
+            if _m is not None:
+                _nb = _end + _m.end() - 1
+                ranged.append((_pos, _bc.get(_nb, len(blanked_body)), arm_names))
+            else:
+                _j = _end; _d = 0
+                while _j < len(blanked_body):
+                    _c = blanked_body[_j]
+                    if _c in '([{': _d += 1
+                    elif _c in ')]}':
+                        if _d == 0: break
+                        _d -= 1
+                    elif _d == 0 and _c in ',;': break
+                    _j += 1
+                ranged.append((_pos, _j, arm_names))
+            continue
+        if _kind == 'assign':
+            _enclA = max((o for o, c in _bc.items() if o <= _pos and c > _pos), default=-1)
+            ranged.append((_pos, _bc.get(_enclA, len(blanked_body)) if _enclA != -1 else len(blanked_body), arm_names))
+            continue
         # Unconditional rebind arms (import/globalThis grafts) neuter the
         # whole assert vocabulary — a file may not alias its way to
         # fabricated evidence (w51-ledger H-1). `_shadow_events` adds the
@@ -1905,6 +1976,10 @@ def _asserts(body, names=('assert', 'requireThat')):
         shadowed |= set(arm_names)
         for name in arm_names:
             live = re.sub(r'\b' + re.escape(name) + r'(?:\.\w+)?\s*\(', '(', live)
+    for _rs, _re, _rnames in ranged:
+        for name in _rnames:
+            live = re.sub(r'\b' + re.escape(name) + r'\b',
+                          lambda m, _a=_rs, _b=_re: ' ' * len(m.group(0)) if _a <= m.start() < _b else m.group(0), live)
     # Enclosing-scope shadows join the neuter (w71-ledger F-1): a fake
     # `assert` bound in a wrapper function, bare block, or IIFE covers
     # every test lexically inside it — `_test_bodies` resolves which

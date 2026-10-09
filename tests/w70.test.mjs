@@ -495,7 +495,12 @@ test('w70-runtime F-3: claims_dropped is monotone across seen-window rolls', () 
 // ============================================================================
 test('w70-seal F-5: the deferred apply reads prev inside its savepoint', () => {
   const src = readFileSync(new URL('../src/fabric.mjs', import.meta.url).pathname, 'utf8');
-  const apply = src.slice(src.indexOf('#applyDeferredRetiredMints(tenant)'), src.indexOf('#applyDeferredRetiredMints(tenant)') + 7000);
+  // Slice to the next private method — a char window goes stale the
+  // moment the apply legitimately grows (the w71 murder/parse consult
+  // already pushed the UPSERT past 7000, and the w73 savepoint hoist
+  // added a comment head again).
+  const applyStart = src.indexOf('#applyDeferredRetiredMints(tenant)');
+  const apply = src.slice(applyStart, src.indexOf('\n  #', applyStart + 40));
   const savepointAt = apply.indexOf('SAVEPOINT deferred_mint');
   const selectAt = apply.indexOf("SELECT value FROM meta_kv WHERE tenant=? AND key='fold_floor_retired'");
   const upsertAt = apply.indexOf("INSERT INTO meta_kv (tenant,key,value) VALUES (?, 'fold_floor_retired'");

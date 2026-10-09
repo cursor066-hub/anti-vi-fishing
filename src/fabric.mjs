@@ -451,7 +451,7 @@ export class Fabric {
       db.exec('DROP TRIGGER IF EXISTS aad_marker_keep_upd');
       db.exec('DROP TRIGGER IF EXISTS aad_marker_keep_ins');
       try { db.prepare("DELETE FROM meta_kv WHERE tenant=? AND key='aad_migration'").run(t); }
-      catch (e) { if (/no such (table|column)|malformed|not a database/i.test(e?.message ?? '')) throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e }); throw e; }
+      catch (e) { this.#schemaClaim(e, 'Ledger schema diverged'); throw e; }
       finally {
         // Plain CREATE — an impostor under our name must not survive the
         // recreate as a no-op; the drops above already cleared it.
@@ -1738,12 +1738,26 @@ export class Fabric {
     finally {
       try { db.exec('RELEASE residue_drain'); released = true; }
       catch (re) {
-        try { db.exec('ROLLBACK TO residue_drain'); } catch { /* savepoint may already be gone */ }
-        try { db.exec('RELEASE residue_drain'); } catch { /* name resolves with the enclosing tx */ }
+        // The retry ORDER is the contract: a RELEASE retried over a
+        // faulted ROLLBACK TO resolves the name by COMMITTING the span
+        // — the "rolled back" writes land while `released` stays false
+        // and the latches attest nothing (w73-runtime F-1). Only a
+        // rollback retry can prove the span undone; a release retry is
+        // legal only after a rollback actually ran.
+        let rolledBack = false;
+        for (let i = 0; i < 2 && !rolledBack; i++) {
+          try { db.exec('ROLLBACK TO residue_drain'); rolledBack = true; } catch { /* savepoint may already be gone */ }
+        }
+        if (rolledBack) { try { db.exec('RELEASE residue_drain'); } catch { /* name resolves with the enclosing tx */ } }
         if (!callerInTx && db.isTransaction) {
           try { db.exec('ROLLBACK'); } catch { /* the zombie refused */ }
           throw new InvariantError('INV-503-LEDGER', 'residue drain savepoint release faulted — leaked transaction rolled back', 503, { cause: re });
         }
+        if (!rolledBack)
+          // The caller's own transaction still holds the unresolved
+          // savepoint — its commit would land unattested work. Surface
+          // the fault instead of returning success (w73-runtime F-1).
+          throw new InvariantError('INV-503-LEDGER', 'residue drain savepoint release faulted — caller transaction holds an unresolved savepoint', 503, { cause: re });
       }
     }
     // Sequential after the finally — these latches are skipped on the
@@ -1876,8 +1890,19 @@ export class Fabric {
     // RE-READ inside the savepoint — a peer write between the drain's
     // commit and this apply merges into `prior` here, where a snapshot
     // taken earlier would clobber it (w70-seal F-5).
+    // `callerInTx` snapshots the CALLER's tx context before the
+    // savepoint — the same doctrine the drain applies (w73-runtime
+    // F-4): a future in-tx caller must not watch its transaction rolled
+    // back on this span's release fault.
+    const callerInTx = db.isTransaction;
+    // SAVEPOINT ahead of the guarded span — same placement as the
+    // drain's: a fault ESTABLISHING the savepoint has no rollback or
+    // release to run (the name resolves with the fault), and letting
+    // the classify frame's ROLLBACK TO / RELEASE retry a span that
+    // never opened replaced the real contention error with a phantom
+    // 'unresolved savepoint' (w73 self-audit).
+    db.exec('SAVEPOINT deferred_mint');
     try {
-      db.exec('SAVEPOINT deferred_mint');
       db.exec('DROP TRIGGER IF EXISTS fold_residue_keep');
       db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
       db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
@@ -2015,12 +2040,22 @@ export class Fabric {
       // and surface the fault instead of succeeding silently.
       try { db.exec('RELEASE deferred_mint'); released = true; }
       catch (re) {
-        try { db.exec('ROLLBACK TO deferred_mint'); } catch { /* savepoint may already be gone */ }
-        try { db.exec('RELEASE deferred_mint'); } catch { /* name resolves with the enclosing tx */ }
-        if (db.isTransaction) {
+        // Same w73-runtime F-1 ordering as the drain: RELEASE retried
+        // over a faulted ROLLBACK TO commits the span un-attested —
+        // only a rollback retry proves the undo, and a release retry is
+        // legal only after one ran. `callerInTx` keeps a hypothetical
+        // in-tx caller's transaction out of the zombie arm.
+        let rolledBack = false;
+        for (let i = 0; i < 2 && !rolledBack; i++) {
+          try { db.exec('ROLLBACK TO deferred_mint'); rolledBack = true; } catch { /* savepoint may already be gone */ }
+        }
+        if (rolledBack) { try { db.exec('RELEASE deferred_mint'); } catch { /* name resolves with the enclosing tx */ } }
+        if (!callerInTx && db.isTransaction) {
           try { db.exec('ROLLBACK'); } catch { /* the zombie refused */ }
           throw new InvariantError('INV-503-LEDGER', 'deferred mint savepoint release faulted — leaked transaction rolled back', 503, { cause: re });
         }
+        if (!rolledBack)
+          throw new InvariantError('INV-503-LEDGER', 'deferred mint savepoint release faulted — caller transaction holds an unresolved savepoint', 503, { cause: re });
       }
     }
     // Sequential after the finally — skipped on the throw path, gated
@@ -2275,10 +2310,10 @@ export class Fabric {
         // tables this consult reads, everything else rides INV-503
         // families — never a silent pass.
         const msg = e?.message ?? '';
-        if (/no such table|no such column|not a database|malformed/i.test(msg)) {
-          try { this.store._stmt("SELECT envelope FROM audit LIMIT 1").get(); this.store._stmt("SELECT value FROM meta_kv LIMIT 1").get(); }
-          catch { throw new InvariantError('INV-409-INTEGRITY', 'Residue marker eval failed (meta_kv dropped or diverged) — tamper evidence', 409, { cause: e }); }
-        }
+        // Shared probe-verify: diverges on proof, propagates a probe
+        // fault classified, and falls through on fabricated text
+        // (w73-seal F-1/F-2).
+        this.#schemaClaim(e, 'Residue marker eval failed (meta_kv dropped or diverged)');
         const base = typeof e?.errcode === 'number' ? e.errcode & 0xFF : null;
         if (base === 5 || base === 6)
           throw new InvariantError('INV-503-LEDGER', 'Residue marker eval hit ledger contention — retry', 503, { cause: e });
@@ -2445,10 +2480,10 @@ export class Fabric {
       // divergence; a readable table under a schema-shaped message is a
       // forged claim and the fault falls through to the errcode
       // families (w72-seal F-2).
-      if (/no such table|no such column|not a database|malformed/i.test(msg)) {
-        try { this.store._stmt("SELECT envelope FROM audit LIMIT 1").get(); this.store._stmt("SELECT value FROM meta_kv LIMIT 1").get(); }
-        catch { throw new InvariantError('INV-409-INTEGRITY', 'Residue marker consult failed (meta_kv dropped or diverged) — tamper evidence', 409, { cause: e }); }
-      }
+      // Shared probe-verify (w73-seal F-1/F-2): convicts only on a
+      // diverged probe, classifies a probe fault, and falls through to
+      // the errcode families on fabricated text.
+      this.#schemaClaim(e, 'Residue marker consult failed (meta_kv dropped or diverged)');
       // Errcode-only like the deferred-apply arm: a foreign trigger's
       // RAISE text IS `e.message`, so a message-regex let attacker-chosen
       // 'database is locked' steer a defeat into the retry class
@@ -2728,6 +2763,10 @@ export class Fabric {
     // #wmTamperDropHeal retires a flag whose anchor provably died while
     // sibling residue rows still owe an unreported conviction (w57-fv NIT-2).
     const cur0 = this.#wmTamper.get(tenant);
+    // Hoisted so the catch's defeat-flag can name the set it dropped —
+    // a `const` inside the try is invisible to the catch (w73-runtime
+    // F-3).
+    let claims = [];
     if (!keepResidue && (kind === 'floor_marker_healed' || kind === 'floor_marker_healed_unanchored'))
       try {
         // Conviction-scoped, never tenant-wide: only the residue rows
@@ -2784,7 +2823,7 @@ export class Fabric {
           // (w68-runtime F-2's sibling site, w69-runtime F-4).
           if (over.length) this.#wmTamperClaimList(tenant, 'floor_marker_retired_overcovered', over.map(c => String(c).slice(0, 120)));
         }
-        const claims = [...claimSet];
+        claims = [...claimSet];
         // Only claims a real residue row can honour may be signed: a
         // non-`seq:marker` value is planted garbage — drain the row but
         // never mint it into the marker (w62-seal F-5); and a claim whose
@@ -2924,9 +2963,21 @@ export class Fabric {
                   // name; a savepoint that refuses to resolve is a live
                   // transaction holding unattested writes — surface it,
                   // never return success with the tx live (w72-runtime
-                  // F-2).
-                  try { db.exec('ROLLBACK TO residue_note'); } catch { /* savepoint may already be gone */ }
-                  try { db.exec('RELEASE residue_note'); } catch (re2) { throw new InvariantError('INV-503-LEDGER', 'residue note savepoint failed to resolve — open transaction holds pending writes', 503, { cause: re2 }); }
+                  // F-2). Same w73-runtime F-1 ordering: a RELEASE
+                  // retried over a faulted ROLLBACK TO commits the note
+                  // it was meant to undo.
+                  let rolledBack = false;
+                  for (let i = 0; i < 2 && !rolledBack; i++) {
+                    try { db.exec('ROLLBACK TO residue_note'); rolledBack = true; } catch { /* savepoint may already be gone */ }
+                  }
+                  if (rolledBack) {
+                    // The retiring set's carry note was discarded while
+                    // the mints proceed unsigned — name the transient
+                    // window instead of sealing silently (w73-fv F-3).
+                    try { this.#wmTamperClaimList(tenant, 'floor_marker_retired_note_rolled_back', mintable); } catch { /* flagging never wedges the rollback */ }
+                    try { db.exec('RELEASE residue_note'); } catch (re2) { throw new InvariantError('INV-503-LEDGER', 'residue note savepoint failed to resolve — open transaction holds pending writes', 503, { cause: re2 }); }
+                  }
+                  else throw new InvariantError('INV-503-LEDGER', 'residue note savepoint release faulted — unresolved savepoint holds pending writes', 503, { cause: re });
                 }
               }
             }
@@ -2968,10 +3019,10 @@ export class Fabric {
         // error text — a foreign RAISE mints verbatim attacker text
         // under SQLITE_ERROR, indistinguishable from a real drop; only
         // a probe failing the same way proves it (w72-seal F-2).
-        if (/no such table|no such column|not a database|malformed/i.test(msg)) {
-          try { this.store._stmt("SELECT envelope FROM audit LIMIT 1").get(); this.store._stmt("SELECT value FROM meta_kv LIMIT 1").get(); }
-          catch { throw new InvariantError('INV-409-INTEGRITY', 'Residue retire failed (meta_kv dropped or diverged) — tamper evidence', 409, { cause: e }); }
-        }
+        // Shared probe-verify (w73-seal F-1/F-2): fabricated schema
+        // text falls through to the errcode families; a probe fault
+        // propagates classified, never as a tamper verdict.
+        this.#schemaClaim(e, 'Residue retire failed (meta_kv dropped or diverged)');
         // Errcode-only like the deferred-apply arm — attacker-chosen
         // RAISE text can no longer steer a defeat into the retry class
         // (w70-seal F-3).
@@ -2979,7 +3030,7 @@ export class Fabric {
           throw new InvariantError('INV-503-LEDGER', 'Residue retire hit ledger contention — retry', 503, { cause: e });
         if ([8, 10, 11, 13, 14, 15].includes(base))
           throw new InvariantError('INV-503-STORAGE', `Residue retire hit a storage fault: ${msg}`, 503, { cause: e });
-        try { if (this.store._stmt("SELECT 1 FROM meta_kv LIMIT 1").get() !== undefined) this.#wmTamperSet(tenant, { kind: 'floor_marker_retired_marker_defeated', seq: 0 }); } catch { /* table really is gone */ }
+        try { if (this.store._stmt("SELECT 1 FROM meta_kv LIMIT 1").get() !== undefined) this.#wmTamperClaimList(tenant, 'floor_marker_retired_marker_defeated', claims); } catch { /* table really is gone */ }
       }
     const cur = cur0;
     if (cur === undefined) return;
@@ -3462,6 +3513,56 @@ export class Fabric {
   }
   executionPublic(t) { return this._verifyKeysCached(t, 'execution'); }
   auditPublicKeys(t) { return this._verifyKeysCached(t, 'audit'); }
+  // Schema-claim verification shared by every convict-on-text site
+  // (w73-seal F-1/F-2/F-3, w73-fv F-1/F-2, w73-runtime F-2): the strings
+  // 'no such table'/'no such column'/'malformed'/'not a database' are
+  // attacker clay — a foreign RAISE mints them verbatim under
+  // SQLITE_ERROR, and parsing the object NAME out of the message is a
+  // lie (case, unicode, spacing and truncation all dodge the regex, and
+  // the named object is never the thing this fabric consults anyway).
+  // Convict divergence only on what the catalog PROVES: probe the
+  // tables this consult reads, column-bearing so a dropped column
+  // diverges too. 'ok' = schema stands (fabricated text); 'diverged' =
+  // the probe itself faulted schema-shaped (the claim is substantively
+  // real); a probe that cannot run at all throws its own fault —
+  // infrastructure, never a tamper verdict.
+  #schemaProbe() {
+    try {
+      this.store._stmt("SELECT tenant,seq,previous,hash,envelope FROM audit LIMIT 0").get();
+      this.store._stmt("SELECT tenant,key,value FROM meta_kv LIMIT 0").get();
+      return 'ok';
+    } catch (pe) {
+      if (/no such table|no such column|not a database|malformed/i.test(pe?.message ?? '')) return 'diverged';
+      throw pe;
+    }
+  }
+  // Classify a schema-claim error `e`: throws INV-409 when the claim is
+  // PROVEN (a corruption-family errcode, which only the engine mints, or
+  // the probe diverges); throws the probe's own fault classified when
+  // the probe cannot answer — contention/storage is never a tamper
+  // verdict; returns 'unproven' when the claim is fabricated text and
+  // 'none' when `e` never claimed schema — the caller then classifies
+  // `e` by its own errcode arms.
+  #schemaClaim(e, what) {
+    const msg = e?.message ?? '';
+    if (!/no such table|no such column|not a database|malformed/i.test(msg)) return 'none';
+    const base = typeof e?.errcode === 'number' ? e.errcode & 0xFF : null;
+    // SQLITE_CORRUPT(11)/SQLITE_NOTADB(26) come only from the engine —
+    // a RAISE cannot mint them, so the errcode alone proves corruption
+    // even while the catalog probe still answers (w73-fv F-1).
+    if (/not a database|malformed/i.test(msg) && (base === 11 || base === 26))
+      throw new InvariantError('INV-409-INTEGRITY', `${what} — tamper evidence`, 409, { cause: e });
+    let probe;
+    try { probe = this.#schemaProbe(); }
+    catch (pe) {
+      const pb = typeof pe?.errcode === 'number' ? pe.errcode & 0xFF : null;
+      if (pb === 5 || pb === 6) throw new InvariantError('INV-503-LEDGER', `${what} — schema probe hit ledger contention — retry`, 503, { cause: pe });
+      if (pb !== null && [8, 10, 11, 13, 14, 15].includes(pb)) throw new InvariantError('INV-503-STORAGE', `${what} — schema probe hit a storage fault: ${pe?.message ?? ''}`, 503, { cause: pe });
+      throw pe;
+    }
+    if (probe === 'diverged') throw new InvariantError('INV-409-INTEGRITY', `${what} — tamper evidence`, 409, { cause: e });
+    return 'unproven';
+  }
   // Fold-free incremental scan of the security-significant chain surface —
   // signer deaths, rotation designations and ceremony facts the
   // head-watermark bump and the seal prescan need without re-entering
@@ -3487,8 +3588,9 @@ export class Fabric {
     try { return this._chainFactsInner(tenant); }
     catch (e) {
       if (e instanceof InvariantError) throw e;
-      if (/no such table|no such column|not a database|malformed/i.test(e?.message ?? ''))
-        throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e });
+      // Probe-verified like every convict site (w73-seal F-1): a
+      // fabricated schema text propagates raw for its own errcode.
+      this.#schemaClaim(e, 'Ledger schema diverged');
       throw e;
     }
   }
@@ -6115,8 +6217,10 @@ export class Fabric {
       // A dropped or rewritten table anywhere on the gate path is the
       // same integrity evidence _schemaGuard produces on the store — the
       // taxonomy must not fork on which DB the tamper hit (w45-fv F-4).
-      if (/no such table|no such column|not a database|malformed/i.test(error?.message ?? ''))
-        throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: error });
+      // The claim is probe-VERIFIED first (w73-seal F-1, w73-fv F-2):
+      // _schemaGuard's exculpated raw escapes and foreign RAISE text
+      // must not re-mint 409 on the same fabricated claim.
+      this.#schemaClaim(error, 'Ledger schema diverged');
       // RUN-009: infrastructure failures get a stable documented code instead
       // of leaking driver internals (e.g. node:sqlite ERR_INVALID_STATE).
       throw new InvariantError('INV-503-GATE', 'Internal gate failure', 503);
@@ -6456,8 +6560,8 @@ export class Fabric {
     try { return this._auditIndexInner(t, _retried); }
     catch (e) {
       if (e instanceof InvariantError) throw e;
-      if (/no such table|no such column|not a database|malformed/i.test(e?.message ?? ''))
-        throw new InvariantError('INV-409-INTEGRITY', 'Ledger schema diverged — tamper evidence', 409, { cause: e });
+      // Probe-verified like every convict site (w73-seal F-1).
+      this.#schemaClaim(e, 'Ledger schema diverged');
       throw e;
     }
   }
@@ -6493,7 +6597,10 @@ export class Fabric {
     const probe = this._probeMemo
       ? (() => { const key = 'q:' + t + ':' + idx.maxSeq; let p = this._probeMemo.get(key); if (p === undefined) { p = idx.headQ.get(t, t, idx.maxSeq); this._probeMemo.set(key, p); } return p; })()
       : idx.headQ.get(t, t, idx.maxSeq);
-    const maxSeq = Math.max(probe.maxSeq, this._probeMemo ? (this._ownSeq?.get(t) ?? 0) : 0);
+    // `let`, not `const`: the durable-watermark race re-probe below can
+    // refresh this snapshot when a peer's commit lands mid-fold
+    // (w73 CI flake — see the wmSeq gate).
+    let maxSeq = Math.max(probe.maxSeq, this._probeMemo ? (this._ownSeq?.get(t) ?? 0) : 0);
     // Re-entrancy must fail closed: a nested caller handed the mid-fold
     // partial projection could observe anchors that the committed chain
     // never attested (w17-idx F9). Nothing inside the fold recurses
@@ -6541,7 +6648,7 @@ export class Fabric {
       // w28-http CI regression).
       if (this._probeMemo?.get(t) !== true) {
       try {
-      const committedHead = this._chainHead(t);
+      let committedHead = this._chainHead(t);
       // Consult the in-DB fold_floor witness BEFORE the corrupt-head wedge
       // throws: deleting the file pair must not silence the one surviving
       // witness to destroyed fold progress — the flag latches in memory
@@ -6555,6 +6662,14 @@ export class Fabric {
       // rows are erased — gating the check on committedHead misses exactly
       // that surgery (w31-fixverify F1).
       const wmSeq = this._headWatermark(t);
+      // Head-flush and watermark-bump are separate file writes on the
+      // peer's commit edge; this fold's maxSeq snapshot and watermark
+      // read can straddle them and convict a live ledger (w73 CI
+      // flake). Re-probe the committed tip once — a peer's committed
+      // rows are visible cross-connection — so only a watermark that
+      // still outruns EVERY committed row convicts as real regression.
+      if (wmSeq !== undefined && wmSeq > maxSeq)
+        maxSeq = Math.max(idx.headQ.get(t, t, idx.maxSeq).maxSeq ?? 0, this._probeMemo ? (this._ownSeq?.get(t) ?? 0) : 0);
       requireThat(!(wmSeq > maxSeq), 'INV-409-INTEGRITY', 'Audit ledger regressed below the durable head watermark', 409);
       // (The fold_floor marker consult moved ABOVE the corrupt-head wedge
       // — consulted even when no head survives: deleting the file pair
@@ -6567,7 +6682,17 @@ export class Fabric {
         // which legitimately runs ahead mid-transaction on uncommitted
         // appends) (w25-fixverify W25-01, w25-issuerd F2).
         requireThat(!(committedHead.seq < (idx.seenHeadSeq ?? 0)), 'INV-409-INTEGRITY', 'Signed chain head regressed below the consumed watermark', 409);
-        requireThat(!(wmSeq > committedHead.seq), 'INV-409-INTEGRITY', 'Signed chain head regressed below the durable watermark', 409);
+        if (wmSeq > committedHead.seq) {
+          // Same straddle as the maxSeq gate: the peer orders head-file
+          // before watermark-bump, so one fresh head-file re-read must
+          // already show seq >= wmSeq — a fresh head that still trails
+          // is a replayed head beside a surgically advanced watermark,
+          // not lag (w73 CI flake).
+          this.#chainHeadVerdicts.delete(t);
+          const freshHead = this._chainHead(t);
+          requireThat(freshHead !== 'corrupt' && freshHead !== undefined && !(wmSeq > freshHead.seq), 'INV-409-INTEGRITY', 'Signed chain head regressed below the durable watermark', 409);
+          committedHead = freshHead;
+        }
         // The watermark floors its own attestation: the signed head claims
         // the durable floor it saw at mint, so a resolved floor below that
         // claim is a replayed or rewritten watermark, never a live one
