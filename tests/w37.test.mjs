@@ -13,8 +13,9 @@ import { fixture, designateSuccessor } from './helpers.mjs';
 import { digest, canonical } from '../src/canonical.mjs';
 
 const dropAuditGuards = h => {
-  for (const tr of h.f.store.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all())
-    h.f.store.db.exec(`DROP TRIGGER "${tr.name}"`);
+  const rows = h.f.store.db.prepare("SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all();
+  for (const tr of rows) h.f.store.db.exec(`DROP TRIGGER "${tr.name}"`);
+  return () => { for (const tr of rows) if (tr.sql) h.f.store.db.exec(tr.sql); };
 };
 const corruptAt = (h, seq) =>
   h.f.store.db.prepare("UPDATE audit SET envelope=? WHERE tenant='acme' AND seq=?")
@@ -97,8 +98,9 @@ test('w37 F-H: deleting a carry page refuses remediation on every path', t => {
   {
     const { h, r } = buildSealedWithPages(t);
     const pages = chainRows(h).filter(x => x.env.payload.type === 'AUDIT_SEAL_CARRY');
-    dropAuditGuards(h);
+    const __r = dropAuditGuards(h);
     for (const row of chainRows(h).filter(x => x.seq >= pages.at(-1).seq)) delRow(h, row.seq);
+    __r();
     assert.throws(() => h.f.sealAuditChain(h.p('security')), e => e?.code === 'INV-409-INTEGRITY' && /carryover page|amputated/.test(e.message));
   }
   // Cut path: a middle page is amputated, leaving a corruption gap plus the
@@ -107,9 +109,10 @@ test('w37 F-H: deleting a carry page refuses remediation on every path', t => {
     const { h } = buildSealedWithPages(t);
     const pages = chainRows(h).filter(x => x.env.payload.type === 'AUDIT_SEAL_CARRY');
     const mid = pages[0];
-    dropAuditGuards(h);
+    const __r = dropAuditGuards(h);
     delRow(h, mid.seq);
     corruptAt(h, mid.seq + 1); // force the cut path so the residue check runs inside it too
+    __r();
     assert.throws(() => h.f.sealAuditChain(h.p('security')), e => e?.code === 'INV-409-INTEGRITY');
   }
 });

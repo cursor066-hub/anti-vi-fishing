@@ -21,11 +21,17 @@ import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { Store } from '../src/store.mjs';
+import { Store, RESIDUE_KEEP_TRIGGERS } from '../src/store.mjs';
 import { fixture } from './helpers.mjs';
 
 const residueRows = h => h.f.store.db.prepare(
   "SELECT key,value FROM meta_kv WHERE tenant='acme' AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.')").all();
+// w76-fv F-1: the schema-version pin convicts a dropped guard set at the
+// next guarded call — grafts restore the canonical trigger text after
+// the plant (the pin re-verifies and re-pins silently).
+const restoreResidueGuards = h => {
+  for (const [name, sql] of RESIDUE_KEEP_TRIGGERS) { try { h.f.store.db.exec(sql); } catch (e) { if (!/already exists/.test(String(e?.message ?? e))) throw e; } }
+};
 const healOnce = (h, garbage) => {
   h.f.store.db.prepare("UPDATE meta_kv SET value=? WHERE tenant='acme' AND key='fold_floor'").run(garbage);
   h.f.store.audit('acme', 'PROBE', 'actor', null, {}, h.f.clock());
@@ -78,11 +84,12 @@ test('w58-fv F-1: erased residue rows are re-named from the chain itself', t => 
   healOnce(h, 'wiped-A:garbage');
   assert.equal(residueRows(h).length, 1, 'the heal minted its residue pointer');
   // File-level wipe: triggers + rows both gone, as a writer would leave
-  // the image before the process restarts.
-  h.f.store.db.exec('DROP TRIGGER fold_residue_keep');
-  h.f.store.db.exec('DROP TRIGGER fold_residue_keep_upd');
-  h.f.store.db.exec('DROP TRIGGER fold_residue_keep_ins');
+  // the image before the process restarts. (w76-fv F-1: the schema pin
+  // convicts the dropped set at the next guarded call — restore the
+  // canonical guards after the wipe so the seal itself runs the same arm.)
+  for (const t of ['fold_residue_keep', 'fold_residue_keep_upd', 'fold_residue_keep_ins']) h.f.store.db.exec(`DROP TRIGGER ${t}`);
   h.f.store.db.prepare("DELETE FROM meta_kv WHERE tenant='acme' AND (key='fold_floor_healed' OR substr(key,1,18)='fold_floor_healed.')").run();
+  restoreResidueGuards(h);
   // The chain row itself is the durable evidence — the seal names the
   // heal even though no residue row survived.
   const seal = h.f.sealAuditChain(h.p('security'));
@@ -122,6 +129,7 @@ test('w58-seal F-2: heals beyond the cap surface as heals_dropped', t => {
   h.f.store.db.exec('DROP TRIGGER fold_residue_keep_ins');
   const plant = h.f.store.db.prepare("INSERT INTO meta_kv VALUES('acme',?,?)");
   for (let i = 0; i < 260; i++) plant.run(`fold_floor_healed.${9000 + i}`, `${9000 + i}:planted-${i}`);
+  restoreResidueGuards(h);
   const seal = h.f.sealAuditChain(h.p('security'));
   const rows = (seal.head_watermark_tampered ?? []).filter(e => e.kind === 'floor_marker_healed_unanchored');
   const named = rows.filter(e => e.healed_marker !== undefined);
@@ -140,6 +148,7 @@ test('w58-seal F-3: a malformed residue claim still convicts', t => {
   h.ready(); h.ready();
   h.f.store.db.exec('DROP TRIGGER fold_residue_keep_ins');
   h.f.store.db.prepare("INSERT INTO meta_kv VALUES('acme','fold_floor_healed.1','garbage')").run();
+  restoreResidueGuards(h);
   const seal = h.f.sealAuditChain(h.p('security'));
   const unanchored = (seal.head_watermark_tampered ?? []).filter(e => e.kind === 'floor_marker_healed_unanchored');
   assert.equal(unanchored.length, 1, `the malformed pointer is named: ${JSON.stringify(seal.head_watermark_tampered)}`);
@@ -192,20 +201,30 @@ const checkErr = dir => {
 };
 
 // w58-fv F-3 + F-7 (one copied-tree gate run — each run also pays the
-// full traceability phase): a bearer call inside an if-body resolves
-// only some requests so the route claim must fail; the separated-marker
-// and widened eval sinks flag authored files on the same pass. The
-// for-body case stays unconditional — the live tree's clean gate proves
-// the control (the issuerd for-loop bearer resolves there).
+// full traceability phase): the enforcement call inside an if-body
+// resolves only some requests so the route claim must fail; the
+// separated-marker and widened eval sinks flag authored files on the
+// same pass. The for-body case stays unconditional — the live tree's
+// clean gate proves the control (the issuerd for-loop bearer resolves
+// there). Since w76 the checker resolves `gate('issue')` itself as the
+// throwing enforcement call (same-file alias doctrine) and the bound
+// `issueAuthed` predicate through its `if (!issueAuthed)` gate-position
+// read (w76-ledger F-10: the gated body reaches `logMac(request)`), so
+// the plant conditions all three unconditional credential sites — the
+// real gate and the probe binding.
 test('w58-ledger: conditional bearer + separated marker + eval sink all flag', t => {
   const dir = ledgerCopyTree();
   try {
     const file = join(dir, 'src', 'issuerd.mjs');
     const text = readFileSync(file, 'utf8');
-    const patched = text.replace(
-      'const issueAuthed = anyBearer(\'issue\');',
-      'let issueAuthed = false; if (request !== null) { issueAuthed = anyBearer(\'issue\'); }');
-    assert.notEqual(patched, text, 'the patch must land on the shipped line');
+    const patched = text
+      .replace(
+        'try { gate(\'issue\'); }',
+        'try { if (request !== null) { gate(\'issue\'); } }')
+      .replace(
+        'const issueAuthed = anyBearer(\'issue\');',
+        'let issueAuthed = false; if (request !== null) { issueAuthed = anyBearer(\'issue\'); }');
+    assert.notEqual(patched, text, 'the patch must land on the shipped lines');
     // The injected spellings are assembled at runtime — this file must
     // not self-match the marker/sink scans it is testing (the loose
     // scan reads comments and strings).

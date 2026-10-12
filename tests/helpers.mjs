@@ -174,3 +174,30 @@ export function designateSuccessor(h, key_class, tenant = 'acme') {
   for (const subject of custodians) h.f.acknowledgeCeremony(h.p(subject, tenant), signAcknowledgement(ceremony, subject, h.setup.custodianKeys[tenant][subject], h.now()));
   return pending;
 }
+
+// Suspend-and-restore for tamper plumbing: a test that must open a dead
+// guard window to write attacker rows gets an honest verbatim re-arm so
+// the schema pin's live-DDL arm (w76-fv F-1) does not convict the
+// sanctioned test state before the deeper verdict under test runs.
+export const suspendTrigger = (db, name) => {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?").get(name);
+  if (!row?.sql) throw new Error(`suspendTrigger: trigger ${name} not found`);
+  db.exec(`DROP TRIGGER "${String(name).replace(/"/g, '""')}"`);
+  return () => db.exec(row.sql);
+};
+// All triggers guarding one table — returns one restore for the set.
+export const suspendTriggersOn = (db, tbl) => {
+  const rows = db.prepare("SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name=?").all(tbl);
+  for (const tr of rows) db.exec(`DROP TRIGGER "${String(tr.name).replace(/"/g, '""')}"`);
+  return () => { for (const tr of rows) if (tr.sql) db.exec(tr.sql); };
+};
+// A whole table plus its dependent objects — restore order: table, then
+// indexes, then triggers. The restored table comes back EMPTY.
+export const suspendTable = (db, name) => {
+  const esc = String(name).replace(/"/g, '""');
+  const rows = db.prepare("SELECT type, name, sql FROM sqlite_master WHERE (tbl_name=? OR name=?) AND sql IS NOT NULL ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 ELSE 2 END").all(name, name);
+  for (const r of rows.filter(x => x.type === 'trigger')) db.exec(`DROP TRIGGER "${String(r.name).replace(/"/g, '""')}"`);
+  for (const r of rows.filter(x => x.type === 'index' && !x.name.startsWith('sqlite_autoindex'))) db.exec(`DROP INDEX IF EXISTS "${String(r.name).replace(/"/g, '""')}"`);
+  db.exec(`DROP TABLE IF EXISTS "${esc}"`);
+  return () => { for (const r of rows) if (r.sql) db.exec(r.sql); };
+};

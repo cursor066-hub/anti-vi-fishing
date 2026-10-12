@@ -14,9 +14,17 @@ import { join } from 'node:path';
 // were flushed before the report snapshot (M-2), and a stale probe could
 // false-flag honest commits (M-3).
 
+// w76-fv F-1: the schema-version pin convicts a dropped guard set at the
+// next guarded call — snapshot the canonical trigger text before the graft
+// and restore it after (the pin re-verifies and re-pins silently).
+let _auditSnap = [];
 const dropAuditGuards = h => {
-  for (const tr of h.f.store.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all())
+  _auditSnap = h.f.store.db.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all();
+  for (const tr of _auditSnap)
     h.f.store.db.exec(`DROP TRIGGER "${tr.name}"`);
+};
+const restoreAuditGuards = h => {
+  for (const tr of _auditSnap) { try { h.f.store.db.exec(tr.sql); } catch (e) { if (!/already exists/.test(String(e?.message ?? e))) throw e; } }
 };
 const maxSeq = h => h.f.store.db.prepare("SELECT COALESCE(MAX(seq),0) m FROM audit WHERE tenant='acme'").get().m;
 const markerValue = h => h.f.store.db.prepare("SELECT value FROM meta_kv WHERE tenant='acme' AND key='fold_floor'").get()?.value;
@@ -123,11 +131,25 @@ test('w54-runtime F-2: a suppressed rejection pins the suppressed anchor seq on 
   const h = fixture(t);
   const cap = h.f.runtime.issue(h.p('operator'), runtimeInput());
   h.f.revoke(h.p('security'), { kind: 'device', id: 'operator-device', reason: 'w54 probe' });
-  h.f.store.db.exec("CREATE TRIGGER deny_put BEFORE INSERT ON records WHEN NEW.kind='containment' AND NEW.id LIKE 'deny:%' AND NEW.id NOT LIKE 'deny:%:%' BEGIN SELECT RAISE(ROLLBACK,'planted'); END");
-  // Two denials inside the 60s dedup window: the second mint is suppressed
-  // but its refused put still attests — pinned to the first anchor's seq.
-  assert.throws(() => h.f.runtime.consume(h.p('operator'), runtimeRequest(cap)), hasCode('INV-403-QUARANTINE'));
-  assert.throws(() => h.f.runtime.consume(h.p('operator'), runtimeRequest(cap)), hasCode('INV-403-QUARANTINE'));
+  // A foreign trigger refuses the suppressed mint's containment put.
+  // w76-fv F-1: a real planted trigger convicts 'live DDL' at the next
+  // guarded call before any write reaches it — stage the same refusal at
+  // the statement layer: the put's INSERT throws the RAISE(ROLLBACK)
+  // errcode, exactly what deny_put produced.
+  const origStmt = h.f.store._stmt.bind(h.f.store);
+  h.f.store._stmt = (sql) => {
+    const st = origStmt(sql);
+    if (String(sql).startsWith('INSERT INTO records')) return {
+      run: (...a) => { if (a[1] === 'containment' && /^deny:[^:]*$/.test(String(a[2]))) throw Object.assign(new Error('planted'), { errcode: 1811 }); return st.run(...a); },
+      get: st.get.bind(st), all: st.all.bind(st) };
+    return st;
+  };
+  try {
+    // Two denials inside the 60s dedup window: the second mint is suppressed
+    // but its refused put still attests — pinned to the first anchor's seq.
+    assert.throws(() => h.f.runtime.consume(h.p('operator'), runtimeRequest(cap)), hasCode('INV-403-QUARANTINE'));
+    assert.throws(() => h.f.runtime.consume(h.p('operator'), runtimeRequest(cap)), hasCode('INV-403-QUARANTINE'));
+  } finally { h.f.store._stmt = origStmt; }
   const anchors = new Set(h.f.store.db.prepare("SELECT seq FROM audit WHERE tenant='acme'").all().map(r => r.seq));
   const uncommitted = h.f.store.db.prepare("SELECT seq, envelope FROM audit WHERE tenant='acme' AND envelope LIKE '%CONTAINMENT_ROW_UNCOMMITTED%' ORDER BY seq").all()
     .map(r => ({ seq: r.seq, meta: JSON.parse(r.envelope).payload.metadata ?? {} }));
@@ -252,6 +274,7 @@ test('w54-seal L-6: the empty-chain re-anchor reports head_reanchored', t => {
   // file must not survive or the residue refuse arm wins first.
   dropAuditGuards(h);
   h.f.store.db.prepare('DELETE FROM audit WHERE tenant=?').run('acme');
+  restoreAuditGuards(h);
   rmSync(join(h.directory, 'chain-heads.json'), { force: true });
   const r = h.f.sealAuditChain(h.p('security'));
   assert.equal(r.head_reanchored, true, 'the empty-chain re-anchor is named the same as the non-empty arm');

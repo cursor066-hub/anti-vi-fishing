@@ -15,9 +15,17 @@ import { InvariantError } from '../src/errors.mjs';
 // check/traceability gates had dead-code laundry shapes (H-2/H-3/H-4/M-1,
 // F-2 freshness, F-4 marker reset, F-7 empty-chain consult).
 
+// w76-fv F-1: the schema-version pin convicts a dropped guard set at the
+// next guarded call — snapshot the canonical trigger text before the graft
+// and restore it after (the pin re-verifies and re-pins silently).
+let _auditSnap = [];
 const dropAuditGuards = h => {
-  for (const tr of h.f.store.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all())
+  _auditSnap = h.f.store.db.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all();
+  for (const tr of _auditSnap)
     h.f.store.db.exec(`DROP TRIGGER "${tr.name}"`);
+};
+const restoreAuditGuards = h => {
+  for (const tr of _auditSnap) { try { h.f.store.db.exec(tr.sql); } catch (e) { if (!/already exists/.test(String(e?.message ?? e))) throw e; } }
 };
 const maxSeq = h => h.f.store.db.prepare("SELECT COALESCE(MAX(seq),0) m FROM audit WHERE tenant='acme'").get().m;
 const markerValue = h => h.f.store.db.prepare("SELECT value FROM meta_kv WHERE tenant='acme' AND key='fold_floor'").get()?.value;
@@ -111,6 +119,7 @@ test('w55-fv H-1: an attacker-inducible refusal cannot retire a latched convicti
   // path) on demand.
   dropAuditGuards(h);
   h.f.store.db.prepare("DELETE FROM audit WHERE tenant='acme' AND seq=?").run(maxSeq(h));
+  restoreAuditGuards(h);
   const orig = h.f.store.audit.bind(h.f.store);
   let block = true;
   h.f.store.audit = (...a) => { if (block) { block = false; throw new InvariantError('INV-503-LEDGER', 'planted refusal'); } return orig(...a); };
@@ -152,6 +161,7 @@ test('w55-seal F-7: the empty-chain re-anchor consults a planted marker before d
   const tip = maxSeq(h);
   dropAuditGuards(h);
   h.f.store.db.prepare("DELETE FROM audit WHERE tenant='acme'").run();
+  restoreAuditGuards(h);
   h.f.store.db.prepare("UPDATE meta_kv SET value=? WHERE tenant='acme' AND key='fold_floor'").run(`${tip + 50}:deadbeef`);
   // The signed watermark survives (wm > 0) but the head file is gone —
   // the empty-chain re-anchor arm owns this shape.

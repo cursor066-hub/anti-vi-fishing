@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fixture, hasCode } from './helpers.mjs';
 import { verifySigned } from '../src/crypto.mjs';
+import { RESIDUE_KEEP_TRIGGERS } from '../src/store.mjs';
 const probeFile = src => {
   const dir = mkdtempSync(join(tmpdir(), 'gate-probe-'));
   const file = join(dir, 'probe.mjs');
@@ -24,6 +25,9 @@ const dropResidueGuards = h => {
   h.f.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
   h.f.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
 };
+// w76-fv F-1: the schema-version pin convicts a dropped guard set at the next
+// guarded call — plants restore the canonical set before the seal runs.
+const restoreResidueGuards = h => { for (const [name, sql] of RESIDUE_KEEP_TRIGGERS) { try { h.f.store.db.exec(sql); } catch (e) { if (!/already exists/.test(String(e?.message ?? e))) throw e; } } };
 const healOnce = (h, garbage) => {
   h.f.store.db.prepare("UPDATE meta_kv SET value=? WHERE tenant='acme' AND key='fold_floor'").run(garbage);
   h.f.store.audit('acme', 'PROBE', 'actor', null, {}, h.f.clock());
@@ -51,6 +55,7 @@ test('w61-seal F-1: a planted unsigned marker convicts, never suppresses', t => 
   // this suppressed the heal conviction at birth.
   dropResidueGuards(h);
   h.f.store.db.prepare("UPDATE meta_kv SET value=? WHERE tenant='acme' AND key='fold_floor_retired'").run(JSON.stringify(['99999:planted']));
+  restoreResidueGuards(h);
   healOnce(h, 'suppressed-target');
   const seal2 = h.f.sealAuditChain(h.p('security'));
   const kinds = (seal2.head_watermark_tampered ?? []).map(e => e.kind);
@@ -67,6 +72,7 @@ test('w61-seal F-1c: malformed marker content is named, not swallowed', t => {
   h.f.sealAuditChain(h.p('security'));
   dropResidueGuards(h);
   h.f.store.db.prepare("UPDATE meta_kv SET value='not json' WHERE tenant='acme' AND key='fold_floor_retired'").run();
+  restoreResidueGuards(h);
   const seal = h.f.sealAuditChain(h.p('security'));
   assert.ok((seal.head_watermark_tampered ?? []).some(e => e.kind === 'floor_marker_retired_malformed'),
     `malformed marker named: ${JSON.stringify(seal.head_watermark_tampered)}`);

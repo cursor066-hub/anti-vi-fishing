@@ -5,13 +5,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { fixture, hasCode, runtimeInput, runtimeRequest } from './helpers.mjs';
+import { fixture, hasCode, runtimeInput, runtimeRequest, suspendTrigger } from './helpers.mjs';
 import { digest } from '../src/canonical.mjs';
 import { verifySigned } from '../src/crypto.mjs';
 
 const dropAuditTriggers = h => {
-  for (const tr of h.f.store.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all())
-    h.f.store.db.exec(`DROP TRIGGER ${tr.name}`);
+  const rows = h.f.store.db.prepare("SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all();
+  for (const tr of rows) h.f.store.db.exec(`DROP TRIGGER ${tr.name}`);
+  return () => { for (const tr of rows) if (tr.sql) h.f.store.db.exec(tr.sql); };
 };
 
 // A raw-SQL edit to any audit row is detected on every read surface even
@@ -20,11 +21,14 @@ const dropAuditTriggers = h => {
 test('w15: auditPage rejects a tampered audit envelope, including malformed JSON', t => {
   const h = fixture(t);
   h.ready();
-  dropAuditTriggers(h);
+  let __r = dropAuditTriggers(h);
   const maxSeq = h.f.store.db.prepare('SELECT MAX(seq) s FROM audit WHERE tenant=?').get('acme').s;
   h.f.store.db.prepare('UPDATE audit SET envelope=? WHERE tenant=? AND seq=?').run(JSON.stringify({ payload: { sequence: maxSeq, type: 'FORGED' }, signature: 'forged' }), 'acme', maxSeq);
+  __r();
   assert.throws(() => h.f.store.auditPage('acme', { after: maxSeq - 1, limit: 5 }), hasCode('INV-409-AUDIT-TAMPER'));
+  __r = dropAuditTriggers(h);
   h.f.store.db.prepare('UPDATE audit SET envelope=? WHERE tenant=? AND seq=?').run('{broken', 'acme', maxSeq);
+  __r();
   assert.throws(() => h.f.store.auditPage('acme', { after: maxSeq - 1, limit: 5 }), hasCode('INV-409-AUDIT-TAMPER'));
   assert.throws(() => h.f.store.auditExport('acme'), hasCode('INV-409-AUDIT-TAMPER'));
 });
@@ -87,8 +91,9 @@ test('w15: forged and deleted usage rows cannot move the replay/budget ledger', 
   // The usage table is append-only too — a file-writer must drop the
   // guard before wiping, and the chain still refuses the replay
   // (w21-store F-6).
-  h.f.store.db.exec('DROP TRIGGER no_usage_delete');
+  const __r = suspendTrigger(h.f.store.db, 'no_usage_delete');
   h.f.store.db.prepare('DELETE FROM usage').run();
+  __r();
   assert.throws(() => h.f.runtime.consume(h.p(), req), hasCode('INV-409-REPLAY'));
 });
 

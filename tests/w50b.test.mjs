@@ -144,13 +144,20 @@ test('w50 F-7: a broken savepoint rollback surfaces on the original error', t =>
   const h = fixture(t);
   const orig = h.f.target.db.exec.bind(h.f.target.db);
   h.f.target.db.exec = sql => { if (/ROLLBACK TO/.test(sql)) throw new Error('rollback dead'); return orig(sql); };
-  h.f.target.db.exec("CREATE TRIGGER boom BEFORE INSERT ON grants BEGIN SELECT RAISE(ABORT, 'planted'); END");
+  // A live-DDL plant convicts at the guarded entry before it can fire —
+  // simulate the same refusal at the write boundary: the cached grants
+  // insert statement throws the exact RAISE-class fault (errcode 1811)
+  // an armed trigger would mint, so the savepoint rollback arm is
+  // exercised honestly (w76-fv F-1).
+  const __ins = h.f.target._stmt('INSERT INTO grants VALUES(?,?,?) ON CONFLICT(tenant,grant_id) DO UPDATE SET value=excluded.value');
+  const origRun = __ins.run.bind(__ins);
+  __ins.run = () => { throw Object.assign(new Error('planted'), { errcode: 1811, errstr: 'constraint failed', code: 'ERR_SQLITE_ERROR' }); };
   // A nested tx takes the savepoint arm — the outer rollback still works.
   let err; try { h.f.target.tx(() => h.f.target.grant('acme', 'grant-rb', { issued_at: h.now() })); } catch (e) { err = e; }
   assert.ok(err, 'the write fails');
   assert.equal(err.code, 'INV-409-INTEGRITY', 'the planted-trigger verdict survives');
   assert.equal(err.details?.cause?.rollback_error ?? err.cause?.rollback_error ?? err.rollback_error, 'rollback dead', 'the failed cleanup annotates the thrown error');
-  h.f.target.db.exec = orig;
+  h.f.target.db.exec = orig; __ins.run = origRun;
   h.close();
 });
 

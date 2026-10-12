@@ -16,8 +16,9 @@ import { Fabric } from '../src/fabric.mjs';
 import { tightenOwnerOnly } from '../src/keystore.mjs';
 
 const dropAuditGuards = h => {
-  for (const tr of h.f.store.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all())
-    h.f.store.db.exec(`DROP TRIGGER "${tr.name}"`);
+  const rows = h.f.store.db.prepare("SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all();
+  for (const tr of rows) h.f.store.db.exec(`DROP TRIGGER "${tr.name}"`);
+  return () => { for (const tr of rows) if (tr.sql) h.f.store.db.exec(tr.sql); };
 };
 const maxSeq = h => h.f.store.db.prepare("SELECT COALESCE(MAX(seq),0) m FROM audit WHERE tenant='acme'").get().m;
 const auditRows = (h, like) => h.f.store.db.prepare("SELECT seq, envelope FROM audit WHERE tenant='acme' AND envelope LIKE ? ORDER BY seq").all(like).map(r => ({ seq: r.seq, meta: JSON.parse(r.envelope).payload.metadata ?? {} }));
@@ -35,11 +36,12 @@ test('w52-store C-1: an aborted reconcile never moves head-watermark.json and ne
   const tip = maxSeq(h);
   const wmBefore = wmSeq(h);
   assert.equal(wmBefore, tip, 'the durable floor tracks the committed tip');
-  dropAuditGuards(h);
+  const __r = dropAuditGuards(h);
   // Roll the committed tail back behind the durable floor — the honest
   // two-file rollback shape — and delete the head file so the wm arm
   // carries the case on its own.
   h.f.store.db.prepare('DELETE FROM audit WHERE tenant=? AND seq > ?').run('acme', tip - 3);
+  __r();
   rmFile(h, 'chain-heads.json');
   // Plant an unanchored revocation row: the reconcile tx's own mint dies
   // on the floor divergence AFTER the file move used to land.
@@ -86,8 +88,9 @@ test('w52-seal F-1: an empty chain under a live floor attests the vanished ledge
   h.ready();
   const wm = wmSeq(h);
   assert.ok(wm > 0, 'a live floor exists to abandon');
-  dropAuditGuards(h);
+  const __r = dropAuditGuards(h);
   h.f.store.db.prepare('DELETE FROM audit').run();
+  __r();
   // Keep the signed head-watermark but drop the head file: the whole
   // attested chain vanished — a restorable-snapshot shape, not a cut.
   rmFile(h, 'chain-heads.json');
@@ -161,8 +164,9 @@ test('w52-seal F-3: a fold_floor marker ahead of a stripped deployment convicts'
   h.ready();
   h.f._auditIndex('acme'); // fold once so the marker is written
   const tip = maxSeq(h);
-  dropAuditGuards(h);
+  const __r = dropAuditGuards(h);
   h.f.store.db.prepare('DELETE FROM audit WHERE tenant=? AND seq > ?').run('acme', tip - 2);
+  __r();
   rmFile(h, 'chain-heads.json');
   rmFile(h, 'head-watermark.json');
   const r = h.f.sealAuditChain(h.p('security'));

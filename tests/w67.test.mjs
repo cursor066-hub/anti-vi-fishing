@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fixture } from './helpers.mjs';
 import { digest } from '../src/canonical.mjs';
+import { RESIDUE_KEEP_TRIGGERS } from '../src/store.mjs';
 
 const probeFile = src => {
   const dir = mkdtempSync(join(tmpdir(), 'gate-probe-'));
@@ -44,6 +45,9 @@ const dropResidueGuards = h => {
   h.f.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_upd');
   h.f.store.db.exec('DROP TRIGGER IF EXISTS fold_residue_keep_ins');
 };
+// w76-fv F-1: the schema-version pin convicts a dropped guard set at the next
+// guarded call — plants restore the canonical set before the seal runs.
+const restoreResidueGuards = h => { for (const [name, sql] of RESIDUE_KEEP_TRIGGERS) { try { h.f.store.db.exec(sql); } catch (e) { if (!/already exists/.test(String(e?.message ?? e))) throw e; } } };
 const dropAuditGuards = h => {
   for (const tr of h.f.store.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='audit'").all())
     h.f.store.db.exec(`DROP TRIGGER "${String(tr.name).replace(/"/g, '""')}"`);
@@ -56,6 +60,7 @@ const putMarker = (h, env, claims = null) => {
   dropResidueGuards(h);
   h.f.store.db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme','fold_floor_retired',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value")
     .run(JSON.stringify({ claims: claims ?? (env ? JSON.parse(env.payload ?? '{}')?.fold_floor_retired ?? [] : []), env }));
+  restoreResidueGuards(h);
 };
 const committedTip = h => h.f.store.db.prepare("SELECT MAX(seq) m FROM audit WHERE tenant='acme'").get().m;
 const tipHashAt = (h, seq) => {
@@ -117,13 +122,17 @@ test('w67-fv F-1: an unproven-member `!==` mints conditional, not unconditional'
   // symmetric for unproven members.
   { const r = collectRun([HEAD2, "  if (m[2] !== 'y') { spy(); } else { authorize(p, ['r']); }", '}'], 'x');
     assert.equal(r.any, true); assert.equal(r.roles, null); }
-  // A positive compare on the member elsewhere in the row proves it —
-  // the `!==` folds for an outsider verb exactly as before.
+  // A single positive compare is an id-filter, not discriminator proof
+  // (w68-ledger F-1): the unbound 'x' folds only once at least two
+  // distinct verbs bind the member. A verb bound ON the member keeps the
+  // deterministic fold — its own binding proves discrimination for it.
   const proven = [HEAD2, "  if (m[2]==='y') { serve(); }", "  if (m[2]!=='z') { authorize(p, ['adm']); }", '}'];
-  { const r = collectRun(proven, 'x'); assert.deepEqual(r.roles, ['adm']); }
+  { const r = collectRun(proven, 'x'); assert.equal(r.roles, null, 'lone id-filter vote — conditional for the unbound'); }
   { const r = collectRun(proven, 'y'); assert.deepEqual(r.roles, ['adm'], "y-requests carry m[2]='y' which is !=='z' — the arm runs"); }
   // 'z' itself can never satisfy its own exclusion — dead arm.
   { const r = collectRun(proven, 'z'); assert.equal(r.any, false, "z-requests carry m[2]='z' — dead"); }
+  const proven2 = [HEAD2, "  if (m[2]==='y') { serve(); }", "  if (m[2]==='w') { serveW(); }", "  if (m[2]!=='z') { authorize(p, ['adm']); }", '}'];
+  { const r = collectRun(proven2, 'x'); assert.deepEqual(r.roles, ['adm'], 'two positive votes prove the member — the fold returns'); }
   // An unbound verb with NO member-neg arm at all stays unconditional.
   { const r = collectRun([HEAD, "  authorize(p, ['adm']);", '}'], 'x');
     assert.deepEqual(r.roles, ['adm']); }
@@ -139,9 +148,13 @@ test('w67-ledger F-3: conjunct-gated pairs keep their vote and arm binding', () 
   // `flag && m[1]==='a'` is 'a''s arm gated by flag — conditional mint.
   { const r = collectRun([HEAD, "  if (flag && m[1]==='a') { authorize(p, ['adm']); }", '}'], 'a');
     assert.equal(r.any, true); assert.equal(r.roles, null, 'flag gates the mint'); }
-  // But it still proves m[1] discriminates — a sibling `!==` folds.
+  // But a lone gated vote is still only an id-filter for unbound verbs
+  // (w68-ledger F-1) — 'c' mints conditional; a second positive vote
+  // restores the discriminator fold.
   const row = [HEAD, "  if (flag && m[1]==='a') { serveA(); }", "  if (m[1]!=='b') { authorize(p, ['adm']); }", '}'];
-  { const r = collectRun(row, 'c'); assert.deepEqual(r.roles, ['adm'], 'm[1] proven — unbound verb folds `!==`'); }
+  { const r = collectRun(row, 'c'); assert.equal(r.roles, null, 'lone gated vote — id-filter only, conditional'); }
+  const row2 = [HEAD, "  if (flag && m[1]==='a') { serveA(); }", "  if (m[1]==='d') { serveD(); }", "  if (m[1]!=='b') { authorize(p, ['adm']); }", '}'];
+  { const r = collectRun(row2, 'c'); assert.deepEqual(r.roles, ['adm'], 'two votes prove m[1] — the unbound fold returns'); }
   // The operator-negated compare itself never serves its own arm.
   { const r = collectRun([HEAD, "  if (m[1]!=='a') { authorize(p, ['notA']); }", '}'], 'a');
     assert.equal(r.roles, null, 'a-requests never enter the `!==` arm'); }
@@ -159,10 +172,13 @@ test('w67-ledger F-4: compares under a foreign gate cannot launder member votes'
   // unbound verb mints conditional.
   const gated = [HEAD, "  if (flag) { if (m[1]==='a') { serveA(); } }", "  if (m[1]!=='b') { authorize(p, ['adm']); }", '}'];
   { const r = collectRun(gated, 'c'); assert.equal(r.roles, null, 'gated proof is no discriminator vote'); }
-  // The same compare at row depth (un-gated) proves the member — the
-  // identical `!==` then folds unconditional for 'c'.
+  // The same compare at row depth (un-gated) still votes — but a lone
+  // vote is an id-filter (w68-ledger F-1), so the unbound `!==` mints
+  // conditional until a second verb proves the member.
   const free = [HEAD, "  if (m[1]==='a') { serveA(); }", "  if (m[1]!=='b') { authorize(p, ['adm']); }", '}'];
-  { const r = collectRun(free, 'c'); assert.deepEqual(r.roles, ['adm']); }
+  { const r = collectRun(free, 'c'); assert.equal(r.roles, null, 'lone vote — id-filter only, conditional'); }
+  const free2 = [HEAD, "  if (m[1]==='a') { serveA(); }", "  if (m[1]==='d') { serveD(); }", "  if (m[1]!=='b') { authorize(p, ['adm']); }", '}'];
+  { const r = collectRun(free2, 'c'); assert.deepEqual(r.roles, ['adm'], 'two votes prove the member — the fold returns'); }
 });
 
 // ============================================================================
@@ -207,35 +223,45 @@ test('w67-seal F-1: a marker whose pinned row the cut murders is deleted, not le
 });
 
 // ============================================================================
-// w67-runtime F-1: a deferred apply over a marker that no longer
-// authenticates names the drop — the queued claims were the drain's only
-// suppression copy, so the refusal lands a bounded-claims flag.
+// w67-runtime F-1 (doctrine refined by w70-seal F-4): a standing marker
+// that cannot authenticate is no longer a wedge — the drain murders it
+// inside its guarded span and names the kill, so the deferred apply
+// meets NO standing marker and lands the queued claims rather than
+// naming a drop. `floor_marker_retired_deferred_dropped` still covers
+// the narrower window where a peer plants a dead marker between the
+// drain's murder and the apply's savepoint re-read.
 // ============================================================================
-test('w67-runtime F-1: a deferred mint refused by a dead standing marker is named', t => {
+test('w67-runtime F-1: a dead standing marker is murdered and the deferred mint lands', t => {
   const h = fixture(t);
   h.ready(); h.ready();
   // The drain during this append runs inside the head-mint seal window,
   // so its merged set lands in the deferred queue with a HEALTHY plane.
   healOnce(h, 'deferred-drop');
-  // Then the standing marker is murdered between queue and apply — the
-  // apply must flag the drop instead of silently keeping the queue's
-  // only suppression copy inside the already-minted F_R_R rows.
+  // Then the standing marker is murdered between queue and apply — under
+  // the murdered-marker doctrine the drain kills it inside the guarded
+  // span and the apply lands the deferred set instead of flagging a drop.
   dropResidueGuards(h);
   h.f.store.db.prepare("INSERT INTO meta_kv (tenant,key,value) VALUES ('acme','fold_floor_retired',?) ON CONFLICT(tenant,key) DO UPDATE SET value=excluded.value")
     .run(JSON.stringify({ claims: ['junk'], env: { garbage: true } }));
+  restoreResidueGuards(h);
   // The apply runs only behind a committed cut — corrupt a row so the
-  // seal really cuts, then the apply meets the dead marker and flags.
+  // seal really cuts, then the drain meets the dead marker and murders it.
   dropAuditGuards(h);
   const tip0 = h.f.store.db.prepare("SELECT MAX(seq) m FROM audit WHERE tenant='acme'").get().m;
   h.f.store.db.prepare("UPDATE audit SET hash='00' WHERE tenant='acme' AND seq=?").run(tip0);
   h.f.invalidateAuditIndex('acme');
-  h.f.sealAuditChain(h.p('security'));
-  // The apply's flag lands after that seal's attestation snapshot — the
-  // NEXT consult surfaces it (same doctrine as every late-landing flag).
+  const seal1 = h.f.sealAuditChain(h.p('security'));
+  const kinds1 = (seal1?.head_watermark_tampered ?? []).map(e => e.kind);
+  assert.ok(kinds1.includes('floor_marker_retired_murdered'),
+    `the dead marker is murdered and named: ${JSON.stringify(kinds1)}`);
+  // The deferred apply landed the queued claims under a fresh signed env —
+  // the drain's suppression copy reached the durable marker after all.
   const seal2 = h.f.sealAuditChain(h.p('security'));
-  const entries = seal2.head_watermark_tampered ?? [];
-  assert.ok(entries.some(e => e.kind === 'floor_marker_retired_deferred_dropped'),
-    `the refused deferred mint names itself: ${JSON.stringify(entries)}`);
+  const row = h.f.store.db.prepare("SELECT value FROM meta_kv WHERE tenant='acme' AND key='fold_floor_retired'").get()?.value;
+  assert.ok(row !== undefined, 'the deferred apply landed a standing marker');
+  const landed = (JSON.parse(row).env?.payload?.fold_floor_retired ?? []).concat(JSON.parse(row).claims ?? []);
+  assert.ok(landed.some(c => c.endsWith(':deferred-drop')),
+    `the deferred claims landed in the fresh marker: ${row.slice(0, 300)}`);
   h.close();
 });
 
